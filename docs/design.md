@@ -644,7 +644,8 @@ An integration test writes with one language and reads with the other, on each e
 
 Each milestone ends with tests passing on every engine it covers, and is releasable.
 
-**Progress:** 1 and 2 are done, on Neo4j and Memgraph.
+**Progress:** 1 and 2 are done, on Neo4j and Memgraph. 3 is done.
+The golden statements are in drivine's `test/1.Unit/golden`, copied to `tests/golden`.
 
 1. **Connections and `PersistenceManager` on Neo4j.**
    - The registry and environment configuration, query specifications, mapping and cursors.

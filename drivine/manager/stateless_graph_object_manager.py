@@ -2,19 +2,26 @@ from __future__ import annotations
 
 import dataclasses
 import inspect
+import json
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any, Literal, TypeVar
 
 from pydantic import BaseModel
+from pydantic_core import to_jsonable_python
 
 from drivine.backend.cypher_backend import CypherBackend
 from drivine.backend.cypher_grammar import cypher_grammar_for
+from drivine.backend.fragment_group import FragmentGroup
+from drivine.backend.graph_statement import GraphStatement
 from drivine.backend.save_statement import SaveStatement
-from drivine.backend.save_statement_builder import items, root_of, target
+from drivine.backend.save_statement_builder import id_of, items, props_of, root_of, target
+from drivine.backend.vector_writes import split_vectors
 from drivine.drivine_error import DrivineError
 from drivine.manager.cascade_type import CascadeType
 from drivine.manager.contention import when_not_contended
+from drivine.manager.edge_operations import EdgeOperations
 from drivine.manager.null_policy import NullPolicy
+from drivine.manager.patch_result import PatchResult
 from drivine.manager.persistence_manager import PersistenceManager
 from drivine.manager.removed_targets import RemovedTargets
 from drivine.manager.save_options import SaveOptions
@@ -28,11 +35,19 @@ from drivine.model.relationship_fragment_model import RelationshipFragmentModel
 from drivine.model.relationship_model import RelationshipModel
 from drivine.model.target_model import TargetModel
 from drivine.transaction.transaction import current_transaction
+from drivine.transaction.transactional import transaction
 
 T = TypeVar("T")
+R = TypeVar("R")
 
 UPDATE_ATTEMPTS = 3
 """How many times `update` loads, changes and saves before a node that keeps changing raises StaleObjectError."""
+
+PATCH_ROWS = 1000
+"""How many nodes a patch_all writes in one statement."""
+
+BATCH_ROWS = 1000
+"""How many fragments of a save_all go to one statement."""
 
 
 class StatelessGraphObjectManager:
@@ -46,6 +61,8 @@ class StatelessGraphObjectManager:
         self.registry = registry or ModelRegistry()
         self.backend = CypherBackend(cypher_grammar_for(persistence_manager.type))
         self.mapper = GraphObjectMapper(self.registry)
+        self.edges = EdgeOperations(self.registry, self._run_one, self._query, self.mapper, self.backend)
+        """Relationships on their own, between stored nodes: see EdgeOperations."""
 
     @property
     def database(self) -> str:
@@ -200,7 +217,208 @@ class StatelessGraphObjectManager:
         statement = self.backend.delete_all(self.registry.model_of(type_), where)
         return await self.persistence_manager.get_one(statement.spec(bindings))
 
+    async def save_all(
+        self,
+        objects: Sequence[T],
+        *,
+        replace: Sequence[str] | Literal["all"] | None = None,
+        removed_targets: RemovedTargets = RemovedTargets.KEEP,
+        null_policy: NullPolicy = NullPolicy.IGNORE,
+        only: Sequence[str] | None = None,
+        except_: Sequence[str] | None = None,
+    ) -> list[T]:
+        """
+        Saves many objects, fragments and views of any classes, together. Fragments go in one statement for each 1,000,
+        each merged on its id; a view is a statement of its own, as `save` writes it. Outside a transaction of the
+        caller's, the statements run in one transaction, so a failure leaves nothing written; inside one, they join it.
+
+        A fragment's stamp isn't checked: a batch only adds, and a fragment with a stale stamp is written all the same,
+        keeping the stamp it had. A view that carries a stamp is checked as `save` checks it, and a stale one raises
+        StaleObjectError, the batch then writing nothing. `replace` applies to views: a batch holding a fragment is
+        refused with it. Returns the objects, in order.
+        """
+        options = SaveOptions(replace, removed_targets, null_policy, only, except_)
+        fragments: dict[type, FragmentGroup] = {}
+        views: list[T] = []
+        for obj in objects:
+            target_ = self.registry.model_of(type(obj))
+            # A view, or a fragment with a property bag or node labels, whose entries no row of a batch can carry, is a
+            # statement of its own.
+            if isinstance(target_, GraphViewModel) or target_.property_bags or target_.node_labels:
+                views.append(obj)
+                continue
+            if replace:
+                raise DrivineError(f"replace applies to views. The batch holds a {target_.type.__name__}.")
+            fragments.setdefault(target_.type, FragmentGroup(target_)).objects.append(obj)
+        entries: list[tuple[GraphStatement, list[FragmentGroup] | None, Any]] = []
+        for chunk in _chunked(list(fragments.values()), BATCH_ROWS):
+            entries.append((self.backend.fragment_batch(chunk, options), chunk, None))
+        for view in views:
+            statement = self.backend.save(self.registry.model_of(type(view)), view, options, False, self.registry)
+            entries.append((statement, None, view))
+        results = await self._run_batch([it[0] for it in entries])
+        for (statement, groups, view), rows in zip(entries, results, strict=True):
+            if groups is not None:
+                self._hand_back_fragments(groups, rows[0])
+            else:
+                assert isinstance(statement, SaveStatement)
+                self._hand_back(view, statement, rows[0])
+        return list(objects)
+
+    async def patch(
+        self,
+        type_: type[Any],
+        id: Any,
+        *,
+        set: Mapping[str, Any] | None = None,
+        clear: Sequence[str] = (),
+        where: str | None = None,
+        bindings: Mapping[str, Any] | None = None,
+    ) -> PatchResult:
+        """
+        Writes named fields of the node with the id, if it meets `where`, a predicate over `n`, in one statement,
+        without loading it. `set` maps fields to values, and `clear` names fields to remove. It never makes a node,
+        isn't checked against a stamp, and hands none back: a node it changed has a new stamp, so an object loaded
+        before is refused when saved. On a view, the fields are its root's.
+        """
+        root = root_of(self.registry.model_of(type_))
+        named = [*(set or {}), *clear]
+        self._assert_patchable(root, named)
+        values: dict[str, Any] = {}
+        for field in named:
+            value = (set or {}).get(field)
+            packed = value is not None and field in root.json_packed
+            values[root.graph_properties.get(field, field)] = json.dumps(to_jsonable_python(value)) if packed else value
+        props, vectors = split_vectors(root, values)
+        statement = self.backend.patch_one(root, where)
+        spec = statement.spec({**(bindings or {}), "id": id, "set": props, "vectors": vectors})
+        row = await self._when_uncontended(lambda: self.persistence_manager.get_one(spec))
+        return PatchResult(row["found"], row["applied"], row["changed"])
+
+    async def patch_all(
+        self,
+        objects: Sequence[Any],
+        *,
+        only: Sequence[str] | None = None,
+        except_: Sequence[str] | None = None,
+        null_policy: NullPolicy = NullPolicy.IGNORE,
+    ) -> list[PatchResult]:
+        """
+        Writes named fields of many nodes, each where its node is there, making none. One result for each object, in
+        order. `only` or `except_` is required: to write every field, save. Under NullPolicy.IGNORE, the default, a
+        named field that is None is left as the store has it. For a view the fields are its root's; its relationships
+        aren't written.
+        """
+        if not objects:
+            return []
+        if (only is None) == (except_ is None):
+            raise DrivineError("patch_all needs only or except_, not both. To write every field of an object, save it.")
+        kind: Any = objects[0].__class__
+        if any(type(it) is not kind for it in objects):
+            raise DrivineError(f"patch_all takes objects of one class; the first is a {kind.__name__}.")
+        target_ = self.registry.model_of(kind)
+        root = root_of(target_)
+        self._assert_patchable(root, list(only or []))
+        written = [
+            field
+            for field in root.graph_properties
+            if (field in only if only is not None else field not in (except_ or ()))
+            and field not in (root.node_id_field, root.stamp_field)
+        ]
+        excluded = [it for it in root.graph_properties if it not in written]
+        rows: list[dict[str, Any]] = []
+        for obj in objects:
+            fragment = getattr(obj, target_.root_field) if isinstance(target_, GraphViewModel) else obj
+            props = props_of(root, fragment, excluded, null_policy is NullPolicy.CLEAR, only or ())
+            props, vectors = split_vectors(root, props)
+            rows.append({"id": id_of(root, fragment), "props": props, "vectors": vectors})
+        ids = [it["id"] for it in rows]
+        if len(set_of(ids)) != len(ids):
+            raise DrivineError("patch_all takes each id once.")
+        # In order of id, so that two calls over the same nodes take their locks in the same order.
+        ordered = sorted(rows, key=lambda it: str(it["id"]))
+        results: dict[Any, PatchResult] = {}
+        for start in range(0, len(ordered), PATCH_ROWS):
+            spec = self.backend.patch_many(root).spec({"rows": ordered[start : start + PATCH_ROWS]})
+            for it in await self._when_uncontended(lambda spec=spec: self.persistence_manager.query(spec)):
+                results[it["id"]] = PatchResult(it["found"], it["found"], it["changed"])
+        return [results[it] for it in ids]
+
     # ----- Writing -----
+
+    async def _run_batch(self, statements: list[GraphStatement]) -> list[list[Any]]:
+        """
+        Runs statements as one batch: joining the caller's transaction if there is one, otherwise in a transaction of
+        its own, rolled back on failure and run again when the engine turns it away for contention. A checked save that
+        finds its root stale (it returns no row) fails the batch.
+        """
+        if not statements:
+            return []
+
+        async def each() -> list[list[Any]]:
+            results: list[list[Any]] = []
+            for statement in statements:
+                rows = await self.persistence_manager.query(statement.spec())
+                if isinstance(statement, SaveStatement) and statement.expected_stamp is not None and not rows:
+                    raise _StaleInBatch(statement)
+                results.append(rows)
+            return results
+
+        async def in_transaction() -> list[list[Any]]:
+            async with transaction():
+                return await each()
+
+        try:
+            if current_transaction() is not None:
+                return await each()
+            if len(statements) == 1:
+                return await when_not_contended(each, self.backend.contended)
+            return await when_not_contended(in_transaction, self.backend.contended)
+        except _StaleInBatch as stale:
+            raise await self._stale_object(stale.statement) from None
+
+    def _hand_back_fragments(self, groups: list[FragmentGroup], result: Mapping[str, Any]) -> None:
+        """Gives each fragment of a batch the stamp the batch left, as far as it was current."""
+        for i, group in enumerate(groups):
+            model = group.model
+            if not model.stamp_field or not model.node_id_field:
+                continue
+            found = {it["id"]: it["stamp"] for it in result["groups"][i]["before"]}
+            now = {it["id"]: it["stamp"] for it in result["groups"][i]["after"]}
+            for obj in group.objects:
+                node_id = getattr(obj, model.node_id_field)
+                carried = getattr(obj, model.stamp_field)
+                setattr(obj, model.stamp_field, stamps.handed_back(carried, found.get(node_id, ""), now[node_id]))
+
+    @staticmethod
+    def _assert_patchable(root: FragmentModel, fields: list[str]) -> None:
+        refused = [
+            it
+            for it in fields
+            if it in (root.node_id_field, root.stamp_field)
+            or it in root.transient_fields
+            or any(bag.field == it for bag in root.property_bags)
+            or (root.node_labels is not None and root.node_labels.field == it)
+        ]
+        if refused:
+            raise DrivineError(f"A patch can't write {', '.join(refused)} of {root.type.__name__}.")
+        unknown = [it for it in fields if it not in root.graph_properties]
+        if unknown:
+            raise DrivineError(f"{root.type.__name__} has no field {', '.join(unknown)} to patch.")
+        if len(set_of(fields)) != len(fields):
+            raise DrivineError("A patch names each field once.")
+
+    async def _when_uncontended(self, statement: Callable[[], Awaitable[R]]) -> R:
+        """Runs a write again when the engine turns it away for contention, unless inside a caller's transaction."""
+        if current_transaction() is not None:
+            return await statement()
+        return await when_not_contended(statement, self.backend.contended)
+
+    async def _run_one(self, statement: GraphStatement) -> Any:
+        return await self._when_uncontended(lambda: self.persistence_manager.get_one(statement.spec()))
+
+    async def _query(self, statement: GraphStatement) -> list[Any]:
+        return await self.persistence_manager.query(statement.spec())
 
     async def _write(self, obj: T, given: SaveOptions, create_only: bool) -> T | None:
         target_ = self.registry.model_of(type(obj))
@@ -355,3 +573,31 @@ def _nodes_of(obj: Any, model: FragmentModel, seen: set[int] | None = None) -> l
         else:
             found.extend(_nodes_of(value, model, seen))
     return found
+
+
+set_of = set
+"""The builtin, under a name `patch`'s `set` argument doesn't hide."""
+
+
+class _StaleInBatch(Exception):
+    def __init__(self, statement: SaveStatement) -> None:
+        super().__init__()
+        self.statement = statement
+
+
+def _chunked(groups: list[FragmentGroup], size: int) -> list[list[FragmentGroup]]:
+    """The groups in chunks of at most `size` rows, a group split across chunks where it is longer."""
+    chunks: list[list[FragmentGroup]] = []
+    current: list[FragmentGroup] = []
+    rows = 0
+    for group in groups:
+        for start in range(0, len(group.objects), size):
+            objects = group.objects[start : start + size]
+            if rows + len(objects) > size and current:
+                chunks.append(current)
+                current, rows = [], 0
+            current.append(FragmentGroup(group.model, objects))
+            rows += len(objects)
+    if current:
+        chunks.append(current)
+    return chunks

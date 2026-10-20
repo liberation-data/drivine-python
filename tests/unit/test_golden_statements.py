@@ -8,15 +8,18 @@ from pathlib import Path
 
 import pytest
 
-from drivine import CascadeType, ModelRegistry, RemovedTargets, SaveOptions
+from drivine import CascadeType, Direction, ModelRegistry, RelateMode, RemovedTargets, SaveOptions
 from drivine.backend.cypher_backend import CypherBackend
 from drivine.backend.cypher_grammar import FALKORDB_GRAMMAR, MEMGRAPH_GRAMMAR, NEO4J_GRAMMAR, CypherGrammar
+from drivine.backend.fragment_group import FragmentGroup
 from drivine.backend.graph_statement import GraphStatement
+from drivine.backend.matched_node import MatchedNode
 from tests.models import (
     ActorStats,
     ActorWithLatestMovie,
     ActorWithMovies,
     Customer,
+    Dog,
     Location,
     LocationAncestors,
     LocationHierarchy,
@@ -101,6 +104,37 @@ def saves(grammar: CypherGrammar, registry: ModelRegistry, backend: CypherBacken
         "LocationHierarchy.delete.all": backend.delete(view(LocationHierarchy), None, CascadeType.DELETE_ALL),
         "Person.heldProperties": backend.held_properties(fragment(Person)),
         "Person.foundStamp": backend.found_stamp(fragment(Person)),
+        "saveAll.fragments": backend.fragment_batch(
+            [
+                FragmentGroup(fragment(Person), [Person(uuid="p1", name="Ada"), Person(uuid="p2", name="Grace")]),
+                FragmentGroup(fragment(Organization), [Organization(uuid="o1", name="Acme")]),
+            ],
+            SaveOptions(),
+        ),
+        "Person.patch": backend.patch_one(fragment(Person)),
+        "Person.patch.where": backend.patch_one(fragment(Person), "n.name = $name"),
+        "Person.patchAll": backend.patch_many(fragment(Person)),
+        "edges.relate": backend.relate(
+            MatchedNode(fragment(Person), "p1"),
+            MatchedNode(fragment(Organization), "o1"),
+            "WORKS_FOR",
+            {"startDate": "2020", "role": "Lead", "note": None},
+            RelateMode.MERGE,
+        ),
+        "edges.relate.create": backend.relate(
+            MatchedNode(fragment(Person), "p1"),
+            MatchedNode(fragment(Person), "p2", ("Admin",)),
+            "KNOWS",
+            {},
+            RelateMode.CREATE,
+        ),
+        "edges.unrelate": backend.unrelate(
+            MatchedNode(fragment(Person), "p1"), MatchedNode(fragment(Organization), "o1"), "WORKS_FOR"
+        ),
+        "edges.unrelateAll": backend.unrelate_all(MatchedNode(fragment(Person), "p1"), "KNOWS", Direction.INCOMING),
+        "edges.related": backend.related(
+            MatchedNode(fragment(Person), "p1"), "OWNS", Direction.OUTGOING, fragment(Dog)
+        ),
     }
     if not grammar.orphan_delete_limit:
         cases["PersonCareer.delete.orphans"] = backend.delete(view(PersonCareer), None, CascadeType.DELETE_ORPHAN)

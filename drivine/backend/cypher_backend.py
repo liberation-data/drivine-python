@@ -3,17 +3,24 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from drivine.annotation.direction import Direction
 from drivine.backend.cascade_targets import CascadeTargets
 from drivine.backend.cypher import label_expression, quote_name
 from drivine.backend.cypher_grammar import CypherGrammar
 from drivine.backend.cypher_stamps import STAMP
+from drivine.backend.edge_statements import EdgeStatements
+from drivine.backend.fragment_batch_statement import FragmentBatchStatement
+from drivine.backend.fragment_group import FragmentGroup
 from drivine.backend.graph_statement import GraphStatement
+from drivine.backend.matched_node import MatchedNode
 from drivine.backend.page import Page
+from drivine.backend.patch_statements import PatchStatements
 from drivine.backend.save_statement import SaveStatement
 from drivine.backend.save_statement_builder import SaveStatementBuilder
 from drivine.backend.view_projector import ViewProjector, fragment
 from drivine.drivine_error import DrivineError
 from drivine.manager.cascade_type import CascadeType
+from drivine.manager.relate_mode import RelateMode
 from drivine.manager.save_options import SaveOptions
 from drivine.model import stamps
 from drivine.model.fragment_model import FragmentModel
@@ -156,6 +163,35 @@ class CypherBackend:
     ) -> SaveStatement:
         """Writes the object as one statement: see SaveStatementBuilder."""
         return SaveStatementBuilder(self.grammar, registry).build(target, obj, options, create_only)
+
+    def fragment_batch(self, groups: list[FragmentGroup], options: SaveOptions) -> GraphStatement:
+        """Saves fragments of several classes in one statement; returns the stamps before and after for each class."""
+        return FragmentBatchStatement.build(groups, options, self.grammar)
+
+    def patch_one(self, model: FragmentModel, where: str | None = None) -> GraphStatement:
+        """
+        Writes `$set` (and `$vectors`) to the node with id `$id` if it meets `where`. Returns `{found, applied,
+        changed}`.
+        """
+        return PatchStatements.one(model, self.grammar, where)
+
+    def patch_many(self, model: FragmentModel) -> GraphStatement:
+        """Writes each row of `$rows`, `{id, props, vectors}`, to its node. Returns `{id, found, changed}` per row."""
+        return PatchStatements.many(model, self.grammar)
+
+    def related(self, origin: MatchedNode, type: str, direction: Direction, target: FragmentModel) -> GraphStatement:
+        return EdgeStatements.related(origin, type, direction, target)
+
+    def relate(
+        self, origin: MatchedNode, to: MatchedNode, type: str, properties: Mapping[str, Any], mode: RelateMode
+    ) -> GraphStatement:
+        return EdgeStatements.relate(origin, to, type, properties, mode)
+
+    def unrelate(self, origin: MatchedNode, to: MatchedNode, type: str) -> GraphStatement:
+        return EdgeStatements.unrelate(origin, to, type)
+
+    def unrelate_all(self, origin: MatchedNode, type: str, direction: Direction) -> GraphStatement:
+        return EdgeStatements.unrelate_all(origin, type, direction)
 
     def held_properties(self, model: FragmentModel) -> GraphStatement:
         """The properties of the node with id `$id`: one row, or none when there is no such node."""

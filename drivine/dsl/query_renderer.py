@@ -197,7 +197,7 @@ class QueryRenderer:
             return self._expression(it, scope, alias)
 
         if node.kind == "PROPERTY":
-            return f"{alias}.{quote_name(_root_property(node.path, scope, 'An expression'))}"
+            return f"{alias}.{quote_name(root_property(node.path, scope, 'An expression'))}"
         if node.kind == "VALUE":
             return self._bind(node.value)
         if node.kind == "ARITHMETIC":
@@ -361,7 +361,7 @@ def _classify(term: OrderTerm, scope: Scope) -> _RootKey | CollectionSort:
         assert next_.scope is not None
         at = next_.scope
     if not hops:
-        return _RootKey(term, _root_property(term.path, scope, "An order"))
+        return _RootKey(term, root_property(term.path, scope, "An order"))
     key = term.path[last_list + 1 :]
     if last_list < 0 or not key or any(it.startswith(STORED) for it in key):
         raise DrivineError(
@@ -371,7 +371,7 @@ def _classify(term: OrderTerm, scope: Scope) -> _RootKey | CollectionSort:
     return CollectionSort(term.path[: last_list + 1], key, term.direction, term.nulls)
 
 
-def _root_property(path: tuple[str, ...], scope: Scope, what: str) -> str:
+def root_property(path: tuple[str, ...], scope: Scope, what: str) -> str:
     """The stored name of the root property a path leads to; `what` names what wants one."""
     at = scope
     for i, name in enumerate(path):
@@ -404,7 +404,7 @@ def _pinned_properties(condition: Condition, scope: Scope) -> list[str]:
     if condition.test.operator != "EQ":
         return []
     try:
-        return [_root_property(condition.path, scope, "A pin")]
+        return [root_property(condition.path, scope, "A pin")]
     except DrivineError:
         return []
 

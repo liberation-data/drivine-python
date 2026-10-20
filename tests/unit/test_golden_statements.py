@@ -18,11 +18,18 @@ from drivine import (
     above,
     any_of,
     at_most,
+    avg,
     case_of,
     coalesce,
+    count,
     div,
+    hop,
+    key,
+    max_,
     not_,
+    path_key,
     refs,
+    sum_,
     times,
 )
 from drivine.backend.cypher_backend import NODE_ALIAS, CypherBackend
@@ -33,6 +40,7 @@ from drivine.backend.matched_node import MatchedNode
 from drivine.backend.page import Page
 from drivine.dsl.query import Query
 from drivine.dsl.query_renderer import QueryRenderer
+from drivine.manager.group_query import GroupQuery
 from drivine.model.graph_view_model import GraphViewModel
 from tests.models import (
     ActorStats,
@@ -40,6 +48,7 @@ from tests.models import (
     ActorWithMovies,
     Animal,
     Customer,
+    Director,
     Dog,
     Location,
     LocationAncestors,
@@ -79,7 +88,54 @@ def statements(grammar: CypherGrammar) -> dict[str, str]:
     }
     cases.update(saves(grammar, registry, backend))
     cases.update(queries(grammar, registry, backend))
+    cases.update(groups(registry, backend))
     return {name: it.text for name, it in cases.items()}
+
+
+def groups(registry: ModelRegistry, backend: CypherBackend) -> dict[str, GraphStatement]:
+    """The grouped reads TypeScript's golden test writes, written alike."""
+    movie = registry.fragment(Movie)
+    directors = {"director": registry.fragment(Director)}
+
+    def labels(type_: type) -> list[str]:
+        return registry.fragment(type_).labels
+
+    return {
+        "groups.byProperty": backend.groups(
+            movie, GroupQuery({"year": key("released")}, {"films": count()}), {}, labels
+        ),
+        "groups.aggregates": backend.groups(
+            movie,
+            GroupQuery(
+                keys={"year": key("released")},
+                aggregates={
+                    "films": count(),
+                    "nineties": count("n.released < 2000"),
+                    "years": sum_("released", "n.released > 2000"),
+                    "average": avg("released"),
+                    "last": max_("released"),
+                },
+                where="n.released > $from",
+                bindings={"from": 1990},
+                having=[("films", "gte", 1)],
+                order_by=[("films", "desc")],
+                skip=1,
+                limit=2,
+            ),
+            {},
+            labels,
+        ),
+        "groups.byPath": backend.groups(
+            movie,
+            GroupQuery(
+                keys={"year": key("released"), "director": path_key(Director, [hop("DIRECTED_BY")])},
+                aggregates={"films": count()},
+                order_by=[("year", "desc")],
+            ),
+            directors,
+            labels,
+        ),
+    }
 
 
 def queries(grammar: CypherGrammar, registry: ModelRegistry, backend: CypherBackend) -> dict[str, GraphStatement]:

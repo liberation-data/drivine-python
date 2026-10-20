@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from drivine.annotation.direction import Direction
@@ -12,6 +12,7 @@ from drivine.backend.edge_statements import EdgeStatements
 from drivine.backend.fragment_batch_statement import FragmentBatchStatement
 from drivine.backend.fragment_group import FragmentGroup
 from drivine.backend.graph_statement import GraphStatement
+from drivine.backend.group_statement import GroupStatement
 from drivine.backend.matched_node import MatchedNode
 from drivine.backend.page import Page
 from drivine.backend.patch_statements import PatchStatements
@@ -19,7 +20,9 @@ from drivine.backend.save_statement import SaveStatement
 from drivine.backend.save_statement_builder import SaveStatementBuilder
 from drivine.backend.view_projector import ViewProjector, fragment
 from drivine.drivine_error import DrivineError
+from drivine.dsl.query_renderer import QueryRenderer
 from drivine.manager.cascade_type import CascadeType
+from drivine.manager.group_query import GroupQuery
 from drivine.manager.relate_mode import RelateMode
 from drivine.manager.save_options import SaveOptions
 from drivine.model import stamps
@@ -192,6 +195,17 @@ class CypherBackend:
 
     def unrelate_all(self, origin: MatchedNode, type: str, direction: Direction) -> GraphStatement:
         return EdgeStatements.unrelate_all(origin, type, direction)
+
+    def groups(
+        self,
+        model: FragmentModel,
+        query: GroupQuery,
+        path_targets: Mapping[str, FragmentModel],
+        labels_of_class: Callable[[type], list[str]],
+    ) -> GraphStatement:
+        """A grouped read. The query may hold references and conditions, which the backend writes."""
+        renderer = QueryRenderer(self.grammar, labels_of_class)
+        return GroupStatement.build(model, GroupStatement.resolved(model, query, renderer), path_targets)
 
     def held_properties(self, model: FragmentModel) -> GraphStatement:
         """The properties of the node with id `$id`: one row, or none when there is no such node."""

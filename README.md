@@ -433,6 +433,33 @@ development and CI (or override `index_advice()` on the assembly); `OFF` says no
 `await gom.store_identity()` gives the store's stable id, minted in the store on first sight: two connections see the
 same id when, and only when, they look at the same data.
 
+## Sync
+
+`drivine.sync` is the same API without `async` and `await`, for scripts, notebooks, Django and Flask:
+
+```python
+from drivine.sync import DatabaseRegistry, PersistenceManagerFactory, StatelessGraphObjectManager, transactional
+
+registry = DatabaseRegistry()
+registry.build_or_resolve_from_env()
+gom = StatelessGraphObjectManager(PersistenceManagerFactory(registry).get())
+
+
+@transactional
+def promote(uuid: str) -> None:
+    person = gom.load(Person, uuid)
+    gom.save(person.model_copy(update={"bio": "Lead"}))
+```
+
+- **Each driver's own sync client**, not an event loop behind the scenes: it costs nothing extra, and works where a loop
+  is already running, as in Jupyter.
+- **The same models, query DSL and backends.** A class is one class in both APIs; only what does I/O is sync.
+- **Each thread has its own transaction**, as asyncio gives each task's context its own.
+- `@transactional` from `drivine.sync` takes a plain function, and drivine's takes an async one.
+
+It is written from the async source by `scripts/unasync.py`, as the Neo4j driver writes its sync API, and tested by the
+same tests, written alike.
+
 ## With pi-pilgrim
 
 `DrivineAssembly` is a [pi-pilgrim](https://github.com/liberation-data/pi-pilgrim) assembly holding the registry
@@ -493,6 +520,11 @@ uv sync
 uv run pytest            # starts Neo4j, Memgraph and FalkorDB in Docker
 uv run ruff check . && uv run pyright
 ```
+
+`drivine/sync` and `tests/sync_integration` are written from the async source: change that, and run
+`uv run python scripts/unasync.py`. A unit test fails while they are out of date. `drivine/sync/concurrency.py`, the
+counterpart of `drivine/concurrency.py`, is the one sync module written by hand, and a test marked `async_only` (one
+that runs tasks concurrently) is left out of the sync tests.
 
 ## License
 

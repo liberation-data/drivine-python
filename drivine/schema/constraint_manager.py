@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-import asyncio
-
+from drivine import concurrency
 from drivine.drivine_error import DrivineError
 from drivine.schema.ensure_result import EnsureResult
 from drivine.schema.index_manager import IndexManager
@@ -61,5 +60,5 @@ class ConstraintManager:
         for attempt in range(50):
             if await self._exists(spec):
                 return
-            await asyncio.sleep(0.02 * (attempt + 1))
+            await concurrency.sleep(0.02 * (attempt + 1))
         raise DrivineError(f"The uniqueness constraint on {spec.label}({', '.join(spec.properties)}) was not built.")

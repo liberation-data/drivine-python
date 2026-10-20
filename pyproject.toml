@@ -1,0 +1,70 @@
+[project]
+name = "drivine"
+version = "0.1.0.dev0"
+description = "Graph database client for Python: Neo4j, Memgraph, FalkorDB, Neptune, Oracle and Postgres."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Liberation Data" }]
+requires-python = ">=3.11"
+dependencies = [
+    "pi-pilgrim>=0.2.0",
+    "pydantic>=2.7",
+]
+keywords = ["graph", "database", "neo4j", "memgraph", "falkordb", "neptune", "cypher", "ogm"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Framework :: AsyncIO",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Topic :: Database",
+    "Typing :: Typed",
+]
+
+[project.optional-dependencies]
+neo4j = ["neo4j>=5.20"]
+testing = ["testcontainers>=4.8", "pytest>=8"]
+
+[project.entry-points.pytest11]
+drivine = "drivine.testing.plugin"
+
+[project.urls]
+Homepage = "https://drivine.org"
+Repository = "https://github.com/liberation-data/drivine-python"
+
+[dependency-groups]
+dev = [
+    "drivine[neo4j,testing]",
+    "pytest-asyncio>=0.24",
+    "pyright>=1.1.380",
+    "ruff>=0.6",
+]
+
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["drivine"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
+testpaths = ["tests"]
+drivine_test_containers = true
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+extend-exclude = ["*.md"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]
+
+[tool.pyright]
+include = ["drivine"]
+pythonVersion = "3.11"
+typeCheckingMode = "strict"
+reportMissingTypeStubs = false
+reportPrivateUsage = false

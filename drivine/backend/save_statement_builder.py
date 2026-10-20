@@ -615,7 +615,7 @@ def props_of(
             continue
         value = getattr(obj, field_, None)
         if value is not None:
-            props[name] = json.dumps(to_jsonable_python(value)) if field_ in mapping.json_packed else _stored(value)
+            props[name] = json.dumps(to_jsonable_python(value)) if field_ in mapping.json_packed else stored(value)
         elif clear_nulls and field_ in assigned:
             props[name] = None
     return props
@@ -638,7 +638,7 @@ def bag_entries(model: FragmentModel, obj: Any, held: Sequence[str] = (), clear:
                     f"holds strings, numbers, booleans, dates, or lists of them."
                 )
             if value is not None:
-                entries[f"{bag.namespace}{key}"] = _stored(value)
+                entries[f"{bag.namespace}{key}"] = stored(value)
         if clear and not bag.flat:
             for it in held:
                 if it.startswith(bag.namespace) and it not in entries:
@@ -646,14 +646,14 @@ def bag_entries(model: FragmentModel, obj: Any, held: Sequence[str] = (), clear:
     return entries
 
 
-def _stored(value: Any) -> Any:
+def stored(value: Any) -> Any:
     """A value as a driver takes it: an Enum as its value, and a set or tuple as a list."""
     if isinstance(value, Enum):
         return value.value
     if isinstance(value, (set, tuple, frozenset)):
-        return [_stored(it) for it in value]  # pyright: ignore[reportUnknownVariableType]
+        return [stored(it) for it in value]  # pyright: ignore[reportUnknownVariableType]
     if isinstance(value, list):
-        return [_stored(it) for it in value]  # pyright: ignore[reportUnknownVariableType]
+        return [stored(it) for it in value]  # pyright: ignore[reportUnknownVariableType]
     return value
 
 

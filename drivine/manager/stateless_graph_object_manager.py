@@ -9,14 +9,22 @@ from typing import Any, Literal, TypeVar
 from pydantic import BaseModel
 from pydantic_core import to_jsonable_python
 
-from drivine.backend.cypher_backend import CypherBackend
+from drivine.backend.cypher_backend import NODE_ALIAS, CypherBackend
 from drivine.backend.cypher_grammar import cypher_grammar_for
 from drivine.backend.fragment_group import FragmentGroup
 from drivine.backend.graph_statement import GraphStatement
+from drivine.backend.page import Page
 from drivine.backend.save_statement import SaveStatement
 from drivine.backend.save_statement_builder import id_of, items, props_of, root_of, target
 from drivine.backend.vector_writes import split_vectors
 from drivine.drivine_error import DrivineError
+from drivine.dsl.collection_sorts import sort_collections
+from drivine.dsl.condition import Where
+from drivine.dsl.order_term import OrderTerm
+from drivine.dsl.query import Query
+from drivine.dsl.query_renderer import QueryRenderer
+from drivine.dsl.rendered_query import RenderedQuery
+from drivine.dsl.seek_value import SeekValue
 from drivine.manager.cascade_type import CascadeType
 from drivine.manager.contention import when_not_contended
 from drivine.manager.edge_operations import EdgeOperations
@@ -72,23 +80,38 @@ class StatelessGraphObjectManager:
     async def load_all(
         self,
         type_: type[T],
-        where: str | None = None,
+        where: str | Where | None = None,
         bindings: Mapping[str, Any] | None = None,
         *,
+        order_by: OrderTerm | Sequence[OrderTerm] | None = None,
+        limit: int | None = None,
+        skip: int | None = None,
+        seek: SeekValue | Sequence[SeekValue] | None = None,
         depth: Mapping[str, int] | None = None,
     ) -> list[T]:
         """
-        Loads every object of the class, optionally filtered: `where` is a Cypher predicate over the root, `n`, with
-        its values in `bindings`. `depth` overrides a recursive relationship's max_depth for this load, by field name.
+        Loads every object of the class, optionally filtered, ordered and paged:
+
+            q = refs(PersonCareer)
+            leads = await gom.load_all(
+                PersonCareer, where=q.person.bio.contains("Lead"), order_by=q.person.name.asc(), limit=20
+            )
+
+        `where` is a condition, or a list of them all of which must hold, made from the class's references; or a
+        Cypher predicate over the root, `n`, with its values in `bindings`. `seek` continues after a keyset cursor.
+        `depth` overrides a recursive relationship's max_depth for this load, by field name.
         """
         target = self.registry.model_of(type_)
-        depth = _checked(depth)
+        rendered = self._rendered(target, where, bindings, Query(None, order_by, limit, skip, seek, depth))
+        page = Page(rendered.order_by, rendered.skip, rendered.limit)
         if isinstance(target, GraphViewModel):
-            statement = self.backend.load_all_views(target, where, depth)
-            rows = await self.persistence_manager.query(statement.spec(bindings))
-            return [self.mapper.view(target, row) for row in rows]
-        statement = self.backend.load_all_fragments(target, where)
-        rows = await self.persistence_manager.query(statement.spec(bindings))
+            statement = self.backend.load_all_views(target, rendered.where, rendered.depth, page)
+            rows = await self.persistence_manager.query(statement.spec(rendered.bindings))
+            views = [self.mapper.view(target, row) for row in rows]
+            sort_collections(views, rendered.collection_sorts)
+            return views
+        statement = self.backend.load_all_fragments(target, rendered.where, page)
+        rows = await self.persistence_manager.query(statement.spec(rendered.bindings))
         return [self.mapper.fragment(target, row) for row in rows]
 
     async def load(self, type_: type[T], id: Any, *, depth: Mapping[str, int] | None = None) -> T | None:
@@ -108,14 +131,17 @@ class StatelessGraphObjectManager:
             return self.mapper.view(target, rows[0])
         return self.mapper.fragment(target, rows[0])
 
-    async def count(self, type_: type[Any], where: str | None = None, bindings: Mapping[str, Any] | None = None) -> int:
-        """How many objects of the class a load would find."""
+    async def count(
+        self, type_: type[Any], where: str | Where | None = None, bindings: Mapping[str, Any] | None = None
+    ) -> int:
+        """How many objects of the class a load with the same filter would find."""
         target = self.registry.model_of(type_)
+        predicate, values = self._condition(target, where, bindings)
         if isinstance(target, GraphViewModel):
-            statement = self.backend.count_views(target, where)
+            statement = self.backend.count_views(target, predicate)
         else:
-            statement = self.backend.count_fragments(target, where)
-        return await self.persistence_manager.get_one(statement.spec(bindings))
+            statement = self.backend.count_fragments(target, predicate)
+        return await self.persistence_manager.get_one(statement.spec(values))
 
     async def save(
         self,
@@ -194,7 +220,7 @@ class StatelessGraphObjectManager:
         self,
         type_: type[Any],
         id: Any,
-        where: str | None = None,
+        where: str | Where | None = None,
         bindings: Mapping[str, Any] | None = None,
         *,
         cascade: CascadeType = CascadeType.NONE,
@@ -204,18 +230,22 @@ class StatelessGraphObjectManager:
         meets the view's requirements, and `where`, a predicate over `n`, when given. A cascade deletes nodes the view
         reaches too. Returns the number of roots deleted: 1, or 0 when there was none.
         """
-        statement = self.backend.delete(self.registry.model_of(type_), where, cascade)
-        return await self.persistence_manager.get_one(statement.spec({**(bindings or {}), "id": id}))
+        target = self.registry.model_of(type_)
+        predicate, values = self._condition(target, where, bindings)
+        statement = self.backend.delete(target, predicate, cascade)
+        return await self.persistence_manager.get_one(statement.spec({**values, "id": id}))
 
     async def delete_all(
-        self, type_: type[Any], where: str | None = None, bindings: Mapping[str, Any] | None = None
+        self, type_: type[Any], where: str | Where | None = None, bindings: Mapping[str, Any] | None = None
     ) -> int:
         """
         Deletes every object a load with the same filter would find: its root, with the root's relationships. Without
         a filter, every one. Returns the number deleted.
         """
-        statement = self.backend.delete_all(self.registry.model_of(type_), where)
-        return await self.persistence_manager.get_one(statement.spec(bindings))
+        target = self.registry.model_of(type_)
+        predicate, values = self._condition(target, where, bindings)
+        statement = self.backend.delete_all(target, predicate)
+        return await self.persistence_manager.get_one(statement.spec(values))
 
     async def save_all(
         self,
@@ -272,7 +302,7 @@ class StatelessGraphObjectManager:
         *,
         set: Mapping[str, Any] | None = None,
         clear: Sequence[str] = (),
-        where: str | None = None,
+        where: str | Where | None = None,
         bindings: Mapping[str, Any] | None = None,
     ) -> PatchResult:
         """
@@ -281,7 +311,9 @@ class StatelessGraphObjectManager:
         isn't checked against a stamp, and hands none back: a node it changed has a new stamp, so an object loaded
         before is refused when saved. On a view, the fields are its root's.
         """
-        root = root_of(self.registry.model_of(type_))
+        target = self.registry.model_of(type_)
+        root = root_of(target)
+        predicate, values_bound = self._condition(target, where, bindings)
         named = [*(set or {}), *clear]
         self._assert_patchable(root, named)
         values: dict[str, Any] = {}
@@ -290,8 +322,8 @@ class StatelessGraphObjectManager:
             packed = value is not None and field in root.json_packed
             values[root.graph_properties.get(field, field)] = json.dumps(to_jsonable_python(value)) if packed else value
         props, vectors = split_vectors(root, values)
-        statement = self.backend.patch_one(root, where)
-        spec = statement.spec({**(bindings or {}), "id": id, "set": props, "vectors": vectors})
+        statement = self.backend.patch_one(root, predicate)
+        spec = statement.spec({**values_bound, "id": id, "set": props, "vectors": vectors})
         row = await self._when_uncontended(lambda: self.persistence_manager.get_one(spec))
         return PatchResult(row["found"], row["applied"], row["changed"])
 
@@ -343,6 +375,37 @@ class StatelessGraphObjectManager:
             for it in await self._when_uncontended(lambda spec=spec: self.persistence_manager.query(spec)):
                 results[it["id"]] = PatchResult(it["found"], it["found"], it["changed"])
         return [results[it] for it in ids]
+
+    def _condition(
+        self, target_: TargetModel, where: str | Where | None, bindings: Mapping[str, Any] | None
+    ) -> tuple[str | None, dict[str, Any]]:
+        """
+        A filter as a predicate over `n`, with its values: Cypher as it is given, or conditions written for the store.
+        """
+        if where is None or isinstance(where, str):
+            return where, dict(bindings or {})
+        written, values = QueryRenderer.render_where(where, target_, self.backend.grammar, NODE_ALIAS, self._labels)
+        return written, {**(bindings or {}), **values}
+
+    def _rendered(
+        self, target_: TargetModel, where: str | Where | None, bindings: Mapping[str, Any] | None, query: Query
+    ) -> RenderedQuery:
+        """
+        A load's query written for the store. A Cypher `where` is kept as it is, and joined to what the query's terms
+        write, such as a keyset.
+        """
+        _checked(query.depth)
+        conditions = None if where is None or isinstance(where, str) else where
+        rendered = QueryRenderer.render(
+            dataclasses.replace(query, where=conditions), target_, self.backend.grammar, NODE_ALIAS, self._labels
+        )
+        if not isinstance(where, str):
+            return dataclasses.replace(rendered, bindings={**(bindings or {}), **rendered.bindings})
+        predicate = f"({where}) AND {rendered.where}" if rendered.where else where
+        return dataclasses.replace(rendered, where=predicate, bindings={**(bindings or {}), **rendered.bindings})
+
+    def _labels(self, type_: type) -> list[str]:
+        return self.registry.fragment(type_).labels
 
     # ----- Writing -----
 

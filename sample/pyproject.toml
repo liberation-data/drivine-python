@@ -1,0 +1,60 @@
+[project]
+name = "drivine-sample"
+version = "0.1.0"
+description = "Drivine's sample application, in Python: an issue tracker and a guide's users"
+authors = [{ name = "Liberation Data" }]
+license = "Apache-2.0"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = ["drivine[neo4j,falkordb,oracle,testing]"]
+
+[tool.poetry]
+packages = [{ include = "drivine_sample" }]
+
+[tool.poetry.build]
+# Writes the typed references of the models (drivine_sample/sample_refs.py and .pyi) on `poetry build` and
+# `poetry install`: see build.py.
+script = "build.py"
+generate-setup-file = false
+
+[tool.poetry.dependencies]
+# drivine from this repository, rather than PyPI.
+drivine = { path = "..", develop = true, extras = ["neo4j", "falkordb", "oracle", "testing"] }
+
+[tool.poetry.group.dev.dependencies]
+pytest = ">=8"
+pytest-asyncio = ">=0.24"
+pyright = ">=1.1.390"
+ruff = ">=0.6"
+
+[build-system]
+# The build script (build.py) runs drivine's stub generator. An application that takes drivine from PyPI lists
+# "drivine" here; the sample reads drivine from its repository, so it lists drivine's own dependencies.
+requires = ["poetry-core>=2.0", "pydantic>=2.7", "pi-pilgrim>=0.2.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
+testpaths = ["tests"]
+drivine_test_containers = true
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+extend-exclude = ["*.md", "drivine_sample/sample_refs.py", "drivine_sample/sample_refs.pyi"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["drivine_sample", "drivine"]
+
+[tool.pyright]
+include = ["drivine_sample", "tests"]
+exclude = ["drivine_sample/sample_refs.py"]
+pythonVersion = "3.11"
+typeCheckingMode = "strict"
+reportMissingTypeStubs = false
+reportPrivateUsage = false

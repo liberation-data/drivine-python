@@ -42,6 +42,7 @@ class TestSaveAll:
         loaded = await gom.load(Customer, "c1")
         assert loaded is not None and loaded.metadata == {"source": "wiki"}
 
+    @pytest.mark.rolls_back
     async def test_a_batch_that_fails_writes_nothing(self, gom):
         await gom.save(Person(uuid="p1", name="Ada"))
         stale = await gom.load(Person, "p1")
@@ -61,6 +62,7 @@ class TestSaveAll:
         with pytest.raises(DrivineError, match="replace applies to views"):
             await gom.save_all([Person(uuid="p1", name="Ada")], replace=["x"])
 
+    @pytest.mark.rolls_back
     async def test_joins_the_callers_transaction(self, gom):
         with pytest.raises(ValueError):
             async with transaction():

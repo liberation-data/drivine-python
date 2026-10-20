@@ -117,6 +117,8 @@ class ConnectionProviderBuilder:
             provider = self._bolt_provider(name)
         elif self._type is DatabaseType.NEPTUNE:
             provider = self._neptune_provider(name)
+        elif self._type is DatabaseType.FALKORDB:
+            provider = self._falkordb_provider(name)
         else:
             raise DrivineError(f"{self._type} is not supported by drivine-python yet.")
         self.registry.register(provider)
@@ -153,4 +155,24 @@ class ConnectionProviderBuilder:
         assert self._host is not None
         return neptune_provider(
             name, self._host, self._port or 8182, self._protocol or "bolt", self._connection_timeout
+        )
+
+    def _falkordb_provider(self, name: str) -> ConnectionProvider:
+        """
+        FalkorDB serves several graphs from one server: `database_name` names the one to work on, `graph` by default.
+        """
+        from drivine.connection.falkordb.falkordb_connection_provider import FalkorDbConnectionProvider
+
+        assert self._host is not None
+        if self._idle_timeout:
+            logger.warning("idle_timeout is not supported by FalkorDB")
+        return FalkorDbConnectionProvider(
+            name,
+            self._database_name or "graph",
+            self._host,
+            self._port or 6379,
+            self._user_name,
+            self._password,
+            self._connection_timeout,
+            self._transaction_mode or TransactionMode.WARN,
         )

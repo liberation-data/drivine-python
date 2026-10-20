@@ -644,7 +644,8 @@ An integration test writes with one language and reads with the other, on each e
 
 Each milestone ends with tests passing on every engine it covers, and is releasable.
 
-**Progress:** 1 to 5 are done, on Neo4j and Memgraph. Index advice moves to milestone 7,
+**Progress:** 1 to 6 are done, on Neo4j, Memgraph and FalkorDB. Neptune connects for the `PersistenceManager`, untested:
+there is no container for it. Index advice moves to milestone 7,
 which lists the database's indexes.
 The golden statements are in drivine's `test/1.Unit/golden`, copied to `tests/golden`.
 

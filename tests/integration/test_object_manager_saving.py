@@ -282,6 +282,7 @@ class TestConcurrency:
         winner = next(it for it in results if not isinstance(it, BaseException))
         assert await value(pm, "MATCH (p:Person) RETURN p.name") == winner.name
 
+    @pytest.mark.rolls_back
     async def test_a_save_joins_the_transaction(self, pm, gom):
         with pytest.raises(ValueError):
             async with transaction():

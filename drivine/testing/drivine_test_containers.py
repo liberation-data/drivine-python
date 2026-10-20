@@ -62,9 +62,33 @@ def _reach(port: int, user_name: str | None = None, password: str | None = None)
     return connection
 
 
+def _falkordb(image: str) -> DockerContainer:
+    return DockerContainer(image).with_exposed_ports(6379).waiting_for(PortWaitStrategy(6379))
+
+
+def _redis_ready(reach: ContainerConnection, timeout: float = 60) -> None:
+    import socket
+
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            with socket.create_connection((reach.host, reach.port), timeout=1) as connection:
+                connection.sendall(b"PING\r\n")
+                if connection.recv(16).startswith(b"+PONG"):
+                    return
+        except OSError:
+            pass
+        if time.monotonic() > deadline:
+            raise TimeoutError(f"FalkorDB at {reach.host}:{reach.port} didn't answer PING.")
+        time.sleep(0.25)
+
+
 TEST_CONTAINER_SPECS: dict[DatabaseType, TestContainerSpec] = {
     DatabaseType.NEO4J: TestContainerSpec(
         "neo4j:5.26-community", 7687, _neo4j, _reach(7687, "neo4j", TEST_CONTAINER_PASSWORD)
+    ),
+    DatabaseType.FALKORDB: TestContainerSpec(
+        "falkordb/falkordb:6.0.0", 6379, _falkordb, _reach(6379), ready=_redis_ready
     ),
     DatabaseType.MEMGRAPH: TestContainerSpec(
         "memgraph/memgraph:3.12.0", 7687, _memgraph, _reach(7687), ready=_bolt_ready

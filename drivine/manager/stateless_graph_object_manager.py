@@ -3,6 +3,7 @@ from __future__ import annotations
 import dataclasses
 import inspect
 import json
+import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any, Literal, TypeVar
 
@@ -17,6 +18,8 @@ from drivine.backend.page import Page
 from drivine.backend.save_statement import SaveStatement
 from drivine.backend.save_statement_builder import id_of, items, props_of, root_of, target
 from drivine.backend.vector_writes import split_vectors
+from drivine.connection.database_type import DatabaseType
+from drivine.connection.transaction_mode import TransactionMode
 from drivine.drivine_error import DrivineError
 from drivine.dsl.collection_sorts import sort_collections
 from drivine.dsl.condition import Where
@@ -29,6 +32,7 @@ from drivine.manager.cascade_type import CascadeType
 from drivine.manager.contention import when_not_contended
 from drivine.manager.edge_operations import EdgeOperations
 from drivine.manager.group_operations import GroupOperations
+from drivine.manager.non_atomic_batch_error import NonAtomicBatchError
 from drivine.manager.null_policy import NullPolicy
 from drivine.manager.patch_result import PatchResult
 from drivine.manager.persistence_manager import PersistenceManager
@@ -47,6 +51,8 @@ from drivine.transaction.transaction import current_transaction
 from drivine.transaction.transactional import transaction
 
 T = TypeVar("T")
+
+logger = logging.getLogger("drivine.manager")
 R = TypeVar("R")
 
 UPDATE_ATTEMPTS = 3
@@ -70,6 +76,7 @@ class StatelessGraphObjectManager:
         self.registry = registry or ModelRegistry()
         self.backend = CypherBackend(cypher_grammar_for(persistence_manager.type))
         self.mapper = GraphObjectMapper(self.registry)
+        self._warned_non_atomic = False
         self.edges = EdgeOperations(self.registry, self._run_one, self._query, self.mapper, self.backend)
         """Relationships on their own, between stored nodes: see EdgeOperations."""
         self.groups = GroupOperations(self.registry, self._query, self.mapper, self.backend)
@@ -420,6 +427,17 @@ class StatelessGraphObjectManager:
         """
         if not statements:
             return []
+        auto_commit = self._auto_commit_mode()
+        if len(statements) > 1 and auto_commit is not None:
+            if auto_commit is TransactionMode.STRICT:
+                raise NonAtomicBatchError("FalkorDB", len(statements))
+            if not self._warned_non_atomic:
+                self._warned_non_atomic = True
+                logger.warning(
+                    "A batch of %s statements runs statement by statement on FalkorDB, which has no multi-statement "
+                    "transactions: a failure part way leaves what ran before it.",
+                    len(statements),
+                )
 
         async def each() -> list[list[Any]]:
             results: list[list[Any]] = []
@@ -437,11 +455,20 @@ class StatelessGraphObjectManager:
         try:
             if current_transaction() is not None:
                 return await each()
-            if len(statements) == 1:
+            if len(statements) == 1 or auto_commit is not None:
                 return await when_not_contended(each, self.backend.contended)
             return await when_not_contended(in_transaction, self.backend.contended)
         except _StaleInBatch as stale:
             raise await self._stale_object(stale.statement) from None
+
+    def _auto_commit_mode(self) -> TransactionMode | None:
+        """The transaction mode of an engine that commits each statement as it runs; None for one that doesn't."""
+        provider = getattr(self.persistence_manager, "provider", None)
+        return (
+            getattr(provider, "transaction_mode", None)
+            if self.persistence_manager.type is DatabaseType.FALKORDB
+            else None
+        )
 
     def _hand_back_fragments(self, groups: list[FragmentGroup], result: Mapping[str, Any]) -> None:
         """Gives each fragment of a batch the stamp the batch left, as far as it was current."""

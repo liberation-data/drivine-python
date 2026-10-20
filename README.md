@@ -4,13 +4,14 @@
 and [drivine4j](https://github.com/liberation-data/drivine4j) for the JVM. Async first, typed, and fast: one statement per
 round trip, no session cache, no lazy loading.
 
-> **Status: early.** On Neo4j and Memgraph today: the low-level `PersistenceManager`, transactions, and the object
+> **Status: early.** On Neo4j, Memgraph and FalkorDB today: the low-level `PersistenceManager`, transactions, and the object
 > manager's loading, saving, batches, patches, edges and deletes of fragments and views, the query DSL and grouped
 > reads. Search, schema management and the other engines come next. Neptune connects
 > the same way, for the `PersistenceManager`. See [the design](docs/design.md) for where it is going.
 
 ```
-pip install "drivine[neo4j]"   # Neo4j, Memgraph, Neptune
+pip install "drivine[neo4j]"      # Neo4j, Memgraph, Neptune
+pip install "drivine[falkordb]"   # FalkorDB
 ```
 
 Python 3.11 or newer.
@@ -41,6 +42,8 @@ pm = PersistenceManagerFactory(registry).get()    # the default database
 ...
 await registry.close()                            # when the application stops
 ```
+
+On FalkorDB, `DATABASE_NAME` names the graph, `graph` by default.
 
 Or in code:
 
@@ -142,6 +145,13 @@ async with transaction(rollback=True):   # a test that leaves nothing behind
 - **Outside a transaction**, each statement runs on its own and commits. Drivine never starts a transaction you didn't
   ask for.
 - **It works on calls to `self`**, since it wraps the function itself, not a proxy.
+
+### FalkorDB
+
+FalkorDB has no multi-statement transactions: each statement commits as it runs. With `DATABASE_TRANSACTION_MODE=WARN`,
+the default, a transaction runs statement by statement and a rollback logs that nothing was rolled back; a `save_all`
+of several statements does the same. With `STRICT`, a transaction is refused at its first statement, and such a batch
+raises `NonAtomicBatchError`, so no code path can rely on atomicity it doesn't have.
 
 ### Tasks share their transaction, one statement at a time
 
@@ -364,8 +374,8 @@ Nothing requires pi-pilgrim: the managers are plain classes.
 drivine_test_containers = true
 ```
 
-it starts a container for each datasource the environment configures, Neo4j or Memgraph, before the tests run, and
-points the datasource at it. Datasources of one type share a container. `USE_LOCAL_NEO4J=true` (or `_MEMGRAPH`)
+it starts a container for each datasource the environment configures, Neo4j, Memgraph or FalkorDB, before the tests run, and
+points the datasource at it. Datasources of one type share a container. `USE_LOCAL_NEO4J=true` (or `_MEMGRAPH`, `_FALKORDB`)
 leaves that type's datasources as they are, to test against your own instance, and `NEO4J_TEST_IMAGE` picks another
 image.
 
@@ -379,7 +389,7 @@ logger when the application hasn't.
 
 ```
 uv sync
-uv run pytest            # starts Neo4j and Memgraph in Docker
+uv run pytest            # starts Neo4j, Memgraph and FalkorDB in Docker
 uv run ruff check . && uv run pyright
 ```
 

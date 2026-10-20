@@ -60,3 +60,24 @@ async def test_provides_one_object_manager_for_each_database():
         assert gom.registry is assembly.graph_object_manager_factory().get("default").registry
     finally:
         await assembly.close()
+
+
+async def test_start_enforces_the_schema():
+    import uuid
+
+    from drivine import SchemaCatalog, SchemaOptions, range_index
+
+    label = f"T{uuid.uuid4().hex[:10]}"
+
+    class WithSchema(DrivineAssembly):
+        def schema_options(self) -> SchemaOptions:
+            return SchemaOptions([SchemaCatalog.of(range_index(label, "a")).named(label)])
+
+    assembly = WithSchema()
+    try:
+        await assembly.start()
+        gom = assembly.graph_object_manager()
+        assert [it.properties for it in await gom.indexes.list("RANGE") if it.label == label] == [("a",)]
+        await gom.indexes.drop(range_index(label, "a"))
+    finally:
+        await assembly.close()

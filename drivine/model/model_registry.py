@@ -8,6 +8,7 @@ from pydantic.fields import FieldInfo
 from drivine.annotation.aggregate import Aggregate
 from drivine.annotation.aggregate_function import AggregateFunction
 from drivine.annotation.empty_when_absent import EmptyWhenAbsent
+from drivine.annotation.full_text_index import FullTextIndex
 from drivine.annotation.graph_path import GraphPath
 from drivine.annotation.graph_property import GraphProperty
 from drivine.annotation.json_packed import JsonPacked
@@ -16,12 +17,15 @@ from drivine.annotation.node_labels import NodeLabels
 from drivine.annotation.node_stamp import NodeStamp
 from drivine.annotation.null_as_default import NullAsDefault
 from drivine.annotation.property_bag import PropertyBag
+from drivine.annotation.range_index import RangeIndex
 from drivine.annotation.read_only import ReadOnly
 from drivine.annotation.relationship import Relationship
 from drivine.annotation.root import Root
 from drivine.annotation.sorted_by import SortedBy
 from drivine.annotation.target_node import TargetNode
 from drivine.annotation.transient import Transient
+from drivine.annotation.unique import Unique
+from drivine.annotation.vector_index import VectorIndex
 from drivine.drivine_error import DrivineError
 from drivine.model.aggregate_model import AggregateModel
 from drivine.model.field_mapping import FieldMapping
@@ -37,7 +41,9 @@ from drivine.model.property_names import PropertyNames, graph_name
 from drivine.model.relationship_fragment import RelationshipFragment
 from drivine.model.relationship_fragment_model import RelationshipFragmentModel
 from drivine.model.relationship_model import RelationshipModel
+from drivine.model.schema_declaration import SchemaDeclaration
 from drivine.model.target_model import RelatedModel, TargetModel
+from drivine.model.vector_field import VectorField
 
 ClassKind = Literal["NODE_FRAGMENT", "RELATIONSHIP_FRAGMENT", "GRAPH_VIEW"]
 
@@ -58,9 +64,13 @@ MARKERS: tuple[type, ...] = (
     SortedBy,
     PropertyBag,
     NodeLabels,
+    RangeIndex,
+    Unique,
+    FullTextIndex,
+    VectorIndex,
 )
 
-_MAPPING = (GraphProperty, Transient, JsonPacked, NullAsDefault, EmptyWhenAbsent)
+_MAPPING = (GraphProperty, Transient, JsonPacked, NullAsDefault, EmptyWhenAbsent, RangeIndex, Unique, FullTextIndex)
 """Markers that shape how a plain field is stored, allowed on node and relationship fragments."""
 
 STAMP_PROPERTY = "__drivine.stamp"
@@ -188,7 +198,9 @@ class ModelRegistry:
                 f'class {type_.__name__}(NodeFragment, labels=["{type_.__name__}"]).'
             )
         fields = self._fields(type_)
-        self._assert_only(type_, fields, (NodeId, NodeStamp, PropertyBag, NodeLabels, *_MAPPING), "a NodeFragment")
+        self._assert_only(
+            type_, fields, (NodeId, NodeStamp, PropertyBag, NodeLabels, VectorIndex, *_MAPPING), "a NodeFragment"
+        )
         ids = [name for name, (_, marks) in fields.items() if NodeId in marks]
         if len(ids) > 1:
             raise DrivineError(f"{type_.__name__} has {len(ids)} NodeId fields ({', '.join(ids)}). A node has one id.")
@@ -206,6 +218,7 @@ class ModelRegistry:
         apart = {stamp, node_labels.field if node_labels else None, *(it.field for it in bags)}
         mapping = self._field_mapping(type_, {k: v for k, v in fields.items() if k not in apart}, naming)
         id_field = ids[0] if ids else None
+        schema = self._schema(type_, fields, mapping.graph_properties)
         return FragmentModel(
             graph_properties=mapping.graph_properties,
             transient_fields=mapping.transient_fields,
@@ -220,6 +233,11 @@ class ModelRegistry:
             node_labels=node_labels,
             property_bags=bags,
             validate_on_load=self._class_setting(type_, "__drivine_validate_on_load__", True),
+            vector_fields={
+                it.field: VectorField(it.properties[0], it.similarity) for it in schema if it.kind == "VECTOR"
+            },
+            full_text_indexes=[it.properties for it in schema if it.kind == "FULLTEXT"],
+            schema=schema,
         )
 
     def _build_relationship_fragment(self, type_: type) -> RelationshipFragmentModel:
@@ -435,6 +453,51 @@ class ModelRegistry:
                     raise DrivineError(f"EmptyWhenAbsent {where} loads an empty collection; the field isn't one.")
                 mapping.empty_when_absent[field] = kind
         return mapping
+
+    def _schema(
+        self, type_: type, fields: dict[str, tuple[FieldInfo, dict[type, Any]]], stored: dict[str, str]
+    ) -> list[SchemaDeclaration]:
+        """The schema items a fragment declares on its fields, and as class arguments over the fields they name."""
+
+        def stored_name(field: str) -> str:
+            if field not in stored:
+                raise DrivineError(f"{type_.__name__} declares a schema item over {field}, which isn't a stored field.")
+            return stored[field]
+
+        declarations: list[SchemaDeclaration] = []
+        kinds = {RangeIndex: "RANGE", Unique: "UNIQUE", FullTextIndex: "FULLTEXT"}
+        for field, (_, marks) in fields.items():
+            for marker, kind in kinds.items():
+                if marker in marks:
+                    declarations.append(SchemaDeclaration(kind, (stored_name(field),), field))  # pyright: ignore[reportArgumentType]
+            vector = marks.get(VectorIndex)
+            if isinstance(vector, VectorIndex):
+                declarations.append(
+                    SchemaDeclaration(
+                        "VECTOR",
+                        (stored_name(field),),
+                        field,
+                        vector.similarity,
+                        vector.dimensions,
+                        vector.hnsw_m,
+                        vector.hnsw_ef_construction,
+                    )
+                )
+        for it in type_.__mro__:
+            declared: tuple[Any, ...] = it.__dict__.get("__drivine_schema__", ())
+            for item in declared:
+                kind = kinds.get(item.__class__)
+                if kind is None:
+                    raise DrivineError(
+                        f"{type_.__name__}'s schema argument takes RangeIndex, Unique and FullTextIndex; not {item!r}. "
+                        f"A VectorIndex goes on its field."
+                    )
+                if not item.properties:
+                    raise DrivineError(
+                        f"On a class, a {type(item).__name__} names its fields: {type(item).__name__}([...])."
+                    )
+                declarations.append(SchemaDeclaration(kind, tuple(stored_name(f) for f in item.properties)))  # pyright: ignore[reportArgumentType]
+        return declarations
 
     def _node_labels(
         self, type_: type, fields: dict[str, tuple[FieldInfo, dict[type, Any]]], own: list[str]

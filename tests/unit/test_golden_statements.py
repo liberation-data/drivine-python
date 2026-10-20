@@ -5,12 +5,14 @@ models: tests/golden/statements.json is written by its test/1.Unit/golden/Golden
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from drivine import (
     CascadeType,
     Direction,
+    EngineVectorOptions,
     ModelRegistry,
     RelateMode,
     RemovedTargets,
@@ -23,14 +25,18 @@ from drivine import (
     coalesce,
     count,
     div,
+    full_text_index,
     hop,
     key,
     max_,
     not_,
     path_key,
+    range_index,
     refs,
     sum_,
     times,
+    uniqueness_constraint,
+    vector_index,
 )
 from drivine.backend.cypher_backend import NODE_ALIAS, CypherBackend
 from drivine.backend.cypher_grammar import FALKORDB_GRAMMAR, MEMGRAPH_GRAMMAR, NEO4J_GRAMMAR, CypherGrammar
@@ -42,6 +48,7 @@ from drivine.dsl.query import Query
 from drivine.dsl.query_renderer import QueryRenderer
 from drivine.manager.group_query import GroupQuery
 from drivine.model.graph_view_model import GraphViewModel
+from drivine.schema.schema_grammar import FALKORDB_SCHEMA, MEMGRAPH_SCHEMA, NEO4J_SCHEMA, SchemaGrammar
 from tests.models import (
     ActorStats,
     ActorWithLatestMovie,
@@ -310,11 +317,68 @@ def saves(grammar: CypherGrammar, registry: ModelRegistry, backend: CypherBacken
     return cases
 
 
+def schema(grammar: SchemaGrammar) -> dict[str, str]:
+    """The schema DDL TypeScript's golden test writes, written alike, for each engine."""
+    span = range_index("Session", ["lastActivityAt", "sessionId"])
+    unique = uniqueness_constraint("Person", "uuid")
+    pair = uniqueness_constraint("Person", ["email", "tenant"])
+    vector = vector_index(
+        "Chunk",
+        "embedding",
+        1536,
+        "COSINE",
+        hnsw_m=16,
+        hnsw_ef_construction=200,
+        engine_options=[
+            EngineVectorOptions("Neo4j", quantization_enabled=False),
+            EngineVectorOptions("FalkorDB", ef_runtime=10, hnsw_m=32),
+        ],
+    )
+    plain = vector_index("Chunk", "summary", 384, "EUCLIDEAN")
+    text = full_text_index("Article", ["title", "body"])
+    single = full_text_index("Article", "title")
+
+    def shown(statements: list[Any]) -> str:
+        return "\n".join(
+            it
+            if isinstance(it, str)
+            else json.dumps(
+                {"native": it.native, "label": it.label, "properties": list(it.properties)}, separators=(",", ":")
+            )
+            for it in statements
+        )
+
+    return {
+        "schema.listRanges": grammar.list_ranges.statement,
+        "schema.listUniques": grammar.list_uniques.statement,
+        "schema.listVectors": grammar.list_vectors.statement,
+        "schema.listFullTexts": grammar.list_full_texts.statement,
+        "schema.createRange": shown(grammar.create_range(span)),
+        "schema.dropRange": shown(grammar.drop_range(span)),
+        "schema.createUnique": shown(grammar.create_unique(unique)),
+        "schema.createUnique.pair": shown(grammar.create_unique(pair)),
+        "schema.dropUnique": shown(grammar.drop_unique(pair)),
+        "schema.createVector": shown(grammar.create_vector(vector)),
+        "schema.createVector.plain": shown(grammar.create_vector(plain)),
+        "schema.dropVector": shown(grammar.drop_vector(vector)),
+        "schema.createFullText": shown(grammar.create_full_text(text)),
+        "schema.createFullText.single": shown(grammar.create_full_text(single)),
+        "schema.dropFullText": shown(grammar.drop_full_text(text, None)),
+        "schema.dropFullText.named": shown(grammar.drop_full_text(text, "given_name")),
+        "schema.conflicts": grammar.conflicts(pair, 10),
+    }
+
+
 @pytest.mark.parametrize(
-    "engine, grammar", [("NEO4J", NEO4J_GRAMMAR), ("MEMGRAPH", MEMGRAPH_GRAMMAR), ("FALKORDB", FALKORDB_GRAMMAR)]
+    "engine, grammar, ddl",
+    [
+        ("NEO4J", NEO4J_GRAMMAR, NEO4J_SCHEMA),
+        ("MEMGRAPH", MEMGRAPH_GRAMMAR, MEMGRAPH_SCHEMA),
+        ("FALKORDB", FALKORDB_GRAMMAR, FALKORDB_SCHEMA),
+    ],
 )
-def test_writes_what_typescript_writes(engine: str, grammar: CypherGrammar):
-    written = statements(grammar)
+def test_writes_what_typescript_writes(engine: str, grammar: CypherGrammar, ddl: SchemaGrammar):
+    written = {**statements(grammar), **schema(ddl)}
     assert written.keys() == GOLDEN[engine].keys()
     for name, text in written.items():
         assert text == GOLDEN[engine][name], name

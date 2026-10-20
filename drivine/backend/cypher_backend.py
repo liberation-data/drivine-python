@@ -31,6 +31,12 @@ from drivine.model.graph_view_model import GraphViewModel
 from drivine.model.model_registry import ModelRegistry
 from drivine.model.target_model import TargetModel
 
+STORE_LABEL = "DrivineStore"
+"""The label of the node holding the store's identity: drivine4j's, so both read one identity."""
+
+SCHEMA_MARKER = "_DrivineSchema"
+"""The label of the nodes recording what each schema owner applied: drivine4j's, so both read one marker."""
+
 NODE_ALIAS = "n"
 """What a statement over a fragment calls its node. Filters are written against it."""
 
@@ -206,6 +212,49 @@ class CypherBackend:
         """A grouped read. The query may hold references and conditions, which the backend writes."""
         renderer = QueryRenderer(self.grammar, labels_of_class)
         return GroupStatement.build(model, GroupStatement.resolved(model, query, renderer), path_targets)
+
+    def store_stamps(self) -> GraphStatement:
+        """The store's identity stamps, `{id, assignedAt}`, oldest first."""
+        return GraphStatement(
+            f"MATCH (s:{STORE_LABEL}) RETURN {{id: s.storeId, assignedAt: s.assignedAt}} AS stamp "
+            f"ORDER BY stamp.assignedAt, stamp.id"
+        )
+
+    def assign_store_stamp(self) -> GraphStatement:
+        """Mints the identity stamp keyed `$key` unless it is there: `$storeId`, `$assignedAt`, `$engine`."""
+        return GraphStatement(
+            f"MERGE (s:{STORE_LABEL} {{key: $key}}) ON CREATE SET s.storeId = $storeId, s.assignedAt = $assignedAt, "
+            f"s.engine = $engine"
+        )
+
+    def schema_marker(self, property: str) -> GraphStatement:
+        """
+        A property ('version', or 'items', the newline-joined inventory) of the newest schema marker of the owner
+        `$scope`, as text: one row, or none when there is no marker.
+        """
+        return GraphStatement(
+            f"MATCH (m:{SCHEMA_MARKER} {{scope: $scope}}) RETURN m.{property} ORDER BY m.appliedAt DESC LIMIT 1"
+        )
+
+    @staticmethod
+    def marker_items(stored: str | None) -> list[str] | None:
+        """The inventory keys a marker's stored `items` holds; None for none recorded."""
+        return None if stored is None else [] if stored == "" else stored.split("\n")
+
+    def record_schema_marker(self) -> GraphStatement:
+        """Writes the owner `$scope`'s marker, making it if it isn't there: `$version`, `$items`, and when."""
+        return GraphStatement(
+            f"MERGE (m:{SCHEMA_MARKER} {{scope: $scope}}) SET m.version = $version, m.items = $items, "
+            f"m.appliedAt = timestamp()"
+        )
+
+    def prune_schema_markers(self) -> GraphStatement:
+        """
+        Removes every marker of the owner `$scope` but the newest: what a race before the marker's constraint left.
+        """
+        return GraphStatement(
+            f"MATCH (m:{SCHEMA_MARKER} {{scope: $scope}}) WITH m ORDER BY m.appliedAt DESC SKIP 1 DELETE m"
+        )
 
     def held_properties(self, model: FragmentModel) -> GraphStatement:
         """The properties of the node with id `$id`: one row, or none when there is no such node."""

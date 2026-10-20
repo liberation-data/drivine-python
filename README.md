@@ -5,7 +5,8 @@ and [drivine4j](https://github.com/liberation-data/drivine4j) for the JVM. Async
 round trip, no session cache, no lazy loading.
 
 > **Status: early.** On Neo4j and Memgraph today: the low-level `PersistenceManager`, transactions, and the object
-> manager's loading of fragments and views. Saving, the query DSL and the other engines come next. Neptune connects
+> manager's loading, saving and deleting of fragments and views. Batches, patches, edges, the query DSL and the other
+> engines come next. Neptune connects
 > the same way, for the `PersistenceManager`. See [the design](docs/design.md) for where it is going.
 
 ```
@@ -218,6 +219,31 @@ total = await gom.count(Person)
 
 The statements are TypeScript's, character for character: the tests check them against those TypeScript's Drivine
 writes for the same models.
+
+### Saving
+
+```python
+saved = await gom.save(career)                                       # fields that aren't None; relationships added
+await gom.save(career, replace=["employment_history"])               # this list is the whole list
+await gom.save(person, only=["name"])                                # or except_=["embedding"]
+await gom.save(person, null_policy=NullPolicy.CLEAR)                 # a field assigned None clears its property
+created = await gom.create(person)                                   # only if absent; None when it was there
+updated = await gom.update(Person, uuid, lambda it: it.model_copy(update={"name": "Ada"}))
+await gom.delete(PersonCareer, uuid, cascade=CascadeType.DELETE_ORPHAN)
+await gom.delete_all(Person, "n.name = $name", {"name": "Ada"})
+```
+
+- **A save is one statement**, applied whole or not at all: the root, the relationships it drops, each related node
+  and the relationship to it.
+- **A save adds and removes nothing**, unless a field is named in `replace`. `removed_targets=DELETE_UNREFERENCED`
+  also deletes a removed node that nothing else refers to.
+- **Stamps refuse a stale save.** On a class with a `NodeStamp` field, a save of an object loaded before another
+  writer changed the node raises `StaleObjectError` and writes nothing. Use the object a save returns: it carries the
+  new stamp. `update` loads, applies your change and saves what it altered, again if the node changed meanwhile.
+- **Outside a transaction**, a save the engine turns away because another writer held the node is run again after a
+  pause. Inside one, it joins the transaction, and fails for its owner to decide.
+
+The store format, stamps included, is TypeScript's and drivine4j's, so the three can share a store.
 
 ## With pi-pilgrim
 

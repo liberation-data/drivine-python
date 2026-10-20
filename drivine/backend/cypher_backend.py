@@ -1,15 +1,25 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from typing import Any
 
+from drivine.backend.cascade_targets import CascadeTargets
 from drivine.backend.cypher import label_expression, quote_name
 from drivine.backend.cypher_grammar import CypherGrammar
+from drivine.backend.cypher_stamps import STAMP
 from drivine.backend.graph_statement import GraphStatement
 from drivine.backend.page import Page
+from drivine.backend.save_statement import SaveStatement
+from drivine.backend.save_statement_builder import SaveStatementBuilder
 from drivine.backend.view_projector import ViewProjector, fragment
 from drivine.drivine_error import DrivineError
+from drivine.manager.cascade_type import CascadeType
+from drivine.manager.save_options import SaveOptions
+from drivine.model import stamps
 from drivine.model.fragment_model import FragmentModel
 from drivine.model.graph_view_model import GraphViewModel
+from drivine.model.model_registry import ModelRegistry
+from drivine.model.target_model import TargetModel
 
 NODE_ALIAS = "n"
 """What a statement over a fragment calls its node. Filters are written against it."""
@@ -79,6 +89,100 @@ class CypherBackend:
                 ]
             )
         )
+
+    def delete(
+        self, target: TargetModel, where: str | None = None, cascade: CascadeType = CascadeType.NONE
+    ) -> GraphStatement:
+        """
+        Deletes the root whose id is the parameter `id`, if it meets the optional predicate (and, for a view, the view's
+        requirements), with its relationships. A cascade, for a view only, deletes nodes the view reaches too. Returns
+        the number of roots deleted.
+        """
+        root = target.root if isinstance(target, GraphViewModel) else target
+        id_ = self._id_predicate(root)
+        condition = f"{id_} AND ({where})" if where else id_
+        head = "".join([self._match(root), self._root_where(target, condition)])
+        if cascade is CascadeType.NONE:
+            return GraphStatement(f"{head}\nDETACH DELETE {NODE_ALIAS}\nRETURN count(*) AS deleted")
+        if not isinstance(target, GraphViewModel):
+            raise DrivineError(f"A cascade follows a view's relationships. {root.type.__name__} is a NodeFragment.")
+        if cascade is CascadeType.DELETE_ORPHAN and self.grammar.orphan_delete_limit:
+            raise DrivineError(
+                f"CascadeType.DELETE_ORPHAN is not available on {self.grammar.engine}: "
+                f"{self.grammar.orphan_delete_limit}."
+            )
+        targets = CascadeTargets(self.grammar).of(target, NODE_ALIAS)
+        deletable = (
+            "targets"
+            if cascade is CascadeType.DELETE_ALL
+            else f"[x IN targets WHERE NOT {self.grammar.existence_check('(x)--()')}]"
+        )
+        return GraphStatement(
+            "".join(
+                [
+                    head,
+                    # WITH before the list: FalkorDB errors on a WHERE and a projection that both hold comprehensions
+                    # (FalkorDB/FalkorDB#3387).
+                    f"\nWITH {NODE_ALIAS}",
+                    f"\nWITH {NODE_ALIAS}, {targets} AS targets",
+                    f"\nDETACH DELETE {NODE_ALIAS}",
+                    "\nWITH targets",
+                    f"\nFOREACH (t IN {deletable} | DETACH DELETE t)",
+                    "\nRETURN count(*) AS deleted",
+                ]
+            )
+        )
+
+    def delete_all(self, target: TargetModel, where: str | None = None) -> GraphStatement:
+        """Deletes every root a load would find, with its relationships. Returns the number deleted."""
+        root = target.root if isinstance(target, GraphViewModel) else target
+        return GraphStatement(
+            "".join(
+                [
+                    self._match(root),
+                    self._root_where(target, where),
+                    f"\nDETACH DELETE {NODE_ALIAS}\nRETURN count(*) AS deleted",
+                ]
+            )
+        )
+
+    def save(
+        self,
+        target: TargetModel,
+        obj: Any,
+        options: SaveOptions | None = None,
+        create_only: bool = False,
+        registry: ModelRegistry | None = None,
+    ) -> SaveStatement:
+        """Writes the object as one statement: see SaveStatementBuilder."""
+        return SaveStatementBuilder(self.grammar, registry).build(target, obj, options, create_only)
+
+    def held_properties(self, model: FragmentModel) -> GraphStatement:
+        """The properties of the node with id `$id`: one row, or none when there is no such node."""
+        return GraphStatement(
+            f"{self._match(model)}\nWHERE {self._id_predicate(model)}\nRETURN properties({NODE_ALIAS}) AS props"
+        )
+
+    def found_stamp(self, model: FragmentModel) -> GraphStatement:
+        """The stamp the node with id `$id` carries ('-' for none); no row when there is no such node."""
+        return GraphStatement(
+            f"{self._match(model)}\nWHERE {self._id_predicate(model)}\n"
+            f"RETURN coalesce({NODE_ALIAS}.{STAMP}, '{stamps.NEVER_STAMPED}') AS found"
+        )
+
+    def contended(self, failure: BaseException) -> bool:
+        """Whether a cause of the failure is the engine turning a statement away for contention."""
+        cause: BaseException | None = failure
+        for _ in range(10):
+            if cause is None:
+                return False
+            if self.grammar.contended(cause):
+                return True
+            cause = cause.__cause__
+        return False
+
+    def _root_where(self, target: TargetModel, where: str | None) -> str:
+        return self._view_where(target, where) if isinstance(target, GraphViewModel) else self._where(where)
 
     def _view_where(self, model: GraphViewModel, where: str | None, depth: Mapping[str, int] | None = None) -> str:
         requirements = ViewProjector(self.grammar, depth).requirements(model, NODE_ALIAS)

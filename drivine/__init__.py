@@ -32,13 +32,19 @@ from drivine.cursor.cursor import Cursor
 from drivine.cursor.cursor_specification import CursorSpecification
 from drivine.drivine_assembly import DrivineAssembly
 from drivine.drivine_error import DrivineError
+from drivine.manager.cascade_type import CascadeType
 from drivine.manager.delegating_persistence_manager import DelegatingPersistenceManager
 from drivine.manager.graph_object_manager_factory import GraphObjectManagerFactory
 from drivine.manager.non_transactional_persistence_manager import NonTransactionalPersistenceManager
+from drivine.manager.null_policy import NullPolicy
 from drivine.manager.persistence_manager import PersistenceManager
 from drivine.manager.persistence_manager_factory import PersistenceManagerFactory
+from drivine.manager.removed_targets import RemovedTargets
+from drivine.manager.save_options import SaveOptions
+from drivine.manager.stale_object_error import StaleObjectError
 from drivine.manager.stateless_graph_object_manager import StatelessGraphObjectManager
 from drivine.manager.transactional_persistence_manager import TransactionalPersistenceManager
+from drivine.model import stamps
 from drivine.model.graph_view import GraphView
 from drivine.model.model_registry import ModelRegistry
 from drivine.model.node_fragment import NodeFragment
@@ -53,6 +59,7 @@ from drivine.transaction.transactional import transaction, transactional
 __all__ = [
     "Aggregate",
     "AggregateFunction",
+    "CascadeType",
     "Connection",
     "ConnectionProperties",
     "ConnectionProvider",
@@ -80,6 +87,7 @@ __all__ = [
     "NodeStamp",
     "NonTransactionalPersistenceManager",
     "NullAsDefault",
+    "NullPolicy",
     "PersistenceManager",
     "PersistenceManagerFactory",
     "PropertyBag",
@@ -88,8 +96,11 @@ __all__ = [
     "ReadOnly",
     "Relationship",
     "RelationshipFragment",
+    "RemovedTargets",
     "Root",
+    "SaveOptions",
     "SortedBy",
+    "StaleObjectError",
     "StatelessGraphObjectManager",
     "Statement",
     "TargetNode",
@@ -104,6 +115,7 @@ __all__ = [
     "hop",
     "sql_file",
     "sql_statement",
+    "stamps",
     "transaction",
     "transactional",
 ]

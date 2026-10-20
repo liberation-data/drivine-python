@@ -8,6 +8,8 @@ from drivine.manager.persistence_manager import PersistenceManager
 from drivine.manager.persistence_manager_factory import PersistenceManagerFactory
 from drivine.manager.stateless_graph_object_manager import StatelessGraphObjectManager
 from drivine.model.model_registry import ModelRegistry
+from drivine.schema.schema_manager import SchemaManager
+from drivine.schema.schema_options import SchemaOptions
 
 
 class DrivineAssembly(PilgrimAssembly):
@@ -70,6 +72,23 @@ class DrivineAssembly(PilgrimAssembly):
         The object manager for a graph database, which loads and saves fragments and views.
         """
         return self.shared(lambda: self.graph_object_manager_factory().get(database))
+
+    def schema_options(self) -> SchemaOptions:
+        """
+        The schema catalogs `start` enforces. None by default: override it to hold indexes and constraints, say
+        `SchemaOptions([SchemaCatalog.from_fragments(Person, Session, dimensions=lambda label, prop: 1536)])`.
+        """
+        return SchemaOptions()
+
+    def schema_manager(self) -> SchemaManager:
+        return self.shared(
+            lambda: SchemaManager(self.registry(), self.graph_object_manager_factory(), self.schema_options())
+        )
+
+    async def start(self) -> None:
+        """Enforces the schema catalogs, if there are any. Call it once, when the application starts."""
+        if self.schema_options().catalogs:
+            await self.schema_manager().enforce()
 
     async def close(self) -> None:
         """

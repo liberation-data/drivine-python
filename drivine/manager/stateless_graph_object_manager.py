@@ -47,6 +47,12 @@ from drivine.model.model_registry import ModelRegistry
 from drivine.model.relationship_fragment_model import RelationshipFragmentModel
 from drivine.model.relationship_model import RelationshipModel
 from drivine.model.target_model import TargetModel
+from drivine.schema.constraint_manager import ConstraintManager
+from drivine.schema.index_manager import IndexManager
+from drivine.schema.schema_executor import SchemaExecutor
+from drivine.schema.schema_grammar import SchemaGrammar, schema_grammar_for
+from drivine.store.store_identity import StoreIdentity
+from drivine.store.store_identity_resolver import StoreIdentityResolver
 from drivine.transaction.transaction import current_transaction
 from drivine.transaction.transactional import transaction
 
@@ -77,10 +83,43 @@ class StatelessGraphObjectManager:
         self.backend = CypherBackend(cypher_grammar_for(persistence_manager.type))
         self.mapper = GraphObjectMapper(self.registry)
         self._warned_non_atomic = False
+        self._identity: StoreIdentity | None = None
         self.edges = EdgeOperations(self.registry, self._run_one, self._query, self.mapper, self.backend)
         """Relationships on their own, between stored nodes: see EdgeOperations."""
         self.groups = GroupOperations(self.registry, self._query, self.mapper, self.backend)
         """Grouped reads: see GroupOperations."""
+
+    @property
+    def indexes(self) -> IndexManager:
+        """
+        Range, vector and full-text indexes of this manager's database: made idempotently, outside any transaction.
+        """
+        return IndexManager(self._schema_executor(), self._schema_grammar())
+
+    @property
+    def constraints(self) -> ConstraintManager:
+        """Uniqueness constraints of this manager's database: made idempotently, outside any transaction."""
+        return ConstraintManager(self._schema_executor(), self._schema_grammar())
+
+    async def store_identity(self) -> StoreIdentity:
+        """
+        The stable identity of the store this manager works on, minted in the store on first sight: equal for two
+        managers when, and only when, they look at the same data. Resolved once for each manager.
+        """
+        if self._identity is None:
+            self._identity = await StoreIdentityResolver(
+                self.persistence_manager, self.backend, self.constraints
+            ).resolve()
+        return self._identity
+
+    def _schema_executor(self) -> SchemaExecutor:
+        provider = getattr(self.persistence_manager, "provider", None)
+        if provider is None:
+            raise DrivineError("Schema management needs a persistence manager that names its connection provider.")
+        return SchemaExecutor(provider)
+
+    def _schema_grammar(self) -> SchemaGrammar:
+        return schema_grammar_for(self.persistence_manager.type)
 
     @property
     def database(self) -> str:

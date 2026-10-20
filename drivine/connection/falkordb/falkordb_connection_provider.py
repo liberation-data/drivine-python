@@ -58,6 +58,14 @@ class FalkorDbConnectionProvider(ConnectionProvider):
     async def connect(self) -> Connection:
         return FalkorDbConnection(self.client.select_graph(self.graph_name), self.transactions, short_id())
 
+    async def constraint(self, operation: str, label: str, properties: tuple[str, ...]) -> None:
+        """Creates or drops a uniqueness constraint, a Redis command FalkorDB takes in place of DDL."""
+        graph = self.client.select_graph(self.graph_name)
+        if operation == "CREATE":
+            await graph.create_node_unique_constraint(label, *properties)
+        else:
+            await graph.drop_node_unique_constraint(label, *properties)
+
     async def end(self) -> None:
         # Cleared before waiting, so a second call made meanwhile doesn't close the client again.
         client, self._client = self._client, None

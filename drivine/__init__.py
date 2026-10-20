@@ -6,6 +6,7 @@ from drivine.annotation.aggregate import Aggregate, Count
 from drivine.annotation.aggregate_function import AggregateFunction
 from drivine.annotation.direction import Direction
 from drivine.annotation.empty_when_absent import EmptyWhenAbsent
+from drivine.annotation.full_text_index import FullTextIndex
 from drivine.annotation.graph_path import GraphPath
 from drivine.annotation.graph_property import GraphProperty
 from drivine.annotation.hop import Hop, hop
@@ -15,12 +16,15 @@ from drivine.annotation.node_labels import NodeLabels
 from drivine.annotation.node_stamp import NodeStamp
 from drivine.annotation.null_as_default import NullAsDefault
 from drivine.annotation.property_bag import PropertyBag
+from drivine.annotation.range_index import RangeIndex
 from drivine.annotation.read_only import ReadOnly
 from drivine.annotation.relationship import Relationship
 from drivine.annotation.root import Root
 from drivine.annotation.sorted_by import SortedBy
 from drivine.annotation.target_node import TargetNode
 from drivine.annotation.transient import Transient
+from drivine.annotation.unique import Unique
+from drivine.annotation.vector_index import VectorIndex
 from drivine.connection.connection import Connection
 from drivine.connection.connection_properties import ConnectionProperties
 from drivine.connection.connection_provider import ConnectionProvider
@@ -86,6 +90,15 @@ from drivine.model.property_names import PropertyNames
 from drivine.model.relationship_fragment import RelationshipFragment
 from drivine.query.query_specification import QuerySpecification
 from drivine.query.statement import Statement, cypher_file, cypher_statement, sql_file, sql_statement
+from drivine.schema.constraint_manager import ConstraintManager
+from drivine.schema.engine_vector_options import EngineVectorOptions
+from drivine.schema.ensure_result import EnsureResult
+from drivine.schema.index_manager import IndexManager
+from drivine.schema.schema_catalog import SchemaCatalog
+from drivine.schema.schema_manager import SchemaManager
+from drivine.schema.schema_options import SchemaOptions
+from drivine.schema.schema_specs import full_text_index, range_index, uniqueness_constraint, vector_index
+from drivine.store.store_identity import StoreIdentity
 from drivine.transaction.transaction import Transaction, current_transaction
 from drivine.transaction.transaction_rolled_back_error import TransactionRolledBackError
 from drivine.transaction.transactional import transaction, transactional
@@ -99,6 +112,7 @@ __all__ = [
     "ConnectionProperties",
     "ConnectionProvider",
     "ConnectionProviderBuilder",
+    "ConstraintManager",
     "Count",
     "Cursor",
     "CursorSpecification",
@@ -110,6 +124,9 @@ __all__ = [
     "DrivineError",
     "EdgeOperations",
     "EmptyWhenAbsent",
+    "EngineVectorOptions",
+    "EnsureResult",
+    "FullTextIndex",
     "GraphObjectManagerFactory",
     "GraphPath",
     "GraphProperty",
@@ -117,6 +134,7 @@ __all__ = [
     "GroupAggregate",
     "GroupOperations",
     "Hop",
+    "IndexManager",
     "JsonPacked",
     "ModelRegistry",
     "NodeFragment",
@@ -136,6 +154,7 @@ __all__ = [
     "PropertyKey",
     "PropertyNames",
     "QuerySpecification",
+    "RangeIndex",
     "ReadOnly",
     "Ref",
     "RelateMode",
@@ -144,17 +163,23 @@ __all__ = [
     "RemovedTargets",
     "Root",
     "SaveOptions",
+    "SchemaCatalog",
+    "SchemaManager",
+    "SchemaOptions",
     "SeekValue",
     "SortedBy",
     "StaleObjectError",
     "StatelessGraphObjectManager",
     "Statement",
+    "StoreIdentity",
     "TargetNode",
     "Transaction",
     "TransactionMode",
     "TransactionRolledBackError",
     "TransactionalPersistenceManager",
     "Transient",
+    "Unique",
+    "VectorIndex",
     "Where",
     "above",
     "all_of",
@@ -174,6 +199,7 @@ __all__ = [
     "equal_to",
     "exp",
     "floor",
+    "full_text_index",
     "has_no_value",
     "has_value",
     "hop",
@@ -188,6 +214,7 @@ __all__ = [
     "param",
     "path_key",
     "plus",
+    "range_index",
     "refs",
     "sql_file",
     "sql_statement",
@@ -196,4 +223,6 @@ __all__ = [
     "times",
     "transaction",
     "transactional",
+    "uniqueness_constraint",
+    "vector_index",
 ]

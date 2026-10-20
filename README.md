@@ -6,7 +6,7 @@ round trip, no session cache, no lazy loading.
 
 > **Status: early.** On Neo4j, Memgraph and FalkorDB today: the low-level `PersistenceManager`, transactions, and the object
 > manager's loading, saving, batches, patches, edges and deletes of fragments and views, the query DSL and grouped
-> reads. Search, schema management and the other engines come next. Neptune connects
+> reads, and schema management. Search, Oracle and typed references come next. Neptune connects
 > the same way, for the `PersistenceManager`. See [the design](docs/design.md) for where it is going.
 
 ```
@@ -334,6 +334,41 @@ people = await gom.edges.load_related(node_ref(Issue, a), "ASSIGNED_TO", Person)
   pause. Inside one, it joins the transaction, and fails for its owner to decide.
 
 The store format, stamps included, is TypeScript's and drivine4j's, so the three can share a store.
+
+## Schema
+
+Declare indexes and constraints on the fragments, and hold them on every database at start-up:
+
+```python
+class Chunk(NodeFragment, labels=["Chunk"], schema=[RangeIndex(["section_id", "position"])]):
+    uuid: Annotated[str, NodeId(), Unique()]
+    section_id: str
+    position: int
+    text: Annotated[str, FullTextIndex()]
+    embedding: Annotated[list[float] | None, VectorIndex(similarity="COSINE")] = None
+
+
+class AppDrivine(DrivineAssembly):
+    def schema_options(self) -> SchemaOptions:
+        return SchemaOptions([SchemaCatalog.from_fragments(Chunk, dimensions=lambda label, prop: 1536)])
+
+await AssemblyHolder.shared(AppDrivine).start()      # makes what is missing; idempotent
+```
+
+- **`ensure` is idempotent.** An item that is there is left; one there with another shape (a vector index's dimensions,
+  say) is reported as DRIFT and left, unless `recreate_on_drift`. A uniqueness constraint the data already breaks is a
+  VIOLATION, with a sample of the values. `mode="FAIL_FAST"`, the default, raises on either; `"WARN"` logs.
+- **Versions.** `catalog.with_version("2")` recreates the catalog's items once, the first time it is enforced. Items an
+  owner applied before and no longer declares are reported, never dropped. Each owner's version and inventory are kept
+  in a `_DrivineSchema` node, as drivine4j and TypeScript keep them.
+- **By hand:** `gom.indexes.ensure(range_index("Session", ["lastActivityAt", "sessionId"]))`, `gom.indexes.recreate`,
+  `gom.indexes.drop`, `gom.constraints.ensure(uniqueness_constraint("Person", "email"))`, and `list`.
+- **Each engine's DDL** is written for it: named items on Neo4j, Memgraph's text and vector indexes, FalkorDB's index per
+  property and its constraint commands. Vector index tuning (`hnsw_m`, `hnsw_ef_construction`, and an engine's own
+  options) is passed where the engine takes it, and reported where it doesn't.
+
+`await gom.store_identity()` gives the store's stable id, minted in the store on first sight: two connections see the
+same id when, and only when, they look at the same data.
 
 ## With pi-pilgrim
 

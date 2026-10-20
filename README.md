@@ -6,7 +6,7 @@ round trip, no session cache, no lazy loading.
 
 > **Status: early.** On Neo4j, Memgraph and FalkorDB today: the low-level `PersistenceManager`, transactions, and the object
 > manager's loading, saving, batches, patches, edges and deletes of fragments and views, the query DSL and grouped
-> reads, and schema management. Search, Oracle and typed references come next. Neptune connects
+> reads, schema management, and vector and full-text search. Oracle and typed references come next. Neptune connects
 > the same way, for the `PersistenceManager`. See [the design](docs/design.md) for where it is going.
 
 ```
@@ -366,6 +366,35 @@ await AssemblyHolder.shared(AppDrivine).start()      # makes what is missing; id
 - **Each engine's DDL** is written for it: named items on Neo4j, Memgraph's text and vector indexes, FalkorDB's index per
   property and its constraint commands. Vector index tuning (`hnsw_m`, `hnsw_ef_construction`, and an engine's own
   options) is passed where the engine takes it, and reported where it doesn't.
+
+### Search
+
+A fragment's `VectorIndex` field drives `load_nearest`, and its `FullTextIndex` drives `load_matching`. Either takes a
+fragment or a view, searched by its root, and gives each hit with its score, best first:
+
+```python
+hits = await gom.load_nearest(Chunk, embedding, top_k=5, where=refs(Chunk).section_id.eq(section))
+for hit in hits:
+    print(hit.score, hit.value.text)
+
+found = await gom.load_matching(Chunk, "graph AND database", top_k=10, threshold=0.5)
+```
+
+- **One scale on every engine.** A nearest score is a similarity, higher nearer: (1 + cos) / 2 for cosine, 1 / (1 + d²)
+  for euclidean. A matching score is scaled so that the best hit is 1.
+- **Filters apply after the search:** `threshold`, `where`, and a view's required relationships. So a search can return
+  fewer than `top_k`; `search_k` asks the index for more, and `top_k` trims after the filter.
+- `property` names the field to search when a fragment declares more than one index; `partition_label` searches the
+  vector index of another label. Full-text text is the engine's own query language, passed as it is.
+
+### Index advice
+
+An ordered query with no range index over exactly its ordered properties scans and sorts. Drivine says so, once for
+each label and properties, naming the index to make. `gom.index_advice = IndexAdvicePolicy.FAIL` raises instead, for
+development and CI (or override `index_advice()` on the assembly); `OFF` says nothing. The index list is read once:
+`gom.index_advisor.refresh()` after making indexes as the application runs.
+
+### Store identity
 
 `await gom.store_identity()` gives the store's stable id, minted in the store on first sight: two connections see the
 same id when, and only when, they look at the same data.

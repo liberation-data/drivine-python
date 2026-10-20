@@ -21,7 +21,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 
 def pytest_sessionstart(session: pytest.Session) -> None:
     if session.config.getini("drivine_test_containers"):
-        from drivine.testing.containers import DrivineTestContainers
+        from drivine.testing.drivine_test_containers import DrivineTestContainers
 
         session.config.stash[_KEY] = DrivineTestContainers.start()
 

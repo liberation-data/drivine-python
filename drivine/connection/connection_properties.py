@@ -4,8 +4,9 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from drivine.connection.database_type import DatabaseType, TransactionMode
-from drivine.errors import DrivineError
+from drivine.connection.database_type import DatabaseType
+from drivine.connection.transaction_mode import TransactionMode
+from drivine.drivine_error import DrivineError
 
 
 @dataclass(frozen=True)

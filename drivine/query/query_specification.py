@@ -4,12 +4,10 @@ import copy
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Generic, Self, TypeVar
 
-from drivine.mapper.post_processors import (
-    FilterPostProcessor,
-    MapPostProcessor,
-    ResultPostProcessor,
-    TransformPostProcessor,
-)
+from drivine.mapper.filter_post_processor import FilterPostProcessor
+from drivine.mapper.map_post_processor import MapPostProcessor
+from drivine.mapper.result_post_processor import ResultPostProcessor
+from drivine.mapper.transform_post_processor import TransformPostProcessor
 from drivine.query.statement import QueryLanguage, Statement
 
 T = TypeVar("T")
@@ -99,22 +97,6 @@ class QuerySpecification(Generic[T]):
     def __repr__(self) -> str:
         text = self.statement.text if self.statement else None
         return f"{type(self).__name__}(statement={text!r}, parameters={self.parameters!r})"
-
-
-class CursorSpecification(QuerySpecification[T]):
-    """
-    A query specification for a cursor, which reads its results `batch_size` at a time.
-    """
-
-    def __init__(self, statement: str | Statement | None = None) -> None:
-        super().__init__(statement)
-        self.batch = 100
-
-    def batch_size(self, size: int) -> Self:
-        if size < 1:
-            raise ValueError("batch_size must be more than zero")
-        self.batch = size
-        return self
 
 
 def _whole_number(count: int | None, what: str) -> int | None:

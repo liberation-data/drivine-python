@@ -1,72 +1,21 @@
 from __future__ import annotations
 
-import asyncio
 import logging
-from collections.abc import Mapping
-from typing import Self
+from typing import TYPE_CHECKING, Self
 
-from drivine.connection.database_type import DatabaseType, TransactionMode
-from drivine.connection.properties import ConnectionProperties
-from drivine.connection.provider import ConnectionProvider
-from drivine.errors import DrivineError
+from drivine.connection.connection_properties import ConnectionProperties
+from drivine.connection.connection_provider import ConnectionProvider
+from drivine.connection.database_type import DatabaseType
+from drivine.connection.transaction_mode import TransactionMode
+from drivine.drivine_error import DrivineError
+
+if TYPE_CHECKING:
+    from drivine.connection.database_registry import DatabaseRegistry
 
 logger = logging.getLogger("drivine.connection")
 
-DEFAULT = "default"
-
 _AUTO_COMMIT_ENGINES = (DatabaseType.FALKORDB,)
 """Engines without multi-statement transactions, which honour TransactionMode."""
-
-
-class DatabaseRegistry:
-    """
-    The application's databases, by name. `"default"` is the first one registered.
-    """
-
-    def __init__(self) -> None:
-        self._providers: dict[str, ConnectionProvider] = {}
-
-    @property
-    def providers(self) -> list[ConnectionProvider]:
-        return list(self._providers.values())
-
-    def builder(self) -> ConnectionProviderBuilder:
-        return ConnectionProviderBuilder(self)
-
-    def build_or_resolve_from_env(
-        self, name: str | None = None, env: Mapping[str, str] | None = None
-    ) -> ConnectionProvider:
-        """
-        Registers the database the environment describes, as `DATABASE_TYPE`, `DATABASE_HOST` and so on, or
-        `<NAME>_DATABASE_TYPE`… for a named one. A database already registered under the name is returned as it is.
-        """
-        retained = self.registered(name or DEFAULT)
-        if retained is not None:
-            return retained
-        return self.builder().with_properties(ConnectionProperties.from_env(name, env)).register(name or DEFAULT)
-
-    def connection_provider(self, name: str = DEFAULT) -> ConnectionProvider | None:
-        if name == DEFAULT and name not in self._providers:
-            return next(iter(self._providers.values()), None)
-        return self._providers.get(name)
-
-    def registered(self, name: str) -> ConnectionProvider | None:
-        """The provider registered under exactly this name."""
-        return self._providers.get(name)
-
-    def register(self, provider: ConnectionProvider) -> None:
-        self._providers[provider.name] = provider
-
-    async def close(self) -> None:
-        """
-        Ends every provider: their drivers and pools. Call it once, when the application stops.
-        """
-        providers = list(self._providers.values())
-        self._providers.clear()
-        results = await asyncio.gather(*(it.end() for it in providers), return_exceptions=True)
-        for provider, result in zip(providers, results, strict=True):
-            if isinstance(result, BaseException):
-                logger.warning("Ending %s failed: %s", provider, result)
 
 
 class ConnectionProviderBuilder:
@@ -148,7 +97,7 @@ class ConnectionProviderBuilder:
         self._default_graph_path = path
         return self
 
-    def register(self, name: str = DEFAULT) -> ConnectionProvider:
+    def register(self, name: str = "default") -> ConnectionProvider:
         """
         Registers the database under the name, and returns its provider. A database already registered under the
         name is returned as it is.
@@ -174,7 +123,7 @@ class ConnectionProviderBuilder:
         return provider
 
     def _bolt_provider(self, name: str) -> ConnectionProvider:
-        from drivine.connection.neo4j.provider import neo4j_provider
+        from drivine.connection.neo4j.neo4j_connection_provider import neo4j_provider
 
         engine = "Neo4j" if self._type is DatabaseType.NEO4J else "Memgraph"
         if self._type is DatabaseType.NEO4J and not self._user_name:
@@ -199,7 +148,7 @@ class ConnectionProviderBuilder:
         )
 
     def _neptune_provider(self, name: str) -> ConnectionProvider:
-        from drivine.connection.neo4j.provider import neptune_provider
+        from drivine.connection.neo4j.neo4j_connection_provider import neptune_provider
 
         assert self._host is not None
         return neptune_provider(

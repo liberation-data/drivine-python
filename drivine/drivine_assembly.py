@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from pipilgrim import PilgrimAssembly
 
-from drivine.connection.registry import DEFAULT, DatabaseRegistry
-from drivine.manager.persistence_manager import PersistenceManager, PersistenceManagerFactory
+from drivine.connection.database_registry import DEFAULT, DatabaseRegistry
+from drivine.manager.persistence_manager import PersistenceManager
+from drivine.manager.persistence_manager_factory import PersistenceManagerFactory
 
 
 class DrivineAssembly(PilgrimAssembly):

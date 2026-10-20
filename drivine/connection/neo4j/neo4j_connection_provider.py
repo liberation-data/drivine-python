@@ -4,9 +4,11 @@ from typing import Any
 
 from neo4j import AsyncDriver, AsyncGraphDatabase, Auth, TrustSystemCAs
 
+from drivine.connection.connection import Connection
+from drivine.connection.connection_provider import ConnectionProvider
 from drivine.connection.database_type import DatabaseType
-from drivine.connection.neo4j.connection import Neo4jConnection
-from drivine.connection.provider import Connection, ConnectionProvider, short_id
+from drivine.connection.neo4j.neo4j_connection import Neo4jConnection
+from drivine.utils.short_id import short_id
 
 
 class Neo4jConnectionProvider(ConnectionProvider):

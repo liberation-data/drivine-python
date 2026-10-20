@@ -5,10 +5,14 @@ import logging
 from contextvars import ContextVar
 from typing import Any, TypeVar
 
-from drivine.connection.provider import Connection, ConnectionProvider, short_id
+from drivine.connection.connection import Connection
+from drivine.connection.connection_provider import ConnectionProvider
 from drivine.cursor.cursor import Cursor
-from drivine.errors import DrivineError, TransactionRolledBackError
-from drivine.query.specification import CursorSpecification, QuerySpecification
+from drivine.cursor.cursor_specification import CursorSpecification
+from drivine.drivine_error import DrivineError
+from drivine.query.query_specification import QuerySpecification
+from drivine.transaction.transaction_rolled_back_error import TransactionRolledBackError
+from drivine.utils.short_id import short_id
 
 T = TypeVar("T")
 

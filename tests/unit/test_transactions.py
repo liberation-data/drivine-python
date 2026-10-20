@@ -11,7 +11,8 @@ from drivine import (
     transaction,
     transactional,
 )
-from drivine.manager.persistence_manager import DelegatingPersistenceManager, NonTransactionalPersistenceManager
+from drivine.manager.delegating_persistence_manager import DelegatingPersistenceManager
+from drivine.manager.non_transactional_persistence_manager import NonTransactionalPersistenceManager
 from tests.unit.fakes import FakeProvider
 
 

@@ -74,10 +74,35 @@ drivine/
   cursor/         async cursors
   schema/         SchemaCatalog, SchemaManager, IndexManager, ConstraintManager, per-engine DDL
   store/          store identity
-  assembly.py     DrivineAssembly (pi-pilgrim)
+  drivine_assembly.py   DrivineAssembly (pi-pilgrim)
   testing/        pytest plugin, testcontainers
   sync/           generated: the same API, without async
 ```
+
+### One class per module
+
+Each public class has a module of its own, named for it in snake case: `DatabaseRegistry` is in
+`connection/database_registry.py`, `Neo4jCursor` in `connection/neo4j/neo4j_cursor.py`. Python packages more often
+group a few related classes in a module, so this is a choice, made because:
+
+- **It mirrors TypeScript and drivine4j file for file.** Statements are ported file for file and checked against
+  TypeScript's, so a fix in `src/connection/DatabaseRegistry.ts` has one obvious counterpart, and a review can put
+  the two side by side.
+- **A class is found by its name**, from a stack trace, an editor's file search or a link, without knowing how its
+  package groups things.
+- **Changes stay small.** A diff, a blame or a merge touches the class it is about, and a module doesn't grow until
+  it needs splitting, which in a port of a library this size it would.
+
+How it's applied:
+
+- **What travels with a class:** its private helpers (`_QueuedConnection` beside `Transaction`), and functions and
+  constants that belong to it (`cypher_statement` beside `Statement`, `DEFAULT` beside `DatabaseRegistry`).
+- **A type alias, a protocol or an enum is a class** for this rule, and gets its own module.
+- **Subpackages' `__init__.py` files are empty.** `drivine/__init__.py` re-exports the public API, so users import
+  from `drivine` and never see the layout. An empty `__init__.py` costs nothing when Python imports a module from its
+  package.
+- **Modules that import each other** use `if TYPE_CHECKING:` for annotations, or import inside the function that
+  needs it.
 
 ## Connections
 

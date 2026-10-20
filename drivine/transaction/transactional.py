@@ -7,7 +7,7 @@ from contextvars import Token
 from types import TracebackType
 from typing import Any, ParamSpec, TypeVar, overload
 
-from drivine.errors import DrivineError
+from drivine.drivine_error import DrivineError
 from drivine.transaction.transaction import Transaction, _current
 
 P = ParamSpec("P")

@@ -3,13 +3,16 @@ from __future__ import annotations
 import logging
 import os
 import re
-from collections.abc import Callable, MutableMapping
+import time
+from collections.abc import MutableMapping
 from dataclasses import dataclass, field
 
 from testcontainers.core.container import DockerContainer
 from testcontainers.core.wait_strategies import LogMessageWaitStrategy, PortWaitStrategy
 
 from drivine.connection.database_type import DatabaseType
+from drivine.testing.container_connection import ContainerConnection
+from drivine.testing.test_container_spec import TestContainerSpec
 
 logger = logging.getLogger("drivine.testing")
 
@@ -17,29 +20,6 @@ TEST_CONTAINER_USER = "drivine"
 """The user every container that takes one is made with."""
 TEST_CONTAINER_PASSWORD = "drivine-test"
 """At least eight characters, which Neo4j wants."""
-
-
-@dataclass(frozen=True)
-class ContainerConnection:
-    """Where a datasource reaches the store a container runs, and whatever else the container fixes."""
-
-    host: str
-    port: int
-    user_name: str | None = None
-    password: str | None = None
-    database_name: str | None = None
-
-
-@dataclass(frozen=True)
-class TestContainerSpec:
-    """A store's container: how to make it, and how a datasource reaches it once it is started."""
-
-    __test__ = False
-
-    image: str
-    port: int
-    container: Callable[[str], DockerContainer]
-    connection: Callable[[DockerContainer], ContainerConnection]
 
 
 def _neo4j(image: str) -> DockerContainer:
@@ -52,8 +32,25 @@ def _neo4j(image: str) -> DockerContainer:
 
 
 def _memgraph(image: str) -> DockerContainer:
-    # Memgraph logs that it is running before Bolt takes connections: wait on the port instead.
+    # Memgraph logs that it is running before Bolt takes connections, and opens the port before it answers on it:
+    # wait on the port, then on Bolt.
     return DockerContainer(image).with_exposed_ports(7687).waiting_for(PortWaitStrategy(7687))
+
+
+def _bolt_ready(reach: ContainerConnection, timeout: float = 60) -> None:
+    from neo4j import GraphDatabase
+
+    auth = (reach.user_name, reach.password or "") if reach.user_name else None
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            with GraphDatabase.driver(f"bolt://{reach.host}:{reach.port}", auth=auth) as driver:  # pyright: ignore[reportUnknownMemberType]
+                driver.verify_connectivity()  # pyright: ignore[reportUnknownMemberType]
+            return
+        except Exception:
+            if time.monotonic() > deadline:
+                raise
+            time.sleep(0.25)
 
 
 def _reach(port: int, user_name: str | None = None, password: str | None = None):
@@ -69,7 +66,9 @@ TEST_CONTAINER_SPECS: dict[DatabaseType, TestContainerSpec] = {
     DatabaseType.NEO4J: TestContainerSpec(
         "neo4j:5.26-community", 7687, _neo4j, _reach(7687, "neo4j", TEST_CONTAINER_PASSWORD)
     ),
-    DatabaseType.MEMGRAPH: TestContainerSpec("memgraph/memgraph:3.12.0", 7687, _memgraph, _reach(7687)),
+    DatabaseType.MEMGRAPH: TestContainerSpec(
+        "memgraph/memgraph:3.12.0", 7687, _memgraph, _reach(7687), ready=_bolt_ready
+    ),
 }
 """The containers Drivine can start, by the type of the datasource that wants one."""
 
@@ -126,6 +125,8 @@ class DrivineTestContainers:
                     logger.info("Starting %s for %s", image, kind.value)
                     started = spec.container(image).start()
                     containers.started[kind] = started
+                    if spec.ready is not None:
+                        spec.ready(spec.connection(started))
                 reach = spec.connection(started)
                 env[f"{prefix}DATABASE_HOST"] = reach.host
                 env[f"{prefix}DATABASE_PORT"] = str(reach.port)

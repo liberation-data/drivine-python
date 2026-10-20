@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from typing import Any
 
-from drivine.query.specification import QuerySpecification
+from drivine.query.query_specification import QuerySpecification
 
 
 class GraphResultMapper(ABC):

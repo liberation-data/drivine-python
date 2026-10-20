@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from drivine.query.specification import QuerySpecification
+    from drivine.query.query_specification import QuerySpecification
 
 
 class DrivineError(Exception):
@@ -25,11 +25,3 @@ class DrivineError(Exception):
     @property
     def root_cause(self) -> BaseException | None:
         return self.__cause__
-
-
-class TransactionRolledBackError(DrivineError):
-    """
-    The transaction is rolling back, because a statement in it failed or an exception left a `@transactional` call,
-    though the caller caught it. A later statement in the transaction raises it at once, and so does the end of the
-    transaction that was meant to commit. `__cause__` is the first failure.
-    """

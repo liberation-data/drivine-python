@@ -11,7 +11,7 @@ from drivine import (
     cypher_file,
     cypher_statement,
 )
-from drivine.query.compiler import CypherSpecCompiler
+from drivine.connection.neo4j.neo4j_spec_compiler import Neo4jSpecCompiler
 
 
 class TestConnectionProperties:
@@ -80,19 +80,18 @@ class TestDatabaseRegistry:
 class TestQuerySpecification:
     def test_compiles_positional_parameters_by_position(self):
         spec = QuerySpecification("MATCH (n) WHERE n.a = $1 AND n.b = $2 RETURN n").bind(["x", 2])
-        compiled = CypherSpecCompiler(spec.finalized_copy("CYPHER")).compile()
+        compiled = Neo4jSpecCompiler(spec.finalized_copy("CYPHER")).compile()
         assert compiled.parameters == {"1": "x", "2": 2}
 
     def test_compiles_skip_and_limit_into_the_statement(self):
         spec = QuerySpecification("MATCH (n) RETURN n").skip(10).limit(5)
         assert (
-            CypherSpecCompiler(spec.finalized_copy("CYPHER")).compile().statement
-            == "MATCH (n) RETURN n SKIP 10 LIMIT 5"
+            Neo4jSpecCompiler(spec.finalized_copy("CYPHER")).compile().statement == "MATCH (n) RETURN n SKIP 10 LIMIT 5"
         )
 
     def test_a_limit_of_zero_is_written(self):
         spec = QuerySpecification("MATCH (n) RETURN n").limit(0)
-        assert CypherSpecCompiler(spec.finalized_copy("CYPHER")).compile().statement.endswith("LIMIT 0")
+        assert Neo4jSpecCompiler(spec.finalized_copy("CYPHER")).compile().statement.endswith("LIMIT 0")
 
     @pytest.mark.parametrize("value", [-1, 1.5, "10", True])
     def test_refuses_skip_and_limit_that_are_not_whole_numbers(self, value):
@@ -103,11 +102,11 @@ class TestQuerySpecification:
 
     def test_refuses_sql_on_a_cypher_engine(self):
         spec = QuerySpecification().with_statement(cypher_statement("RETURN 1"))
-        assert CypherSpecCompiler(spec.finalized_copy("SQL")).statement.language == "CYPHER"
+        assert Neo4jSpecCompiler(spec.finalized_copy("SQL")).statement.language == "CYPHER"
         from drivine import sql_statement
 
         with pytest.raises(DrivineError, match="SQL is not supported"):
-            CypherSpecCompiler(QuerySpecification(sql_statement("SELECT 1")).finalized_copy("CYPHER"))
+            Neo4jSpecCompiler(QuerySpecification(sql_statement("SELECT 1")).finalized_copy("CYPHER"))
 
     def test_finalized_copy_leaves_the_original_as_it_was(self):
         spec = CursorSpecification("RETURN 1").batch_size(7).map(lambda it: it)

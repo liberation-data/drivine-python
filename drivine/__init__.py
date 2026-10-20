@@ -6,8 +6,9 @@ from drivine.annotation.aggregate import Aggregate, Count
 from drivine.annotation.aggregate_function import AggregateFunction
 from drivine.annotation.direction import Direction
 from drivine.annotation.empty_when_absent import EmptyWhenAbsent
-from drivine.annotation.graph_path import GraphPath, Hop, hop
+from drivine.annotation.graph_path import GraphPath
 from drivine.annotation.graph_property import GraphProperty
+from drivine.annotation.hop import Hop, hop
 from drivine.annotation.json_packed import JsonPacked
 from drivine.annotation.node_id import NodeId
 from drivine.annotation.node_labels import NodeLabels

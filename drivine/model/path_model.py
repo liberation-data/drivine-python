@@ -4,7 +4,7 @@ import dataclasses
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
-from drivine.annotation.graph_path import Hop
+from drivine.annotation.hop import Hop
 from drivine.model.field_shape import CollectionKind
 from drivine.model.fragment_model import FragmentModel
 

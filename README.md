@@ -1,0 +1,224 @@
+# Drivine for Python
+
+**A graph database client for Python**, beside [Drivine](https://github.com/liberation-data/drivine) for TypeScript
+and [drivine4j](https://github.com/liberation-data/drivine4j) for the JVM. Async first, typed, and fast: one statement per
+round trip, no session cache, no lazy loading.
+
+> **Status: early.** The low-level `PersistenceManager` and transactions work today on Neo4j and Memgraph, with
+> Neptune connecting the same way. The object manager (fragments, views, the query DSL) and the other engines come
+> next. See [the design](docs/design.md) for where it is going.
+
+```
+pip install "drivine[neo4j]"   # Neo4j, Memgraph, Neptune
+```
+
+Python 3.11 or newer.
+
+## Connecting
+
+Describe a database in the environment, with the same variables as TypeScript's Drivine and drivine4j, so one `.env`
+serves an application in any of them:
+
+```
+DATABASE_TYPE=NEO4J
+DATABASE_HOST=localhost
+DATABASE_PORT=7687
+DATABASE_USER=neo4j
+DATABASE_PASSWORD=…
+```
+
+A second database takes a prefix, `ANALYTICS_DATABASE_TYPE` and so on. Then register them:
+
+```python
+from drivine import DatabaseRegistry, PersistenceManagerFactory
+
+registry = DatabaseRegistry()
+registry.build_or_resolve_from_env()              # "default"
+registry.build_or_resolve_from_env("analytics")   # ANALYTICS_DATABASE_*
+
+pm = PersistenceManagerFactory(registry).get()    # the default database
+...
+await registry.close()                            # when the application stops
+```
+
+Or in code:
+
+```python
+registry.builder().database_type(DatabaseType.MEMGRAPH).host("localhost").register("graph")
+```
+
+Drivine reads `os.environ`, and doesn't load `.env` files itself: use python-dotenv, pydantic-settings, or your
+platform's way.
+
+## Statements
+
+The `PersistenceManager` runs your statements and maps their results:
+
+```python
+from drivine import QuerySpecification
+
+spec = (QuerySpecification[Person]()
+    .with_statement("MATCH (p:Person {city: $city}) RETURN properties(p)")
+    .bind({"city": "Sydney"})    # named parameters, or a list for $1, $2, …
+    .transform(Person)           # validated with Pydantic: a model, dataclass, TypedDict…
+    .filter(lambda it: it.age >= 18)
+    .limit(10))
+
+people = await pm.query(spec)
+person = await pm.get_one(spec)          # exactly one, or it raises
+maybe = await pm.maybe_get_one(spec)     # one or None
+await pm.execute(spec)                   # no results
+```
+
+- A node or relationship comes back as its properties, and Neo4j's dates and times as the standard library's.
+- A row of one column is its value, and a row of several is a list.
+- A failed statement raises `DrivineError`, which holds the specification, and the database's error as its cause.
+
+### Cursors
+
+A cursor streams a large result, reading it from the driver `batch_size` rows at a time:
+
+```python
+spec = CursorSpecification[Route]("MATCH (r:Route) RETURN properties(r)").batch_size(500).transform(Route)
+async with await pm.open_cursor(spec) as cursor:
+    async for route in cursor:
+        ...
+```
+
+It works in a transaction or outside one, where it has a connection of its own until it is closed.
+
+### Statements in files
+
+```python
+from drivine import cypher_file
+
+routes_between = cypher_file(__package__, "routes_between.cypher")
+```
+
+Read with `importlib.resources`, so it works from an installed wheel as well as a source tree.
+
+## Transactions
+
+```python
+from drivine import transactional
+
+
+class IssueService:
+    def __init__(self, issues: IssueRepository, audit: AuditLog):
+        self.issues = issues
+        self.audit = audit
+
+    @transactional()           # join the current transaction, or start one
+    async def raise_issue(self, issue: Issue) -> Issue:
+        saved = await self.issues.save(issue)
+        await self.audit.record(saved)   # same transaction
+        return saved
+```
+
+Or for a block:
+
+```python
+from drivine import transaction
+
+async with transaction():
+    await pm.execute(first)
+    await pm.execute(second)
+
+async with transaction(rollback=True):   # a test that leaves nothing behind
+    ...
+```
+
+- **The outermost call or block owns the transaction.** It commits when it ends, and rolls back when an exception
+  leaves it. Inner ones join it.
+- **A failure anywhere rolls the whole transaction back.** An exception that leaves any `@transactional` call, even
+  one the caller catches, marks the transaction rollback-only. It then rolls back, and its end raises
+  `TransactionRolledBackError` rather than committing what the inner call half did. `no_rollback_for=(NotFound,)`
+  exempts an exception.
+- **One transaction spans every database it touches.** It opens a connection to each, and begins its transaction,
+  the first time it runs a statement there. Commits are one after another, not two-phase.
+- **A `@transactional` method that never reaches Drivine costs nothing**: no connection is opened. Code with fakes in
+  its tests, or with Drivine taken out, runs as written.
+- **Outside a transaction**, each statement runs on its own and commits. Drivine never starts a transaction you didn't
+  ask for.
+- **It works on calls to `self`**, since it wraps the function itself, not a proxy.
+
+### Tasks share their transaction, one statement at a time
+
+The current transaction lives in a context variable, so asyncio carries it across every `await` and into the tasks
+started inside it:
+
+```python
+@transactional()
+async def import_all(self, people: list[Person]) -> None:
+    async with asyncio.TaskGroup() as tasks:
+        for person in people:
+            tasks.create_task(self.people.add(person))   # all in this transaction
+```
+
+A database transaction runs one statement at a time, so Drivine queues them, in the order they were issued. A
+cursor takes its turn for each row it reads, so other statements run between its rows. A statement that fails dooms
+the transaction, and the statements after it raise `TransactionRolledBackError` at once.
+
+The queue keeps concurrency correct, not parallel. For a parallel import, give each task its own transaction.
+
+## With pi-pilgrim
+
+`DrivineAssembly` is a [pi-pilgrim](https://github.com/liberation-data/pi-pilgrim) assembly holding the registry
+and the managers, for your own assembly to use:
+
+```python
+from pipilgrim import AssemblyHolder, PilgrimAssembly
+from drivine import DrivineAssembly
+
+
+class AppAssembly(PilgrimAssembly):
+    def __init__(self):
+        self.drivine = AssemblyHolder.shared(DrivineAssembly)
+        super().__init__()
+
+    def route_repository(self) -> RouteRepository:
+        return self.shared(lambda: RouteRepository(self.drivine.persistence_manager()))
+
+    def report_repository(self) -> ReportRepository:
+        return self.shared(lambda: ReportRepository(self.drivine.persistence_manager("analytics")))
+```
+
+- It registers the database the environment describes. To register yours in code, subclass it and override
+  `register_databases(registry)`.
+- `Assembled` injects a manager into a class something else makes:
+  `pm: PersistenceManager = Assembled(assembly=DrivineAssembly)`.
+- Call `await assembly.drivine.close()` when the application stops, in FastAPI's lifespan, say.
+
+Nothing requires pi-pilgrim: the managers are plain classes.
+
+## Testing
+
+`pip install "drivine[testing]"` adds a pytest plugin. With
+
+```toml
+[tool.pytest.ini_options]
+drivine_test_containers = true
+```
+
+it starts a container for each datasource the environment configures, Neo4j or Memgraph, before the tests run, and
+points the datasource at it. Datasources of one type share a container. `USE_LOCAL_NEO4J=true` (or `_MEMGRAPH`)
+leaves that type's datasources as they are, to test against your own instance, and `NEO4J_TEST_IMAGE` picks another
+image.
+
+## Logging
+
+Drivine logs through the standard `logging` module: `drivine.statements` logs each statement at DEBUG, with its
+session and how long it took. `DRIVINE_LOG_LEVEL`, as TypeScript's Drivine reads it, sets the level of the `drivine`
+logger when the application hasn't.
+
+## Building
+
+```
+uv sync
+uv run pytest            # starts Neo4j and Memgraph in Docker
+uv run ruff check . && uv run pyright
+```
+
+## License
+
+Apache 2.0.

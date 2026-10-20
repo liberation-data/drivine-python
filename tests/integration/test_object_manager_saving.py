@@ -7,13 +7,13 @@ from drivine import (
     DrivineError,
     NullPolicy,
     PersistenceManager,
-    QuerySpecification,
     RemovedTargets,
     StaleObjectError,
     StatelessGraphObjectManager,
     stamps,
     transaction,
 )
+from tests.integration.stores import equals, labels, nodes, set_property
 from tests.models import (
     Animal,
     Customer,
@@ -32,8 +32,10 @@ def gom(pm: PersistenceManager) -> StatelessGraphObjectManager:
     return StatelessGraphObjectManager(pm)
 
 
-async def value(pm: PersistenceManager, statement: str, **bindings: object) -> object:
-    return await pm.maybe_get_one(QuerySpecification(statement).bind(bindings))
+async def stored(pm: PersistenceManager, label: str, *props: str) -> object:
+    """A property of the one node with the label, or a list of several, as the store holds them."""
+    [node] = await nodes(pm, label)
+    return node.get(props[0]) if len(props) == 1 else [node.get(it) for it in props]
 
 
 def acme() -> Organization:
@@ -61,7 +63,7 @@ class TestFragments:
         with pytest.raises(StaleObjectError) as raised:
             await gom.save(first)
         assert not raised.value.deleted and raised.value.found_stamp == second.stamp
-        assert await value(pm, "MATCH (p:Person) RETURN p.name") == "Ada L"
+        assert await stored(pm, "Person", "name") == "Ada L"
 
     async def test_a_save_of_a_deleted_node_is_stale(self, gom):
         await gom.save(Person(uuid="p1", name="Ada"))
@@ -74,18 +76,18 @@ class TestFragments:
     async def test_null_policies(self, pm, gom):
         await gom.save(Person(uuid="p1", name="Ada", bio="Engineer"))
         await gom.save(Person(uuid="p1", name="Ada"))  # IGNORE: bio left as it is
-        assert await value(pm, "MATCH (p:Person) RETURN p.bio") == "Engineer"
+        assert await stored(pm, "Person", "bio") == "Engineer"
         await gom.save(Person(uuid="p1", name="Ada"), null_policy=NullPolicy.CLEAR)  # bio never assigned: left
-        assert await value(pm, "MATCH (p:Person) RETURN p.bio") == "Engineer"
+        assert await stored(pm, "Person", "bio") == "Engineer"
         await gom.save(Person(uuid="p1", name="Ada", bio=None), null_policy=NullPolicy.CLEAR)  # assigned None: cleared
-        assert await value(pm, "MATCH (p:Person) RETURN p.bio") is None
+        assert await stored(pm, "Person", "bio") is None
 
     async def test_only_and_except(self, pm, gom):
         await gom.save(Person(uuid="p1", name="Ada", bio="Engineer"))
         await gom.save(Person(uuid="p1", name="Grace", bio="Admiral"), only=["bio"])
-        assert await value(pm, "MATCH (p:Person) RETURN [p.name, p.bio]") == ["Ada", "Admiral"]
+        assert await stored(pm, "Person", "name", "bio") == ["Ada", "Admiral"]
         await gom.save(Person(uuid="p1", name="Grace", bio="Rear admiral"), except_=["bio"])
-        assert await value(pm, "MATCH (p:Person) RETURN [p.name, p.bio]") == ["Grace", "Admiral"]
+        assert await stored(pm, "Person", "name", "bio") == ["Grace", "Admiral"]
         with pytest.raises(DrivineError, match="not both"):
             await gom.save(Person(uuid="p1", name="x"), only=["name"], except_=["bio"])
 
@@ -106,13 +108,13 @@ class TestFragments:
 
     async def test_a_subclass_is_written_with_its_own_labels(self, pm, gom):
         await gom.save(Puppy(uuid="a1", name="Bit", age_in_weeks=9))
-        assert sorted(await value(pm, "MATCH (n {uuid: 'a1'}) RETURN labels(n)")) == ["Animal", "Dog", "Puppy"]
+        assert await labels(pm, "a1") == ["Animal", "Dog", "Puppy"]
         assert type(await gom.load(Animal, "a1")) is Puppy
 
     async def test_create_makes_only_what_is_absent(self, pm, gom):
         assert await gom.create(Person(uuid="p1", name="Ada")) is not None
         assert await gom.create(Person(uuid="p1", name="Imposter")) is None
-        assert await value(pm, "MATCH (p:Person) RETURN p.name") == "Ada"
+        assert await stored(pm, "Person", "name") == "Ada"
         loaded = await gom.load(Person, "p1")
         with pytest.raises(DrivineError, match="carries a stamp was loaded"):
             await gom.create(loaded)
@@ -162,7 +164,7 @@ class TestViews:
         await gom.save(career, replace=["employment_history"], removed_targets=RemovedTargets.DELETE_UNREFERENCED)
         loaded = await gom.load(PersonCareer, "p1")
         assert loaded is not None and [it.target.name for it in loaded.employment_history] == ["Acme"]
-        assert await value(pm, "MATCH (o:Organization {uuid: 'o2'}) RETURN count(o)") == 0
+        assert [it["uuid"] for it in await nodes(pm, "Organization")] == ["o1"]
 
     async def test_replace_all_needs_a_loaded_view(self, gom):
         with pytest.raises(DrivineError, match='replace="all" needs'):
@@ -193,7 +195,7 @@ class TestViews:
 class TestUpdate:
     async def test_writes_what_the_change_altered(self, pm, gom):
         await gom.save(Person(uuid="p1", name="Ada", bio="Engineer"))
-        await pm.execute(QuerySpecification("MATCH (p:Person) SET p.extra = 'kept'"))
+        await set_property(pm, "Person", "extra", "kept")
 
         def rename(person: Person) -> None:
             person.name = "Ada L"
@@ -201,7 +203,7 @@ class TestUpdate:
 
         updated = await gom.update(Person, "p1", rename)
         assert updated is not None and updated.name == "Ada L"
-        assert await value(pm, "MATCH (p:Person) RETURN [p.name, p.bio, p.extra]") == ["Ada L", None, "kept"]
+        assert await stored(pm, "Person", "name", "bio", "extra") == ["Ada L", None, "kept"]
 
     async def test_loads_again_when_another_writer_got_there_first(self, gom):
         await gom.save(Person(uuid="p1", name="Ada", bio="b0"))
@@ -247,12 +249,12 @@ class TestUpdate:
 
 
 class TestDelete:
-    async def test_deletes_by_id_and_all(self, gom):
+    async def test_deletes_by_id_and_all(self, pm, gom):
         for it in range(3):
             await gom.save(Person(uuid=f"p{it}", name=f"n{it}"))
         assert await gom.delete(Person, "p0") == 1
         assert await gom.delete(Person, "p0") == 0
-        assert await gom.delete_all(Person, "n.name = $name", {"name": "n1"}) == 1
+        assert await gom.delete_all(Person, equals(pm, "name", "name"), {"name": "n1"}) == 1
         assert [it.uuid for it in await gom.load_all(Person)] == ["p2"]
 
     async def test_cascades(self, pm, gom):
@@ -267,7 +269,7 @@ class TestDelete:
                 await gom.delete(PersonCareer, "p1", cascade=CascadeType.DELETE_ORPHAN)
             return
         assert await gom.delete(PersonCareer, "p1", cascade=CascadeType.DELETE_ORPHAN) == 1
-        assert sorted(await pm.query(QuerySpecification("MATCH (o:Organization) RETURN o.uuid"))) == ["o1"]
+        assert [it["uuid"] for it in await nodes(pm, "Organization")] == ["o1"]
         assert await gom.delete(PersonCareer, "p2", cascade=CascadeType.DELETE_ALL) == 1
         assert await gom.count(Organization) == 0
 
@@ -280,7 +282,7 @@ class TestConcurrency:
         results = await asyncio.gather(gom.save(first), gom.save(second), return_exceptions=True)
         assert sum(isinstance(it, StaleObjectError) for it in results) == 1
         winner = next(it for it in results if not isinstance(it, BaseException))
-        assert await value(pm, "MATCH (p:Person) RETURN p.name") == winner.name
+        assert await stored(pm, "Person", "name") == winner.name
 
     @pytest.mark.rolls_back
     async def test_a_save_joins_the_transaction(self, pm, gom):

@@ -12,6 +12,9 @@ from drivine import (
     transactional,
 )
 
+# Statements written in Cypher; Oracle's are in tests/integration/oracle.
+pytestmark = pytest.mark.graph_engines
+
 
 def create(name: str) -> QuerySpecification[None]:
     return QuerySpecification("CREATE (:Person {name: $name})").bind({"name": name})

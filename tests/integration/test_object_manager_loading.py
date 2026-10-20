@@ -17,6 +17,9 @@ from tests.models import (
     Puppy,
 )
 
+# Seeded in Cypher; Oracle's loads are in tests/integration/oracle.
+pytestmark = pytest.mark.graph_engines
+
 
 @pytest.fixture
 def gom(pm: PersistenceManager) -> StatelessGraphObjectManager:

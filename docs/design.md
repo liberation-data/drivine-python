@@ -644,9 +644,11 @@ An integration test writes with one language and reads with the other, on each e
 
 Each milestone ends with tests passing on every engine it covers, and is releasable.
 
-**Progress:** 1 to 7 are done, on Neo4j, Memgraph and FalkorDB. Neptune connects for the `PersistenceManager`,
-untested: there is no container for it. Index advice moved to milestone 7, which lists the database's indexes.
-The golden statements are in drivine's `test/1.Unit/golden`, copied to `tests/golden`.
+**Progress:** 1 to 8 are done, on Neo4j, Memgraph and FalkorDB, and on Oracle 23ai/26ai for 8. Neptune connects for
+the `PersistenceManager`, untested: there is no container for it. Index advice moved to milestone 7, which lists the
+database's indexes. The golden statements are in drivine's `test/1.Unit/golden`, copied to `tests/golden`; Oracle's are
+checked there too. The object-manager suites run on Oracle with `ORACLE_TESTS=true`, beside the Oracle-only suites in
+`tests/integration/oracle`; tests written in Cypher are marked `graph_engines`.
 
 1. **Connections and `PersistenceManager` on Neo4j.**
    - The registry and environment configuration, query specifications, mapping and cursors.

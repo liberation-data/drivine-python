@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any, Literal
 
-from drivine.backend.cypher_backend import CypherBackend
+from drivine.backend.graph_backend import GraphBackend
 from drivine.backend.graph_statement import GraphStatement
 from drivine.drivine_error import DrivineError
 from drivine.manager.group_aggregate import GroupAggregate
@@ -28,7 +28,7 @@ class GroupOperations:
         registry: ModelRegistry,
         query: Callable[[GraphStatement], Awaitable[list[Any]]],
         mapper: GraphObjectMapper,
-        backend: CypherBackend,
+        backend: GraphBackend,
     ) -> None:
         self._registry = registry
         self._query = query

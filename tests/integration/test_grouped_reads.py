@@ -3,7 +3,7 @@ import pytest
 from drivine import (
     DrivineError,
     PersistenceManager,
-    QuerySpecification,
+    RelateMode,
     StatelessGraphObjectManager,
     avg,
     count,
@@ -11,10 +11,12 @@ from drivine import (
     key,
     max_,
     min_,
+    node_ref,
     path_key,
     refs,
     sum_,
 )
+from tests.integration.stores import below
 from tests.models import Director, Movie
 
 
@@ -37,12 +39,10 @@ async def films(pm: PersistenceManager, gom: StatelessGraphObjectManager) -> Non
             Director(uuid="d3", name="Kathryn"),
         ]
     )
-    await pm.execute(
-        QuerySpecification(
-            "UNWIND $pairs AS pair MATCH (m:Movie {uuid: pair[0]}), (d:Director {uuid: pair[1]}) "
-            "CREATE (m)-[:DIRECTED_BY]->(d)"
-        ).bind({"pairs": [["m1", "d1"], ["m2", "d1"], ["m3", "d1"], ["m4", "d2"], ["m5", "d3"], ["m1", "d1"]]})
-    )
+    for movie, director in [("m1", "d1"), ("m2", "d1"), ("m3", "d1"), ("m4", "d2"), ("m5", "d3"), ("m1", "d1")]:
+        await gom.edges.relate(
+            node_ref(Movie, movie), node_ref(Director, director), "DIRECTED_BY", mode=RelateMode.CREATE
+        )
 
 
 async def test_groups_by_a_property(gom, films):
@@ -56,7 +56,7 @@ async def test_groups_by_a_property(gom, films):
     ]
 
 
-async def test_aggregates_with_filters(gom, films):
+async def test_aggregates_with_filters(pm, gom, films):
     q = refs(Movie)
     rows = await gom.groups.load(
         Movie,
@@ -64,7 +64,7 @@ async def test_aggregates_with_filters(gom, films):
         aggregates={
             "films": count(),
             "matrix": count(q.title.starts_with("The Matrix")),
-            "nineties": count("n.released < 2000"),
+            "nineties": count(below(pm, "released", 2000)),
             "years": sum_(q.released, q.released.gt(2000)),
             "average": avg("released"),
             "first": min_(q.released),

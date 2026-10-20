@@ -10,7 +10,6 @@ from drivine import (
     NodeFragment,
     NodeId,
     PersistenceManager,
-    QuerySpecification,
     RangeIndex,
     SchemaCatalog,
     SchemaManager,
@@ -24,6 +23,7 @@ from drivine import (
     vector_index,
 )
 from drivine.manager.graph_object_manager_factory import GraphObjectManagerFactory
+from tests.integration.stores import create
 
 
 @pytest.fixture
@@ -72,18 +72,14 @@ class TestConstraints:
         spec = uniqueness_constraint(label, "code")
         assert (await gom.constraints.ensure(spec)).status == "CREATED"
         assert (await gom.constraints.ensure(spec)).status == "ALREADY_MATCHING"
-        await gom.persistence_manager.execute(QuerySpecification(f"CREATE (:{label} {{code: 'x'}})"))
+        await create(gom.persistence_manager, label, {"code": "x"})
         with pytest.raises(DrivineError):
-            await gom.persistence_manager.execute(QuerySpecification(f"CREATE (:{label} {{code: 'x'}})"))
+            await create(gom.persistence_manager, label, {"code": "x"})
         await gom.constraints.drop(spec)
         assert not [it for it in await gom.constraints.list() if it.label == label]
 
     async def test_reports_data_that_breaks_it(self, gom, label):
-        await gom.persistence_manager.execute(
-            QuerySpecification(
-                f"CREATE (:{label} {{code: 'dup'}}), (:{label} {{code: 'dup'}}), (:{label} {{code: 'u'}})"
-            )
-        )
+        await create(gom.persistence_manager, label, {"code": "dup"}, {"code": "dup"}, {"code": "u"})
         result = await gom.constraints.ensure(uniqueness_constraint(label, "code"))
         assert result.status == "VIOLATION" and result.sample == ("dup",)
         assert not [it for it in await gom.constraints.list() if it.label == label]
@@ -145,7 +141,7 @@ class TestSchemaManager:
             await gom.indexes.drop(range_index(label, prop))
 
     async def test_a_violation_fails_fast_or_warns(self, factory, pm, label, caplog):
-        await pm.execute(QuerySpecification(f"CREATE (:{label} {{code: 'dup'}}), (:{label} {{code: 'dup'}})"))
+        await create(pm, label, {"code": "dup"}, {"code": "dup"})
         catalog = SchemaCatalog.of(uniqueness_constraint(label, "code")).named(label).for_database(pm.database)
         managers = GraphObjectManagerFactory(factory)
         with pytest.raises(DrivineError, match="VIOLATION for the UNIQUE"):

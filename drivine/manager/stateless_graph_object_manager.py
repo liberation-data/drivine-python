@@ -10,8 +10,7 @@ from typing import Any, Literal, TypeVar
 from pydantic import BaseModel
 from pydantic_core import to_jsonable_python
 
-from drivine.backend.cypher_backend import NODE_ALIAS, CypherBackend
-from drivine.backend.cypher_grammar import cypher_grammar_for
+from drivine.backend.backends import backend_for
 from drivine.backend.fragment_group import FragmentGroup
 from drivine.backend.graph_statement import GraphStatement
 from drivine.backend.matching_search import MatchingSearch
@@ -29,7 +28,6 @@ from drivine.dsl.index_advice_policy import IndexAdvicePolicy
 from drivine.dsl.order_term import OrderTerm
 from drivine.dsl.query import Query
 from drivine.dsl.query_index_advisor import QueryIndexAdvisor
-from drivine.dsl.query_renderer import QueryRenderer
 from drivine.dsl.rendered_query import RenderedQuery
 from drivine.dsl.seek_value import SeekValue
 from drivine.manager.cascade_type import CascadeType
@@ -86,7 +84,8 @@ class StatelessGraphObjectManager:
     def __init__(self, persistence_manager: PersistenceManager, registry: ModelRegistry | None = None) -> None:
         self.persistence_manager = persistence_manager
         self.registry = registry or ModelRegistry()
-        self.backend = CypherBackend(cypher_grammar_for(persistence_manager.type))
+        provider = getattr(persistence_manager, "provider", None)
+        self.backend = backend_for(persistence_manager.type, getattr(provider, "graph_name", None))
         self.mapper = GraphObjectMapper(self.registry)
         self._warned_non_atomic = False
         self._identity: StoreIdentity | None = None
@@ -131,7 +130,7 @@ class StatelessGraphObjectManager:
         return SchemaExecutor(provider)
 
     def _schema_grammar(self) -> SchemaGrammar:
-        return schema_grammar_for(self.persistence_manager.type)
+        return schema_grammar_for(self.persistence_manager.type, getattr(self.backend, "graph", None))
 
     @property
     def database(self) -> str:
@@ -250,10 +249,11 @@ class StatelessGraphObjectManager:
             raise DrivineError(
                 f"search_k must be a whole number of at least top_k ({top_k}): a narrower search only loses hits."
             )
+        label = partition_label or root.labels[0]
         statement = self.backend.nearest(
             target,
             NearestSearch(
-                partition_label or root.labels[0],
+                label,
                 searched.property,
                 searched.similarity,
                 search_k if search_k is not None else top_k,
@@ -261,6 +261,7 @@ class StatelessGraphObjectManager:
                 threshold is not None,
                 top_k if search_k is not None else None,
                 _checked(depth) or {},
+                await self._search_table("VECTOR", label, [searched.property]),
             ),
         )
         rows = await self.persistence_manager.query(
@@ -306,10 +307,29 @@ class StatelessGraphObjectManager:
         _check_top_k(top_k)
         statement = self.backend.matching(
             target,
-            MatchingSearch(root.labels[0], chosen, top_k, predicate, threshold is not None, _checked(depth) or {}),
+            MatchingSearch(
+                root.labels[0],
+                chosen,
+                top_k,
+                predicate,
+                threshold is not None,
+                _checked(depth) or {},
+                text,
+                await self._search_table("FULLTEXT", root.labels[0], chosen),
+            ),
         )
         rows = await self.persistence_manager.query(statement.spec({**values, "_text": text, "_threshold": threshold}))
         return [Scored(self._mapped(target, row["value"]), row["score"]) for row in rows]
+
+    async def _search_table(
+        self, kind: Literal["VECTOR", "FULLTEXT"], label: str, properties: Sequence[str]
+    ) -> str | None:
+        """Where the store keeps a search index as a table of its own (Oracle), that table; None elsewhere."""
+        statement = getattr(self.backend, "search_index_table", None)
+        if statement is None:
+            return None
+        rows = await self.persistence_manager.query(statement(kind, label, properties).spec())
+        return rows[0] if rows else None
 
     def _mapped(self, target_: TargetModel, row: Any) -> Any:
         if isinstance(target_, GraphViewModel):
@@ -557,7 +577,7 @@ class StatelessGraphObjectManager:
         """
         if where is None or isinstance(where, str):
             return where, dict(bindings or {})
-        written, values = QueryRenderer.render_where(where, target_, self.backend.grammar, NODE_ALIAS, self._labels)
+        written, values = self.backend.render_where(where, target_, self._labels)
         return written, {**(bindings or {}), **values}
 
     def _rendered(
@@ -569,9 +589,7 @@ class StatelessGraphObjectManager:
         """
         _checked(query.depth)
         conditions = None if where is None or isinstance(where, str) else where
-        rendered = QueryRenderer.render(
-            dataclasses.replace(query, where=conditions), target_, self.backend.grammar, NODE_ALIAS, self._labels
-        )
+        rendered = self.backend.render_query(dataclasses.replace(query, where=conditions), target_, self._labels)
         if not isinstance(where, str):
             return dataclasses.replace(rendered, bindings={**(bindings or {}), **rendered.bindings})
         predicate = f"({where}) AND {rendered.where}" if rendered.where else where

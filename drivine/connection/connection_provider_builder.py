@@ -119,6 +119,8 @@ class ConnectionProviderBuilder:
             provider = self._neptune_provider(name)
         elif self._type is DatabaseType.FALKORDB:
             provider = self._falkordb_provider(name)
+        elif self._type is DatabaseType.ORACLE:
+            provider = self._oracle_provider(name)
         else:
             raise DrivineError(f"{self._type} is not supported by drivine-python yet.")
         self.registry.register(provider)
@@ -175,4 +177,22 @@ class ConnectionProviderBuilder:
             self._password,
             self._connection_timeout,
             self._transaction_mode or TransactionMode.WARN,
+        )
+
+    def _oracle_provider(self, name: str) -> ConnectionProvider:
+        """`database_name` is the service, say FREEPDB1; `default_graph_path` names the graph, `drivine` by default."""
+        from drivine.connection.oracle.oracle_connection_provider import OracleConnectionProvider
+
+        if not self._database_name:
+            raise DrivineError("Oracle requires a database name: the service, e.g. FREEPDB1")
+        if self._idle_timeout:
+            logger.warning("idle_timeout is not supported by Oracle")
+        return OracleConnectionProvider(
+            name,
+            f"{self._host}:{self._port or 1521}/{self._database_name}",
+            self._user_name,
+            self._password,
+            self._pool_max,
+            self._connection_timeout,
+            self._default_graph_path,
         )

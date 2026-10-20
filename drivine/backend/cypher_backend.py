@@ -23,7 +23,9 @@ from drivine.backend.save_statement_builder import SaveStatementBuilder
 from drivine.backend.view_projection import ViewProjection
 from drivine.backend.view_projector import ViewProjector, fragment
 from drivine.drivine_error import DrivineError
+from drivine.dsl.query import Query
 from drivine.dsl.query_renderer import QueryRenderer
+from drivine.dsl.rendered_query import RenderedQuery
 from drivine.manager.cascade_type import CascadeType
 from drivine.manager.group_query import GroupQuery
 from drivine.manager.relate_mode import RelateMode
@@ -53,6 +55,18 @@ class CypherBackend:
 
     def __init__(self, grammar: CypherGrammar) -> None:
         self.grammar = grammar
+
+    def render_query(
+        self, query: Query, target: TargetModel, labels_of_class: Callable[[type], list[str]]
+    ) -> RenderedQuery:
+        """A query over a class's references, written for the store: its predicate, order and paging, and values."""
+        return QueryRenderer.render(query, target, self.grammar, NODE_ALIAS, labels_of_class)
+
+    def render_where(
+        self, where: Any, target: TargetModel, labels_of_class: Callable[[type], list[str]]
+    ) -> tuple[str, dict[str, Any]]:
+        """A condition over a class's references, written for the store, with its values."""
+        return QueryRenderer.render_where(where, target, self.grammar, NODE_ALIAS, labels_of_class)
 
     def load_all_fragments(
         self, model: FragmentModel, where: str | None = None, page: Page | None = None

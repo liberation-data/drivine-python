@@ -109,7 +109,7 @@ class SaveStatementBuilder:
             raise DrivineError(
                 f"{view.type.__name__}.{view.root_field}, the root, is None. A view is saved from its root."
             )
-        replaced = self._replaced_fields(view, obj)
+        replaced = replaced_fields(view, obj, self._options)
         # A root of a subclass of the view's root type is written with its own labels.
         parts = [self._root(self._concrete_model(view.root, root), root, len(replaced) > 0)]
         writes = self._write_parts(view, [])
@@ -132,22 +132,6 @@ class SaveStatementBuilder:
         related = ", ".join(f"{{before: before{it.index}, after: after{it.index}}}" for it in self._stamped)
         parts.append(f"RETURN {{found: _found, now: n.{STAMP}, related: [{related}]}} AS result")
         return self._statement(parts, self._concrete_model(view.root, root), root)
-
-    def _replaced_fields(self, view: GraphViewModel, obj: Any) -> list[str]:
-        """
-        The relationship fields to trim: those named, or every one of the view's for "all", which needs an object that
-        carries a stamp, since the lists of an object built from scratch are its defaults and not what the store holds.
-        """
-        replace_ = self._options.replace
-        if replace_ != "all":
-            return list(replace_ or [])
-        root = getattr(obj, view.root_field, None)
-        if not view.root.stamp_field or getattr(root, view.root.stamp_field, None) is None:
-            raise DrivineError(
-                f'replace="all" needs a {view.type.__name__} whose root carries a stamp: an object built from scratch '
-                f"holds its defaults, not what the store holds. Load it first, or name the fields to replace."
-            )
-        return [it.field for it in view.relationships if not it.read_only]
 
     def _read_stamps(self, when: str) -> list[str]:
         """
@@ -265,7 +249,7 @@ class SaveStatementBuilder:
         self, view: GraphViewModel, obj: Any, replaced: list[str], removed_targets: RemovedTargets
     ) -> list[str]:
         parts: list[str] = []
-        held = self._held_ids(view, obj)
+        held = held_ids(view, obj)
         for name in replaced:
             rel = next((it for it in view.relationships if it.field == name), None)
             if rel is None:
@@ -370,7 +354,7 @@ class SaveStatementBuilder:
         into = target(rel)
         result: list[dict[str, Any]] = []
         for item in items(rel, value):
-            node = _node_of(rel, item)
+            node = node_of(rel, item)
             if node is None:
                 raise DrivineError(f"A {type(item).__name__} in {rel.field} has no target node.")
             node_object = getattr(node, into.root_field) if isinstance(into, GraphViewModel) else node
@@ -501,23 +485,41 @@ class SaveStatementBuilder:
         if id_ not in ids:
             ids.append(id_)
 
-    def _held_ids(self, view: GraphViewModel, obj: Any, seen: set[int] | None = None) -> list[Any]:
-        """The ids of every node the object holds, at any depth."""
-        seen = set() if seen is None else seen
-        if obj is None or id(obj) in seen:
-            return []
-        seen.add(id(obj))
-        root = getattr(obj, view.root_field, None)
-        ids = [getattr(root, view.root.node_id_field, None) if view.root.node_id_field else None]
-        for rel in view.relationships:
-            into = target(rel)
-            for item in items(rel, getattr(obj, rel.field, None)):
-                node = _node_of(rel, item)
-                if isinstance(into, GraphViewModel):
-                    ids.extend(self._held_ids(into, node, seen))
-                elif into.node_id_field:
-                    ids.append(getattr(node, into.node_id_field, None))
-        return [it for it in ids if it is not None]
+
+def held_ids(view: GraphViewModel, obj: Any, seen: set[int] | None = None) -> list[Any]:
+    """The ids of every node the object holds, at any depth."""
+    seen = set() if seen is None else seen
+    if obj is None or id(obj) in seen:
+        return []
+    seen.add(id(obj))
+    root = getattr(obj, view.root_field, None)
+    ids = [getattr(root, view.root.node_id_field, None) if view.root.node_id_field else None]
+    for rel in view.relationships:
+        into = target(rel)
+        for item in items(rel, getattr(obj, rel.field, None)):
+            node = node_of(rel, item)
+            if isinstance(into, GraphViewModel):
+                ids.extend(held_ids(into, node, seen))
+            elif into.node_id_field:
+                ids.append(getattr(node, into.node_id_field, None))
+    return [it for it in ids if it is not None]
+
+
+def replaced_fields(view: GraphViewModel, obj: Any, options: SaveOptions) -> list[str]:
+    """
+    The relationship fields to trim: those named, or every one of the view's for "all", which needs an object that
+    carries a stamp, since the lists of an object built from scratch are its defaults and not what the store holds.
+    """
+    replace_ = options.replace
+    if replace_ != "all":
+        return list(replace_ or [])
+    root = getattr(obj, view.root_field, None)
+    if not view.root.stamp_field or getattr(root, view.root.stamp_field, None) is None:
+        raise DrivineError(
+            f'replace="all" needs a {view.type.__name__} whose root carries a stamp: an object built from scratch '
+            f"holds its defaults, not what the store holds. Load it first, or name the fields to replace."
+        )
+    return [it.field for it in view.relationships if not it.read_only]
 
 
 def _stamp_excluded(model: FragmentModel) -> list[str]:
@@ -542,7 +544,7 @@ def root_of(into: TargetModel) -> FragmentModel:
     return into.root if isinstance(into, GraphViewModel) else into
 
 
-def _node_of(rel: RelationshipModel, item: Any) -> Any:
+def node_of(rel: RelationshipModel, item: Any) -> Any:
     """The node an item of a relationship field leads to: for a relationship fragment, its target."""
     related = rel.related
     return getattr(item, related.target_field, None) if isinstance(related, RelationshipFragmentModel) else item
@@ -550,7 +552,7 @@ def _node_of(rel: RelationshipModel, item: Any) -> Any:
 
 def _fragment_of(rel: RelationshipModel, item: Any) -> Any:
     """The fragment an item of a relationship field leads to: for a view, its root."""
-    node = _node_of(rel, item)
+    node = node_of(rel, item)
     into = target(rel)
     return getattr(node, into.root_field, None) if isinstance(into, GraphViewModel) else node
 

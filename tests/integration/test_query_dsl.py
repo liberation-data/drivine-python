@@ -13,6 +13,7 @@ from drivine import (
     refs,
     times,
 )
+from tests.integration.stores import below
 from tests.models import (
     ActorStats,
     Animal,
@@ -216,9 +217,9 @@ class TestOtherUses:
         assert await gom.delete_all(Person, q.bio.is_null()) == 1
         assert sorted(it.name for it in await gom.load_all(Person)) == ["Ada", "Grace"]
 
-    async def test_a_cypher_where_still_works_beside_an_order(self, gom, movies):
+    async def test_a_raw_where_still_works_beside_an_order(self, pm, gom, movies):
         q = refs(Movie)
-        found = await gom.load_all(Movie, "n.released < $year", {"year": 2010}, order_by=q.released.desc())
+        found = await gom.load_all(Movie, below(pm, "released", 2010), order_by=q.released.desc())
         assert [it.released for it in found] == [2003, 1999, 1994]
 
     async def test_names_a_field_the_class_doesnt_have(self, gom):

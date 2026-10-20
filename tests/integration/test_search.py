@@ -19,6 +19,7 @@ from drivine import (
     VectorIndex,
     refs,
 )
+from tests.integration.stores import equals
 
 
 class Proposition(NodeFragment, labels=["NearestTest", "Proposition"]):
@@ -140,12 +141,17 @@ class TestLoadNearest:
         assert hits[0].score == pytest.approx(1, abs=0.01)
         assert hits[1].score == pytest.approx(1 / 26, abs=0.01)
 
-    async def test_filters_by_threshold_and_by_where_with_a_wider_search(self, gom):
+    async def test_filters_by_threshold_and_by_where_with_a_wider_search(self, pm, gom):
         close = await gom.load_nearest(Proposition, [1, 0, 0], top_k=4, threshold=0.85)
         assert [it.value.id for it in close] == ["north", "north-east"]
         # east and up are both in context b; the query leans towards east, so they don't tie.
         scoped = await gom.load_nearest(
-            Proposition, [1, 0.1, 0], top_k=1, search_k=4, where="n.contextId = $context", bindings={"context": "b"}
+            Proposition,
+            [1, 0.1, 0],
+            top_k=1,
+            search_k=4,
+            where=equals(pm, "contextId", "context"),
+            bindings={"context": "b"},
         )
         assert [it.value.id for it in scoped] == ["east"]
         typed = await gom.load_nearest(
@@ -186,9 +192,11 @@ class TestLoadMatching:
         hits = await gom.load_matching(Article, "inventor", top_k=5)
         assert [it.value.id for it in hits] == ["a1"]
 
-    async def test_limits_to_top_k_and_filters_by_threshold_and_where(self, gom):
+    async def test_limits_to_top_k_and_filters_by_threshold_and_where(self, pm, gom):
         assert len(await gom.load_matching(Chunk, "graph", top_k=1)) == 1
-        scoped = await gom.load_matching(Chunk, "graph", top_k=10, where="n.sectionId = $s", bindings={"s": "s2"})
+        scoped = await gom.load_matching(
+            Chunk, "graph", top_k=10, where=equals(pm, "sectionId", "s"), bindings={"s": "s2"}
+        )
         assert [it.value.id for it in scoped] == ["c2"]
         typed = await gom.load_matching(Chunk, "graph", top_k=10, where=refs(Chunk).section_id.eq("s2"))
         assert [it.value.id for it in typed] == ["c2"]

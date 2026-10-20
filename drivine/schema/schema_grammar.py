@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from drivine.backend.cypher import label_expression, quote_name
 from drivine.connection.database_type import DatabaseType
@@ -18,6 +18,9 @@ from drivine.schema.schema_listing import SchemaListing
 from drivine.schema.schema_specs import item_name
 from drivine.schema.uniqueness_constraint_spec import UniquenessConstraintSpec
 from drivine.schema.vector_index_spec import VectorIndexSpec
+
+if TYPE_CHECKING:
+    from drivine.backend.oracle.oracle_graph import OracleGraph
 
 
 @dataclass(frozen=True)
@@ -50,16 +53,20 @@ class SchemaGrammar:
     unique_needs_range: bool = False
     """Whether a uniqueness constraint needs a range index over its properties, made first."""
 
-    @staticmethod
-    def conflicts(spec: UniquenessConstraintSpec, limit: int) -> str:
-        """A statement giving up to `limit` values that more than one of the label's nodes hold, one per row."""
-        values = [f"n.{quote_name(it)}" for it in spec.properties]
-        present = " AND ".join(f"{it} IS NOT NULL" for it in values)
-        key = values[0] if len(values) == 1 else f"[{', '.join(values)}]"
-        return (
-            f"MATCH (n{label_expression([spec.label])}) WHERE {present} WITH {key} AS value, count(*) AS holders "
-            f"WHERE holders > 1 RETURN value LIMIT {limit}"
-        )
+    conflicts: Callable[[UniquenessConstraintSpec, int], str] = field(
+        default=lambda spec, limit: _conflicts(spec, limit)
+    )
+    """A statement giving up to `limit` values that more than one of the label's nodes hold, one per row."""
+
+
+def _conflicts(spec: UniquenessConstraintSpec, limit: int) -> str:
+    values = [f"n.{quote_name(it)}" for it in spec.properties]
+    present = " AND ".join(f"{it} IS NOT NULL" for it in values)
+    key = values[0] if len(values) == 1 else f"[{', '.join(values)}]"
+    return (
+        f"MATCH (n{label_expression([spec.label])}) WHERE {present} WITH {key} AS value, count(*) AS holders "
+        f"WHERE holders > 1 RETURN value LIMIT {limit}"
+    )
 
 
 def _pattern(spec: Any) -> str:
@@ -74,7 +81,7 @@ def _number(value: Any) -> int | None:
     return None if value is None else int(value)
 
 
-def _portable_pins(spec: VectorIndexSpec) -> list[str]:
+def portable_pins(spec: VectorIndexSpec) -> list[str]:
     """The portable HNSW pins a spec makes, for an engine with no HNSW parameters of its own."""
     return [
         *(["hnsw_m"] if spec.hnsw_m is not None else []),
@@ -231,7 +238,7 @@ MEMGRAPH_SCHEMA = SchemaGrammar(
     ],
     drop_vector=lambda spec: [f"DROP VECTOR INDEX {quote_name(item_name(spec))}"],
     # Memgraph's vector index takes no HNSW parameters.
-    unsupported_vector_tuning=_portable_pins,
+    unsupported_vector_tuning=portable_pins,
     # A text index over several properties indexes only the first (Memgraph 3.x), so one over several is made over the
     # whole label, which indexes every property: a search may then match the label's other text too.
     create_full_text=lambda spec: [
@@ -333,7 +340,13 @@ when each is. Its uniqueness constraints are a Redis command, and need a range i
 """
 
 
-def schema_grammar_for(type: DatabaseType) -> SchemaGrammar:
+def schema_grammar_for(type: DatabaseType, graph: OracleGraph | None = None) -> SchemaGrammar:
+    """The engine's schema grammar; on Oracle, over the tables of `graph` (the default graph when None)."""
+    if type is DatabaseType.ORACLE:
+        from drivine.backend.oracle.oracle_graph import OracleGraph
+        from drivine.backend.oracle.oracle_schema_grammar import oracle_schema_grammar
+
+        return oracle_schema_grammar(graph or OracleGraph())
     grammars = {
         DatabaseType.NEO4J: NEO4J_SCHEMA,
         DatabaseType.MEMGRAPH: MEMGRAPH_SCHEMA,

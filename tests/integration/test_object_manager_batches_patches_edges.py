@@ -5,13 +5,13 @@ from drivine import (
     NullPolicy,
     PatchResult,
     PersistenceManager,
-    QuerySpecification,
     RelateMode,
     StaleObjectError,
     StatelessGraphObjectManager,
     node_ref,
     transaction,
 )
+from tests.integration.stores import equals, nodes
 from tests.models import Customer, Dog, Organization, Person, PersonCareer, Puppy, WorkHistory
 
 
@@ -20,8 +20,9 @@ def gom(pm: PersistenceManager) -> StatelessGraphObjectManager:
     return StatelessGraphObjectManager(pm)
 
 
-async def value(pm: PersistenceManager, statement: str, **bindings: object) -> object:
-    return await pm.maybe_get_one(QuerySpecification(statement).bind(bindings))
+async def bios(pm: PersistenceManager) -> dict[str, object]:
+    """Each Person's bio, by uuid, as the store holds it."""
+    return {it["uuid"]: it.get("bio") for it in await nodes(pm, "Person")}
 
 
 class TestSaveAll:
@@ -75,21 +76,25 @@ class TestPatch:
     async def test_writes_named_fields_where_the_condition_holds(self, pm, gom):
         await gom.save(Person(uuid="p1", name="Ada", bio="b0"))
         loaded = await gom.load(Person, "p1")
-        result = await gom.patch(Person, "p1", set={"bio": "b1"}, where="n.name = $name", bindings={"name": "Ada"})
+        result = await gom.patch(
+            Person, "p1", set={"bio": "b1"}, where=equals(pm, "name", "name"), bindings={"name": "Ada"}
+        )
         assert result == PatchResult(found=True, applied=True, changed=True)
-        assert await value(pm, "MATCH (p:Person) RETURN p.bio") == "b1"
+        assert await bios(pm) == {"p1": "b1"}
         with pytest.raises(StaleObjectError):  # the patch gave the node a new stamp
             await gom.save(loaded)
         unchanged = await gom.patch(Person, "p1", set={"bio": "b1"})
         assert unchanged == PatchResult(True, True, False)
-        refused = await gom.patch(Person, "p1", set={"bio": "b2"}, where="n.name = 'Grace'")
+        refused = await gom.patch(
+            Person, "p1", set={"bio": "b2"}, where=equals(pm, "name", "name"), bindings={"name": "Grace"}
+        )
         assert refused == PatchResult(True, False, False)
         assert await gom.patch(Person, "missing", set={"bio": "x"}) == PatchResult(False, False, False)
 
     async def test_clears_and_refuses_what_it_cant_write(self, pm, gom):
         await gom.save(Person(uuid="p1", name="Ada", bio="b0"))
         await gom.patch(Person, "p1", clear=["bio"])
-        assert await value(pm, "MATCH (p:Person) RETURN p.bio") is None
+        assert await bios(pm) == {"p1": None}
         with pytest.raises(DrivineError, match="can't write uuid"):
             await gom.patch(Person, "p1", set={"uuid": "p2"})
         with pytest.raises(DrivineError, match="no field nmae"):
@@ -110,10 +115,10 @@ class TestPatch:
             PatchResult(False, False, False),
             PatchResult(True, True, False),
         ]
-        rows = await pm.query(QuerySpecification("MATCH (p:Person) RETURN [p.uuid, p.name, p.bio] ORDER BY p.uuid"))
+        rows = [[it["uuid"], it["name"], it.get("bio")] for it in await nodes(pm, "Person")]
         assert rows == [["p1", "Ada", "a"], ["p2", "Grace", "G"]]
         await gom.patch_all([Person(uuid="p1", name="Ada", bio=None)], only=["bio"], null_policy=NullPolicy.CLEAR)
-        assert await value(pm, "MATCH (p:Person {uuid: 'p1'}) RETURN p.bio") is None
+        assert (await bios(pm))["p1"] is None
         with pytest.raises(DrivineError, match="only or except_"):
             await gom.patch_all([Person(uuid="p1", name="x")])
         with pytest.raises(DrivineError, match="each id once"):

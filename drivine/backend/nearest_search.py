@@ -22,3 +22,5 @@ class NearestSearch:
     limit: int | None = None
     """How many are kept after the filter, if any are trimmed."""
     depth: Mapping[str, int] = field(default_factory=lambda: {})
+    table: str | None = None
+    """The table an index made for the search is over, where the store keeps one (see `search_index_table`)."""

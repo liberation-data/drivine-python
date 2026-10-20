@@ -5,6 +5,9 @@ from pydantic import BaseModel
 
 from drivine import CursorSpecification, DrivineError, PersistenceManager, QuerySpecification, transaction
 
+# Statements written in Cypher; Oracle's are in tests/integration/oracle.
+pytestmark = pytest.mark.graph_engines
+
 
 class Person(BaseModel):
     name: str

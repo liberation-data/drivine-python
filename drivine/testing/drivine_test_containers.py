@@ -83,6 +83,29 @@ def _redis_ready(reach: ContainerConnection, timeout: float = 60) -> None:
         time.sleep(0.25)
 
 
+def _oracle(image: str) -> DockerContainer:
+    # The listener is up before the pluggable database is open and the user made in it.
+    return (
+        DockerContainer(image)
+        .with_env("ORACLE_PASSWORD", TEST_CONTAINER_PASSWORD)
+        .with_env("APP_USER", TEST_CONTAINER_USER)
+        .with_env("APP_USER_PASSWORD", TEST_CONTAINER_PASSWORD)
+        .with_exposed_ports(1521)
+        .waiting_for(LogMessageWaitStrategy(re.compile(r"DATABASE IS READY TO USE!")).with_startup_timeout(300))
+    )
+
+
+def _oracle_reach(started: DockerContainer) -> ContainerConnection:
+    # An ordinary user of the pluggable database: the administrators' tablespace can't hold a graph's JSON column.
+    return ContainerConnection(
+        started.get_container_host_ip(),
+        int(started.get_exposed_port(1521)),
+        TEST_CONTAINER_USER,
+        TEST_CONTAINER_PASSWORD,
+        "FREEPDB1",
+    )
+
+
 TEST_CONTAINER_SPECS: dict[DatabaseType, TestContainerSpec] = {
     DatabaseType.NEO4J: TestContainerSpec(
         "neo4j:5.26-community", 7687, _neo4j, _reach(7687, "neo4j", TEST_CONTAINER_PASSWORD)
@@ -93,6 +116,7 @@ TEST_CONTAINER_SPECS: dict[DatabaseType, TestContainerSpec] = {
     DatabaseType.MEMGRAPH: TestContainerSpec(
         "memgraph/memgraph:3.12.0", 7687, _memgraph, _reach(7687), ready=_bolt_ready
     ),
+    DatabaseType.ORACLE: TestContainerSpec("gvenzl/oracle-free:23-faststart", 1521, _oracle, _oracle_reach),
 }
 """The containers Drivine can start, by the type of the datasource that wants one."""
 

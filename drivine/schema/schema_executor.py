@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from typing import Any
 
@@ -10,14 +11,19 @@ from drivine.manager.contention import when_not_contended
 from drivine.query.query_specification import QuerySpecification
 from drivine.schema.native_operation import NativeOperation
 
+_ORACLE_CONTENDED = re.compile(r"ORA-(00060|08177)\b")
+
 
 def _contended(failure: BaseException) -> bool:
-    """A transient error over Bolt, or FalkorDB turning a write away while another is in progress."""
+    """
+    A transient error over Bolt, FalkorDB turning a write away while another is in progress, or an Oracle deadlock or
+    serialization failure.
+    """
     cause: BaseException | None = failure
     for _ in range(10):
         if cause is None:
             return False
-        if NEO4J_GRAMMAR.contended(cause) or FALKORDB_GRAMMAR.contended(cause):
+        if NEO4J_GRAMMAR.contended(cause) or FALKORDB_GRAMMAR.contended(cause) or _ORACLE_CONTENDED.search(str(cause)):
             return True
         cause = cause.__cause__
     return False

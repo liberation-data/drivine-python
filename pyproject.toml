@@ -27,6 +27,9 @@ testing = ["testcontainers>=4.8", "pytest>=8"]
 falkordb = [
     "falkordb>=1.2",
 ]
+oracle = [
+    "oracledb>=3.0",
+]
 
 [project.entry-points.pytest11]
 drivine = "drivine.testing.plugin"
@@ -37,7 +40,7 @@ Repository = "https://github.com/liberation-data/drivine-python"
 
 [dependency-groups]
 dev = [
-    "drivine[neo4j,falkordb,testing]",
+    "drivine[neo4j,falkordb,oracle,testing]",
     "pytest-asyncio>=0.24",
     "pyright>=1.1.380",
     "ruff>=0.6",
@@ -56,7 +59,10 @@ asyncio_default_fixture_loop_scope = "session"
 asyncio_default_test_loop_scope = "session"
 testpaths = ["tests"]
 drivine_test_containers = true
-markers = ["rolls_back: needs multi-statement transactions, which FalkorDB lacks"]
+markers = [
+    "rolls_back: needs multi-statement transactions, which FalkorDB lacks",
+    "graph_engines: written in Cypher, which Oracle doesn't take",
+]
 
 [tool.ruff]
 line-length = 120
@@ -65,6 +71,10 @@ extend-exclude = ["*.md"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "ASYNC"]
+
+[tool.ruff.lint.per-file-ignores]
+# The PL/SQL prelude is TypeScript's Drivine's, line for line, so that the two write the same statements.
+"drivine/backend/oracle/oracle_save_builder.py" = ["E501"]
 
 [tool.pyright]
 include = ["drivine"]

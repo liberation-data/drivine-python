@@ -9,8 +9,9 @@ from drivine.backend.cypher import label_expression, quote_name
 from drivine.backend.graph_statement import GraphStatement
 from drivine.drivine_error import DrivineError
 from drivine.dsl.condition import all_of_one
+from drivine.dsl.condition_writer import ConditionWriter
 from drivine.dsl.model_scope import scope_of
-from drivine.dsl.query_renderer import QueryRenderer, root_property
+from drivine.dsl.query_renderer import root_property
 from drivine.dsl.ref import Ref
 from drivine.manager.group_aggregate import GroupAggregate
 from drivine.manager.group_query import GroupQuery
@@ -18,7 +19,7 @@ from drivine.manager.path_key import PathKey
 from drivine.manager.property_key import PropertyKey
 from drivine.model.fragment_model import FragmentModel
 
-_COMPARISONS = {"eq": "=", "neq": "<>", "gt": ">", "gte": ">=", "lt": "<", "lte": "<="}
+COMPARISONS = {"eq": "=", "neq": "<>", "gt": ">", "gte": ">=", "lt": "<", "lte": "<="}
 
 NODE_ALIAS = "n"
 
@@ -31,8 +32,8 @@ class GroupStatement:
     """
 
     @staticmethod
-    def resolved(model: FragmentModel, query: GroupQuery, renderer: QueryRenderer) -> GroupQuery:
-        """The query with its references as stored names and its conditions as Cypher over `n`, values bound."""
+    def resolved(model: FragmentModel, query: GroupQuery, renderer: ConditionWriter) -> GroupQuery:
+        """The query with its references as stored names and its conditions in the store's language over `n`."""
         scope = scope_of(model)
 
         def name(prop: Any, what: str) -> str:
@@ -100,7 +101,7 @@ class GroupStatement:
             if column is None or not column.startswith("a"):
                 raise DrivineError(f"having names {it}, which is not an aggregate of the read.")
             bindings[f"_having{i}"] = value
-            having.append(f"{column} {_COMPARISONS[comparison]} $_having{i}")
+            having.append(f"{column} {COMPARISONS[comparison]} $_having{i}")
         if having:
             parts.append(f"WHERE {' AND '.join(having)}")
         projected = [
@@ -128,9 +129,9 @@ class GroupStatement:
         ties = [f"{order_of(f'k{i}')} ASC" for i in range(len(keys)) if not any(c == f"k{i}" for c, _ in ordered)]
         parts.append(f"ORDER BY {', '.join([*(text for _, text in ordered), *ties])}")
         if query.skip:
-            parts.append(f"SKIP {_integer(query.skip, 'skip')}")
+            parts.append(f"SKIP {whole_number(query.skip, 'skip')}")
         if query.limit is not None:
-            parts.append(f"LIMIT {_integer(query.limit, 'limit')}")
+            parts.append(f"LIMIT {whole_number(query.limit, 'limit')}")
         return GraphStatement("\n".join(parts), bindings)
 
 
@@ -164,7 +165,7 @@ def _path_pattern(group_key: PathKey, alias: str, target: FragmentModel) -> str:
     return f"(n){''.join(steps)}"
 
 
-def _integer(value: int, what: str) -> int:
+def whole_number(value: int, what: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:  # pyright: ignore[reportUnnecessaryIsInstance]
         raise DrivineError(f"{what} must be a whole number of at least 0.")
     return value

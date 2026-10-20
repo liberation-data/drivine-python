@@ -4,7 +4,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, TypeVar
 
 from drivine.annotation.direction import Direction
-from drivine.backend.cypher_backend import CypherBackend
+from drivine.backend.graph_backend import GraphBackend
 from drivine.backend.graph_statement import GraphStatement
 from drivine.backend.matched_node import MatchedNode
 from drivine.manager.node_ref import NodeRef
@@ -29,7 +29,7 @@ class EdgeOperations:
         run: Callable[[GraphStatement], Awaitable[Any]],
         query: Callable[[GraphStatement], Awaitable[list[Any]]],
         mapper: GraphObjectMapper,
-        backend: CypherBackend,
+        backend: GraphBackend,
     ) -> None:
         self._registry = registry
         self._run = run

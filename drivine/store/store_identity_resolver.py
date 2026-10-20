@@ -12,7 +12,7 @@ from drivine.schema.schema_specs import uniqueness_constraint
 from drivine.store.store_identity import StoreIdentity
 
 if TYPE_CHECKING:
-    from drivine.backend.cypher_backend import CypherBackend
+    from drivine.backend.graph_backend import GraphBackend
     from drivine.manager.persistence_manager import PersistenceManager
     from drivine.schema.constraint_manager import ConstraintManager
 
@@ -38,7 +38,7 @@ class StoreIdentityResolver:
     """
 
     def __init__(
-        self, persistence_manager: PersistenceManager, backend: CypherBackend, constraints: ConstraintManager | None
+        self, persistence_manager: PersistenceManager, backend: GraphBackend, constraints: ConstraintManager | None
     ) -> None:
         self.persistence_manager = persistence_manager
         self.backend = backend

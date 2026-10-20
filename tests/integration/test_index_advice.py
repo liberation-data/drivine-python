@@ -9,11 +9,11 @@ from drivine import (
     NodeFragment,
     NodeId,
     PersistenceManager,
-    QuerySpecification,
     StatelessGraphObjectManager,
     range_index,
     refs,
 )
+from tests.integration.stores import create
 
 
 class Ticket(NodeFragment, labels=["AdviceTest"]):
@@ -32,11 +32,7 @@ async def gom(pm: PersistenceManager):
     gom.index_advice = IndexAdvicePolicy.FAIL
     await gom.indexes.drop(BY_OPENED_AND_RANK)
     await gom.indexes.drop(BY_OPENED)
-    await pm.execute(
-        QuerySpecification(
-            "CREATE (:AdviceTest {id: 't1', opened: 1, rank: 2}), (:AdviceTest {id: 't2', opened: 2, rank: 1})"
-        )
-    )
+    await create(pm, "AdviceTest", {"id": "t1", "opened": 1, "rank": 2}, {"id": "t2", "opened": 2, "rank": 1})
     yield gom
     await gom.indexes.drop(BY_OPENED_AND_RANK)
     await gom.indexes.drop(BY_OPENED)

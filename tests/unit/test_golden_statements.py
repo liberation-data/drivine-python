@@ -38,19 +38,28 @@ from drivine import (
     uniqueness_constraint,
     vector_index,
 )
-from drivine.backend.cypher_backend import NODE_ALIAS, CypherBackend
+from drivine.backend.cypher_backend import CypherBackend
 from drivine.backend.cypher_grammar import FALKORDB_GRAMMAR, MEMGRAPH_GRAMMAR, NEO4J_GRAMMAR, CypherGrammar
 from drivine.backend.fragment_group import FragmentGroup
+from drivine.backend.graph_backend import GraphBackend
 from drivine.backend.graph_statement import GraphStatement
 from drivine.backend.matched_node import MatchedNode
 from drivine.backend.matching_search import MatchingSearch
 from drivine.backend.nearest_search import NearestSearch
+from drivine.backend.oracle.oracle_backend import OracleBackend
+from drivine.backend.oracle.oracle_graph import OracleGraph
 from drivine.backend.page import Page
+from drivine.connection.database_type import DatabaseType
 from drivine.dsl.query import Query
-from drivine.dsl.query_renderer import QueryRenderer
 from drivine.manager.group_query import GroupQuery
 from drivine.model.graph_view_model import GraphViewModel
-from drivine.schema.schema_grammar import FALKORDB_SCHEMA, MEMGRAPH_SCHEMA, NEO4J_SCHEMA, SchemaGrammar
+from drivine.schema.schema_grammar import (
+    FALKORDB_SCHEMA,
+    MEMGRAPH_SCHEMA,
+    NEO4J_SCHEMA,
+    SchemaGrammar,
+    schema_grammar_for,
+)
 from tests.models import (
     ActorStats,
     ActorWithLatestMovie,
@@ -74,54 +83,82 @@ from tests.models import (
 GOLDEN = json.loads((Path(__file__).parent.parent / "golden" / "statements.json").read_text())
 
 
+CYPHER_WHERE = "n.name = $name"
+SQL_WHERE = "JSON_VALUE(n.props, '$.name') = $name"
+"""A filter in the store's own language: Cypher over `n`, or SQL over the node row `n` on Oracle."""
+
+
 def statements(grammar: CypherGrammar) -> dict[str, str]:
+    return written(CypherBackend(grammar), CYPHER_WHERE, not grammar.orphan_delete_limit)
+
+
+def oracle_statements() -> dict[str, str]:
+    """Oracle's statements: the same cases, a filter in SQL, and the searches through an index's table too."""
+    backend = OracleBackend(OracleGraph())
+    person = ModelRegistry().fragment(Person)
+    return {
+        **written(backend, SQL_WHERE, True),
+        "Person.nearest.indexed": backend.nearest(
+            person,
+            NearestSearch("Person", "embedding", "EUCLIDEAN", 20, limit=5, table="drivine_v_Personembedding_1a2b3c"),
+        ).text,
+        "Person.matching.indexed": backend.matching(
+            person,
+            MatchingSearch(
+                "Person", ("name", "bio"), 10, text="graph -relational", table="drivine_t_Personnamebio_4d5e6f"
+            ),
+        ).text,
+        "Person.searchIndexTable": backend.search_index_table("VECTOR", "Person", ["embedding"]).text,
+    }
+
+
+def written(backend: GraphBackend, where: str, orphans: bool) -> dict[str, str]:
     registry = ModelRegistry()
-    backend = CypherBackend(grammar)
     fragment, view = registry.fragment, registry.view
     cases = {
         "Person.loadAll": backend.load_all_fragments(fragment(Person)),
-        "Person.loadAll.where": backend.load_all_fragments(fragment(Person), "n.name = $name"),
+        "Person.loadAll.where": backend.load_all_fragments(fragment(Person), where),
         "Person.load": backend.load_fragment(fragment(Person)),
-        "Person.count": backend.count_fragments(fragment(Person), "n.name = $name"),
+        "Person.count": backend.count_fragments(fragment(Person), where),
         "Puppy.loadAll": backend.load_all_fragments(fragment(Puppy)),
         "PersonCareer.loadAll": backend.load_all_views(view(PersonCareer)),
         "PersonCareer.load": backend.load_view(view(PersonCareer)),
-        "PersonCareer.count": backend.count_views(view(PersonCareer), "n.name = $name"),
+        "PersonCareer.count": backend.count_views(view(PersonCareer), where),
         "LocationHierarchy.load": backend.load_view(view(LocationHierarchy)),
         "LocationHierarchy.load.depth": backend.load_view(view(LocationHierarchy), {"sub_locations": 5}),
         "LocationAncestors.load": backend.load_view(view(LocationAncestors)),
         "ActorStats.loadAll": backend.load_all_views(view(ActorStats)),
-        "ActorWithMovies.loadAll.where": backend.load_all_views(view(ActorWithMovies), "n.name = $name"),
+        "ActorWithMovies.loadAll.where": backend.load_all_views(view(ActorWithMovies), where),
         "ActorWithMovies.count": backend.count_views(view(ActorWithMovies)),
         "ActorWithLatestMovie.loadAll": backend.load_all_views(view(ActorWithLatestMovie)),
     }
-    cases.update(saves(grammar, registry, backend))
-    cases.update(queries(grammar, registry, backend))
+    cases.update(saves(registry, backend, where, orphans))
+    cases.update(queries(registry, backend))
     cases.update(groups(registry, backend))
-    cases.update(searches(registry, backend))
+    cases.update(searches(registry, backend, where))
     return {name: it.text for name, it in cases.items()}
 
 
-def searches(registry: ModelRegistry, backend: CypherBackend) -> dict[str, GraphStatement]:
+def searches(registry: ModelRegistry, backend: GraphBackend, where: str) -> dict[str, GraphStatement]:
     """The vector and full-text searches TypeScript's golden test writes, written alike."""
     person, career = registry.fragment(Person), registry.view(PersonCareer)
     vector = NearestSearch("Person", "embedding", "COSINE", 5)
-    text = MatchingSearch("Person", ("name", "bio"), 10)
+    text = MatchingSearch("Person", ("name", "bio"), 10, text="graph database")
     return {
         "Person.nearest": backend.nearest(person, vector),
         "Person.nearest.filtered": backend.nearest(
-            person, NearestSearch("Person", "embedding", "EUCLIDEAN", 20, "n.name = $name", True, 5)
+            person, NearestSearch("Person", "embedding", "EUCLIDEAN", 20, where, True, 5)
         ),
         "PersonCareer.nearest": backend.nearest(career, vector),
         "Person.matching": backend.matching(person, text),
         "Person.matching.filtered": backend.matching(
-            person, MatchingSearch("Person", ("bio",), 3, "n.name = $name", True)
+            person, MatchingSearch("Person", ("bio",), 3, where, True, text="graph database")
         ),
         "PersonCareer.matching": backend.matching(career, text),
     }
 
 
-def groups(registry: ModelRegistry, backend: CypherBackend) -> dict[str, GraphStatement]:
+def groups(registry: ModelRegistry, backend: GraphBackend) -> dict[str, GraphStatement]:
     """The grouped reads TypeScript's golden test writes, written alike."""
     movie = registry.fragment(Movie)
     directors = {"director": registry.fragment(Director)}
@@ -167,23 +204,21 @@ def groups(registry: ModelRegistry, backend: CypherBackend) -> dict[str, GraphSt
     }
 
 
-def queries(grammar: CypherGrammar, registry: ModelRegistry, backend: CypherBackend) -> dict[str, GraphStatement]:
+def queries(registry: ModelRegistry, backend: GraphBackend) -> dict[str, GraphStatement]:
     """The queries TypeScript's golden test writes, written alike: each load as its statement."""
 
     def labels(type_: type) -> list[str]:
         return registry.fragment(type_).labels
 
     def load(target, query: Query) -> GraphStatement:  # noqa: ANN001
-        rendered = QueryRenderer.render(query, target, grammar, NODE_ALIAS, labels)
+        rendered = backend.render_query(query, target, labels)
         page = Page(rendered.order_by, rendered.skip, rendered.limit)
         if isinstance(target, GraphViewModel):
             return backend.load_all_views(target, rendered.where, rendered.depth, page)
         return backend.load_all_fragments(target, rendered.where, page)
 
     m, c, a, p = refs(Movie), refs(PersonCareer), refs(Animal), refs(Customer)
-    count_where, _ = QueryRenderer.render_where(
-        refs(Person).name.eq_ignore_case("ada"), registry.fragment(Person), grammar, NODE_ALIAS, labels
-    )
+    count_where, _ = backend.render_where(refs(Person).name.eq_ignore_case("ada"), registry.fragment(Person), labels)
     return {
         "query.Movie.where": load(
             registry.fragment(Movie),
@@ -260,7 +295,7 @@ def queries(grammar: CypherGrammar, registry: ModelRegistry, backend: CypherBack
 STAMP = "aaaaaaaaaaaaaaaa:bbbbbbbbbbbbbbbb"
 
 
-def saves(grammar: CypherGrammar, registry: ModelRegistry, backend: CypherBackend) -> dict[str, GraphStatement]:
+def saves(registry: ModelRegistry, backend: GraphBackend, where: str, orphans: bool) -> dict[str, GraphStatement]:
     """The objects TypeScript's golden test builds, built alike: what a statement's text depends on is the same."""
 
     def save(target, obj, options=None, create_only=False):  # noqa: ANN001, ANN202
@@ -296,8 +331,8 @@ def saves(grammar: CypherGrammar, registry: ModelRegistry, backend: CypherBacken
         ),
         "LocationHierarchy.save": save(view(LocationHierarchy), place("l0", place("l1", place("l2")))),
         "Person.delete": backend.delete(fragment(Person)),
-        "Person.deleteAll": backend.delete_all(fragment(Person), "n.name = $name"),
-        "PersonCareer.delete.where": backend.delete(view(PersonCareer), "n.name = $name"),
+        "Person.deleteAll": backend.delete_all(fragment(Person), where),
+        "PersonCareer.delete.where": backend.delete(view(PersonCareer), where),
         "PersonCareer.delete.all": backend.delete(view(PersonCareer), None, CascadeType.DELETE_ALL),
         "LocationHierarchy.delete.all": backend.delete(view(LocationHierarchy), None, CascadeType.DELETE_ALL),
         "Person.heldProperties": backend.held_properties(fragment(Person)),
@@ -310,7 +345,7 @@ def saves(grammar: CypherGrammar, registry: ModelRegistry, backend: CypherBacken
             SaveOptions(),
         ),
         "Person.patch": backend.patch_one(fragment(Person)),
-        "Person.patch.where": backend.patch_one(fragment(Person), "n.name = $name"),
+        "Person.patch.where": backend.patch_one(fragment(Person), where),
         "Person.patchAll": backend.patch_many(fragment(Person)),
         "edges.relate": backend.relate(
             MatchedNode(fragment(Person), "p1"),
@@ -334,7 +369,7 @@ def saves(grammar: CypherGrammar, registry: ModelRegistry, backend: CypherBacken
             MatchedNode(fragment(Person), "p1"), "OWNS", Direction.OUTGOING, fragment(Dog)
         ),
     }
-    if not grammar.orphan_delete_limit:
+    if orphans:
         cases["PersonCareer.delete.orphans"] = backend.delete(view(PersonCareer), None, CascadeType.DELETE_ORPHAN)
     return cases
 
@@ -400,7 +435,14 @@ def schema(grammar: SchemaGrammar) -> dict[str, str]:
     ],
 )
 def test_writes_what_typescript_writes(engine: str, grammar: CypherGrammar, ddl: SchemaGrammar):
-    written = {**statements(grammar), **schema(ddl)}
-    assert written.keys() == GOLDEN[engine].keys()
-    for name, text in written.items():
+    expect_golden(engine, {**statements(grammar), **schema(ddl)})
+
+
+def test_writes_what_typescript_writes_for_oracle():
+    expect_golden("ORACLE", {**oracle_statements(), **schema(schema_grammar_for(DatabaseType.ORACLE))})
+
+
+def expect_golden(engine: str, statements: dict[str, str]) -> None:
+    assert statements.keys() == GOLDEN[engine].keys()
+    for name, text in statements.items():
         assert text == GOLDEN[engine][name], name

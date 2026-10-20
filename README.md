@@ -4,14 +4,15 @@
 and [drivine4j](https://github.com/liberation-data/drivine4j) for the JVM. Async first, typed, and fast: one statement per
 round trip, no session cache, no lazy loading.
 
-> **Status: early.** On Neo4j, Memgraph and FalkorDB today: the low-level `PersistenceManager`, transactions, and the object
-> manager's loading, saving, batches, patches, edges and deletes of fragments and views, the query DSL and grouped
-> reads, schema management, and vector and full-text search. Oracle and typed references come next. Neptune connects
+> **Status: early.** On Neo4j, Memgraph, FalkorDB and Oracle today: the low-level `PersistenceManager`, transactions,
+> and the object manager's loading, saving, batches, patches, edges and deletes of fragments and views, the query DSL
+> and grouped reads, schema management, and vector and full-text search. Typed references come next. Neptune connects
 > the same way, for the `PersistenceManager`. See [the design](docs/design.md) for where it is going.
 
 ```
 pip install "drivine[neo4j]"      # Neo4j, Memgraph, Neptune
 pip install "drivine[falkordb]"   # FalkorDB
+pip install "drivine[oracle]"     # Oracle 23ai and 26ai, through python-oracledb in thin mode
 ```
 
 Python 3.11 or newer.
@@ -44,6 +45,13 @@ await registry.close()                            # when the application stops
 ```
 
 On FalkorDB, `DATABASE_NAME` names the graph, `graph` by default.
+
+On Oracle, `DATABASE_NAME` is the service (`FREEPDB1`, say), and `DATABASE_DEFAULT_GRAPH_PATH` names the graph,
+`drivine` by default. A graph is drivine4j's tables, `<graph>_node`, `<graph>_edge` and `<graph>_schema`, and a SQL
+property graph over them, made on the first connection when they aren't there, so one store serves the JVM, Node and
+Python. The object manager writes SQL for it, and the query DSL, grouped reads, search and schema management work as on
+the graph engines. A raw `where` is SQL over the node's row, `n`: its `labels`, `props` (a JSON object keyed by stored
+name) and `stamp`, say `JSON_VALUE(n.props, '$.name') = $name`. Your own statements are SQL too.
 
 Or in code:
 
@@ -438,10 +446,13 @@ Nothing requires pi-pilgrim: the managers are plain classes.
 drivine_test_containers = true
 ```
 
-it starts a container for each datasource the environment configures, Neo4j, Memgraph or FalkorDB, before the tests run, and
-points the datasource at it. Datasources of one type share a container. `USE_LOCAL_NEO4J=true` (or `_MEMGRAPH`, `_FALKORDB`)
-leaves that type's datasources as they are, to test against your own instance, and `NEO4J_TEST_IMAGE` picks another
-image.
+it starts a container for each datasource the environment configures, Neo4j, Memgraph, FalkorDB or Oracle, before the
+tests run, and points the datasource at it. Datasources of one type share a container. `USE_LOCAL_NEO4J=true` (or
+`_MEMGRAPH`, `_FALKORDB`, `_ORACLE`) leaves that type's datasources as they are, to test against your own instance, and
+`NEO4J_TEST_IMAGE` picks another image.
+
+Drivine's own tests run on Oracle only with `ORACLE_TESTS=true`: its image is large, and the database wants two
+gigabytes.
 
 ## Logging
 

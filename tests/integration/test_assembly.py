@@ -47,3 +47,16 @@ async def test_a_subclass_registers_its_own_databases():
 
 async def test_closing_an_unused_assembly_does_nothing():
     await DrivineAssembly().close()
+
+
+async def test_provides_one_object_manager_for_each_database():
+    from drivine import StatelessGraphObjectManager
+
+    assembly = DrivineAssembly()
+    try:
+        gom = assembly.graph_object_manager()
+        assert isinstance(gom, StatelessGraphObjectManager)
+        assert gom is assembly.graph_object_manager("default")
+        assert gom.registry is assembly.graph_object_manager_factory().get("default").registry
+    finally:
+        await assembly.close()

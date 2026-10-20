@@ -4,9 +4,9 @@
 and [drivine4j](https://github.com/liberation-data/drivine4j) for the JVM. Async first, typed, and fast: one statement per
 round trip, no session cache, no lazy loading.
 
-> **Status: early.** The low-level `PersistenceManager` and transactions work today on Neo4j and Memgraph, with
-> Neptune connecting the same way. The object manager (fragments, views, the query DSL) and the other engines come
-> next. See [the design](docs/design.md) for where it is going.
+> **Status: early.** On Neo4j and Memgraph today: the low-level `PersistenceManager`, transactions, and the object
+> manager's loading of fragments and views. Saving, the query DSL and the other engines come next. Neptune connects
+> the same way, for the `PersistenceManager`. See [the design](docs/design.md) for where it is going.
 
 ```
 pip install "drivine[neo4j]"   # Neo4j, Memgraph, Neptune
@@ -160,6 +160,64 @@ cursor takes its turn for each row it reads, so other statements run between its
 the transaction, and the statements after it raise `TransactionRolledBackError` at once.
 
 The queue keeps concurrency correct, not parallel. For a parallel import, give each task its own transaction.
+
+## Fragments and views
+
+Map a node with a `NodeFragment`, and compose fragments and relationships into a `GraphView`, which loads in one
+statement:
+
+```python
+from typing import Annotated
+
+from drivine import GraphView, NodeFragment, NodeId, Relationship, RelationshipFragment, Root, TargetNode
+
+
+class Person(NodeFragment, labels=["Person"]):
+    uuid: Annotated[str, NodeId()]
+    name: str
+    bio: str | None = None
+
+
+class Organization(NodeFragment, labels=["Organization"]):
+    uuid: Annotated[str, NodeId()]
+    name: str
+
+
+class WorkHistory(RelationshipFragment):     # a relationship's properties, and the node it leads to
+    start_date: str
+    role: str
+    target: Annotated[Organization, TargetNode()]
+
+
+class PersonCareer(GraphView):
+    person: Annotated[Person, Root()]
+    employment_history: Annotated[list[WorkHistory], Relationship("WORKS_FOR")] = []
+```
+
+```python
+gom = drivine.graph_object_manager()        # from DrivineAssembly, or StatelessGraphObjectManager(pm)
+
+career = await gom.load(PersonCareer, uuid)
+leads = await gom.load_all(PersonCareer, "n.bio CONTAINS $text", {"text": "Lead"})
+total = await gom.count(Person)
+```
+
+- **Models are Pydantic.** A loaded fragment is validated, so a bad value fails at the load.
+- **The annotation says what a relationship holds**: a fragment, a relationship fragment or a view, one or a list. A
+  single relationship typed without `None` is required, so only roots that have it load; `Person | None` is
+  optional. A list is required with `Relationship(..., required=True)`.
+- **Properties are stored in camel case**, as TypeScript and JVM models store them: `start_date` as `startDate`.
+  `GraphProperty("name")` names one, and `property_names="as_written"` keeps a class's fields as they are written.
+- **A subclass is loaded as itself.** A fragment's labels are inherited, and a node loads as the most specific
+  subclass whose labels it carries.
+- **Recursion:** `Relationship("HAS_LOCATION", max_depth=3)` on a list of the view's own class expands three levels;
+  `depth={"sub_locations": 5}` overrides it for one load.
+- **More markers:** `GraphPath([hop(...), ...])` for the nodes at the end of several hops, `Count` and `Aggregate`
+  computed in the query, `SortedBy`, `ReadOnly`, `Transient`, `NodeStamp`, `NodeLabels`, `PropertyBag`,
+  `JsonPacked`, `NullAsDefault` and `EmptyWhenAbsent`, as in TypeScript's Drivine.
+
+The statements are TypeScript's, character for character: the tests check them against those TypeScript's Drivine
+writes for the same models.
 
 ## With pi-pilgrim
 

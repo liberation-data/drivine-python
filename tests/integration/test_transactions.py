@@ -53,6 +53,7 @@ async def test_commits(pm: PersistenceManager):
     assert await names(pm) == ["Ada", "Grace"]
 
 
+@pytest.mark.rolls_back
 async def test_sees_its_own_writes_before_it_commits(pm: PersistenceManager):
     async with transaction(rollback=True):
         await pm.execute(create("Ada"))
@@ -60,12 +61,14 @@ async def test_sees_its_own_writes_before_it_commits(pm: PersistenceManager):
     assert await names(pm) == []
 
 
+@pytest.mark.rolls_back
 async def test_rolls_back_on_an_exception(pm: PersistenceManager):
     with pytest.raises(ValueError):
         await People(pm).add_then_fail("Ada")
     assert await names(pm) == []
 
 
+@pytest.mark.rolls_back
 async def test_rolls_back_an_inner_failure_the_caller_caught(pm: PersistenceManager):
     with pytest.raises(TransactionRolledBackError):
         await People(pm).add_and_swallow("Ada")
@@ -78,6 +81,7 @@ async def test_concurrent_tasks_share_the_transaction(pm: PersistenceManager):
     assert await names(pm) == [f"p{it:02}" for it in range(20)]
 
 
+@pytest.mark.rolls_back
 async def test_a_failed_statement_among_concurrent_tasks_rolls_all_back(pm: PersistenceManager):
     async def tolerant(spec: QuerySpecification[None]) -> None:
         try:

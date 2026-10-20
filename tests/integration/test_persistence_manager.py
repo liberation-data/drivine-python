@@ -48,7 +48,8 @@ async def test_temporal_values_are_the_standard_librarys(pm: PersistenceManager)
     value = await pm.get_one(QuerySpecification("RETURN date('2024-02-29')"))
     assert value == date(2024, 2, 29)
     stamp = await pm.get_one(QuerySpecification("RETURN localdatetime('2024-02-29T10:15:30')"))
-    assert stamp == datetime(2024, 2, 29, 10, 15, 30)
+    # FalkorDB has one datetime type, held in UTC, and its client returns it aware of that.
+    assert stamp.replace(tzinfo=None) == datetime(2024, 2, 29, 10, 15, 30)
 
 
 async def test_skip_and_limit(pm: PersistenceManager):
@@ -93,6 +94,7 @@ class TestCursors:
         # The connection went back to the pool: the next statement gets one.
         assert await pm.get_one(QuerySpecification("MATCH (p:Person) RETURN count(p)")) == 50
 
+    @pytest.mark.rolls_back
     async def test_interleaves_with_statements_in_a_transaction(self, pm: PersistenceManager):
         await make_people(pm, 12)
         seen: list[int] = []

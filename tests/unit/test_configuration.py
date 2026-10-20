@@ -72,7 +72,7 @@ class TestDatabaseRegistry:
             DatabaseRegistry().builder().database_type(DatabaseType.NEO4J).host("localhost").register()
 
     def test_an_engine_not_ported_yet_says_so(self):
-        builder = DatabaseRegistry().builder().database_type(DatabaseType.FALKORDB).host("localhost")
+        builder = DatabaseRegistry().builder().database_type(DatabaseType.POSTGRES).host("localhost")
         with pytest.raises(DrivineError, match="not supported by drivine-python yet"):
             builder.register()
 

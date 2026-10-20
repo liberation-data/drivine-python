@@ -25,6 +25,7 @@ class DelegatingPersistenceManager(PersistenceManager):
         self.non_transactional = non_transactional
         self.database = transactional.database
         self.type = transactional.type
+        self.provider = transactional.provider
 
     def _delegate(self) -> PersistenceManager:
         return self.transactional if current_transaction() is not None else self.non_transactional

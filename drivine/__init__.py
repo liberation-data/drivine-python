@@ -34,11 +34,15 @@ from drivine.drivine_assembly import DrivineAssembly
 from drivine.drivine_error import DrivineError
 from drivine.manager.cascade_type import CascadeType
 from drivine.manager.delegating_persistence_manager import DelegatingPersistenceManager
+from drivine.manager.edge_operations import EdgeOperations
 from drivine.manager.graph_object_manager_factory import GraphObjectManagerFactory
+from drivine.manager.node_ref import NodeRef, node_ref
 from drivine.manager.non_transactional_persistence_manager import NonTransactionalPersistenceManager
 from drivine.manager.null_policy import NullPolicy
+from drivine.manager.patch_result import PatchResult
 from drivine.manager.persistence_manager import PersistenceManager
 from drivine.manager.persistence_manager_factory import PersistenceManagerFactory
+from drivine.manager.relate_mode import RelateMode
 from drivine.manager.removed_targets import RemovedTargets
 from drivine.manager.save_options import SaveOptions
 from drivine.manager.stale_object_error import StaleObjectError
@@ -73,6 +77,7 @@ __all__ = [
     "Direction",
     "DrivineAssembly",
     "DrivineError",
+    "EdgeOperations",
     "EmptyWhenAbsent",
     "GraphObjectManagerFactory",
     "GraphPath",
@@ -84,16 +89,19 @@ __all__ = [
     "NodeFragment",
     "NodeId",
     "NodeLabels",
+    "NodeRef",
     "NodeStamp",
     "NonTransactionalPersistenceManager",
     "NullAsDefault",
     "NullPolicy",
+    "PatchResult",
     "PersistenceManager",
     "PersistenceManagerFactory",
     "PropertyBag",
     "PropertyNames",
     "QuerySpecification",
     "ReadOnly",
+    "RelateMode",
     "Relationship",
     "RelationshipFragment",
     "RemovedTargets",
@@ -113,6 +121,7 @@ __all__ = [
     "cypher_file",
     "cypher_statement",
     "hop",
+    "node_ref",
     "sql_file",
     "sql_statement",
     "stamps",

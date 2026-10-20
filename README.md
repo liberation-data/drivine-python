@@ -5,7 +5,7 @@ and [drivine4j](https://github.com/liberation-data/drivine4j) for the JVM. Async
 round trip, no session cache, no lazy loading.
 
 > **Status: early.** On Neo4j and Memgraph today: the low-level `PersistenceManager`, transactions, and the object
-> manager's loading, saving and deleting of fragments and views. Batches, patches, edges, the query DSL and the other
+> manager's loading, saving, batches, patches, edges and deletes of fragments and views. The query DSL and the other
 > engines come next. Neptune connects
 > the same way, for the `PersistenceManager`. See [the design](docs/design.md) for where it is going.
 
@@ -231,6 +231,15 @@ created = await gom.create(person)                                   # only if a
 updated = await gom.update(Person, uuid, lambda it: it.model_copy(update={"name": "Ada"}))
 await gom.delete(PersonCareer, uuid, cascade=CascadeType.DELETE_ORPHAN)
 await gom.delete_all(Person, "n.name = $name", {"name": "Ada"})
+
+await gom.save_all(chunks)                                           # fragments in one statement per 1,000
+result = await gom.patch(Session, session_id, set={"last_activity_at": now},
+                         where="n.lastActivityAt IS NULL OR n.lastActivityAt < $now", bindings={"now": now})
+results = await gom.patch_all(chunks, only=["embedding"])            # named fields, where each node is there
+
+await gom.edges.relate(node_ref(Issue, a), node_ref(Person, b), "ASSIGNED_TO")
+await gom.edges.unrelate(node_ref(Issue, a), node_ref(Person, b), "ASSIGNED_TO")
+people = await gom.edges.load_related(node_ref(Issue, a), "ASSIGNED_TO", Person)
 ```
 
 - **A save is one statement**, applied whole or not at all: the root, the relationships it drops, each related node
@@ -240,6 +249,10 @@ await gom.delete_all(Person, "n.name = $name", {"name": "Ada"})
 - **Stamps refuse a stale save.** On a class with a `NodeStamp` field, a save of an object loaded before another
   writer changed the node raises `StaleObjectError` and writes nothing. Use the object a save returns: it carries the
   new stamp. `update` loads, applies your change and saves what it altered, again if the node changed meanwhile.
+- **`save_all`** runs its statements in one transaction, or in yours, so a failure leaves nothing written.
+- **`patch`** writes named fields of one node by id, if it meets a condition, without loading it, and says whether it
+  found the node, applied the patch and changed anything. It never makes a node.
+- **Edges** relate and unrelate stored nodes by id, marking both ends' stamps.
 - **Outside a transaction**, a save the engine turns away because another writer held the node is run again after a
   pause. Inside one, it joins the transaction, and fails for its owner to decide.
 

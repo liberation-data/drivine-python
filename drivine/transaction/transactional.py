@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import functools
-import inspect
 from collections.abc import Awaitable, Callable
 from contextvars import Token
 from types import TracebackType
 from typing import Any, ParamSpec, TypeVar, overload
 
+from drivine import concurrency
 from drivine.drivine_error import DrivineError
 from drivine.transaction.transaction import Transaction, _current
 
@@ -74,10 +74,10 @@ class transaction:
             _current.reset(token)
 
     def __call__(self, function: Callable[P, Awaitable[R]]) -> Callable[P, Awaitable[R]]:
-        if not inspect.iscoroutinefunction(function):
+        if not concurrency.runs_here(function):
             raise TypeError(
-                f"@transactional takes an async function, and {function.__qualname__} isn't one. "
-                f"The sync API will take sync functions."
+                f"@transactional takes {concurrency.FUNCTIONS}, and {function.__qualname__} isn't one: "
+                f"take @transactional from {concurrency.OTHER_API}."
             )
         rollback, no_rollback_for = self.rollback, self.no_rollback_for
 

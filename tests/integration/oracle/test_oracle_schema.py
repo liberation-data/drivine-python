@@ -97,6 +97,7 @@ async def test_advises_on_an_ordered_query_and_stops_once_the_index_is_there(gom
     await gom.indexes.drop(range_index("OraSchema", "region"))
 
 
+@pytest.mark.async_only
 async def test_agrees_on_one_store_identity_across_managers_resolving_at_once(pm: PersistenceManager):
     identities = await asyncio.gather(*(StatelessGraphObjectManager(pm).store_identity() for _ in range(5)))
     assert len({it.id for it in identities}) == 1

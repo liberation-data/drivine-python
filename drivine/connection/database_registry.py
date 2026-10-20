@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 from collections.abc import Mapping
 
@@ -58,7 +57,8 @@ class DatabaseRegistry:
         """
         providers = list(self._providers.values())
         self._providers.clear()
-        results = await asyncio.gather(*(it.end() for it in providers), return_exceptions=True)
-        for provider, result in zip(providers, results, strict=True):
-            if isinstance(result, BaseException):
-                logger.warning("Ending %s failed: %s", provider, result)
+        for provider in providers:
+            try:
+                await provider.end()
+            except Exception as error:
+                logger.warning("Ending %s failed: %s", provider, error)

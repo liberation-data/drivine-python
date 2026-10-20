@@ -130,6 +130,7 @@ async def test_refuses_a_stale_save_and_one_of_a_deleted_node_writing_nothing(go
     assert await gom.load(Person, "bob") is None
 
 
+@pytest.mark.async_only
 async def test_exactly_one_of_several_writers_holding_one_stamp_wins(gom):
     base = await gom.save(Person(id="cy", name="Cy"))
     writers = [Person(id="cy", name=f"Writer {i}", stamp=base.stamp) for i in range(1, 6)]

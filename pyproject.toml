@@ -62,6 +62,7 @@ drivine_test_containers = true
 markers = [
     "rolls_back: needs multi-statement transactions, which FalkorDB lacks",
     "graph_engines: written in Cypher, which Oracle doesn't take",
+    "async_only: runs tasks concurrently; left out of the sync tests scripts/unasync.py writes",
 ]
 
 [tool.ruff]

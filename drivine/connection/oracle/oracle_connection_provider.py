@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import asyncio
 from typing import Any
 
+from drivine import concurrency
 from drivine.backend.oracle.oracle_graph import DEFAULT_GRAPH, OracleGraph
 from drivine.connection.connection import Connection
 from drivine.connection.connection_provider import ConnectionProvider
@@ -38,20 +38,18 @@ class OracleConnectionProvider(ConnectionProvider):
         self.graph = OracleGraph(graph or DEFAULT_GRAPH)
         self.graph_name = self.graph.name
         self._pool: Any = None
-        self._ensured: asyncio.Task[None] | None = None
+        self._ensuring = concurrency.Lock()
+        self._ensured = False
 
     async def connect(self) -> Connection:
         """A connection, the graph's tables made first if this is the first (schema statements commit on their own)."""
         pool = self._pool_of()
         connection = await pool.acquire()
         try:
-            if self._ensured is None:
-                self._ensured = asyncio.ensure_future(self._ensure(connection))
-            try:
-                await asyncio.shield(self._ensured)
-            except BaseException:
-                self._ensured = None
-                raise
+            async with self._ensuring:
+                if not self._ensured:
+                    await self._ensure(connection)
+                    self._ensured = True
             cursor = connection.cursor()
             await cursor.execute("SELECT SYS_CONTEXT('USERENV', 'SID') FROM dual")
             row = await cursor.fetchone()
@@ -64,7 +62,7 @@ class OracleConnectionProvider(ConnectionProvider):
     async def end(self) -> None:
         # Cleared before waiting, so a second call made meanwhile doesn't close the pool again.
         pool, self._pool = self._pool, None
-        self._ensured = None
+        self._ensured = False
         if pool is not None:
             await pool.close(force=True)
 

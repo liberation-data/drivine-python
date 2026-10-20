@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-import asyncio
 import random
 from collections.abc import Awaitable, Callable
 from typing import TypeVar
+
+from drivine import concurrency
 
 R = TypeVar("R")
 
@@ -27,7 +28,7 @@ def contended_pause(attempt: int, chance: Callable[[], float] = random.random) -
 async def when_not_contended(
     statement: Callable[[], Awaitable[R]],
     contended: Callable[[BaseException], bool],
-    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    sleep: Callable[[float], Awaitable[None]] = concurrency.sleep,
 ) -> R:
     """
     Runs `statement`, again after a pause when the engine turned it away for contention. The first failure is raised

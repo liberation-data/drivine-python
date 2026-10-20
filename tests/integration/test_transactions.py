@@ -78,12 +78,14 @@ async def test_rolls_back_an_inner_failure_the_caller_caught(pm: PersistenceMana
     assert await names(pm) == []
 
 
+@pytest.mark.async_only
 async def test_concurrent_tasks_share_the_transaction(pm: PersistenceManager):
     async with transaction():
         await asyncio.gather(*(pm.execute(create(f"p{it:02}")) for it in range(20)))
     assert await names(pm) == [f"p{it:02}" for it in range(20)]
 
 
+@pytest.mark.async_only
 @pytest.mark.rolls_back
 async def test_a_failed_statement_among_concurrent_tasks_rolls_all_back(pm: PersistenceManager):
     async def tolerant(spec: QuerySpecification[None]) -> None:

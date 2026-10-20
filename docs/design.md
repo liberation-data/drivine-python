@@ -76,7 +76,7 @@ drivine/
   store/          store identity
   drivine_assembly.py   DrivineAssembly (pi-pilgrim)
   testing/        pytest plugin, testcontainers
-  sync/           generated: the same API, without async
+  sync/           written from the async source by scripts/unasync.py: the same API, without async
 ```
 
 ### One class per module
@@ -581,13 +581,18 @@ transaction is a `@transactional` service method, or opens `async with transacti
 
 `drivine.sync` is the same API without `async` and `await`, for scripts, notebooks, Django and Flask.
 
-- It is generated from the async source by an unasync step at build time, as the Neo4j Python driver generates its
-  own sync API.
+- It is written from the async source by `scripts/unasync.py`, as the Neo4j Python driver writes its own sync API: the
+  tokens `async` and `await` dropped, the async names of the language and each driver renamed (`AsyncGraphDatabase`,
+  `falkordb.asyncio`, `create_pool_async`), and imports pointed at the sync modules.
+- Only what does I/O is written again: a module with async code, and any that imports one. Models, the query DSL,
+  backends and grammars are shared, so a class is one class in both APIs.
+- What the async API asks of asyncio (a lock, a sleep, which functions `@transactional` takes) is in
+  `drivine/concurrency.py`, whose counterpart over threading is the one sync module written by hand.
 - Each sync class uses its driver's sync client, not an event loop behind it, so it costs nothing extra and works
   where a loop is already running, as in Jupyter.
-- One source, two APIs. A fix is written once, and CI checks the generated code is up to date.
-
-It comes after the async API is complete, not alongside it.
+- The integration tests are written again too, so the sync API runs every test the async one does, but those marked
+  `async_only`, which run tasks concurrently. `tests/sync` holds what only threads do.
+- One source, two APIs. A fix is written once, and a unit test fails while the generated code is out of date.
 
 ## Schema, Store Identity, Testing, Logging
 
@@ -646,7 +651,7 @@ An integration test writes with one language and reads with the other, on each e
 
 Each milestone ends with tests passing on every engine it covers, and is releasable.
 
-**Progress:** 1 to 9 are done, on Neo4j, Memgraph and FalkorDB, and on Oracle 23ai/26ai for 8. Neptune connects for
+**Progress:** 1 to 10 are done, on Neo4j, Memgraph and FalkorDB, and on Oracle 23ai/26ai for 8. Neptune connects for
 the `PersistenceManager`, untested: there is no container for it. Index advice moved to milestone 7, which lists the
 database's indexes. The golden statements are in drivine's `test/1.Unit/golden`, copied to `tests/golden`; Oracle's are
 checked there too. The object-manager suites run on Oracle with `ORACLE_TESTS=true`, beside the Oracle-only suites in

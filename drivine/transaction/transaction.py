@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 from contextvars import ContextVar
 from typing import Any, TypeVar
 
+from drivine import concurrency
 from drivine.connection.connection import Connection
 from drivine.connection.connection_provider import ConnectionProvider
 from drivine.cursor.cursor import Cursor
@@ -36,7 +36,7 @@ class Transaction:
     nothing.
 
     Tasks started inside a transaction share it, and a database transaction runs one statement at a time, so each
-    connection's statements are queued: each takes the connection's lock, which asyncio grants in the order asked.
+    connection's statements are queued: each takes the connection's lock, granted in the order asked.
     A statement that fails marks the transaction rollback-only, and the statements after it raise
     `TransactionRolledBackError` at once.
     """
@@ -46,7 +46,7 @@ class Transaction:
         self.rollback = rollback
         """Roll back at the end, even on success: for tests."""
         self._connections: dict[int, _QueuedConnection] = {}
-        self._connecting = asyncio.Lock()
+        self._connecting = concurrency.Lock()
         self._cursors: list[Cursor[Any]] = []
         self._failure: BaseException | None = None
         self._ended = False
@@ -183,7 +183,7 @@ class _QueuedConnection:
     def __init__(self, provider: ConnectionProvider, connection: Connection) -> None:
         self.provider = provider
         self.connection = connection
-        self.lock = asyncio.Lock()
+        self.lock = concurrency.Lock()
 
 
 class _QueuedCursor(Cursor[T]):
@@ -192,7 +192,9 @@ class _QueuedCursor(Cursor[T]):
     between its reads.
     """
 
-    def __init__(self, cursor: Cursor[T], lock: asyncio.Lock, transaction: Transaction, spec: CursorSpecification[T]):
+    def __init__(
+        self, cursor: Cursor[T], lock: concurrency.Lock, transaction: Transaction, spec: CursorSpecification[T]
+    ):
         self.cursor = cursor
         self.lock = lock
         self.transaction = transaction

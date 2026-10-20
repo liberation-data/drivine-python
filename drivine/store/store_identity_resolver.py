@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 import re
 import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from drivine import concurrency
 from drivine.drivine_error import DrivineError
 from drivine.schema.schema_specs import uniqueness_constraint
 from drivine.store.store_identity import StoreIdentity
@@ -101,5 +101,5 @@ class StoreIdentityResolver:
                 # Lost the race to a peer's first boot: its stamp is there, or about to be. Back off and merge onto it.
                 if not guarded or attempt >= _MERGE_ATTEMPTS or not _LOST_RACE.search(str(error)):
                     raise
-                await asyncio.sleep(_MERGE_BACKOFF_SECONDS * 2 ** (attempt - 1))
+                await concurrency.sleep(_MERGE_BACKOFF_SECONDS * 2 ** (attempt - 1))
                 attempt += 1

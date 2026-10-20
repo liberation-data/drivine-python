@@ -275,6 +275,7 @@ class TestDelete:
 
 
 class TestConcurrency:
+    @pytest.mark.async_only
     async def test_of_two_saves_from_one_load_one_is_refused(self, pm, gom):
         await gom.save(Person(uuid="p1", name="Ada"))
         first, second = await gom.load(Person, "p1"), await gom.load(Person, "p1")

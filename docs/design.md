@@ -460,19 +460,21 @@ await gom.load_all(Proposition, where=[
 
 ### Typed references
 
-`refs(PersonCareer)` is typed as `Refs[PersonCareer]`, which a type checker sees as untyped. Python's type system
-can't derive "a reference type for each field" from a class, so checking needs generated code, as drivine4j uses KSP:
+`refs(PersonCareer)` is typed `Any`: Python's type system can't derive "a reference type for each field" from a class,
+so checking needs generated code, as drivine4j uses KSP:
 
 ```
-python -m drivine.refs myapp/models.py     # writes myapp/models_refs.pyi
+python -m drivine.stubs myapp.models     # writes myapp/models_refs.py and myapp/models_refs.pyi
 ```
 
-The stub declares a reference class per model, `PersonCareerRefs` with `person: PersonRefs`, `bio: TextRef`, and so
-on, and an overload of `refs` for each model. With it, pyright and mypy reject `q.person.bio.gt(3)` and
-`q.person.nmae`, and editors complete field names. Without it, everything still runs, and a misspelt field fails when
-the query is built, naming the field and the model.
-
-This is a later milestone. The runtime references come first.
+The stub declares, for each model, `PersonCareerRefs` (its fields' references: `person: PersonNodes`, `bio: StringRef`,
+and so on) and `PersonCareerNodes` (what a relationship to it reaches, adding `any` and `none`), and an overload of
+`refs` for each model, a subclass's before its parent's. A field's reference follows from its type as TypeScript's
+`RefOf` derives it, through the protocols `ValueRef`, `ComparableRef`, `StringRef`, `ListRef`, `BagRefs` and
+`NodeTests`, which the runtime `Ref` meets. With it, pyright and mypy reject `q.person.bio.gt(3)` and `q.person.nmae`,
+and editors complete field names. The module beside the stub is drivine's `refs` at run time. A standalone script,
+rather than a mypy plugin, because pyright can't use plugins; `--check` fails when the stub is out of date, for CI.
+Without it, everything still runs, and a misspelt field fails when the query is built, naming the field and the model.
 
 ## PersistenceManager
 
@@ -644,7 +646,7 @@ An integration test writes with one language and reads with the other, on each e
 
 Each milestone ends with tests passing on every engine it covers, and is releasable.
 
-**Progress:** 1 to 8 are done, on Neo4j, Memgraph and FalkorDB, and on Oracle 23ai/26ai for 8. Neptune connects for
+**Progress:** 1 to 9 are done, on Neo4j, Memgraph and FalkorDB, and on Oracle 23ai/26ai for 8. Neptune connects for
 the `PersistenceManager`, untested: there is no container for it. Index advice moved to milestone 7, which lists the
 database's indexes. The golden statements are in drivine's `test/1.Unit/golden`, copied to `tests/golden`; Oracle's are
 checked there too. The object-manager suites run on Oracle with `ORACLE_TESTS=true`, beside the Oracle-only suites in
@@ -674,5 +676,3 @@ checked there too. The object-manager suites run on Oracle with `ORACLE_TESTS=tr
   is a behaviour change there, so it would wait for a major version.
 - **`REQUIRES_NEW`** in the first release, or later?
 - **Validation on load** by default (recommended), or `model_construct` by default for speed?
-- **The stub generator:** a standalone script (recommended: it works with every checker) or a mypy plugin, which
-  pyright can't use.

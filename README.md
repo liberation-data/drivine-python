@@ -261,7 +261,33 @@ q.employment_history.none(lambda it: it.role.eq("Lead"))
   with `above`, `below`, `at_least`, `at_most`, `equal_to`, `has_value` and the rest, all computed in the database.
 - `count`, `delete`, `delete_all` and `patch` take conditions too.
 
-The references aren't typed for an editor yet: generated stubs will make them so.
+### Typed references
+
+`refs` is untyped: Python can't derive a reference type for each field from a class, as TypeScript does. A
+misspelt field still fails, but when the query is written. To have pyright or mypy check each query, and an editor
+complete its fields, write typed references for your models:
+
+```
+python -m drivine.stubs myapp.models                 # writes myapp/models_refs.py and models_refs.pyi
+python -m drivine.stubs myapp.models --check         # in CI: fails when the models changed since
+```
+
+Then import `refs` from the module written:
+
+```python
+from myapp.models_refs import refs
+
+q = refs(PersonCareer)                  # PersonCareerRefs
+q.person.bio.contains("Lead")           # StringRef
+q.person.born.gt("1815")                # error: born is ComparableRef[int]
+q.person.nmae                           # error: PersonNodes has no attribute nmae
+```
+
+Each field's reference follows from its type: text is a `StringRef`; numbers, dates and times are a
+`ComparableRef`; booleans and enums a `ValueRef`; lists and sets a `ListRef`; a property bag gives any entry; and a
+relationship leads to the fields of the nodes it reaches, with `any` and `none`. At run time the module is drivine's
+`refs`, so nothing changes but what the checker knows. Several modules can share one: `python -m drivine.stubs
+myapp.models myapp.billing --out myapp/query_refs.py`.
 
 ### Grouped reads
 

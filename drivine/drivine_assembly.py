@@ -3,6 +3,7 @@ from __future__ import annotations
 from pipilgrim import PilgrimAssembly
 
 from drivine.connection.database_registry import DEFAULT, DatabaseRegistry
+from drivine.dsl.index_advice_policy import IndexAdvicePolicy
 from drivine.manager.graph_object_manager_factory import GraphObjectManagerFactory
 from drivine.manager.persistence_manager import PersistenceManager
 from drivine.manager.persistence_manager_factory import PersistenceManagerFactory
@@ -65,7 +66,18 @@ class DrivineAssembly(PilgrimAssembly):
         return self.shared(lambda: ModelRegistry())
 
     def graph_object_manager_factory(self) -> GraphObjectManagerFactory:
-        return self.shared(lambda: GraphObjectManagerFactory(self.persistence_manager_factory(), self.model_registry()))
+        return self.shared(
+            lambda: GraphObjectManagerFactory(
+                self.persistence_manager_factory(), self.model_registry(), self.index_advice()
+            )
+        )
+
+    def index_advice(self) -> IndexAdvicePolicy:
+        """
+        What an ordered query with no range index to seek into does: WARN by default. Override it to return FAIL in
+        development or CI.
+        """
+        return IndexAdvicePolicy.WARN
 
     def graph_object_manager(self, database: str = DEFAULT) -> StatelessGraphObjectManager:
         """

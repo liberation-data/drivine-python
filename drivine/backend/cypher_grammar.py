@@ -1,12 +1,25 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
+from drivine.backend.cypher import quote_string
 from drivine.connection.database_type import DatabaseType
 from drivine.drivine_error import DrivineError
+from drivine.schema.schema_specs import full_text_index, item_name, vector_index
+from drivine.schema.vector_index_spec import SimilarityFunction
+
+
+def _full_text_index_name(label: str, properties: Sequence[str]) -> str:
+    """The full-text index Drivine makes over a label's properties (see full_text_index), by the name it gives it."""
+    return item_name(full_text_index(label, properties))
+
+
+def _vector_index_name(label: str, property: str) -> str:
+    """The vector index Drivine makes over a label's property (see vector_index), by the name it gives it."""
+    return item_name(vector_index(label, property, 1))
 
 
 def _exists_subquery(pattern: str, where: str | None = None) -> str:
@@ -43,6 +56,47 @@ def _plain_vector(expression: str) -> str:
     return expression
 
 
+def _neo4j_full_text_search(label: str, properties: Sequence[str]) -> str:
+    name = quote_string(_full_text_index_name(label, properties))
+    return f"CALL db.index.fulltext.queryNodes({name}, $_text) YIELD node, score"
+
+
+def _neo4j_vector_search(label: str, property: str, similarity: SimilarityFunction) -> tuple[str, str]:
+    # Neo4j's score is already (1 + cos) / 2, or 1 / (1 + d²).
+    name = quote_string(_vector_index_name(label, property))
+    return f"CALL db.index.vector.queryNodes({name}, $_k, $_vector) YIELD node AS n, score AS _raw", "_raw"
+
+
+def _memgraph_full_text_search(label: str, properties: Sequence[str]) -> str:
+    name = quote_string(_full_text_index_name(label, properties))
+    return f"CALL text_search.search_all({name}, $_text) YIELD node, score"
+
+
+def _memgraph_vector_search(label: str, property: str, similarity: SimilarityFunction) -> tuple[str, str]:
+    # Memgraph's similarity is the cosine itself, or already 1 / (1 + d²). Its vector search returns nodes deleted since
+    # its last garbage collection, and any read of one fails ('Trying to access labels on a deleted node') until it
+    # collects: FREE MEMORY forces it (memgraph/memgraph#4975).
+    name = quote_string(_vector_index_name(label, property))
+    return (
+        f"CALL vector_search.search({name}, $_k, $_vector) YIELD node AS n, similarity AS _raw",
+        "(1 + _raw) / 2.0" if similarity == "COSINE" else "_raw",
+    )
+
+
+def _falkordb_full_text_search(label: str, properties: Sequence[str]) -> str:
+    # One full-text index to a label, found by the label.
+    return f"CALL db.idx.fulltext.queryNodes({quote_string(label)}, $_text) YIELD node, score"
+
+
+def _falkordb_vector_search(label: str, property: str, similarity: SimilarityFunction) -> tuple[str, str]:
+    # FalkorDB's score is a distance: 1 - cos, or d.
+    return (
+        f"CALL db.idx.vector.queryNodes({quote_string(label)}, {quote_string(property)}, $_k, vecf32($_vector)) "
+        "YIELD node AS n, score AS _raw",
+        "1 - _raw / 2.0" if similarity == "COSINE" else "1.0 / (1 + _raw * _raw)",
+    )
+
+
 @dataclass(frozen=True)
 class CypherGrammar:
     """
@@ -76,12 +130,31 @@ class CypherGrammar:
     Whether the engine turned a statement away because another writer held what it writes, so that running it again
     may succeed. `failure` is the driver's own error.
     """
+    vector_search: Callable[[str, str, SimilarityFunction], tuple[str, str]]
+    """
+    The call that asks the vector index over a label's property for `$_k` nodes nearest `$_vector`, binding each as
+    `n`, and the expression of its score as a similarity, higher nearer, on one scale on every engine: (1 + cos) / 2
+    for cosine, 1 / (1 + d²) for euclidean.
+    """
+    full_text_search: Callable[[str, Sequence[str]], str]
+    """
+    The call that asks the full-text index over a label's properties for nodes matching `$_text`, yielding
+    `node, score`.
+    """
     orphan_delete_limit: str | None = None
     """Why the engine can't delete with CascadeType.DELETE_ORPHAN; None when it can."""
 
 
 NEO4J_GRAMMAR = CypherGrammar(
-    "Neo4j", "INLINE", _exists_subquery, _some_match_subquery, True, _plain_vector, _transient_over_bolt
+    "Neo4j",
+    "INLINE",
+    _exists_subquery,
+    _some_match_subquery,
+    True,
+    _plain_vector,
+    _transient_over_bolt,
+    _neo4j_vector_search,
+    _neo4j_full_text_search,
 )
 
 MEMGRAPH_GRAMMAR = CypherGrammar(
@@ -92,6 +165,8 @@ MEMGRAPH_GRAMMAR = CypherGrammar(
     False,
     _plain_vector,
     _transient_over_bolt,
+    _memgraph_vector_search,
+    _memgraph_full_text_search,
     orphan_delete_limit="Memgraph takes an existence check only in a WHERE clause, not in the list of nodes to delete",
 )
 
@@ -107,6 +182,8 @@ FALKORDB_GRAMMAR = CypherGrammar(
     lambda expression: f"vecf32({expression})",
     # FalkorDB runs one query at a time, but turns a write away while another is in progress.
     lambda failure: bool(_ANOTHER_WRITE.search(str(failure))),
+    _falkordb_vector_search,
+    _falkordb_full_text_search,
 )
 """
 FalkorDB takes neither `EXISTS { }` nor a pattern in `exists()`. Its views are projected with CALL subqueries: on

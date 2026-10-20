@@ -14,6 +14,8 @@ from drivine.backend.cypher_backend import NODE_ALIAS, CypherBackend
 from drivine.backend.cypher_grammar import cypher_grammar_for
 from drivine.backend.fragment_group import FragmentGroup
 from drivine.backend.graph_statement import GraphStatement
+from drivine.backend.matching_search import MatchingSearch
+from drivine.backend.nearest_search import NearestSearch
 from drivine.backend.page import Page
 from drivine.backend.save_statement import SaveStatement
 from drivine.backend.save_statement_builder import id_of, items, props_of, root_of, target
@@ -23,8 +25,10 @@ from drivine.connection.transaction_mode import TransactionMode
 from drivine.drivine_error import DrivineError
 from drivine.dsl.collection_sorts import sort_collections
 from drivine.dsl.condition import Where
+from drivine.dsl.index_advice_policy import IndexAdvicePolicy
 from drivine.dsl.order_term import OrderTerm
 from drivine.dsl.query import Query
+from drivine.dsl.query_index_advisor import QueryIndexAdvisor
 from drivine.dsl.query_renderer import QueryRenderer
 from drivine.dsl.rendered_query import RenderedQuery
 from drivine.dsl.seek_value import SeekValue
@@ -38,6 +42,7 @@ from drivine.manager.patch_result import PatchResult
 from drivine.manager.persistence_manager import PersistenceManager
 from drivine.manager.removed_targets import RemovedTargets
 from drivine.manager.save_options import SaveOptions
+from drivine.manager.scored import Scored
 from drivine.manager.stale_object_error import StaleObjectError
 from drivine.mapper.graph_object_mapper import GraphObjectMapper
 from drivine.model import stamps
@@ -47,6 +52,7 @@ from drivine.model.model_registry import ModelRegistry
 from drivine.model.relationship_fragment_model import RelationshipFragmentModel
 from drivine.model.relationship_model import RelationshipModel
 from drivine.model.target_model import TargetModel
+from drivine.model.vector_field import VectorField
 from drivine.schema.constraint_manager import ConstraintManager
 from drivine.schema.index_manager import IndexManager
 from drivine.schema.schema_executor import SchemaExecutor
@@ -88,6 +94,12 @@ class StatelessGraphObjectManager:
         """Relationships on their own, between stored nodes: see EdgeOperations."""
         self.groups = GroupOperations(self.registry, self._query, self.mapper, self.backend)
         """Grouped reads: see GroupOperations."""
+        self.index_advice = IndexAdvicePolicy.WARN
+        """What an ordered query with no range index to seek into does: see IndexAdvicePolicy."""
+        self.index_advisor = QueryIndexAdvisor(
+            lambda: self.indexes, lambda: self.constraints, lambda: self._schema_grammar().ranges_per_property
+        )
+        """Checks ordered queries for a range index; `refresh` it after making indexes as the application runs."""
 
     @property
     def indexes(self) -> IndexManager:
@@ -152,6 +164,14 @@ class StatelessGraphObjectManager:
         """
         target = self.registry.model_of(type_)
         rendered = self._rendered(target, where, bindings, Query(None, order_by, limit, skip, seek, depth))
+        if rendered.ordered:
+            await self.index_advisor.check(
+                self.index_advice,
+                target.root if isinstance(target, GraphViewModel) else target,
+                rendered.ordered,
+                "seek" if rendered.seeks else "order_by",
+                rendered.pinned,
+            )
         page = Page(rendered.order_by, rendered.skip, rendered.limit)
         if isinstance(target, GraphViewModel):
             statement = self.backend.load_all_views(target, rendered.where, rendered.depth, page)
@@ -191,6 +211,110 @@ class StatelessGraphObjectManager:
         else:
             statement = self.backend.count_fragments(target, predicate)
         return await self.persistence_manager.get_one(statement.spec(values))
+
+    async def load_nearest(
+        self,
+        type_: type[T],
+        vector: Sequence[float],
+        *,
+        top_k: int,
+        search_k: int | None = None,
+        threshold: float | None = None,
+        where: str | Where | None = None,
+        bindings: Mapping[str, Any] | None = None,
+        property: str | None = None,
+        partition_label: str | None = None,
+        depth: Mapping[str, int] | None = None,
+    ) -> list[Scored[T]]:
+        """
+        The nodes nearest `vector` by the fragment's VectorIndex field (a view's root's), as fragments or views, each
+        with its score, nearest first:
+
+            hits = await gom.load_nearest(Chunk, embedding, top_k=5, where=refs(Chunk).section_id.eq(section))
+
+        A view's required relationships, `threshold` and `where` filter after the search, so a search can return fewer
+        than `top_k`. `search_k` widens it: how many the index is asked for, at least `top_k`. On Lucene-backed engines
+        the result queue is the search's beam, so a wider one finds true neighbours a narrow one misses, and a filter
+        thins it less. `top_k` then trims after the filter.
+
+        `property` names the VectorIndex field searched, needed only when the fragment declares more than one.
+        `partition_label` searches the index of that label instead of the fragment's first: one vector index for each
+        partition.
+        """
+        target = self.registry.model_of(type_)
+        predicate, values = self._condition(target, where, bindings)
+        root = target.root if isinstance(target, GraphViewModel) else target
+        searched = _searched_vector(root, property)
+        _check_top_k(top_k)
+        if search_k is not None and (isinstance(search_k, bool) or not isinstance(search_k, int) or search_k < top_k):  # pyright: ignore[reportUnnecessaryIsInstance]
+            raise DrivineError(
+                f"search_k must be a whole number of at least top_k ({top_k}): a narrower search only loses hits."
+            )
+        statement = self.backend.nearest(
+            target,
+            NearestSearch(
+                partition_label or root.labels[0],
+                searched.property,
+                searched.similarity,
+                search_k if search_k is not None else top_k,
+                predicate,
+                threshold is not None,
+                top_k if search_k is not None else None,
+                _checked(depth) or {},
+            ),
+        )
+        rows = await self.persistence_manager.query(
+            statement.spec({**values, "_vector": list(vector), "_threshold": threshold})
+        )
+        return [Scored(self._mapped(target, row["value"]), row["score"]) for row in rows]
+
+    async def load_matching(
+        self,
+        type_: type[T],
+        text: str,
+        *,
+        top_k: int,
+        threshold: float | None = None,
+        where: str | Where | None = None,
+        bindings: Mapping[str, Any] | None = None,
+        property: str | None = None,
+        depth: Mapping[str, int] | None = None,
+    ) -> list[Scored[T]]:
+        """
+        The nodes matching `text` by the fragment's FullTextIndex (a view's root's), as fragments or views, each with
+        its relevance, scaled so that the best hit is 1, most relevant first. The text is the engine's full-text query
+        language (Lucene on Neo4j), passed as it is: escape user input yourself.
+
+        `top_k` is how many to return at most, after `threshold` and `where` filter. `property` names a property of
+        the full-text index searched, needed only when the fragment declares more than one.
+        """
+        target = self.registry.model_of(type_)
+        predicate, values = self._condition(target, where, bindings)
+        root = target.root if isinstance(target, GraphViewModel) else target
+        indexes = root.full_text_indexes
+        if property is not None:
+            stored = root.graph_properties.get(property, property)
+            chosen = next((it for it in indexes if stored in it), None)
+        else:
+            chosen = indexes[0] if len(indexes) == 1 else None
+        if chosen is None:
+            raise DrivineError(
+                f"{root.type.__name__} declares {len(indexes)} full-text indexes; name a property of the one to search."
+                if indexes
+                else f"{root.type.__name__} declares no FullTextIndex to search."
+            )
+        _check_top_k(top_k)
+        statement = self.backend.matching(
+            target,
+            MatchingSearch(root.labels[0], chosen, top_k, predicate, threshold is not None, _checked(depth) or {}),
+        )
+        rows = await self.persistence_manager.query(statement.spec({**values, "_text": text, "_threshold": threshold}))
+        return [Scored(self._mapped(target, row["value"]), row["score"]) for row in rows]
+
+    def _mapped(self, target_: TargetModel, row: Any) -> Any:
+        if isinstance(target_, GraphViewModel):
+            return self.mapper.view(target_, row)
+        return self.mapper.fragment(target_, row)
 
     async def save(
         self,
@@ -662,6 +786,27 @@ class StatelessGraphObjectManager:
         return StaleObjectError(
             statement.root.type, statement.root_id, statement.expected_stamp, found[0] if found else None, not found
         )
+
+
+def _searched_vector(root: FragmentModel, property: str | None) -> VectorField:
+    """The VectorIndex field a nearest search uses."""
+    fields = root.vector_fields
+    if property is not None:
+        chosen = fields.get(property)
+    else:
+        chosen = next(iter(fields.values())) if len(fields) == 1 else None
+    if chosen is None:
+        raise DrivineError(
+            f"{root.type.__name__} declares {len(fields)} VectorIndex fields; name the one to search with property."
+            if fields and property is None
+            else f"{root.type.__name__} declares no VectorIndex field{f' {property}' if property else ''} to search."
+        )
+    return chosen
+
+
+def _check_top_k(top_k: int) -> None:
+    if isinstance(top_k, bool) or not isinstance(top_k, int) or top_k < 1:  # pyright: ignore[reportUnnecessaryIsInstance]
+        raise DrivineError("top_k must be a whole number of at least 1.")
 
 
 def _checked(depth: Mapping[str, int] | None) -> Mapping[str, int] | None:

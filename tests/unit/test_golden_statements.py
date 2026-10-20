@@ -43,6 +43,8 @@ from drivine.backend.cypher_grammar import FALKORDB_GRAMMAR, MEMGRAPH_GRAMMAR, N
 from drivine.backend.fragment_group import FragmentGroup
 from drivine.backend.graph_statement import GraphStatement
 from drivine.backend.matched_node import MatchedNode
+from drivine.backend.matching_search import MatchingSearch
+from drivine.backend.nearest_search import NearestSearch
 from drivine.backend.page import Page
 from drivine.dsl.query import Query
 from drivine.dsl.query_renderer import QueryRenderer
@@ -96,7 +98,27 @@ def statements(grammar: CypherGrammar) -> dict[str, str]:
     cases.update(saves(grammar, registry, backend))
     cases.update(queries(grammar, registry, backend))
     cases.update(groups(registry, backend))
+    cases.update(searches(registry, backend))
     return {name: it.text for name, it in cases.items()}
+
+
+def searches(registry: ModelRegistry, backend: CypherBackend) -> dict[str, GraphStatement]:
+    """The vector and full-text searches TypeScript's golden test writes, written alike."""
+    person, career = registry.fragment(Person), registry.view(PersonCareer)
+    vector = NearestSearch("Person", "embedding", "COSINE", 5)
+    text = MatchingSearch("Person", ("name", "bio"), 10)
+    return {
+        "Person.nearest": backend.nearest(person, vector),
+        "Person.nearest.filtered": backend.nearest(
+            person, NearestSearch("Person", "embedding", "EUCLIDEAN", 20, "n.name = $name", True, 5)
+        ),
+        "PersonCareer.nearest": backend.nearest(career, vector),
+        "Person.matching": backend.matching(person, text),
+        "Person.matching.filtered": backend.matching(
+            person, MatchingSearch("Person", ("bio",), 3, "n.name = $name", True)
+        ),
+        "PersonCareer.matching": backend.matching(career, text),
+    }
 
 
 def groups(registry: ModelRegistry, backend: CypherBackend) -> dict[str, GraphStatement]:

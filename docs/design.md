@@ -384,7 +384,7 @@ await gom.save_all(views)
 await gom.delete(Person, uuid, cascade=CascadeType.DELETE_ORPHAN)
 
 nearest = await gom.load_nearest(ChunkView, vector, top_k=10)
-matching = await gom.load_matching(SampleFullTextView, "graph database")
+matching = await gom.load_matching(SampleFullTextView, "graph database", top_k=10)
 
 await gom.edges.unrelate(node_ref(Issue, a), node_ref(Person, b), "ASSIGNED_TO")
 groups = await gom.groups.load(...)
@@ -644,9 +644,8 @@ An integration test writes with one language and reads with the other, on each e
 
 Each milestone ends with tests passing on every engine it covers, and is releasable.
 
-**Progress:** 1 to 6 are done, on Neo4j, Memgraph and FalkorDB, and 7 but for search and index advice. Neptune connects for the `PersistenceManager`, untested:
-there is no container for it. Index advice moves to milestone 7,
-which lists the database's indexes.
+**Progress:** 1 to 7 are done, on Neo4j, Memgraph and FalkorDB. Neptune connects for the `PersistenceManager`,
+untested: there is no container for it. Index advice moved to milestone 7, which lists the database's indexes.
 The golden statements are in drivine's `test/1.Unit/golden`, copied to `tests/golden`.
 
 1. **Connections and `PersistenceManager` on Neo4j.**

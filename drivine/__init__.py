@@ -37,6 +37,7 @@ from drivine.cursor.cursor_specification import CursorSpecification
 from drivine.drivine_assembly import DrivineAssembly
 from drivine.drivine_error import DrivineError
 from drivine.dsl.condition import Condition, Where, all_of, any_of, not_
+from drivine.dsl.index_advice_policy import IndexAdvicePolicy
 from drivine.dsl.order_expressions import (
     above,
     at_least,
@@ -59,6 +60,7 @@ from drivine.dsl.order_expressions import (
     times,
 )
 from drivine.dsl.order_term import OrderTerm
+from drivine.dsl.query_index_advisor import QueryIndexAdvisor
 from drivine.dsl.ref import Ref, refs
 from drivine.dsl.seek_value import SeekValue
 from drivine.manager.cascade_type import CascadeType
@@ -79,6 +81,7 @@ from drivine.manager.property_key import PropertyKey
 from drivine.manager.relate_mode import RelateMode
 from drivine.manager.removed_targets import RemovedTargets
 from drivine.manager.save_options import SaveOptions
+from drivine.manager.scored import Scored
 from drivine.manager.stale_object_error import StaleObjectError
 from drivine.manager.stateless_graph_object_manager import StatelessGraphObjectManager
 from drivine.manager.transactional_persistence_manager import TransactionalPersistenceManager
@@ -134,6 +137,7 @@ __all__ = [
     "GroupAggregate",
     "GroupOperations",
     "Hop",
+    "IndexAdvicePolicy",
     "IndexManager",
     "JsonPacked",
     "ModelRegistry",
@@ -154,6 +158,7 @@ __all__ = [
     "PropertyKey",
     "PropertyNames",
     "QuerySpecification",
+    "QueryIndexAdvisor",
     "RangeIndex",
     "ReadOnly",
     "Ref",
@@ -166,6 +171,7 @@ __all__ = [
     "SchemaCatalog",
     "SchemaManager",
     "SchemaOptions",
+    "Scored",
     "SeekValue",
     "SortedBy",
     "StaleObjectError",

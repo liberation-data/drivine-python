@@ -14,10 +14,13 @@ from drivine.backend.fragment_group import FragmentGroup
 from drivine.backend.graph_statement import GraphStatement
 from drivine.backend.group_statement import GroupStatement
 from drivine.backend.matched_node import MatchedNode
+from drivine.backend.matching_search import MatchingSearch
+from drivine.backend.nearest_search import NearestSearch
 from drivine.backend.page import Page
 from drivine.backend.patch_statements import PatchStatements
 from drivine.backend.save_statement import SaveStatement
 from drivine.backend.save_statement_builder import SaveStatementBuilder
+from drivine.backend.view_projection import ViewProjection
 from drivine.backend.view_projector import ViewProjector, fragment
 from drivine.drivine_error import DrivineError
 from drivine.dsl.query_renderer import QueryRenderer
@@ -162,6 +165,23 @@ class CypherBackend:
             )
         )
 
+    def nearest(self, target: TargetModel, search: NearestSearch) -> GraphStatement:
+        """The roots nearest `$_vector` by the label's vector index, each as `{value, score}`, nearest first."""
+        call, score = self.grammar.vector_search(search.label, search.property, search.similarity)
+        head = [call.replace("$_k", str(search.k)), f"WITH {NODE_ALIAS}, {score} AS _score"]
+        return self._scored(target, head, search.where, search.threshold, search.limit, search.depth)
+
+    def matching(self, target: TargetModel, search: MatchingSearch) -> GraphStatement:
+        """The roots matching `$_text` by the full-text index, each as `{value, score}`, most relevant first."""
+        # Scaled by the best hit, so the scale is [0, 1] on every engine; a best score of 0 (FalkorDB) gives each 1.
+        head = [
+            self.grammar.full_text_search(search.label, search.properties),
+            "WITH collect({node: node, score: score}) AS _hits, max(score) AS _best",
+            "UNWIND _hits AS _hit",
+            f"WITH _hit.node AS {NODE_ALIAS}, CASE WHEN _best > 0 THEN _hit.score / _best ELSE 1.0 END AS _score",
+        ]
+        return self._scored(target, head, search.where, search.threshold, search.limit, search.depth)
+
     def save(
         self,
         target: TargetModel,
@@ -279,6 +299,46 @@ class CypherBackend:
                 return True
             cause = cause.__cause__
         return False
+
+    def _scored(
+        self,
+        target: TargetModel,
+        head: list[str],
+        where: str | None,
+        threshold: bool,
+        limit: int | None,
+        depth: Mapping[str, int],
+    ) -> GraphStatement:
+        """The tail of a scored search: filter after the search, project, order by score, trim."""
+        root = target.root if isinstance(target, GraphViewModel) else target
+        filters = [
+            f"{NODE_ALIAS}{label_expression(root.labels)}",
+            *(["_score >= $_threshold"] if threshold else []),
+            *([f"({where})"] if where else []),
+            *(
+                ViewProjector(self.grammar, depth).requirements(target, NODE_ALIAS)
+                if isinstance(target, GraphViewModel)
+                else []
+            ),
+        ]
+        projection = (
+            ViewProjector(self.grammar, depth).project(target, NODE_ALIAS)
+            if isinstance(target, GraphViewModel)
+            else ViewProjection(fragment(NODE_ALIAS))
+        )
+        return GraphStatement(
+            "\n".join(
+                [
+                    *head,
+                    # A MATCH of the bound node holds the filter: Memgraph takes no existence check in a WITH's WHERE.
+                    f"MATCH ({NODE_ALIAS}) WHERE {' AND '.join(filters)}",
+                    *projection.calls,
+                    f"RETURN {{value: {projection.expression}, score: _score}} AS result",
+                    "ORDER BY result.score DESC",
+                    *([f"LIMIT {limit}"] if limit is not None else []),
+                ]
+            )
+        )
 
     def _root_where(self, target: TargetModel, where: str | None) -> str:
         return self._view_where(target, where) if isinstance(target, GraphViewModel) else self._where(where)

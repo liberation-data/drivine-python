@@ -5,8 +5,8 @@ and [drivine4j](https://github.com/liberation-data/drivine4j) for the JVM. Async
 round trip, no session cache, no lazy loading.
 
 > **Status: early.** On Neo4j and Memgraph today: the low-level `PersistenceManager`, transactions, and the object
-> manager's loading, saving, batches, patches, edges and deletes of fragments and views, and the query DSL. Grouped
-> reads and the other engines come next. Neptune connects
+> manager's loading, saving, batches, patches, edges and deletes of fragments and views, the query DSL and grouped
+> reads. Search, schema management and the other engines come next. Neptune connects
 > the same way, for the `PersistenceManager`. See [the design](docs/design.md) for where it is going.
 
 ```
@@ -244,6 +244,31 @@ q.employment_history.none(lambda it: it.role.eq("Lead"))
 - `count`, `delete`, `delete_all` and `patch` take conditions too.
 
 The references aren't typed for an editor yet: generated stubs will make them so.
+
+### Grouped reads
+
+Group a fragment's nodes by keys, with numbers about each group, in one statement:
+
+```python
+from drivine import avg, count, hop, key, path_key, refs
+
+q = refs(Review)
+top = await gom.groups.load(
+    Review,
+    keys={"page": key(q.page)},                                  # or path_key(Page, [hop("REVIEWS")]): the node
+    aggregates={"votes": count(q.helpful.eq(True)), "rating": avg(q.rating)},
+    where=q.published.is_not_null(),
+    having=[("votes", "gte", 3)],
+    order_by=[("votes", "desc")],
+    limit=10,
+)
+# [{"page": "/pricing", "votes": 12, "rating": 4.5}, ...]
+
+await gom.groups.count_by(Review, "page")                       # {"/pricing": 14, ...}
+```
+
+Aggregates are `count`, `sum_`, `avg`, `min_` and `max_`, each with an optional filter. Ties in an order are broken by
+the keys, so a page of groups is the same every time.
 
 - **Models are Pydantic.** A loaded fragment is validated, so a bad value fails at the load.
 - **The annotation says what a relationship holds**: a fragment, a relationship fragment or a view, one or a list. A

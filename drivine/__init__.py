@@ -61,12 +61,17 @@ from drivine.manager.cascade_type import CascadeType
 from drivine.manager.delegating_persistence_manager import DelegatingPersistenceManager
 from drivine.manager.edge_operations import EdgeOperations
 from drivine.manager.graph_object_manager_factory import GraphObjectManagerFactory
+from drivine.manager.group_aggregate import GroupAggregate
+from drivine.manager.group_operations import GroupOperations
+from drivine.manager.groups import avg, count, key, max_, min_, path_key, sum_
 from drivine.manager.node_ref import NodeRef, node_ref
 from drivine.manager.non_transactional_persistence_manager import NonTransactionalPersistenceManager
 from drivine.manager.null_policy import NullPolicy
 from drivine.manager.patch_result import PatchResult
+from drivine.manager.path_key import PathKey
 from drivine.manager.persistence_manager import PersistenceManager
 from drivine.manager.persistence_manager_factory import PersistenceManagerFactory
+from drivine.manager.property_key import PropertyKey
 from drivine.manager.relate_mode import RelateMode
 from drivine.manager.removed_targets import RemovedTargets
 from drivine.manager.save_options import SaveOptions
@@ -109,6 +114,8 @@ __all__ = [
     "GraphPath",
     "GraphProperty",
     "GraphView",
+    "GroupAggregate",
+    "GroupOperations",
     "Hop",
     "JsonPacked",
     "ModelRegistry",
@@ -122,9 +129,11 @@ __all__ = [
     "NullPolicy",
     "OrderTerm",
     "PatchResult",
+    "PathKey",
     "PersistenceManager",
     "PersistenceManagerFactory",
     "PropertyBag",
+    "PropertyKey",
     "PropertyNames",
     "QuerySpecification",
     "ReadOnly",
@@ -152,9 +161,11 @@ __all__ = [
     "any_of",
     "at_least",
     "at_most",
+    "avg",
     "below",
     "case_of",
     "coalesce",
+    "count",
     "current_transaction",
     "cypher_file",
     "cypher_statement",
@@ -166,17 +177,22 @@ __all__ = [
     "has_no_value",
     "has_value",
     "hop",
+    "key",
+    "max_",
+    "min_",
     "minus",
     "negate",
     "node_ref",
     "not_",
     "not_equal_to",
     "param",
+    "path_key",
     "plus",
     "refs",
     "sql_file",
     "sql_statement",
     "stamps",
+    "sum_",
     "times",
     "transaction",
     "transactional",

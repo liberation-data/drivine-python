@@ -28,6 +28,7 @@ from drivine.dsl.seek_value import SeekValue
 from drivine.manager.cascade_type import CascadeType
 from drivine.manager.contention import when_not_contended
 from drivine.manager.edge_operations import EdgeOperations
+from drivine.manager.group_operations import GroupOperations
 from drivine.manager.null_policy import NullPolicy
 from drivine.manager.patch_result import PatchResult
 from drivine.manager.persistence_manager import PersistenceManager
@@ -71,6 +72,8 @@ class StatelessGraphObjectManager:
         self.mapper = GraphObjectMapper(self.registry)
         self.edges = EdgeOperations(self.registry, self._run_one, self._query, self.mapper, self.backend)
         """Relationships on their own, between stored nodes: see EdgeOperations."""
+        self.groups = GroupOperations(self.registry, self._query, self.mapper, self.backend)
+        """Grouped reads: see GroupOperations."""
 
     @property
     def database(self) -> str:

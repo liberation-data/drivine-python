@@ -12,12 +12,13 @@ from typing import Any, TypeAlias
 from drivine.drivine_error import DrivineError
 from drivine.dsl.case_branch import CaseBranch
 from drivine.dsl.case_condition import CaseCondition
+from drivine.dsl.comparable_ref import ComparableRef
 from drivine.dsl.condition_node import ConditionNode
 from drivine.dsl.expression import Expression
 from drivine.dsl.expression_node import ExpressionNode
 from drivine.dsl.ref import Ref
 
-Operand: TypeAlias = Expression | Ref | int | float
+Operand: TypeAlias = Expression | ComparableRef[int] | int | float
 """What arithmetic takes: a numeric property of the root, an expression, or a number (bound)."""
 
 Comparand: TypeAlias = Any

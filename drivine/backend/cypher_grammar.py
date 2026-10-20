@@ -9,9 +9,25 @@ from drivine.connection.database_type import DatabaseType
 from drivine.drivine_error import DrivineError
 
 
-def _exists_subquery(pattern: str) -> str:
+def _exists_subquery(pattern: str, where: str | None = None) -> str:
     """`EXISTS { }` stops at the first match."""
-    return f"EXISTS {{ MATCH {pattern} }}"
+    return f"EXISTS {{ MATCH {pattern}{f' WHERE {where}' if where else ''} }}"
+
+
+def _some_match_subquery(pattern: str, node: str, rel: str, where: Callable[[str], str]) -> str:
+    return _exists_subquery(pattern, where(rel))
+
+
+def _falkordb_some_match(pattern: str, node: str, rel: str, where: Callable[[str], str]) -> str:
+    # Not as a comprehension's WHERE: two comprehensions of one pattern, each with a WHERE, in one predicate match
+    # nothing (FalkorDB/FalkorDB#3392). Nor with the relationship itself in the list: its properties, as #3386 needs.
+    if not rel:
+        return f"any({node} IN [{pattern} | {node}] WHERE {where('')})"
+    it = f"{node}_e"
+    return (
+        f"any({it} IN [{pattern} | {{node: {node}, rel: properties({rel})}}] "
+        f"WHERE any({node} IN [{it}.node] WHERE {where(f'{it}.rel')}))"
+    )
 
 
 def _transient_over_bolt(failure: BaseException) -> bool:
@@ -42,6 +58,17 @@ class CypherGrammar:
     """
     existence_check: Callable[[str], str]
     """A predicate that holds when the pattern, such as `(n)-[:R]->(:T)`, matches at least once."""
+    some_match: Callable[[str, str, str, Callable[[str], str]], str]
+    """
+    A predicate that holds when at least one match of `pattern`, which binds its far node to `node` (and its
+    relationship to `rel`, unless that is ''), meets the predicate `where` writes. `where` is given the expression the
+    relationship's properties are read through.
+    """
+    keyset_null_guard: bool
+    """
+    Whether a keyset predicate constrains each key with `IS NOT NULL`: where indexes leave out null-valued nodes
+    (Neo4j), that is what lets a composite index serve the page. On Memgraph it costs the range bound.
+    """
     vector_value: Callable[[str], str]
     """How a vector value is written so the engine's vector index takes it: as it is, or in the engine's own type."""
     contended: Callable[[BaseException], bool]
@@ -53,12 +80,16 @@ class CypherGrammar:
     """Why the engine can't delete with CascadeType.DELETE_ORPHAN; None when it can."""
 
 
-NEO4J_GRAMMAR = CypherGrammar("Neo4j", "INLINE", _exists_subquery, _plain_vector, _transient_over_bolt)
+NEO4J_GRAMMAR = CypherGrammar(
+    "Neo4j", "INLINE", _exists_subquery, _some_match_subquery, True, _plain_vector, _transient_over_bolt
+)
 
 MEMGRAPH_GRAMMAR = CypherGrammar(
     "Memgraph",
     "INLINE",
     _exists_subquery,
+    _some_match_subquery,
+    False,
     _plain_vector,
     _transient_over_bolt,
     orphan_delete_limit="Memgraph takes an existence check only in a WHERE clause, not in the list of nodes to delete",
@@ -70,6 +101,8 @@ FALKORDB_GRAMMAR = CypherGrammar(
     "FalkorDB",
     "CALL_SUBQUERY",
     lambda pattern: f"size([{pattern} | 1]) > 0",
+    _falkordb_some_match,
+    False,
     # FalkorDB indexes only its own vector type: a list stored as a list is never found by a vector search.
     lambda expression: f"vecf32({expression})",
     # FalkorDB runs one query at a time, but turns a write away while another is in progress.

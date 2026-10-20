@@ -5,8 +5,8 @@ and [drivine4j](https://github.com/liberation-data/drivine4j) for the JVM. Async
 round trip, no session cache, no lazy loading.
 
 > **Status: early.** On Neo4j and Memgraph today: the low-level `PersistenceManager`, transactions, and the object
-> manager's loading, saving, batches, patches, edges and deletes of fragments and views. The query DSL and the other
-> engines come next. Neptune connects
+> manager's loading, saving, batches, patches, edges and deletes of fragments and views, and the query DSL. Grouped
+> reads and the other engines come next. Neptune connects
 > the same way, for the `PersistenceManager`. See [the design](docs/design.md) for where it is going.
 
 ```
@@ -199,9 +199,51 @@ class PersonCareer(GraphView):
 gom = drivine.graph_object_manager()        # from DrivineAssembly, or StatelessGraphObjectManager(pm)
 
 career = await gom.load(PersonCareer, uuid)
-leads = await gom.load_all(PersonCareer, "n.bio CONTAINS $text", {"text": "Lead"})
+leads = await gom.load_all(PersonCareer, "n.bio CONTAINS $text", {"text": "Lead"})   # Cypher over the root, n
 total = await gom.count(Person)
 ```
+
+### Queries
+
+A query is built from a class's **references**, which mirror its fields:
+
+```python
+from drivine import any_of, not_, refs
+
+q = refs(PersonCareer)
+leads = await gom.load_all(
+    PersonCareer,
+    where=q.person.bio.contains("Lead"),
+    order_by=q.person.name.asc(),
+    limit=20,
+)
+
+await gom.load_all(PersonCareer, where=[                                 # a list: all must hold
+    q.employment_history.target.name.eq("Acme"),                         # across a relationship
+    any_of(q.person.name.eq("Ada"), q.person.name.eq("Grace")),
+    not_(q.person.bio.is_null()),
+])
+
+# one relationship that meets both, rather than each met by any
+q.employment_history.any(lambda it: [it.role.eq("Engineer"), it.target.name.eq("Acme")])
+q.employment_history.none(lambda it: it.role.eq("Lead"))
+```
+
+- **Operators:** `eq`, `neq`, `gt`, `gte`, `lt`, `lte`, `in_`, `not_in`, `contains`, `starts_with`, `ends_with`,
+  `matches`, `contains_ignore_case`, `eq_ignore_case`, `has_item`, `is_null`, `is_not_null`. On a node:
+  `instance_of(Type)`, `has_any_label(...)`, and `property(name)` or `predicate(name, operator, value)` for a property
+  named at run time by its stored name.
+- **Fields go by their Python names**, `q.start_date`, and Drivine writes the stored names. A field the class doesn't
+  have fails as the query is written, naming it and the class. `q.x == 1` raises: write `q.x.eq(1)`.
+- **Order and pages:** `order_by` takes terms, `asc()` or `desc()`, then `nulls_first()` or `nulls_last()`; `limit`
+  and `skip` apply in the database. An order on a list relationship's property sorts that list in each object.
+- **Keyset pages:** `seek=[q.released.after(last.released), q.uuid.after(last.uuid)]`, one value for each term of
+  `order_by`, ending with a unique key.
+- **An order by an expression:** `plus`, `minus`, `times`, `div`, `negate`, `exp`, `floor`, `coalesce`, `case_of`
+  with `above`, `below`, `at_least`, `at_most`, `equal_to`, `has_value` and the rest, all computed in the database.
+- `count`, `delete`, `delete_all` and `patch` take conditions too.
+
+The references aren't typed for an editor yet: generated stubs will make them so.
 
 - **Models are Pydantic.** A loaded fragment is validated, so a bad value fails at the load.
 - **The annotation says what a relationship holds**: a fragment, a relationship fragment or a view, one or a list. A

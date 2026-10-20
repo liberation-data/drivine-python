@@ -8,21 +8,43 @@ from pathlib import Path
 
 import pytest
 
-from drivine import CascadeType, Direction, ModelRegistry, RelateMode, RemovedTargets, SaveOptions
-from drivine.backend.cypher_backend import CypherBackend
+from drivine import (
+    CascadeType,
+    Direction,
+    ModelRegistry,
+    RelateMode,
+    RemovedTargets,
+    SaveOptions,
+    above,
+    any_of,
+    at_most,
+    case_of,
+    coalesce,
+    div,
+    not_,
+    refs,
+    times,
+)
+from drivine.backend.cypher_backend import NODE_ALIAS, CypherBackend
 from drivine.backend.cypher_grammar import FALKORDB_GRAMMAR, MEMGRAPH_GRAMMAR, NEO4J_GRAMMAR, CypherGrammar
 from drivine.backend.fragment_group import FragmentGroup
 from drivine.backend.graph_statement import GraphStatement
 from drivine.backend.matched_node import MatchedNode
+from drivine.backend.page import Page
+from drivine.dsl.query import Query
+from drivine.dsl.query_renderer import QueryRenderer
+from drivine.model.graph_view_model import GraphViewModel
 from tests.models import (
     ActorStats,
     ActorWithLatestMovie,
     ActorWithMovies,
+    Animal,
     Customer,
     Dog,
     Location,
     LocationAncestors,
     LocationHierarchy,
+    Movie,
     Organization,
     Person,
     PersonCareer,
@@ -56,7 +78,98 @@ def statements(grammar: CypherGrammar) -> dict[str, str]:
         "ActorWithLatestMovie.loadAll": backend.load_all_views(view(ActorWithLatestMovie)),
     }
     cases.update(saves(grammar, registry, backend))
+    cases.update(queries(grammar, registry, backend))
     return {name: it.text for name, it in cases.items()}
+
+
+def queries(grammar: CypherGrammar, registry: ModelRegistry, backend: CypherBackend) -> dict[str, GraphStatement]:
+    """The queries TypeScript's golden test writes, written alike: each load as its statement."""
+
+    def labels(type_: type) -> list[str]:
+        return registry.fragment(type_).labels
+
+    def load(target, query: Query) -> GraphStatement:  # noqa: ANN001
+        rendered = QueryRenderer.render(query, target, grammar, NODE_ALIAS, labels)
+        page = Page(rendered.order_by, rendered.skip, rendered.limit)
+        if isinstance(target, GraphViewModel):
+            return backend.load_all_views(target, rendered.where, rendered.depth, page)
+        return backend.load_all_fragments(target, rendered.where, page)
+
+    m, c, a, p = refs(Movie), refs(PersonCareer), refs(Animal), refs(Customer)
+    count_where, _ = QueryRenderer.render_where(
+        refs(Person).name.eq_ignore_case("ada"), registry.fragment(Person), grammar, NODE_ALIAS, labels
+    )
+    return {
+        "query.Movie.where": load(
+            registry.fragment(Movie),
+            Query(
+                where=[
+                    any_of(m.released.eq(1999), m.title.starts_with("The")),
+                    m.uuid.not_in(["m9"]),
+                    not_(m.title.eq("x")),
+                ],
+                order_by=m.released.desc().nulls_last(),
+                skip=10,
+                limit=5,
+            ),
+        ),
+        "query.Movie.seek": load(
+            registry.fragment(Movie),
+            Query(
+                order_by=[m.released.desc(), m.uuid.asc()], seek=[m.released.after(2000), m.uuid.after("m3")], limit=3
+            ),
+        ),
+        "query.Movie.expression": load(
+            registry.fragment(Movie),
+            Query(
+                order_by=[
+                    case_of(
+                        [above(m.released, 2010).or_(at_most(m.released, 1995)).then(0)],
+                        times(coalesce(m.released, 0), div(1, 2)),
+                    ).desc(),
+                    m.title.asc().nulls_first(),
+                ]
+            ),
+        ),
+        "query.PersonCareer.across": load(
+            registry.view(PersonCareer),
+            Query(
+                where=[
+                    c.employment_history.target.name.eq("Acme"),
+                    c.person.bio.contains("Lead"),
+                    c.employment_history.role.eq("Lead"),
+                ]
+            ),
+        ),
+        "query.PersonCareer.quantified": load(
+            registry.view(PersonCareer),
+            Query(
+                where=any_of(
+                    c.employment_history.any(lambda it: [it.role.eq("Engineer"), it.target.name.eq("Acme")]),
+                    c.employment_history.none(lambda it: it.role.eq("Lead")),
+                ),
+                order_by=[c.person.name.asc(), c.employment_history.start_date.desc()],
+            ),
+        ),
+        "query.Customer.bags": load(
+            registry.fragment(Customer),
+            Query(
+                where=[
+                    p.metadata.source.eq("wiki"),
+                    p.property("metadata.score").gte(3),
+                    p.predicate("fullName", "STARTS_WITH", "A"),
+                    p.tiers.has_item("Gold"),
+                    p.tags.has_item("vip"),
+                    p.full_name.contains_ignore_case("ad"),
+                    p.legacy_code.is_null(),
+                ]
+            ),
+        ),
+        "query.Animal.labels": load(
+            registry.fragment(Animal), Query(where=any_of(a.instance_of(Puppy), a.has_any_label("Dog", "Cat")))
+        ),
+        "query.Person.count": backend.count_fragments(registry.fragment(Person), count_where),
+    }
 
 
 STAMP = "aaaaaaaaaaaaaaaa:bbbbbbbbbbbbbbbb"

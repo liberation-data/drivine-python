@@ -13,6 +13,7 @@ round trip, no session cache, no lazy loading.
 pip install "drivine[neo4j]"      # Neo4j, Memgraph, Neptune
 pip install "drivine[falkordb]"   # FalkorDB
 pip install "drivine[oracle]"     # Oracle 23ai and 26ai, through python-oracledb in thin mode
+pip install "drivine[pilgrim]"    # DrivineAssembly, for pi-pilgrim; optional
 ```
 
 Python 3.11 or newer.
@@ -462,6 +463,8 @@ class AppDrivine(DrivineAssembly):
 await AssemblyHolder.shared(AppDrivine).start()      # makes what is missing; idempotent
 ```
 
+Without pi-pilgrim, enforce it yourself: `await SchemaManager(registry, factory, options).enforce()`.
+
 - **`ensure` is idempotent.** An item that is there is left; one there with another shape (a vector index's dimensions,
   say) is reported as DRIFT and left, unless `recreate_on_drift`. A uniqueness constraint the data already breaks is a
   VIOLATION, with a sample of the values. `mode="FAIL_FAST"`, the default, raises on either; `"WARN"` logs.
@@ -536,11 +539,11 @@ same tests, written alike.
 ## With pi-pilgrim
 
 `DrivineAssembly` is a [pi-pilgrim](https://github.com/liberation-data/pi-pilgrim) assembly holding the registry
-and the managers, for your own assembly to use:
+and the managers, for your own assembly to use. It needs `pip install "drivine[pilgrim]"`:
 
 ```python
 from pipilgrim import AssemblyHolder, PilgrimAssembly
-from drivine import DrivineAssembly
+from drivine.drivine_assembly import DrivineAssembly      # drivine.sync.drivine_assembly for the sync API
 
 
 class AppAssembly(PilgrimAssembly):
@@ -561,7 +564,7 @@ class AppAssembly(PilgrimAssembly):
   `pm: PersistenceManager = Assembled(assembly=DrivineAssembly)`.
 - Call `await assembly.drivine.close()` when the application stops, in FastAPI's lifespan, say.
 
-Nothing requires pi-pilgrim: the managers are plain classes.
+Nothing else needs pi-pilgrim: `import drivine` doesn't load it, and the managers are plain classes.
 
 ## The sample app
 

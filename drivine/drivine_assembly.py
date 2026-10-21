@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from pipilgrim import PilgrimAssembly
+try:
+    from pipilgrim import PilgrimAssembly
+except ModuleNotFoundError as e:
+    raise ModuleNotFoundError("DrivineAssembly needs pi-pilgrim: pip install 'drivine[pilgrim]'", name=e.name) from e
 
 from drivine.connection.database_registry import DEFAULT, DatabaseRegistry
 from drivine.dsl.index_advice_policy import IndexAdvicePolicy

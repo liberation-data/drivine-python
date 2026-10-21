@@ -95,7 +95,6 @@ from drivine.sync.connection.connection_provider import ConnectionProvider
 from drivine.sync.connection.connection_provider_builder import ConnectionProviderBuilder
 from drivine.sync.connection.database_registry import DatabaseRegistry
 from drivine.sync.cursor.cursor import Cursor
-from drivine.sync.drivine_assembly import DrivineAssembly
 from drivine.sync.dsl.query_index_advisor import QueryIndexAdvisor
 from drivine.sync.manager.delegating_persistence_manager import DelegatingPersistenceManager
 from drivine.sync.manager.edge_operations import EdgeOperations
@@ -147,7 +146,6 @@ __all__ = [
     "DelegatingPersistenceManager",
     "Direction",
     "div",
-    "DrivineAssembly",
     "DrivineError",
     "EdgeOperations",
     "EmptyWhenAbsent",

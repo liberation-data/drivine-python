@@ -2,7 +2,8 @@
 # change that, and run the script again.
 from pipilgrim import Assembled, AssemblyHolder
 
-from drivine.sync import DatabaseRegistry, DrivineAssembly, PersistenceManager, QuerySpecification
+from drivine.sync import DatabaseRegistry, PersistenceManager, QuerySpecification
+from drivine.sync.drivine_assembly import DrivineAssembly
 
 
 class Routes:

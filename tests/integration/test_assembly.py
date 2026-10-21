@@ -1,6 +1,7 @@
 from pipilgrim import Assembled, AssemblyHolder
 
-from drivine import DatabaseRegistry, DrivineAssembly, PersistenceManager, QuerySpecification
+from drivine import DatabaseRegistry, PersistenceManager, QuerySpecification
+from drivine.drivine_assembly import DrivineAssembly
 
 
 class Routes:

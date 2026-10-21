@@ -368,10 +368,9 @@ wheels = [
 
 [[package]]
 name = "drivine"
-version = "0.1.0.dev0"
+version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "pi-pilgrim" },
     { name = "pydantic" },
 ]
 
@@ -385,6 +384,9 @@ neo4j = [
 oracle = [
     { name = "oracledb" },
 ]
+pilgrim = [
+    { name = "pi-pilgrim" },
+]
 testing = [
     { name = "pytest" },
     { name = "testcontainers" },
@@ -392,7 +394,7 @@ testing = [
 
 [package.dev-dependencies]
 dev = [
-    { name = "drivine", extra = ["falkordb", "neo4j", "oracle", "testing"] },
+    { name = "drivine", extra = ["falkordb", "neo4j", "oracle", "pilgrim", "testing"] },
     { name = "pyright" },
     { name = "pytest-asyncio" },
     { name = "ruff" },
@@ -403,16 +405,16 @@ requires-dist = [
     { name = "falkordb", marker = "extra == 'falkordb'", specifier = ">=1.2" },
     { name = "neo4j", marker = "extra == 'neo4j'", specifier = ">=5.20" },
     { name = "oracledb", marker = "extra == 'oracle'", specifier = ">=3.0" },
-    { name = "pi-pilgrim", specifier = ">=0.2.0" },
+    { name = "pi-pilgrim", marker = "extra == 'pilgrim'", specifier = ">=0.2.0" },
     { name = "pydantic", specifier = ">=2.7" },
     { name = "pytest", marker = "extra == 'testing'", specifier = ">=8" },
     { name = "testcontainers", marker = "extra == 'testing'", specifier = ">=4.8" },
 ]
-provides-extras = ["neo4j", "testing", "falkordb", "oracle"]
+provides-extras = ["neo4j", "pilgrim", "testing", "falkordb", "oracle"]
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "drivine", extras = ["neo4j", "falkordb", "oracle", "testing"] },
+    { name = "drivine", extras = ["neo4j", "falkordb", "oracle", "pilgrim", "testing"] },
     { name = "pyright", specifier = ">=1.1.380" },
     { name = "pytest-asyncio", specifier = ">=0.24" },
     { name = "ruff", specifier = ">=0.6" },

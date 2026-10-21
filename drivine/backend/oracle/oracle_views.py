@@ -6,14 +6,15 @@ from drivine.annotation.aggregate_function import AggregateFunction
 from drivine.annotation.direction import Direction
 from drivine.annotation.hop import Hop
 from drivine.backend.oracle.oracle_graph import (
-    RELATED_SUBQUERY,
     OracleGraph,
     has_labels,
     holding,
     json_key,
     node_document,
+    related_subquery,
     sql_text,
 )
+from drivine.backend.oracle.oracle_nodes_of import OracleNodesOf
 from drivine.backend.oracle.oracle_step import OracleStep
 from drivine.backend.view_projector import target
 from drivine.model.aggregate_model import AggregateModel
@@ -37,11 +38,6 @@ class OracleViews:
         self.depth = depth or {}
         self._alias_count = 0
 
-    @property
-    def graph_nodes(self) -> str:
-        """The table of nodes."""
-        return self.graph.nodes
-
     def next_alias(self, prefix: str) -> str:
         """An alias no other part of the statement uses."""
         self._alias_count += 1
@@ -64,7 +60,7 @@ class OracleViews:
     def requirements(self, model: GraphViewModel, alias: str) -> list[str]:
         """What the node row `alias` must meet to be the view's root: each required relationship and path is there."""
         relationships = [
-            f"EXISTS ({RELATED_SUBQUERY} {step.from_} AND {step.x})"
+            f"EXISTS ({related_subquery()} {step.from_} AND {step.x})"
             for step in (
                 self.step(rel.type, rel.direction, alias, _labels_of(target(rel)))
                 for rel in model.relationships
@@ -96,8 +92,21 @@ class OracleViews:
             has_labels(node, labels) if labels else "1 = 1",
         )
 
+    def nodes_of(self, ids: str, x: str) -> OracleNodesOf:
+        """
+        The node rows `x` whose ids the query `ids` selects, as a column `nid`, each once: the FROM of a query that
+        reads them, and the hint its SELECT carries. They're joined from the ids, so a query correlated to another row
+        is read from where it starts; tested with `IN`, Oracle would test every node against it. The hint has each read
+        by its id: Oracle takes a test of a node's labels for a lookup of one row, and would read every node of the
+        label for each id.
+        """
+        r = self.next_alias("r")
+        return OracleNodesOf(
+            f"FROM (SELECT DISTINCT nid FROM ({ids})) {r} JOIN {self.graph.nodes} {x} ON {x}.nid = {r}.nid", _by_id(x)
+        )
+
     def reached(self, type: str, direction: Direction, from_: str, depth: int) -> str:
-        """The ids of the nodes 1 to `depth` relationships of the type away from the node row `from_`."""
+        """The ids (a column `nid`) of the nodes 1 to `depth` relationships of the type from the node row `from_`."""
         edges = self.graph.edges
         typed = sql_text(type)
         if direction is Direction.UNDIRECTED:
@@ -109,7 +118,10 @@ class OracleViews:
             pairs = f"(SELECT dst AS a, src AS b FROM {edges} WHERE type = {typed})"
         else:
             pairs = f"(SELECT src AS a, dst AS b FROM {edges} WHERE type = {typed})"
-        return f"SELECT b FROM {pairs} START WITH a = {from_}.nid CONNECT BY NOCYCLE PRIOR b = a AND LEVEL <= {depth}"
+        return (
+            f"SELECT b AS nid FROM {pairs} START WITH a = {from_}.nid "
+            f"CONNECT BY NOCYCLE PRIOR b = a AND LEVEL <= {depth}"
+        )
 
     def _reached_from(
         self,
@@ -125,13 +137,12 @@ class OracleViews:
             into = target(rel)
             if isinstance(rel.related, FragmentModel) and depth > 1:
                 x = self.next_alias("x")
-                tests = [
-                    *wheres,
-                    f"{x}.nid IN ({self.reached(rel.type, rel.direction, from_, depth)})",
-                    has_labels(x, _labels_of(into)),
-                ]
+                r = self.next_alias("r")
+                reached = self.reached(rel.type, rel.direction, from_, depth)
+                tests = [*wheres, has_labels(x, _labels_of(into))]
                 queries.append(
-                    f"SELECT {x}.nid {' '.join(froms)} CROSS JOIN {self.graph.nodes} {x} WHERE {' AND '.join(tests)}"
+                    f"SELECT /*+ {_by_id(x)} */ {x}.nid {' '.join(froms)} CROSS JOIN LATERAL ({reached}) {r} "
+                    f"JOIN {self.graph.nodes} {x} ON {x}.nid = {r}.nid WHERE {' AND '.join(tests)}"
                 )
                 continue
             if sum(1 for it in path if it is rel) >= depth:
@@ -185,20 +196,23 @@ class OracleViews:
         """A list of fragments read over 1 to `depth` hops, each node once."""
         x = self.next_alias("x")
         reached = self.reached(rel.type, rel.direction, from_, depth)
-        nodes = f"FROM {self.graph.nodes} {x} WHERE {x}.nid IN ({reached}) AND {has_labels(x, _labels_of(target(rel)))}"
+        nodes = self.nodes_of(reached, x)
+        where = f"WHERE {has_labels(x, _labels_of(target(rel)))}"
         if rel.is_collection:
-            return f"(SELECT JSON_ARRAYAGG({node_document(x)} RETURNING JSON) {nodes})"
-        return f"(SELECT {node_document(x)} {nodes} FETCH FIRST 1 ROW ONLY)"
+            return (
+                f"(SELECT /*+ {nodes.hint} */ JSON_ARRAYAGG({node_document(x)} RETURNING JSON) {nodes.from_} {where})"
+            )
+        return f"(SELECT /*+ {nodes.hint} */ {node_document(x)} {nodes.from_} {where} FETCH FIRST 1 ROW ONLY)"
 
     def _path(self, path: PathModel, from_: str) -> str:
         """The nodes at the far end of a path, each once: in the order one of its hops names, where one does."""
         x = self.next_alias("x")
         ordered = next((it for it in path.hops if it.order_by), None)
         if ordered is None:
-            nodes = f"FROM {self.graph.nodes} {x} WHERE {x}.nid IN ({self._path_ids(path, from_)})"
+            nodes = self.nodes_of(self._path_ids(path, from_), x)
             if path.is_collection:
-                return f"(SELECT JSON_ARRAYAGG({node_document(x)} RETURNING JSON) {nodes})"
-            return f"(SELECT {node_document(x)} {nodes} FETCH FIRST 1 ROW ONLY)"
+                return f"(SELECT /*+ {nodes.hint} */ JSON_ARRAYAGG({node_document(x)} RETURNING JSON) {nodes.from_})"
+            return f"(SELECT /*+ {nodes.hint} */ {node_document(x)} {nodes.from_} FETCH FIRST 1 ROW ONLY)"
         o = self.next_alias("o")
         direction = "ASC" if ordered.ascending else "DESC"
         nodes = (
@@ -283,6 +297,11 @@ class OracleViews:
         else:
             fn = f"{aggregate.function.value}({number})"
         return f"(SELECT {fn} {step.from_})"
+
+
+def _by_id(x: str) -> str:
+    """The hint that has Oracle read the node row `x` by its id, through the primary key."""
+    return f"INDEX({x} (nid))"
 
 
 def _labels_of(into: TargetModel) -> list[str]:

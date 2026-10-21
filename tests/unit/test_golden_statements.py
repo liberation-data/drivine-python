@@ -271,6 +271,9 @@ def queries(registry: ModelRegistry, backend: GraphBackend) -> dict[str, GraphSt
                 order_by=[c.person.name.asc(), c.employment_history.start_date.desc()],
             ),
         ),
+        "query.LocationAncestors.deep": load(
+            registry.view(LocationAncestors), Query(where=refs(LocationAncestors).within.name.eq("Europe"))
+        ),
         "query.Customer.bags": load(
             registry.fragment(Customer),
             Query(
@@ -335,6 +338,7 @@ def saves(registry: ModelRegistry, backend: GraphBackend, where: str, orphans: b
         "PersonCareer.delete.where": backend.delete(view(PersonCareer), where),
         "PersonCareer.delete.all": backend.delete(view(PersonCareer), None, CascadeType.DELETE_ALL),
         "LocationHierarchy.delete.all": backend.delete(view(LocationHierarchy), None, CascadeType.DELETE_ALL),
+        "LocationAncestors.delete.all": backend.delete(view(LocationAncestors), None, CascadeType.DELETE_ALL),
         "Person.heldProperties": backend.held_properties(fragment(Person)),
         "Person.foundStamp": backend.found_stamp(fragment(Person)),
         "saveAll.fragments": backend.fragment_batch(

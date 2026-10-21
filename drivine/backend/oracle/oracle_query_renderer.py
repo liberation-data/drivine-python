@@ -7,7 +7,7 @@ from typing import Any, Literal
 
 from pydantic_core import to_jsonable_python
 
-from drivine.backend.oracle.oracle_graph import RELATED_SUBQUERY, has_labels, holding, json_key
+from drivine.backend.oracle.oracle_graph import has_labels, holding, json_key, related_subquery
 from drivine.backend.oracle.oracle_json import storable
 from drivine.backend.oracle.oracle_views import OracleViews
 from drivine.backend.save_statement_builder import stored
@@ -157,20 +157,21 @@ class OracleQueryRenderer:
         if isinstance(rel.related, FragmentModel) and depth > 1:
             node = self.views.next_alias("x")
             reached = self.views.reached(rel.type, rel.direction, rows.node, depth)
-            clause = (
-                f"FROM {self.views.graph_nodes} {node} WHERE {node}.nid IN ({reached}) AND {has_labels(node, labels)}"
-            )
+            nodes = self.views.nodes_of(reached, node)
+            clause = f"{nodes.from_} WHERE {has_labels(node, labels)}"
+            hints = [nodes.hint]
             inner = _Rows(node)
         else:
             hop = self.views.step(rel.type, rel.direction, rows.node, labels)
             clause = f"{hop.from_} AND {hop.x}"
+            hints = []
             inner = _Rows(hop.node, hop.edge)
         quantified = test if i == len(path) - 1 and isinstance(test, QuantifyTest) else None
         if quantified is not None:
             tested = " AND ".join(self._condition(it, next_.scope, inner) for it in quantified.conditions)
         else:
             tested = self._walk(path, i + 1, test, next_.scope, inner)
-        exists = f"EXISTS ({RELATED_SUBQUERY} {clause} AND {tested})"
+        exists = f"EXISTS ({related_subquery(*hints)} {clause} AND {tested})"
         return f"NOT {exists}" if quantified is not None and quantified.negate else exists
 
     def _at_node(self, test: Test, path: tuple[str, ...], rows: _Rows) -> str:

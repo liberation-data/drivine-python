@@ -3,7 +3,7 @@ from __future__ import annotations
 from drivine.annotation.direction import Direction
 from drivine.backend.cypher import label_expression, quote_name
 from drivine.backend.cypher_grammar import CypherGrammar
-from drivine.backend.view_projector import ViewProjector, target
+from drivine.backend.view_projector import ViewProjector, label_test, target
 from drivine.model.fragment_model import FragmentModel
 from drivine.model.graph_view_model import GraphViewModel
 from drivine.model.relationship_model import RelationshipModel
@@ -39,11 +39,17 @@ class CascadeTargets:
             into = target(rel)
             hops = f"*1..{rel.max_depth}" if isinstance(into, FragmentModel) and rel.max_depth > 1 else ""
             labels = into.root.labels if isinstance(into, GraphViewModel) else into.labels
-            extended = f"{chain}{_hop(rel, hops)}({alias}{label_expression(labels)})"
+            step = f"{chain}{_hop(rel, hops)}({alias}"
+            extended = f"{step}{label_expression(labels)})"
             own = ViewProjector(self.grammar).requirements(into, alias) if isinstance(into, GraphViewModel) else []
             every = [*conditions, *own]
             where = f" WHERE {' AND '.join(every)}" if every else ""
-            lists.append(f"[{extended}{where} | {alias}]")
+            # Where the grammar says so, the far node's labels are tested after the match, the next level's chain
+            # keeping them.
+            if self.grammar.far_labels_after_match:
+                lists.append(f"[{alias} IN [{step}){where} | {alias}] WHERE {label_test(alias, labels)}]")
+            else:
+                lists.append(f"[{extended}{where} | {alias}]")
             if isinstance(into, GraphViewModel):
                 lists.extend(self._view(into, extended, every, [*path, rel]))
         return lists

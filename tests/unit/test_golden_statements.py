@@ -62,6 +62,7 @@ from drivine.schema.schema_grammar import (
 )
 from tests.models import (
     ActorStats,
+    ActorWithDirectors,
     ActorWithLatestMovie,
     ActorWithMovies,
     Animal,
@@ -130,6 +131,7 @@ def written(backend: GraphBackend, where: str, orphans: bool) -> dict[str, str]:
         "ActorStats.loadAll": backend.load_all_views(view(ActorStats)),
         "ActorWithMovies.loadAll.where": backend.load_all_views(view(ActorWithMovies), where),
         "ActorWithMovies.count": backend.count_views(view(ActorWithMovies)),
+        "ActorWithDirectors.loadAll": backend.load_all_views(view(ActorWithDirectors)),
         "ActorWithLatestMovie.loadAll": backend.load_all_views(view(ActorWithLatestMovie)),
     }
     cases.update(saves(registry, backend, where, orphans))

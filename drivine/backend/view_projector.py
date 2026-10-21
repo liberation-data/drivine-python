@@ -48,8 +48,17 @@ class ViewProjector:
             for it in model.relationships
             if it.required
         ]
-        paths = [self.grammar.existence_check(path_pattern(it, alias, "", True)) for it in model.paths if it.required]
+        paths = [self._path_requirement(it, alias) for it in model.paths if it.required]
         return relationships + paths
+
+    def _path_requirement(self, path: PathModel, alias: str) -> str:
+        if not self.grammar.far_labels_after_match:
+            return self.grammar.existence_check(path_pattern(path, alias, "", True))
+        self._alias_count += 1
+        far = f"p{self._alias_count}"
+        return self.grammar.some_match(
+            path_pattern(path, alias, far, False), far, "", lambda _: label_test(far, far_labels(path))
+        )
 
     def _depth_of(self, rel: RelationshipModel) -> int:
         return self.depth.get(rel.field, rel.max_depth)
@@ -117,32 +126,29 @@ class ViewProjector:
 
     def _path(self, path: PathModel, origin: str) -> ViewProjection:
         """
-        The nodes at the far end of a path, each once, in the order one of its hops names where one does. On FalkorDB
-        the far node's labels are tested after the match: with a label in the pattern, FalkorDB 6 plans the match from
-        that end (FalkorDB/FalkorDB#3332).
+        The nodes at the far end of a path, each once, in the order one of its hops names where one does. Where the
+        grammar says so, the far node's labels are tested as each is collected, after the match.
         """
         self._alias_count += 1
         n = self._alias_count
         t = f"t{n}"
         order = _path_order(path, t, n)
         if self.grammar.view_projection == "CALL_SUBQUERY":
-            match = path_pattern(path, origin, t, False, order.node if order else None)
-            labels = " AND ".join(f"{t}:{quote_name(it)}" for it in path.target.labels)
+            after = self.grammar.far_labels_after_match
+            match = path_pattern(path, origin, t, not after, order.node if order else None)
+            kept = label_test(t, far_labels(path)) if after else f"{t} IS NOT NULL"
             # collect(DISTINCT …) keeps each node where it first occurs, so sorting the rows first orders the list.
             ordered = ""
             if order:
                 bound = ", ".join(dict.fromkeys([origin, t, order.node]))
                 way = "ASC" if order.ascending else "DESC"
                 ordered = f" WITH {bound} ORDER BY {order.key} IS NULL, {order.key} {way}"
-            collected = f"collect(DISTINCT CASE WHEN {t} IS NOT NULL THEN {fragment(t)} END)"
+            collected = f"collect(DISTINCT CASE WHEN {kept} THEN {fragment(t)} END)"
             value = f"v{n}"
             returned = collected if path.is_collection else f"head({collected})"
             return ViewProjection(
                 value,
-                [
-                    f"CALL {{ WITH {origin} OPTIONAL MATCH {match} WHERE {labels}{ordered} "
-                    f"RETURN {returned} AS {value} }}"
-                ],
+                [f"CALL {{ WITH {origin} OPTIONAL MATCH {match}{ordered} RETURN {returned} AS {value} }}"],
             )
         if order:
             reached = _sorted_by_key(path_pattern(path, origin, t, True, order.node), t, order, n)
@@ -270,10 +276,21 @@ def _sorted_by_key(pattern: str, far: str, order: _PathOrder, n: int) -> str:
     return f"[{z} IN {ordered} | {z}.n]"
 
 
+def far_labels(path: PathModel) -> list[str]:
+    """The labels a path's far node carries: its last hop's, and its target's."""
+    last = path.hops[-1]
+    return [*([last.label] if last.label else []), *path.target.labels]
+
+
+def label_test(alias: str, labels: list[str]) -> str:
+    """A test that the node bound to `alias` carries every one of the labels; that it is there, for none."""
+    return " AND ".join(f"{alias}:{quote_name(it)}" for it in labels) if labels else f"{alias} IS NOT NULL"
+
+
 def path_pattern(path: PathModel, origin: str, far: str, labelled: bool, ordered: str | None = None) -> str:
     """
-    A path from `origin` through its hops, the far node bound to `far` (with its labels when `labelled`), and the node
-    of the hop the path is ordered by bound to `ordered`.
+    A path from `origin` through its hops, the far node bound to `far` (with its labels, its last hop's among them,
+    when `labelled`), and the node of the hop the path is ordered by bound to `ordered`.
     """
     steps: list[str] = []
     for index, hop in enumerate(path.hops):
@@ -286,7 +303,10 @@ def path_pattern(path: PathModel, origin: str, far: str, labelled: bool, ordered
         else:
             arrow = f"-{edge}->"
         own = [hop.label] if hop.label else []
-        labels = label_expression([*own, *path.target.labels]) if last and labelled else label_expression(own)
+        if last:
+            labels = label_expression(far_labels(path)) if labelled else ""
+        else:
+            labels = label_expression(own)
         named = far if last else (ordered if hop.order_by and ordered else "")
         steps.append(f"{arrow}({named}{labels})")
     return f"({origin}){''.join(steps)}"

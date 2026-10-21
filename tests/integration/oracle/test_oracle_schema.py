@@ -99,6 +99,9 @@ async def test_advises_on_an_ordered_query_and_stops_once_the_index_is_there(gom
 
 @pytest.mark.async_only
 async def test_agrees_on_one_store_identity_across_managers_resolving_at_once(pm: PersistenceManager):
+    # As a new store: each manager ensures the key constraint, and stamps the store, at once.
+    await StatelessGraphObjectManager(pm).constraints.drop(uniqueness_constraint("DrivineStore", "key"))
+    await OracleSeed(pm, "DrivineStore").clear()
     identities = await asyncio.gather(*(StatelessGraphObjectManager(pm).store_identity() for _ in range(5)))
     assert len({it.id for it in identities}) == 1
     assert (await StatelessGraphObjectManager(pm).store_identity()).engine == DatabaseType.ORACLE

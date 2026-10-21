@@ -53,12 +53,14 @@ async def test_loads_everyone_whose_bio_mentions_leading(pm: PersistenceManager)
                 person=Person(uuid="landing-dev", name="Dev", bio="Developer"),
                 employment_history=[WorkHistory(role="Dev", organization=studio)],
             ),
+            PersonCareer(person=Person(uuid="landing-head", name="Head", bio="leading the platform team")),
         ]
     )
 
     # Everyone whose bio mentions leading
     q = refs(PersonCareer)
-    leads = await gom.load_all(PersonCareer, where=q.person.bio.contains("Lead"))
+    leads = await gom.load_all(PersonCareer, where=q.person.bio.contains_ignore_case("lead"))
 
-    assert [it.person.name for it in leads] == ["Lead"]
-    assert [(it.role, it.organization.name) for it in leads[0].employment_history] == [("Lead", "Studio")]
+    assert sorted(it.person.name for it in leads) == ["Head", "Lead"]
+    lead = next(it for it in leads if it.person.name == "Lead")
+    assert [(it.role, it.organization.name) for it in lead.employment_history] == [("Lead", "Studio")]

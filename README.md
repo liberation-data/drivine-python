@@ -4,10 +4,10 @@
 and [drivine4j](https://github.com/liberation-data/drivine4j) for the JVM. Async first, typed, and fast: one statement per
 round trip, no session cache, no lazy loading.
 
-> **Status: early.** On Neo4j, Memgraph, FalkorDB and Oracle today: the low-level `PersistenceManager`, transactions,
-> and the object manager's loading, saving, batches, patches, edges and deletes of fragments and views, the query DSL
-> and grouped reads, schema management, and vector and full-text search. Typed references come next. Neptune connects
-> the same way, for the `PersistenceManager`. See [the design](docs/design.md) for where it is going.
+> **Status: early.** On Neo4j, Memgraph, FalkorDB and Oracle: the low-level `PersistenceManager`, transactions, and
+> the object manager's loading, saving, batches, patches, edges and deletes of fragments and views, the query DSL with
+> typed references, grouped reads, schema management, and vector and full-text search, async and sync. Neptune
+> connects the same way, for the `PersistenceManager`. See [the design](docs/design.md) for how it came about.
 
 ```
 pip install "drivine[neo4j]"      # Neo4j, Memgraph, Neptune
@@ -16,6 +16,79 @@ pip install "drivine[oracle]"     # Oracle 23ai and 26ai, through python-oracled
 ```
 
 Python 3.11 or newer.
+
+## Quick start
+
+Describe the database in the environment:
+
+```
+DATABASE_TYPE=NEO4J
+DATABASE_HOST=localhost
+DATABASE_USER=neo4j
+DATABASE_PASSWORD=…
+```
+
+Declare a fragment for each node a use case reads, and a view that composes them:
+
+```python
+from typing import Annotated
+
+from drivine import GraphView, NodeFragment, NodeId, Relationship, RelationshipFragment, Root, TargetNode
+
+
+class Person(NodeFragment, labels=["Person"]):
+    uuid: Annotated[str, NodeId()]
+    name: str
+    bio: str | None = None
+
+
+class Organization(NodeFragment, labels=["Organization"]):
+    uuid: Annotated[str, NodeId()]
+    name: str
+
+
+class WorkHistory(RelationshipFragment):
+    role: str
+    organization: Annotated[Organization, TargetNode()]
+
+
+class PersonCareer(GraphView):
+    person: Annotated[Person, Root()]
+    employment_history: Annotated[list[WorkHistory], Relationship("WORKS_FOR")] = []
+```
+
+Then load and save, each in one statement:
+
+```python
+import asyncio
+
+from drivine import DatabaseRegistry, PersistenceManagerFactory, StatelessGraphObjectManager, refs
+
+
+async def main() -> None:
+    registry = DatabaseRegistry()
+    registry.build_or_resolve_from_env()
+    gom = StatelessGraphObjectManager(PersistenceManagerFactory(registry).get())
+    try:
+        await gom.save(
+            PersonCareer(
+                person=Person(uuid="p1", name="Ada", bio="Design Lead"),
+                employment_history=[WorkHistory(role="Lead", organization=Organization(uuid="o1", name="Studio"))],
+            )
+        )
+        q = refs(PersonCareer)
+        for career in await gom.load_all(PersonCareer, where=q.person.bio.contains("Lead")):
+            print(career.person.name, [it.organization.name for it in career.employment_history])
+    finally:
+        await registry.close()
+
+
+asyncio.run(main())
+```
+
+From here: [the persistence manager](#statements) for Cypher of your own, [transactions](#transactions),
+[queries](#queries) and [typed references](#typed-references), [the sync API](#sync), and
+[DrivineAssembly](#with-pi-pilgrim) to wire it into an application.
 
 ## Connecting
 
@@ -489,6 +562,12 @@ class AppAssembly(PilgrimAssembly):
 - Call `await assembly.drivine.close()` when the application stops, in FastAPI's lifespan, say.
 
 Nothing requires pi-pilgrim: the managers are plain classes.
+
+## The sample app
+
+[`sample/`](sample) is the port of drivine4j's sample, as TypeScript's Drivine has it: an issue tracker and a guide's
+users, with fragments, views, relationship fragments, polymorphic users, property bags, stamps and search, and its
+tests on every engine. It is a Poetry project of its own, whose build writes its typed references.
 
 ## Testing
 

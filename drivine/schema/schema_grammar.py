@@ -52,6 +52,12 @@ class SchemaGrammar:
     """Whether a full-text index over several properties is made over the whole label, and reported with none."""
     unique_needs_range: bool = False
     """Whether a uniqueness constraint needs a range index over its properties, made first."""
+    labelled_indexes: bool = False
+    """
+    Whether its range indexes and uniqueness constraints hold a label's nodes alone, so that a query over references
+    reads a filter on one of their properties through them, in place of the label (Oracle). The object manager then
+    gives the backend's render_query the ones there are.
+    """
 
     conflicts: Callable[[UniquenessConstraintSpec, int], str] = field(
         default=lambda spec, limit: _conflicts(spec, limit)

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Protocol
 
 from drivine.annotation.direction import Direction
@@ -21,6 +21,7 @@ from drivine.model.fragment_model import FragmentModel
 from drivine.model.graph_view_model import GraphViewModel
 from drivine.model.model_registry import ModelRegistry
 from drivine.model.target_model import TargetModel
+from drivine.schema.schema_item import SchemaItem
 
 
 class GraphBackend(Protocol):
@@ -31,20 +32,37 @@ class GraphBackend(Protocol):
     """
 
     def render_query(
-        self, query: Query, target: TargetModel, labels_of_class: Callable[[type], list[str]]
-    ) -> RenderedQuery: ...
+        self,
+        query: Query,
+        target: TargetModel,
+        labels_of_class: Callable[[type], list[str]],
+        indexed: Sequence[SchemaItem] = (),
+    ) -> RenderedQuery:
+        """
+        A query over a class's references, written for the store: its predicate, order and paging, and its values.
+        `indexed` is the store's range indexes and uniqueness constraints, for a store that reads a filter through them
+        (see SchemaGrammar's labelled_indexes); it decides how the query reads, never what it finds.
+        """
+        ...
 
     def render_where(
         self, where: Any, target: TargetModel, labels_of_class: Callable[[type], list[str]]
     ) -> tuple[str, dict[str, Any]]: ...
 
     def load_all_fragments(
-        self, model: FragmentModel, where: str | None = None, page: Page | None = None
-    ) -> GraphStatement: ...
+        self, model: FragmentModel, where: str | None = None, page: Page | None = None, tested: Sequence[str] = ()
+    ) -> GraphStatement:
+        """
+        Loads every node of the fragment, optionally filtered by a predicate over `n`. `tested` names the labels `where`
+        tests itself (a rendered query's labels_tested), which the statement needn't.
+        """
+        ...
 
     def load_fragment(self, model: FragmentModel) -> GraphStatement: ...
 
-    def count_fragments(self, model: FragmentModel, where: str | None = None) -> GraphStatement: ...
+    def count_fragments(
+        self, model: FragmentModel, where: str | None = None, tested: Sequence[str] = ()
+    ) -> GraphStatement: ...
 
     def load_all_views(
         self,
@@ -52,19 +70,26 @@ class GraphBackend(Protocol):
         where: str | None = None,
         depth: Mapping[str, int] | None = None,
         page: Page | None = None,
+        tested: Sequence[str] = (),
     ) -> GraphStatement: ...
 
     def load_view(self, model: GraphViewModel, depth: Mapping[str, int] | None = None) -> GraphStatement: ...
 
     def count_views(
-        self, model: GraphViewModel, where: str | None = None, depth: Mapping[str, int] | None = None
+        self,
+        model: GraphViewModel,
+        where: str | None = None,
+        depth: Mapping[str, int] | None = None,
+        tested: Sequence[str] = (),
     ) -> GraphStatement: ...
 
     def delete(
         self, target: TargetModel, where: str | None = None, cascade: CascadeType = CascadeType.NONE
     ) -> GraphStatement: ...
 
-    def delete_all(self, target: TargetModel, where: str | None = None) -> GraphStatement: ...
+    def delete_all(
+        self, target: TargetModel, where: str | None = None, tested: Sequence[str] = ()
+    ) -> GraphStatement: ...
 
     def nearest(self, target: TargetModel, search: NearestSearch) -> GraphStatement: ...
 

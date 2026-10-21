@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import itertools
 import logging
+from collections.abc import Callable
 from typing import Literal, TypeVar
 
 from drivine.schema.ensure_result import EnsureResult
@@ -27,9 +28,13 @@ class IndexManager:
     label and properties, and reports DRIFT, changing nothing, when it holds one of another shape. `recreate` replaces.
     """
 
-    def __init__(self, executor: SchemaExecutor, grammar: SchemaGrammar) -> None:
+    def __init__(
+        self, executor: SchemaExecutor, grammar: SchemaGrammar, changed: Callable[[], None] = lambda: None
+    ) -> None:
+        """`changed` is told once this has made or dropped an index: the object manager's index list is then stale."""
         self.executor = executor
         self.grammar = grammar
+        self.changed = changed
 
     def list(self, kind: Literal["RANGE", "VECTOR", "FULLTEXT"] = "RANGE") -> list[SchemaItem]:
         """The indexes of a kind the engine holds."""
@@ -48,6 +53,7 @@ class IndexManager:
                 return EnsureResult("ALREADY_MATCHING", spec)
             return EnsureResult("DRIFT", spec, found=found)
         self._create(spec)
+        self.changed()
         self._log_effective(spec)
         return EnsureResult("CREATED", spec)
 
@@ -55,6 +61,7 @@ class IndexManager:
         """Drops the index over the label and properties, whatever its shape, and makes it as the spec says."""
         self.drop(spec)
         self._create(spec)
+        self.changed()
         return EnsureResult("RECREATED", spec)
 
     def drop(self, spec: IndexSpec) -> None:
@@ -69,6 +76,7 @@ class IndexManager:
             statements = self._statements(held, "drop")
         for statement in statements:
             self.executor.run(statement)
+        self.changed()
 
     def _warn_unsupported(self, spec: IndexSpec) -> None:
         unsupported = self.grammar.unsupported_vector_tuning(spec) if isinstance(spec, VectorIndexSpec) else []

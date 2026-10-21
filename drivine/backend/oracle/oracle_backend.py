@@ -32,6 +32,7 @@ from drivine.model.fragment_model import FragmentModel
 from drivine.model.graph_view_model import GraphViewModel
 from drivine.model.model_registry import ModelRegistry
 from drivine.model.target_model import TargetModel
+from drivine.schema.schema_item import SchemaItem
 
 STORE_LABEL = "DrivineStore"
 """The label of the node holding the store's identity: drivine4j's, so both read one identity."""
@@ -67,11 +68,15 @@ class OracleBackend:
         self.graph = graph or OracleGraph()
 
     def render_query(
-        self, query: Query, target: TargetModel, labels_of_class: Callable[[type], list[str]]
+        self,
+        query: Query,
+        target: TargetModel,
+        labels_of_class: Callable[[type], list[str]],
+        indexed: Sequence[SchemaItem] = (),
     ) -> RenderedQuery:
         """A query over a class's references, written for the store: its predicate, order and paging, and values."""
         return OracleQueryRenderer.render(
-            query, target, lambda depth: OracleViews(self.graph, depth), ROW_ALIAS, labels_of_class
+            query, target, lambda depth: OracleViews(self.graph, depth), ROW_ALIAS, labels_of_class, indexed
         )
 
     def render_where(
@@ -81,17 +86,21 @@ class OracleBackend:
         return OracleQueryRenderer.render_where(where, target, OracleViews(self.graph), ROW_ALIAS, labels_of_class)
 
     def load_all_fragments(
-        self, model: FragmentModel, where: str | None = None, page: Page | None = None
+        self, model: FragmentModel, where: str | None = None, page: Page | None = None, tested: Sequence[str] = ()
     ) -> GraphStatement:
         return GraphStatement(
-            "\n".join([f'SELECT {node_document(ROW_ALIAS)} AS "result"', self._from(model, where), *self._page(page)])
+            "\n".join(
+                [f'SELECT {node_document(ROW_ALIAS)} AS "result"', self._from(model, where, tested), *self._page(page)]
+            )
         )
 
     def load_fragment(self, model: FragmentModel) -> GraphStatement:
         return self.load_all_fragments(model, self._id_predicate(model))
 
-    def count_fragments(self, model: FragmentModel, where: str | None = None) -> GraphStatement:
-        return GraphStatement("\n".join(['SELECT COUNT(*) AS "count"', self._from(model, where)]))
+    def count_fragments(
+        self, model: FragmentModel, where: str | None = None, tested: Sequence[str] = ()
+    ) -> GraphStatement:
+        return GraphStatement("\n".join(['SELECT COUNT(*) AS "count"', self._from(model, where, tested)]))
 
     def load_all_views(
         self,
@@ -99,13 +108,14 @@ class OracleBackend:
         where: str | None = None,
         depth: Mapping[str, int] | None = None,
         page: Page | None = None,
+        tested: Sequence[str] = (),
     ) -> GraphStatement:
         views = OracleViews(self.graph, depth)
         return GraphStatement(
             "\n".join(
                 [
                     f'SELECT {views.document(model, ROW_ALIAS)} AS "result"',
-                    self._from(model.root, self._view_where(model, where, depth)),
+                    self._from(model.root, self._view_where(model, where, depth), tested),
                     *self._page(page),
                 ]
             )
@@ -115,10 +125,16 @@ class OracleBackend:
         return self.load_all_views(model, self._id_predicate(model.root), depth)
 
     def count_views(
-        self, model: GraphViewModel, where: str | None = None, depth: Mapping[str, int] | None = None
+        self,
+        model: GraphViewModel,
+        where: str | None = None,
+        depth: Mapping[str, int] | None = None,
+        tested: Sequence[str] = (),
     ) -> GraphStatement:
         return GraphStatement(
-            "\n".join(['SELECT COUNT(*) AS "count"', self._from(model.root, self._view_where(model, where, depth))])
+            "\n".join(
+                ['SELECT COUNT(*) AS "count"', self._from(model.root, self._view_where(model, where, depth), tested)]
+            )
         )
 
     def delete(
@@ -155,9 +171,9 @@ BEGIN
     DBMS_SQL.RETURN_RESULT(c);
 END;""")
 
-    def delete_all(self, target: TargetModel, where: str | None = None) -> GraphStatement:
+    def delete_all(self, target: TargetModel, where: str | None = None, tested: Sequence[str] = ()) -> GraphStatement:
         root = target.root if isinstance(target, GraphViewModel) else target
-        return self._deleting(root, self._root_where(target, where))
+        return self._deleting(root, self._root_where(target, where), tested)
 
     def search_index_table(
         self, kind: Literal["VECTOR", "FULLTEXT"], label: str, properties: Sequence[str]
@@ -326,18 +342,29 @@ END;""")
         parts = [*([f"({where})"] if where else []), *OracleViews(self.graph, depth).requirements(model, ROW_ALIAS)]
         return " AND ".join(parts) if parts else None
 
-    def _from(self, model: FragmentModel, where: str | None = None) -> str:
-        """The nodes of the fragment's labels that meet `where`, as the row `n`."""
-        labels = has_labels(ROW_ALIAS, model.labels)
-        return f"FROM {self.graph.nodes} {ROW_ALIAS}\nWHERE {labels}{f' AND ({where})' if where else ''}"
+    def _from(self, model: FragmentModel, where: str | None = None, tested: Sequence[str] = ()) -> str:
+        """
+        The nodes of the fragment's labels that meet `where`, as the row `n`. A label `where` tests itself (`tested`)
+        is not tested again. Beside one, the others are tested in a form no index serves: Oracle takes a label's test
+        for a lookup of one row, and would read that label's nodes in place of the index `where` is read through.
+        """
+        untested = [it for it in model.labels if it not in tested]
+        if not tested:
+            labels = [has_labels(ROW_ALIAS, untested)]
+        elif untested:
+            labels = [f"CASE WHEN {has_labels(ROW_ALIAS, untested)} THEN 1 END = 1"]
+        else:
+            labels = []
+        tests = [*labels, *([f"({where})"] if where else [])]
+        return f"FROM {self.graph.nodes} {ROW_ALIAS}\nWHERE {' AND '.join(tests)}"
 
-    def _deleting(self, model: FragmentModel, where: str | None) -> GraphStatement:
+    def _deleting(self, model: FragmentModel, where: str | None, tested: Sequence[str] = ()) -> GraphStatement:
         """Deletes the nodes `where` selects, with their relationships, and returns how many: `{deleted}`."""
         return GraphStatement(f"""DECLARE
     v_deleted NUMBER;
     c SYS_REFCURSOR;
 BEGIN
-    DELETE {self._from(model, where)};
+    DELETE {self._from(model, where, tested)};
     v_deleted := SQL%ROWCOUNT;
     OPEN c FOR SELECT v_deleted AS "deleted" FROM dual;
     DBMS_SQL.RETURN_RESULT(c);

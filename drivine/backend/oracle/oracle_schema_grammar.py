@@ -7,7 +7,7 @@ import re
 from collections.abc import Sequence
 from typing import Any, Literal
 
-from drivine.backend.oracle.oracle_graph import OracleGraph, has_labels, json_key, sql_text
+from drivine.backend.oracle.oracle_graph import OracleGraph, has_labels, json_key, labelled_value, sql_text
 from drivine.backend.oracle.oracle_json import to_json
 from drivine.backend.oracle.oracle_side_table import OracleSideTable
 from drivine.schema.full_text_index_spec import FullTextIndexSpec
@@ -53,6 +53,7 @@ def oracle_schema_grammar(graph: OracleGraph) -> SchemaGrammar:
         drop_full_text=lambda spec, name: grammar.drop_full_text(spec),
         unsupported_vector_tuning=portable_pins,
         conflicts=grammar.conflicts,
+        labelled_indexes=True,
     )
 
 
@@ -200,11 +201,7 @@ END;"""
         of the name is this one, its name a hash of what it is over, and a record of the item is this record.
         """
         made = object_name(self.graph, kind, label, properties)
-        columns = ", ".join(
-            f"CASE WHEN {has_labels('n', [label])} THEN JSON_VALUE(n.props, '${json_key(it)}' RETURNING VARCHAR2(4000) "
-            "NULL ON ERROR) END"
-            for it in properties
-        )
+        columns = ", ".join(labelled_value("n", label, it) for it in properties)
         ddl = f"CREATE {'UNIQUE ' if kind == 'UNIQUE' else ''}INDEX {made} ON {self.graph.nodes} n ({columns})"
         name = f"{label}_{'_'.join(properties)}_{'range' if kind == 'RANGE' else 'unique'}"
         listed = sql_text(to_json(list(properties)))

@@ -49,6 +49,7 @@ from drivine.model.relationship_model import RelationshipModel
 from drivine.model.target_model import TargetModel
 from drivine.model.vector_field import VectorField
 from drivine.schema.schema_grammar import SchemaGrammar, schema_grammar_for
+from drivine.schema.schema_item import SchemaItem
 from drivine.store.store_identity import StoreIdentity
 from drivine.sync.dsl.query_index_advisor import QueryIndexAdvisor
 from drivine.sync.manager.contention import when_not_contended
@@ -107,12 +108,12 @@ class StatelessGraphObjectManager:
         """
         Range, vector and full-text indexes of this manager's database: made idempotently, outside any transaction.
         """
-        return IndexManager(self._schema_executor(), self._schema_grammar())
+        return IndexManager(self._schema_executor(), self._schema_grammar(), self.index_advisor.refresh)
 
     @property
     def constraints(self) -> ConstraintManager:
         """Uniqueness constraints of this manager's database: made idempotently, outside any transaction."""
-        return ConstraintManager(self._schema_executor(), self._schema_grammar())
+        return ConstraintManager(self._schema_executor(), self._schema_grammar(), self.index_advisor.refresh)
 
     def store_identity(self) -> StoreIdentity:
         """
@@ -162,7 +163,8 @@ class StatelessGraphObjectManager:
         `depth` overrides a recursive relationship's max_depth for this load, by field name.
         """
         target = self.registry.model_of(type_)
-        rendered = self._rendered(target, where, bindings, Query(None, order_by, limit, skip, seek, depth))
+        query = Query(None, order_by, limit, skip, seek, depth)
+        rendered = self._rendered(target, where, bindings, query, self._filter_indexes(where))
         if rendered.ordered:
             self.index_advisor.check(
                 self.index_advice,
@@ -173,12 +175,14 @@ class StatelessGraphObjectManager:
             )
         page = Page(rendered.order_by, rendered.skip, rendered.limit)
         if isinstance(target, GraphViewModel):
-            statement = self.backend.load_all_views(target, rendered.where, rendered.depth, page)
+            statement = self.backend.load_all_views(
+                target, rendered.where, rendered.depth, page, rendered.labels_tested
+            )
             rows = self.persistence_manager.query(statement.spec(rendered.bindings))
             views = [self.mapper.view(target, row) for row in rows]
             sort_collections(views, rendered.collection_sorts)
             return views
-        statement = self.backend.load_all_fragments(target, rendered.where, page)
+        statement = self.backend.load_all_fragments(target, rendered.where, page, rendered.labels_tested)
         rows = self.persistence_manager.query(statement.spec(rendered.bindings))
         return [self.mapper.fragment(target, row) for row in rows]
 
@@ -204,12 +208,12 @@ class StatelessGraphObjectManager:
     ) -> int:
         """How many objects of the class a load with the same filter would find."""
         target = self.registry.model_of(type_)
-        predicate, values = self._condition(target, where, bindings)
+        rendered = self._rendered(target, where, bindings, Query(), self._filter_indexes(where))
         if isinstance(target, GraphViewModel):
-            statement = self.backend.count_views(target, predicate)
+            statement = self.backend.count_views(target, rendered.where, None, rendered.labels_tested)
         else:
-            statement = self.backend.count_fragments(target, predicate)
-        return self.persistence_manager.get_one(statement.spec(values))
+            statement = self.backend.count_fragments(target, rendered.where, rendered.labels_tested)
+        return self.persistence_manager.get_one(statement.spec(rendered.bindings))
 
     def load_nearest(
         self,
@@ -434,9 +438,9 @@ class StatelessGraphObjectManager:
         a filter, every one. Returns the number deleted.
         """
         target = self.registry.model_of(type_)
-        predicate, values = self._condition(target, where, bindings)
-        statement = self.backend.delete_all(target, predicate)
-        return self.persistence_manager.get_one(statement.spec(values))
+        rendered = self._rendered(target, where, bindings, Query(), self._filter_indexes(where))
+        statement = self.backend.delete_all(target, rendered.where, rendered.labels_tested)
+        return self.persistence_manager.get_one(statement.spec(rendered.bindings))
 
     def save_all(
         self,
@@ -579,19 +583,40 @@ class StatelessGraphObjectManager:
         return written, {**(bindings or {}), **values}
 
     def _rendered(
-        self, target_: TargetModel, where: str | Where | None, bindings: Mapping[str, Any] | None, query: Query
+        self,
+        target_: TargetModel,
+        where: str | Where | None,
+        bindings: Mapping[str, Any] | None,
+        query: Query,
+        indexed: Sequence[SchemaItem] = (),
     ) -> RenderedQuery:
         """
         A load's query written for the store. A Cypher `where` is kept as it is, and joined to what the query's terms
-        write, such as a keyset.
+        write, such as a keyset. `indexed` is what conditions may be read through (see `_filter_indexes`).
         """
         _checked(query.depth)
         conditions = None if where is None or isinstance(where, str) else where
-        rendered = self.backend.render_query(dataclasses.replace(query, where=conditions), target_, self._labels)
+        rendered = self.backend.render_query(
+            dataclasses.replace(query, where=conditions), target_, self._labels, indexed
+        )
         if not isinstance(where, str):
             return dataclasses.replace(rendered, bindings={**(bindings or {}), **rendered.bindings})
         predicate = f"({where}) AND {rendered.where}" if rendered.where else where
         return dataclasses.replace(rendered, where=predicate, bindings={**(bindings or {}), **rendered.bindings})
+
+    def _filter_indexes(self, where: str | Where | None) -> list[SchemaItem]:
+        """
+        The range indexes and uniqueness constraints conditions may be read through, where the store reads a filter
+        through them (see SchemaGrammar's labelled_indexes): none for a Cypher filter, nor elsewhere.
+        """
+        if where is None or isinstance(where, str):
+            return []
+        try:
+            if not self._schema_grammar().labelled_indexes:
+                return []
+        except DrivineError:
+            return []
+        return self.index_advisor.indexed()
 
     def _labels(self, type_: type) -> list[str]:
         return self.registry.fragment(type_).labels

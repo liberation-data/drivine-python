@@ -151,6 +151,18 @@ def has_labels(alias: str, labels: Sequence[str]) -> str:
     return " AND ".join(f"JSON_EXISTS({alias}.labels, '$?(@ == \"{_escaped(it)}\")')" for it in labels)
 
 
+def labelled_value(alias: str, label: str, property: str) -> str:
+    """
+    A property of the node row `alias` as a range index or a uniqueness constraint over the label holds it: as text,
+    for the label's nodes alone, and null for every other node, for a value that isn't a scalar, and for one longer
+    than 4,000 bytes. A predicate over this expression implies the label.
+    """
+    return (
+        f"CASE WHEN {has_labels(alias, [label])} THEN JSON_VALUE({alias}.props, '${json_key(property)}' "
+        "RETURNING VARCHAR2(4000) NULL ON ERROR) END"
+    )
+
+
 def _escaped(text: str) -> str:
     """Text for a JSON path string inside an SQL literal: backslashes and quotes escaped, then single quotes doubled."""
     return text.replace("\\", "\\\\").replace('"', '\\"').replace("'", "''")

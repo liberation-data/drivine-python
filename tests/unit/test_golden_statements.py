@@ -60,6 +60,7 @@ from drivine.schema.schema_grammar import (
     SchemaGrammar,
     schema_grammar_for,
 )
+from drivine.schema.schema_item import SchemaItem
 from tests.models import (
     ActorStats,
     ActorWithDirectors,
@@ -110,6 +111,42 @@ def oracle_statements() -> dict[str, str]:
             ),
         ).text,
         "Person.searchIndexTable": backend.search_index_table("VECTOR", "Person", ["embedding"]).text,
+        **indexed_reads(backend),
+    }
+
+
+def indexed_reads(backend: OracleBackend) -> dict[str, str]:
+    """Oracle's reads through a labelled index: a filter on a property a range index or a constraint begins with."""
+    registry = ModelRegistry()
+    indexed = [SchemaItem("Movie", ("title",)), SchemaItem("Dog", ("breed", "name"))]
+    movie, dog = registry.fragment(Movie), registry.fragment(Dog)
+
+    def labels(type_: type) -> list[str]:
+        return registry.fragment(type_).labels
+
+    m, d = refs(Movie), refs(Dog)
+    movies = backend.render_query(
+        Query(
+            where=[
+                m.title.eq("Heat"),
+                m.released.gt(1990),
+                any_of(m.title.eq("x"), m.uuid.eq("m1")),
+                m.title.lte("Z"),
+                m.uuid.eq("m2"),
+            ]
+        ),
+        movie,
+        labels,
+        indexed,
+    )
+    dogs = backend.render_query(Query(where=d.breed.gte("Collie")), dog, labels, indexed)
+    names = backend.render_query(Query(where=d.name.eq("Rex")), dog, labels, indexed)
+    return {
+        "query.Movie.indexed": backend.load_all_fragments(movie, movies.where, None, movies.labels_tested).text,
+        "query.Movie.indexed.count": backend.count_fragments(movie, movies.where, movies.labels_tested).text,
+        "query.Dog.indexed": backend.load_all_fragments(dog, dogs.where, None, dogs.labels_tested).text,
+        "query.Dog.indexed.deleteAll": backend.delete_all(dog, dogs.where, dogs.labels_tested).text,
+        "query.Dog.notIndexed": backend.load_all_fragments(dog, names.where, None, names.labels_tested).text,
     }
 
 

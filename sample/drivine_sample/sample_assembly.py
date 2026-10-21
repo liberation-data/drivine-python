@@ -2,13 +2,13 @@ from __future__ import annotations
 
 from drivine import (
     DatabaseRegistry,
-    DrivineAssembly,
     IndexAdvicePolicy,
     PersistenceManager,
     SchemaOptions,
     StatelessGraphObjectManager,
 )
 from drivine.connection.database_registry import DEFAULT
+from drivine.drivine_assembly import DrivineAssembly
 
 
 class SampleAssembly(DrivineAssembly):

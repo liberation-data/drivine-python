@@ -34,7 +34,6 @@ from drivine.connection.database_type import DatabaseType
 from drivine.connection.transaction_mode import TransactionMode
 from drivine.cursor.cursor import Cursor
 from drivine.cursor.cursor_specification import CursorSpecification
-from drivine.drivine_assembly import DrivineAssembly
 from drivine.drivine_error import DrivineError
 from drivine.dsl.bag_refs import BagRefs
 from drivine.dsl.comparable_ref import ComparableRef
@@ -145,7 +144,6 @@ __all__ = [
     "DelegatingPersistenceManager",
     "Direction",
     "div",
-    "DrivineAssembly",
     "DrivineError",
     "EdgeOperations",
     "EmptyWhenAbsent",

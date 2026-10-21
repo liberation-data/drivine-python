@@ -533,7 +533,7 @@ uses it, and its own classes take what they need in their initializers:
 
 ```python
 from pipilgrim import AssemblyHolder, PilgrimAssembly
-from drivine import DrivineAssembly
+from drivine.drivine_assembly import DrivineAssembly
 
 
 class AppAssembly(PilgrimAssembly):

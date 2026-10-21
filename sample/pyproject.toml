@@ -6,7 +6,7 @@ authors = [{ name = "Liberation Data" }]
 license = "Apache-2.0"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = ["drivine[neo4j,falkordb,oracle,testing]"]
+dependencies = ["drivine[neo4j,falkordb,oracle,pilgrim,testing]"]
 
 [tool.poetry]
 packages = [{ include = "drivine_sample" }]
@@ -19,7 +19,7 @@ generate-setup-file = false
 
 [tool.poetry.dependencies]
 # drivine from this repository, rather than PyPI.
-drivine = { path = "..", develop = true, extras = ["neo4j", "falkordb", "oracle", "testing"] }
+drivine = { path = "..", develop = true, extras = ["neo4j", "falkordb", "oracle", "pilgrim", "testing"] }
 
 [tool.poetry.group.dev.dependencies]
 pytest = ">=8"

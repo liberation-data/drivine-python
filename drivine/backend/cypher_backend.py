@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from drivine.annotation.direction import Direction
@@ -35,6 +35,7 @@ from drivine.model.fragment_model import FragmentModel
 from drivine.model.graph_view_model import GraphViewModel
 from drivine.model.model_registry import ModelRegistry
 from drivine.model.target_model import TargetModel
+from drivine.schema.schema_item import SchemaItem
 
 STORE_LABEL = "DrivineStore"
 """The label of the node holding the store's identity: drivine4j's, so both read one identity."""
@@ -57,9 +58,16 @@ class CypherBackend:
         self.grammar = grammar
 
     def render_query(
-        self, query: Query, target: TargetModel, labels_of_class: Callable[[type], list[str]]
+        self,
+        query: Query,
+        target: TargetModel,
+        labels_of_class: Callable[[type], list[str]],
+        indexed: Sequence[SchemaItem] = (),
     ) -> RenderedQuery:
-        """A query over a class's references, written for the store: its predicate, order and paging, and values."""
+        """
+        A query over a class's references, written for the store: its predicate, order and paging, and values. A graph
+        engine reads no filter through `indexed`: it chooses its indexes itself.
+        """
         return QueryRenderer.render(query, target, self.grammar, NODE_ALIAS, labels_of_class)
 
     def render_where(
@@ -69,9 +77,9 @@ class CypherBackend:
         return QueryRenderer.render_where(where, target, self.grammar, NODE_ALIAS, labels_of_class)
 
     def load_all_fragments(
-        self, model: FragmentModel, where: str | None = None, page: Page | None = None
+        self, model: FragmentModel, where: str | None = None, page: Page | None = None, tested: Sequence[str] = ()
     ) -> GraphStatement:
-        """Loads every node of the fragment, optionally filtered by a predicate over `n`."""
+        """Loads every node of the fragment, optionally filtered by a predicate over `n`. No label is `tested`."""
         return GraphStatement(
             "".join([self._match(model), self._where(where), self._project_fragment(), self._page(page)])
         )
@@ -80,7 +88,9 @@ class CypherBackend:
         """Loads the node of the fragment whose id is the parameter `id`."""
         return self.load_all_fragments(model, self._id_predicate(model))
 
-    def count_fragments(self, model: FragmentModel, where: str | None = None) -> GraphStatement:
+    def count_fragments(
+        self, model: FragmentModel, where: str | None = None, tested: Sequence[str] = ()
+    ) -> GraphStatement:
         return GraphStatement(
             "".join([self._match(model), self._where(where), f"\nRETURN count({NODE_ALIAS}) AS count"])
         )
@@ -91,6 +101,7 @@ class CypherBackend:
         where: str | None = None,
         depth: Mapping[str, int] | None = None,
         page: Page | None = None,
+        tested: Sequence[str] = (),
     ) -> GraphStatement:
         """Loads every view whose root meets the view's requirements and, optionally, a predicate over `n`."""
         projection = ViewProjector(self.grammar, depth).project(model, NODE_ALIAS)
@@ -111,7 +122,11 @@ class CypherBackend:
         return self.load_all_views(model, self._id_predicate(model.root), depth)
 
     def count_views(
-        self, model: GraphViewModel, where: str | None = None, depth: Mapping[str, int] | None = None
+        self,
+        model: GraphViewModel,
+        where: str | None = None,
+        depth: Mapping[str, int] | None = None,
+        tested: Sequence[str] = (),
     ) -> GraphStatement:
         return GraphStatement(
             "".join(
@@ -166,7 +181,7 @@ class CypherBackend:
             )
         )
 
-    def delete_all(self, target: TargetModel, where: str | None = None) -> GraphStatement:
+    def delete_all(self, target: TargetModel, where: str | None = None, tested: Sequence[str] = ()) -> GraphStatement:
         """Deletes every root a load would find, with its relationships. Returns the number deleted."""
         root = target.root if isinstance(target, GraphViewModel) else target
         return GraphStatement(

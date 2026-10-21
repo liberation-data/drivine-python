@@ -17,7 +17,9 @@ logger = logging.getLogger("drivine.dsl")
 class QueryIndexAdvisor:
     """
     Checks that an ordered query has a range index over exactly its ordered properties, in order, and says so when it
-    has none. The index list is read once and kept: an index made later is unseen until `refresh`.
+    has none. The index list is read once and kept: an index made later is unseen until `refresh`, which the object
+    manager's own index and constraint managers call when they make or drop one. The list is also what a filter is
+    read through, on a store that does (see SchemaGrammar's labelled_indexes).
     """
 
     def __init__(
@@ -66,6 +68,14 @@ class QueryIndexAdvisor:
         if signature not in self._reported:
             self._reported.add(signature)
             logger.warning(message)
+
+    async def indexed(self) -> list[SchemaItem]:
+        """The range indexes and uniqueness constraints there are, read once and kept as for advice."""
+        if self._indexes is None:
+            self._indexes = await self._read("indexes", lambda: self._index_manager().list("RANGE"))
+        if self._constraints is None:
+            self._constraints = await self._read("constraints", lambda: self._constraint_manager().list())
+        return [*self._indexes, *self._constraints]
 
     def refresh(self) -> None:
         """Forgets the index list, so the next check reads it again."""

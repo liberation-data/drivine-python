@@ -2,6 +2,8 @@
 # change that, and run the script again.
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from drivine.drivine_error import DrivineError
 from drivine.schema.ensure_result import EnsureResult
 from drivine.schema.schema_grammar import SchemaGrammar
@@ -22,9 +24,13 @@ class ConstraintManager:
     same values, nothing is made and the result is a VIOLATION with a sample of the values.
     """
 
-    def __init__(self, executor: SchemaExecutor, grammar: SchemaGrammar) -> None:
+    def __init__(
+        self, executor: SchemaExecutor, grammar: SchemaGrammar, changed: Callable[[], None] = lambda: None
+    ) -> None:
+        """`changed` is told once this has made or dropped a constraint, as the object manager's list is then stale."""
         self.executor = executor
         self.grammar = grammar
+        self.changed = changed
 
     def list(self) -> list[SchemaItem]:
         return self.grammar.list_uniques.read(self.executor.run(self.grammar.list_uniques.statement))
@@ -42,16 +48,18 @@ class ConstraintManager:
         if sample:
             return EnsureResult("VIOLATION", spec, sample=tuple(sample))
         if self.grammar.unique_needs_range:
-            IndexManager(self.executor, self.grammar).ensure(range_index(spec.label, spec.properties))
+            IndexManager(self.executor, self.grammar, self.changed).ensure(range_index(spec.label, spec.properties))
         for statement in self.grammar.create_unique(spec):
             self.executor.run(statement)
         self._await_built(spec)
+        self.changed()
         return EnsureResult("CREATED", spec)
 
     def drop(self, spec: UniquenessConstraintSpec) -> None:
         if self._exists(spec):
             for statement in self.grammar.drop_unique(spec):
                 self.executor.run(statement)
+            self.changed()
 
     def _exists(self, spec: UniquenessConstraintSpec) -> bool:
         # Order means nothing to uniqueness, and engines reorder the properties.

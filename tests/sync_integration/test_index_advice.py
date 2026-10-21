@@ -59,16 +59,15 @@ def test_does_not_advise_an_order_of_one_root_pinned_by_its_id(gom):
     assert [it.id for it in one] == ["t1"]
 
 
-def test_takes_an_index_over_exactly_the_ordered_properties_once_it_is_seen(gom):
+def test_takes_an_index_over_exactly_the_ordered_properties_its_own_at_once_another_once_refreshed(gom):
     with pytest.raises(DrivineError, match="no matching"):
         gom.load_all(Ticket, order_by=q.opened.asc())
     gom.indexes.ensure(BY_OPENED)
-    with pytest.raises(DrivineError, match="no matching"):  # the list read before the index was made is kept
-        gom.load_all(Ticket, order_by=q.opened.asc())
-    gom.index_advisor.refresh()
     rows = gom.load_all(Ticket, order_by=q.opened.desc())
     assert [it.id for it in rows] == ["t2", "t1"]
-    gom.indexes.ensure(BY_OPENED_AND_RANK)
+    StatelessGraphObjectManager(gom.persistence_manager).indexes.ensure(BY_OPENED_AND_RANK)
+    with pytest.raises(DrivineError, match="no matching"):  # the list read before another made the index is kept
+        gom.load_all(Ticket, order_by=[q.opened.asc(), q.rank.asc()])
     gom.index_advisor.refresh()
     gom.load_all(Ticket, order_by=[q.opened.asc(), q.rank.asc()])
 

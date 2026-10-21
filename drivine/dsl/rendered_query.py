@@ -26,3 +26,8 @@ class RenderedQuery:
     paged: bool = False
     """Whether the query orders, skips, limits or seeks."""
     seeks: bool = False
+    labels_tested: tuple[str, ...] = ()
+    """
+    The root's labels the predicate tests itself, as it reads a property through a labelled index: a statement needn't
+    test them again, and testing them on their own would have the store read the label instead (Oracle).
+    """

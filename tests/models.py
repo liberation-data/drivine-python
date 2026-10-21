@@ -97,6 +97,16 @@ class ActorStats(GraphView):
     ] = None
 
 
+class ActorWithDirectors(GraphView):
+    """Only actors a director directed a movie of: the path is required, and labelled at each hop."""
+
+    actor: Annotated[Actor, Root()]
+    directors: Annotated[
+        list[Director],
+        GraphPath([hop("ACTED_IN", label="Movie"), hop("DIRECTED_BY", label="Person")], required=True),
+    ] = []
+
+
 class ActorWithMovies(GraphView):
     """Only actors who acted in something: the relationship is required."""
 

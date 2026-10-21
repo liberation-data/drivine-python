@@ -143,6 +143,12 @@ class CypherGrammar:
     """
     orphan_delete_limit: str | None = None
     """Why the engine can't delete with CascadeType.DELETE_ORPHAN; None when it can."""
+    far_labels_after_match: bool = False
+    """
+    Whether a view's paths, and a cascade's patterns, match their far node without its labels, and test them after,
+    outside the match: FalkorDB 6 plans a match of several hops from a labelled far end, reading every relationship of
+    the last hop's type, whether the label is in the pattern or in its WHERE (FalkorDB/FalkorDB#3332).
+    """
 
 
 NEO4J_GRAMMAR = CypherGrammar(
@@ -184,6 +190,7 @@ FALKORDB_GRAMMAR = CypherGrammar(
     lambda failure: bool(_ANOTHER_WRITE.search(str(failure))),
     _falkordb_vector_search,
     _falkordb_full_text_search,
+    far_labels_after_match=True,
 )
 """
 FalkorDB takes neither `EXISTS { }` nor a pattern in `exists()`. Its views are projected with CALL subqueries: on

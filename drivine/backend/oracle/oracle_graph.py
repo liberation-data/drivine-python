@@ -15,13 +15,6 @@ A graph's name: the longest leaves room for the longest name it gives an object,
 a hash, with nothing readable) and the trigger beside that, within Oracle's 128. drivine4j's rule.
 """
 
-RELATED_SUBQUERY = "SELECT /*+ NO_COALESCE_SQ */ 1"
-"""
-The hint every subquery over related nodes carries. Oracle 23 coalesces two such subqueries ORed together into one,
-and rewrites the second's label test as a multivalue index lookup that, evaluated as a filter, misses nodes with more
-than one label: of two roots, one related to each subclass, `instance_of(A) OR instance_of(B)` found one.
-"""
-
 
 class OracleGraph:
     """
@@ -170,3 +163,13 @@ def _java_hash(text: str) -> int:
     for i in range(0, len(units), 2):
         hashed = (31 * hashed + int.from_bytes(units[i : i + 2], "little")) & 0xFFFFFFFF
     return hashed - (1 << 32) if hashed >= 1 << 31 else hashed
+
+
+def related_subquery(*hints: str) -> str:
+    """
+    The SELECT of a subquery over related nodes, with the hint every one carries and any more given. Oracle 23
+    coalesces two such subqueries ORed together into one, and rewrites the second's label test as a multivalue index
+    lookup that, evaluated as a filter, misses nodes with more than one label: of two roots, one related to each
+    subclass, `instance_of(A) | instance_of(B)` found one. NO_COALESCE_SQ prevents it.
+    """
+    return f"SELECT /*+ {' '.join(['NO_COALESCE_SQ', *hints])} */ 1"

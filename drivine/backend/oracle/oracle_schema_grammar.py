@@ -194,7 +194,11 @@ END;"""
         )
 
     def create(self, kind: _Kind, label: str, properties: Sequence[str]) -> str:
-        """Makes the index and records it, in one block; an item recorded already is recorded again."""
+        """
+        Makes the index and records it, in one block; an item recorded already is recorded again. Another session may
+        make and record the same item at once, as managers that start together each ensure the store's key: an index
+        of the name is this one, its name a hash of what it is over, and a record of the item is this record.
+        """
         made = object_name(self.graph, kind, label, properties)
         columns = ", ".join(
             f"CASE WHEN {has_labels('n', [label])} THEN JSON_VALUE(n.props, '${json_key(it)}' RETURNING VARCHAR2(4000) "
@@ -204,11 +208,16 @@ END;"""
         ddl = f"CREATE {'UNIQUE ' if kind == 'UNIQUE' else ''}INDEX {made} ON {self.graph.nodes} n ({columns})"
         name = f"{label}_{'_'.join(properties)}_{'range' if kind == 'RANGE' else 'unique'}"
         listed = sql_text(to_json(list(properties)))
-        return f"""BEGIN
-    EXECUTE IMMEDIATE {sql_text(ddl)};
+        return f"""DECLARE
+    e_exists EXCEPTION;
+    PRAGMA EXCEPTION_INIT(e_exists, -955);
+BEGIN
+    BEGIN EXECUTE IMMEDIATE {sql_text(ddl)}; EXCEPTION WHEN e_exists THEN NULL; END;
     DELETE FROM {self.graph.catalog} WHERE kind = '{kind}' AND label = {sql_text(label)} AND properties = {listed};
     INSERT INTO {self.graph.catalog} (kind, label, properties, name, object_name, details)
         VALUES ('{kind}', {sql_text(label)}, {listed}, {sql_text(name)}, '{made}', JSON('{{}}'));
+EXCEPTION
+    WHEN DUP_VAL_ON_INDEX THEN NULL;
 END;"""
 
     def drop(self, kind: _Kind, label: str, properties: Sequence[str]) -> str:

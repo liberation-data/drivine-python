@@ -1,13 +1,28 @@
-# Drivine for Python
+<a href="https://drivine.org/"><img src="https://raw.githubusercontent.com/liberation-data/drivine/master/website/public/images/splash.jpg" alt="Drivine: graph database client for TypeScript, Python and the JVM"></a>
 
-**A graph database client for Python**, beside [Drivine](https://github.com/liberation-data/drivine) for TypeScript
-and [drivine4j](https://github.com/liberation-data/drivine4j) for the JVM. Async first, typed, and fast: one statement per
-round trip, no session cache, no lazy loading.
+# drivine-python
 
-> **Status: early.** On Neo4j, Memgraph, FalkorDB and Oracle: the low-level `PersistenceManager`, transactions, and
-> the object manager's loading, saving, batches, patches, edges and deletes of fragments and views, the query DSL with
-> typed references, grouped reads, schema management, and vector and full-text search, async and sync. Neptune
-> connects the same way, for the `PersistenceManager`. See [the design](docs/design.md) for how it came about.
+[![PyPI](https://img.shields.io/pypi/v/drivine.svg)](https://pypi.org/project/drivine/)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
+
+**Docs: [drivine.org](https://drivine.org/py/)**, for Python, TypeScript, and Kotlin & Java.
+
+A graph database client for Python, supporting **Neo4j**, **Memgraph**, **FalkorDB**, **Amazon Neptune** and **Oracle**
+(SQL/PGQ). Async first, with a sync API written from it, typed, and fast: one statement per round trip, no session
+cache, no lazy loading. It gives you two ways to work with a graph:
+
+1. **PersistenceManager**: a low-level API where you write the queries yourself.
+2. **Object manager** (`StatelessGraphObjectManager`): a high-level API that maps Pydantic models, with a query DSL
+   whose typed references are stubs generated from your models.
+
+Neptune connects for the `PersistenceManager`; the object manager runs on the others. 0.1 is an alpha release: the API
+may still change. See [the design](docs/design.md) for how it came about.
+
+> **On Node.js or the JVM?** [Drivine](https://github.com/liberation-data/drivine)
+> (`npm install @liberation-data/drivine`) and [drivine4j](https://github.com/liberation-data/drivine4j)
+> (`org.drivine:drivine4j`) are its TypeScript and Kotlin & Java twins, with the same object manager, query DSL, schema
+> management and engines. The three share a storage format: a store written from any of them is read, stamped and
+> checked alike by the others.
 
 ```
 pip install "drivine[neo4j]"      # Neo4j, Memgraph, Neptune

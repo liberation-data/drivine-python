@@ -8,9 +8,9 @@ from drivine.backend.fragment_group import FragmentGroup
 from drivine.backend.graph_statement import GraphStatement
 from drivine.backend.matched_node import MatchedNode
 from drivine.backend.oracle.oracle_graph import OracleGraph, has_labels, json_key, node_document
-from drivine.backend.oracle.oracle_json import to_json
 from drivine.backend.oracle.oracle_save_builder import prelude
 from drivine.backend.save_statement_builder import id_of, object_props
+from drivine.backend.sql.sql_json import to_json
 from drivine.drivine_error import DrivineError
 from drivine.manager.relate_mode import RelateMode
 from drivine.manager.save_options import SaveOptions

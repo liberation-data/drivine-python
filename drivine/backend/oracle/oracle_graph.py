@@ -1,60 +1,19 @@
 from __future__ import annotations
 
-import re
 from collections.abc import Sequence
 
-from drivine.drivine_error import DrivineError
+from drivine.backend.sql.sql_graph import DEFAULT_GRAPH, SqlGraph, sql_text
 from drivine.model import stamps
 
-DEFAULT_GRAPH = "drivine"
-"""The graph a manager on Oracle works on when none is named."""
 
-_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,113}$")
-"""
-A graph's name: the longest leaves room for the longest name it gives an object, a table beside the nodes (`_v__` and
-a hash, with nothing readable) and the trigger beside that, within Oracle's 128. drivine4j's rule.
-"""
-
-
-class OracleGraph:
+class OracleGraph(SqlGraph):
     """
-    A graph as Oracle keeps it (drivine4j's layout, so a store written from the JVM, Node or Python is one): a table of
-    nodes, each with its labels (a JSON array), its properties (a JSON object keyed by stored name) and its stamp; a
-    table of relationships, from `src` to `dst`, with a type and JSON properties; and the SQL property graph over the
-    two. A node's relationships go with it: the relationship table cascades.
+    A graph as Oracle keeps it: the tables of a SqlGraph, and the SQL property graph over the two, which view reads go
+    through.
     """
 
     def __init__(self, name: str = DEFAULT_GRAPH) -> None:
-        if not _NAME.match(name):
-            raise DrivineError(
-                f"'{name}' can't name a graph on Oracle: it names tables, so it is letters, digits and underscores, "
-                "beginning with a letter, at most 114."
-            )
-        self.name = name
-        self.nodes = f"{name}_node"
-        self.edges = f"{name}_edge"
-        self.catalog = f"{name}_schema"
-        """What Drivine made of indexes and constraints."""
-
-    def vectors(self, label: str, property: str) -> str:
-        """The table that holds the embeddings a vector index on the label's property is over."""
-        return self.object_name("v", [label, property])
-
-    def texts(self, label: str, properties: Sequence[str]) -> str:
-        """The table that holds the text a full-text index on the label's properties is over."""
-        return self.object_name("t", [label, *properties])
-
-    def object_name(self, kind: str, parts: Sequence[str]) -> str:
-        """
-        A name for an object of `kind` made for `parts`, as drivine4j names it, so the JVM, Node and Python make one:
-        the graph's name, the kind, what of the parts reads as a name, and a hash of the parts (Java's String.hashCode),
-        leaving room for the `_t` or `_i` an object made beside it adds within Oracle's 128.
-        """
-        hashed = format(_java_hash("\u0000".join(parts)) & 0xFFFFFFFF, "x")
-        fixed = len(f"{self.name}_{kind}__{hashed}") + 2
-        room = min(max(128 - fixed, 0), 40)
-        readable = "".join(re.sub(r"[^A-Za-z0-9]", "", it) for it in parts)[:room]
-        return f"{self.name}_{kind}_{readable}_{hashed}"
+        super().__init__(name, "Oracle", 128)
 
     @property
     def ddl(self) -> list[str]:
@@ -114,11 +73,6 @@ BEGIN
 END;"""
 
 
-def sql_text(text: str) -> str:
-    """A string as an SQL literal."""
-    return "'" + text.replace("'", "''") + "'"
-
-
 def json_key(name: str) -> str:
     """A JSON path step naming a key, quoted: `."metadata.source"`."""
     return '."' + name.replace("\\", "\\\\").replace('"', '\\"').replace("'", "''") + '"'
@@ -166,15 +120,6 @@ def labelled_value(alias: str, label: str, property: str) -> str:
 def _escaped(text: str) -> str:
     """Text for a JSON path string inside an SQL literal: backslashes and quotes escaped, then single quotes doubled."""
     return text.replace("\\", "\\\\").replace('"', '\\"').replace("'", "''")
-
-
-def _java_hash(text: str) -> int:
-    """Java's String.hashCode, over UTF-16 code units, as a 32-bit int."""
-    units = text.encode("utf-16-le")
-    hashed = 0
-    for i in range(0, len(units), 2):
-        hashed = (31 * hashed + int.from_bytes(units[i : i + 2], "little")) & 0xFFFFFFFF
-    return hashed - (1 << 32) if hashed >= 1 << 31 else hashed
 
 
 def related_subquery(*hints: str) -> str:

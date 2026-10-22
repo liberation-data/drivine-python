@@ -8,8 +8,8 @@ from collections.abc import Sequence
 from typing import Any, Literal
 
 from drivine.backend.oracle.oracle_graph import OracleGraph, has_labels, json_key, labelled_value, sql_text
-from drivine.backend.oracle.oracle_json import to_json
 from drivine.backend.oracle.oracle_side_table import OracleSideTable
+from drivine.backend.sql.sql_json import to_json
 from drivine.schema.full_text_index_spec import FullTextIndexSpec
 from drivine.schema.schema_grammar import SchemaGrammar, portable_pins
 from drivine.schema.schema_item import SchemaItem

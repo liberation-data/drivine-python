@@ -49,6 +49,8 @@ class _Token:
 class _Term:
     """One term as Oracle is asked it: as a whole-word expression, and for Oracle Text."""
 
+    words: list[str]
+    """The term's words in turn, the last of them the start of a word for a prefix."""
     pattern: str
     oracle_text: str
 
@@ -58,6 +60,7 @@ class _Parts:
     """The parts of a query as they are read, each kind as expressions and as Oracle Text."""
 
     scored: list[str] = field(default_factory=lambda: [])
+    scored_words: list[list[str]] = field(default_factory=lambda: [])
     required: list[str] = field(default_factory=lambda: [])
     excluded: list[str] = field(default_factory=lambda: [])
     scored_text: list[str] = field(default_factory=lambda: [])
@@ -81,6 +84,11 @@ class TextQuery:
     scored: list[str]
     required: list[str]
     excluded: list[str]
+    scored_words: list[list[str]]
+    """
+    The words of each term of `scored`, in turn: a node whose text matches the term holds each of them, so a store may
+    narrow what it counts to the nodes that hold them all, by an index of their text.
+    """
     oracle_text: str
     """
     The same query for an Oracle Text index: the scoring terms accumulated, each required one conjoined and each
@@ -108,7 +116,7 @@ class TextQuery:
         text = " AND ".join([f"({' ACCUM '.join(parts.scored_text)})", *parts.required_text]) + "".join(
             f" NOT {it}" for it in parts.excluded_text
         )
-        return TextQuery(parts.scored, parts.required, parts.excluded, text)
+        return TextQuery(parts.scored, parts.required, parts.excluded, parts.scored_words, text)
 
 
 def _add(parts: _Parts, token: _Token, must: bool, not_: bool) -> None:
@@ -124,6 +132,7 @@ def _add(parts: _Parts, token: _Token, must: bool, not_: bool) -> None:
         parts.required.append(term.pattern)
         parts.required_text.append(term.oracle_text)
     parts.scored.append(term.pattern)
+    parts.scored_words.append(term.words)
     parts.scored_text.append(term.oracle_text)
 
 
@@ -242,7 +251,9 @@ def _term_of(token: _Token) -> _Term | None:
     oracle_text = (
         " ".join([*(f"{{{it}}}" for it in words[:-1]), f"{words[-1]}%"]) if prefix else f"{{{' '.join(words)}}}"
     )
-    return _Term(_BOUNDARY_BEFORE + "[^[:alnum:]_]+".join(words) + ("" if prefix else _BOUNDARY_AFTER), oracle_text)
+    return _Term(
+        words, _BOUNDARY_BEFORE + "[^[:alnum:]_]+".join(words) + ("" if prefix else _BOUNDARY_AFTER), oracle_text
+    )
 
 
 def _last_index(items: Sequence[_Char], test: Callable[[_Char], bool]) -> int:

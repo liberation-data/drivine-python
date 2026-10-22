@@ -1,4 +1,4 @@
-"""Values as Oracle's JSON holds them, written as TypeScript's Drivine writes them with JSON.stringify."""
+"""Values as a SQL store's JSON holds them, written as TypeScript's Drivine writes them with JSON.stringify."""
 
 from __future__ import annotations
 

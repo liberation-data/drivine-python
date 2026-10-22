@@ -185,6 +185,9 @@ applied whole or not at all.
 - A raw `where`, for a load or a delete, is SQL over the root's row: its `props`, `labels` and `stamp`, say
   `(n.props ->> 'name') = $name`.
 - A number is compared as a number only where one is stored: `'7'` is not `7`, as on the graph engines.
+- Text is ordered by the database's collation, so a page of mixed-case text may not be in the order Neo4j gives
+  (`a, b, B` rather than `B, a, b`). The range indexes are made in that collation, so an order and a seek are read
+  through them.
 - A save checks the stamp, as on the graph engines. A save turned away by a serialization failure (`40001`) or a
   deadlock (`40P01`) is run again.
 - Index the id of each class you save: a range index or a uniqueness constraint is a partial index over the label's

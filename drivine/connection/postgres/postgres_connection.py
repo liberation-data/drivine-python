@@ -4,7 +4,7 @@ import itertools
 import logging
 import time
 from collections.abc import Mapping
-from typing import Any, TypeVar
+from typing import Any, TypeVar, cast
 
 from drivine.connection.connection import Connection
 from drivine.connection.postgres.postgres_cursor import PostgresCursor
@@ -80,10 +80,25 @@ class PostgresConnection(Connection):
 def _bindable(parameters: Mapping[str, Any]) -> Mapping[str, Any] | None:
     """
     The values as psycopg binds them, or None for none, so a statement without parameters is sent as it is: a dict as
-    `jsonb`, as Drivine's statements take a map. Everything else psycopg adapts itself.
+    `jsonb`, as Drivine's statements take a map, and a list of numbers some of which are whole as floats, as psycopg
+    binds a list of one type (a vector, say, `[1, 0.5]`). Everything else psycopg adapts itself.
     """
     if not parameters:
         return None
     from psycopg.types.json import Jsonb
 
-    return {key: Jsonb(value) if isinstance(value, dict) else value for key, value in parameters.items()}
+    def bindable(value: Any) -> Any:
+        if isinstance(value, dict):
+            return Jsonb(value)
+        if isinstance(value, list):
+            items = cast(list[Any], value)
+            return [float(it) for it in items] if _mixed_numbers(items) else items
+        return value
+
+    return {key: bindable(value) for key, value in parameters.items()}
+
+
+def _mixed_numbers(values: list[Any]) -> bool:
+    """Whether the values are numbers, whole and not."""
+    numbers = all(isinstance(it, (int, float)) and not isinstance(it, bool) for it in values)
+    return numbers and any(isinstance(it, float) for it in values) and any(isinstance(it, int) for it in values)

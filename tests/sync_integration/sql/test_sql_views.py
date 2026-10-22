@@ -1,11 +1,13 @@
+# Written by scripts/unasync.py from tests/integration/sql/test_sql_views.py:
+# change that, and run the script again.
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import Iterator
 from typing import Annotated, Any
 
 import pytest
 
-from drivine import (
+from drivine.sync import (
     Aggregate,
     AggregateFunction,
     Count,
@@ -15,6 +17,7 @@ from drivine import (
     GraphView,
     NodeFragment,
     NodeId,
+    PersistenceManager,
     PersistenceManagerFactory,
     Relationship,
     RelationshipFragment,
@@ -23,7 +26,7 @@ from drivine import (
     TargetNode,
     hop,
 )
-from tests.integration.oracle.oracle_seed import ON_ORACLE, OracleSeed
+from tests.sync_integration.sql.sql_seed import SqlSeed, raw_property
 
 
 class Person(NodeFragment, labels=["Person"]):
@@ -110,9 +113,10 @@ class Category(GraphView):
 
 
 @pytest.fixture(scope="module")
-async def seeded(factory: PersistenceManagerFactory) -> AsyncIterator[None]:
-    seed = OracleSeed(factory.get("oracle"), "OraView")
-    await seed.clear()
+def seeded(factory: PersistenceManagerFactory, store: str) -> Iterator[None]:
+    seed = SqlSeed(factory.get(store), "SqlView")
+    seed.prepare()
+    seed.clear()
     for labels, props in [
         (["Person"], {"id": "ava", "name": "Ada"}),
         (["Person", "Engineer"], {"id": "ben", "name": "Bob"}),
@@ -138,7 +142,7 @@ async def seeded(factory: PersistenceManagerFactory) -> AsyncIterator[None]:
         (["City"], {"id": "lyon", "name": "Lyon"}),
         (["City"], {"id": "tokyo", "name": "Tokyo"}),
     ]:
-        await seed.node(labels, props)
+        seed.node(labels, props)
     edges: list[tuple[str, str, str, dict[str, Any] | None]] = [
         ("ava", "WORKS_FOR", "initech", {"role": "lead", "start_year": 2020}),
         ("ava", "WORKS_FOR", "hooli", {"role": "advisor", "start_year": 2024}),
@@ -166,7 +170,7 @@ async def seeded(factory: PersistenceManagerFactory) -> AsyncIterator[None]:
         ("ufa", "LOCATED_IN", "oslo", None),
     ]
     for from_, type_, to, props in edges:
-        await seed.edge(from_, type_, to, props)
+        seed.edge(from_, type_, to, props)
     # Dee funded studios whose 'sort key' is a text or a number: lyon 'a', paris 'b', oslo 'c' and 5, tokyo 10, and
     # rome none. Lowest first, oslo keeps 'c'; highest first, 5.
     keys: list[tuple[str, str | int | None, str]] = [
@@ -178,9 +182,9 @@ async def seeded(factory: PersistenceManagerFactory) -> AsyncIterator[None]:
         ("lux", None, "rome"),
     ]
     for studio, key, city in keys:
-        await seed.node(["Studio"], {"id": studio} if key is None else {"id": studio, "sort key": key})
-        await seed.edge("dot", "FUNDED", studio)
-        await seed.edge(studio, "LOCATED_IN", city)
+        seed.node(["Studio"], {"id": studio} if key is None else {"id": studio, "sort key": key})
+        seed.edge("dot", "FUNDED", studio)
+        seed.edge(studio, "LOCATED_IN", city)
     # Cy funded studios whose 'sort key' is a text, one of them "": oslo '' and 'c', lyon 'a', paris 'b', tokyo 'd'.
     # "" is a text, and the lowest one, so lowest first oslo leads; highest first, oslo keeps 'c'.
     for studio, key, city in [
@@ -190,18 +194,18 @@ async def seeded(factory: PersistenceManagerFactory) -> AsyncIterator[None]:
         ("bee", "b", "paris"),
         ("dee", "d", "tokyo"),
     ]:
-        await seed.node(["Studio"], {"id": studio, "sort key": key})
-        await seed.edge("cal", "FUNDED", studio)
-        await seed.edge(studio, "LOCATED_IN", city)
+        seed.node(["Studio"], {"id": studio, "sort key": key})
+        seed.edge("cal", "FUNDED", studio)
+        seed.edge(studio, "LOCATED_IN", city)
     yield
-    await seed.clear()
+    seed.clear()
 
 
-pytestmark = [ON_ORACLE, pytest.mark.usefixtures("seeded")]
+pytestmark = pytest.mark.usefixtures("seeded")
 
 
-async def test_loads_relationship_fragments_single_and_undirected_relationships(gom: StatelessGraphObjectManager):
-    ada = await gom.load(Career, "ava")
+def test_loads_relationship_fragments_single_and_undirected_relationships(gom: StatelessGraphObjectManager):
+    ada = gom.load(Career, "ava")
     assert type(ada) is Career
     assert ada.person == Person(id="ava", name="Ada")
     assert ada.city.name == "Paris"
@@ -214,75 +218,75 @@ async def test_loads_relationship_fragments_single_and_undirected_relationships(
     assert type(next(it for it in ada.friends if it.id == "ben")) is Engineer
 
 
-async def test_reads_deep_fragment_lists_once_each_paths_counts_and_aggregates(gom: StatelessGraphObjectManager):
-    ada = await gom.load(Career, "ava")
+def test_reads_deep_fragment_lists_once_each_paths_counts_and_aggregates(gom: StatelessGraphObjectManager):
+    ada = gom.load(Career, "ava")
     assert sorted(it.id for it in ada.reports) == ["ben", "cal"]
     assert sorted(it.name for it in ada.office_cities) == ["Oslo", "Paris"]
     assert [ada.ratings, ada.avg_score, ada.total_score] == [3, 3, 6]
-    deeper = await gom.load(Career, "ava", depth={"reports": 3})
+    deeper = gom.load(Career, "ava", depth={"reports": 3})
     assert sorted(it.id for it in deeper.reports) == ["ben", "cal", "dot"]
-    bob = await gom.load(Career, "ben")
+    bob = gom.load(Career, "ben")
     assert [bob.ratings, bob.avg_score, bob.total_score] == [0, None, 0]
     assert [it.id for it in bob.friends] == ["ava"]
 
 
-async def test_reads_a_path_in_the_order_one_of_its_hops_names(gom: StatelessGraphObjectManager):
-    ada = await gom.load(Patron, "ava")
+def test_reads_a_path_in_the_order_one_of_its_hops_names(gom: StatelessGraphObjectManager):
+    ada = gom.load(Patron, "ava")
     assert [it.name for it in ada.cities] == ["Oslo", "Paris", "Rome"]
     assert ada.first.name == "Oslo"
     assert ada.latest.name == "Paris"
     assert [it.name for it in ada.latest_first] == ["Paris", "Oslo", "Rome"]
-    bob = await gom.load(Patron, "ben")
+    bob = gom.load(Patron, "ben")
     assert bob.cities == []
     assert bob.first is None
 
 
-async def test_reads_a_text_of_digits_as_text_and_a_node_without_the_property_last(gom: StatelessGraphObjectManager):
-    ada = await gom.load(Patron, "ava")
+def test_reads_a_text_of_digits_as_text_and_a_node_without_the_property_last(gom: StatelessGraphObjectManager):
+    ada = gom.load(Patron, "ava")
     assert [it.name for it in ada.by_code] == ["Paris", "Oslo", "Rome"]
     assert [it.name for it in ada.by_code_descending] == ["Oslo", "Paris", "Rome"]
 
 
-async def test_reads_a_text_before_a_number_lowest_first_and_after_highest_first(gom: StatelessGraphObjectManager):
-    dee = await gom.load(RankedPatron, "dot")
+def test_reads_a_text_before_a_number_lowest_first_and_after_highest_first(gom: StatelessGraphObjectManager):
+    dee = gom.load(RankedPatron, "dot")
     assert [it.name for it in dee.cities] == ["Lyon", "Paris", "Oslo", "Tokyo", "Rome"]
     assert [it.name for it in dee.cities_descending] == ["Tokyo", "Oslo", "Paris", "Lyon", "Rome"]
 
 
-async def test_reads_an_empty_text_as_a_text_and_the_lowest_one(gom: StatelessGraphObjectManager):
-    cy = await gom.load(RankedPatron, "cal")
+def test_reads_an_empty_text_as_a_text_and_the_lowest_one(gom: StatelessGraphObjectManager):
+    cy = gom.load(RankedPatron, "cal")
     assert [it.name for it in cy.cities] == ["Oslo", "Lyon", "Paris", "Tokyo"]
     assert [it.name for it in cy.cities_descending] == ["Tokyo", "Oslo", "Paris", "Lyon"]
 
 
-async def test_reads_an_ordered_path_of_a_view_nested_in_another(gom: StatelessGraphObjectManager):
-    cy = await gom.load(PatronFriend, "cal")
+def test_reads_an_ordered_path_of_a_view_nested_in_another(gom: StatelessGraphObjectManager):
+    cy = gom.load(PatronFriend, "cal")
     assert [it.person.id for it in cy.knows] == ["ava"]
     assert [it.name for it in cy.knows[0].cities] == ["Oslo", "Paris", "Rome"]
     assert cy.knows[0].latest.name == "Paris"
 
 
-async def test_keeps_only_roots_with_the_required_relationships(gom: StatelessGraphObjectManager):
-    assert sorted(it.person.id for it in await gom.load_all(Career)) == ["ava", "ben"]
-    assert await gom.count(Career) == 2
-    assert await gom.load(Career, "cal") is None
+def test_keeps_only_roots_with_the_required_relationships(gom: StatelessGraphObjectManager):
+    assert sorted(it.person.id for it in gom.load_all(Career)) == ["ava", "ben"]
+    assert gom.count(Career) == 2
+    assert gom.load(Career, "cal") is None
 
 
-async def test_nests_views_and_follows_one_that_holds_itself_to_its_max_depth(gom: StatelessGraphObjectManager):
-    acme = await gom.load(Team, "initech")
+def test_nests_views_and_follows_one_that_holds_itself_to_its_max_depth(gom: StatelessGraphObjectManager):
+    acme = gom.load(Team, "initech")
     assert sorted(it.person.id for it in acme.members) == ["ava", "ben"]
     assert next(it for it in acme.members if it.person.id == "ava").city.name == "Paris"
-    c1 = await gom.load(Category, "c1")
+    c1 = gom.load(Category, "c1")
     assert c1.parent.node.id == "c2"
     assert c1.parent.parent.node.id == "c3"
     assert c1.parent.parent.parent is None
 
 
-async def test_filters_views_by_sql_over_the_root_row_and_deletes_a_root_that_meets_them(
-    factory: PersistenceManagerFactory, gom: StatelessGraphObjectManager
+def test_filters_views_by_sql_over_the_root_row_and_deletes_a_root_that_meets_them(
+    pm: PersistenceManager, gom: StatelessGraphObjectManager
 ):
-    named = await gom.load_all(Career, "JSON_VALUE(n.props, '$.name') = $name", {"name": "Bob"})
+    named = gom.load_all(Career, f"{raw_property(pm, 'name')} = $name", {"name": "Bob"})
     assert [it.person.id for it in named] == ["ben"]
-    await OracleSeed(factory.get("oracle"), "OraView").node(["Person"], {"id": "tmp", "name": "Tmp"})
-    assert await gom.delete(Career, "tmp") == 0
-    assert await gom.delete(Person, "tmp") == 1
+    SqlSeed(pm, "SqlView").node(["Person"], {"id": "tmp", "name": "Tmp"})
+    assert gom.delete(Career, "tmp") == 0
+    assert gom.delete(Person, "tmp") == 1

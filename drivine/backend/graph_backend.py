@@ -27,8 +27,12 @@ from drivine.schema.schema_item import SchemaItem
 class GraphBackend(Protocol):
     """
     What the object manager asks of a store: each statement it runs, ready to bind. Cypher engines have one backend,
-    Oracle another. A `where` given as a string is a predicate in the store's own language over the root, `n`; a query
-    over references is written by the backend.
+    Oracle another, Postgres a third. A `where` given as a string is a predicate in the store's own language over the
+    root, `n`; a query over references is written by the backend.
+
+    Where the store is tables an object manager makes (Postgres), the backend has `ensuring` too: the statement that
+    makes them when they are not there and does nothing when they are, which a manager runs once, before its first
+    statement, outside any transaction. A backend without it has nothing to make, or its connection makes it (Oracle).
     """
 
     def render_query(

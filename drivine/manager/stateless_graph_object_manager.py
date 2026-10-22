@@ -33,6 +33,7 @@ from drivine.dsl.seek_value import SeekValue
 from drivine.manager.cascade_type import CascadeType
 from drivine.manager.contention import when_not_contended
 from drivine.manager.edge_operations import EdgeOperations
+from drivine.manager.ensured_store import EnsuredStore, ensure_store
 from drivine.manager.group_operations import GroupOperations
 from drivine.manager.non_atomic_batch_error import NonAtomicBatchError
 from drivine.manager.null_policy import NullPolicy
@@ -83,10 +84,12 @@ class StatelessGraphObjectManager:
     """
 
     def __init__(self, persistence_manager: PersistenceManager, registry: ModelRegistry | None = None) -> None:
-        self.persistence_manager = persistence_manager
         self.registry = registry or ModelRegistry()
         provider = getattr(persistence_manager, "provider", None)
         self.backend = backend_for(persistence_manager.type, getattr(provider, "graph_name", None))
+        ensuring: str | None = getattr(self.backend, "ensuring", None)
+        self.persistence_manager = EnsuredStore(persistence_manager, ensuring) if ensuring else persistence_manager
+        """The manager's statements run through it, once the backend's store is made where it has one to make."""
         self.mapper = GraphObjectMapper(self.registry)
         self._warned_non_atomic = False
         self._identity: StoreIdentity | None = None
@@ -128,7 +131,15 @@ class StatelessGraphObjectManager:
         provider = getattr(self.persistence_manager, "provider", None)
         if provider is None:
             raise DrivineError("Schema management needs a persistence manager that names its connection provider.")
-        return SchemaExecutor(provider)
+        ensuring: str | None = getattr(self.backend, "ensuring", None)
+        if not ensuring:
+            return SchemaExecutor(provider)
+        persistence_manager = self.persistence_manager
+
+        async def prepare() -> None:
+            await ensure_store(persistence_manager, ensuring)
+
+        return SchemaExecutor(provider, prepare)
 
     def _schema_grammar(self) -> SchemaGrammar:
         return schema_grammar_for(self.persistence_manager.type, getattr(self.backend, "graph", None))
@@ -266,6 +277,7 @@ class StatelessGraphObjectManager:
                 top_k if search_k is not None else None,
                 _checked(depth) or {},
                 await self._search_table("VECTOR", label, [searched.property]),
+                len(vector),
             ),
         )
         rows = await self.persistence_manager.query(

@@ -1,4 +1,4 @@
-# Written by scripts/unasync.py from tests/integration/oracle/test_oracle_writes.py:
+# Written by scripts/unasync.py from tests/integration/sql/test_sql_writes.py:
 # change that, and run the script again.
 import re
 from collections.abc import Iterator
@@ -22,25 +22,25 @@ from drivine.sync import (
     node_ref,
     refs,
 )
-from tests.sync_integration.oracle.oracle_seed import ON_ORACLE, OracleSeed
+from tests.sync_integration.sql.sql_seed import SqlSeed
 
 STAMP = re.compile(r"^[0-9a-f]{16}:[0-9a-f]{16}$")
 
 
-class Session(NodeFragment, labels=["OraWrite", "Session"]):
+class Session(NodeFragment, labels=["SqlWrite", "Session"]):
     id: Annotated[str, NodeId()]
     last_activity: int | None = None
     summary: str | None = None
     stamp: Annotated[str | None, NodeStamp()] = None
 
 
-class Message(NodeFragment, labels=["OraWrite", "Message"]):
+class Message(NodeFragment, labels=["SqlWrite", "Message"]):
     id: Annotated[str, NodeId()]
     text: str | None = None
     stamp: Annotated[str | None, NodeStamp()] = None
 
 
-class Person(NodeFragment, labels=["OraWrite", "Person"]):
+class Person(NodeFragment, labels=["SqlWrite", "Person"]):
     id: Annotated[str, NodeId()]
     name: str | None = None
 
@@ -53,13 +53,11 @@ class Conversation(GraphView):
 
 @pytest.fixture(autouse=True)
 def cleared(pm: PersistenceManager) -> Iterator[None]:
-    seed = OracleSeed(pm, "OraWrite")
+    seed = SqlSeed(pm, "SqlWrite")
+    seed.prepare()
     seed.clear()
     yield
     seed.clear()
-
-
-pytestmark = ON_ORACLE
 
 
 def test_saves_fragments_of_several_classes_in_one_batch_handing_back_stamps(gom: StatelessGraphObjectManager):

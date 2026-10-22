@@ -20,7 +20,7 @@ from drivine.schema.uniqueness_constraint_spec import UniquenessConstraintSpec
 from drivine.schema.vector_index_spec import VectorIndexSpec
 
 if TYPE_CHECKING:
-    from drivine.backend.oracle.oracle_graph import OracleGraph
+    from drivine.backend.sql.sql_graph import SqlGraph
 
 
 @dataclass(frozen=True)
@@ -346,13 +346,21 @@ when each is. Its uniqueness constraints are a Redis command, and need a range i
 """
 
 
-def schema_grammar_for(type: DatabaseType, graph: OracleGraph | None = None) -> SchemaGrammar:
-    """The engine's schema grammar; on Oracle, over the tables of `graph` (the default graph when None)."""
+def schema_grammar_for(type: DatabaseType, graph: SqlGraph | None = None) -> SchemaGrammar:
+    """
+    The engine's schema grammar; on Oracle and Postgres, over the tables of `graph` (the default graph when None, and
+    the graph of that name when it is another store's).
+    """
     if type is DatabaseType.ORACLE:
         from drivine.backend.oracle.oracle_graph import OracleGraph
         from drivine.backend.oracle.oracle_schema_grammar import oracle_schema_grammar
 
-        return oracle_schema_grammar(graph or OracleGraph())
+        return oracle_schema_grammar(graph if isinstance(graph, OracleGraph) else OracleGraph(_name_of(graph)))
+    if type is DatabaseType.POSTGRES:
+        from drivine.backend.postgres.postgres_graph import PostgresGraph
+        from drivine.backend.postgres.postgres_schema_grammar import postgres_schema_grammar
+
+        return postgres_schema_grammar(graph if isinstance(graph, PostgresGraph) else PostgresGraph(_name_of(graph)))
     grammars = {
         DatabaseType.NEO4J: NEO4J_SCHEMA,
         DatabaseType.MEMGRAPH: MEMGRAPH_SCHEMA,
@@ -362,3 +370,10 @@ def schema_grammar_for(type: DatabaseType, graph: OracleGraph | None = None) -> 
     if grammar is None:
         raise DrivineError(f"{type} has no schema management.")
     return grammar
+
+
+def _name_of(graph: SqlGraph | None) -> str:
+    """The name of the graph, the default graph's when None."""
+    from drivine.backend.sql.sql_graph import DEFAULT_GRAPH
+
+    return graph.name if graph is not None else DEFAULT_GRAPH

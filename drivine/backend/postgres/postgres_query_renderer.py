@@ -9,7 +9,7 @@ from pydantic_core import to_jsonable_python
 from drivine.backend.postgres.postgres_graph import json_value, number_of, text_of
 from drivine.backend.postgres.postgres_views import PostgresViews
 from drivine.backend.sql.compared import Compared
-from drivine.backend.sql.sql_json import to_json
+from drivine.backend.sql.sql_json import storable, to_json
 from drivine.backend.sql.sql_query_renderer import SqlQueryRenderer
 from drivine.drivine_error import DrivineError
 from drivine.dsl.compare_test import CompareTest
@@ -193,7 +193,9 @@ class PostgresQueryRenderer(SqlQueryRenderer):
 
 
 def _is_number(value: Any) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
+    """Whether the value is stored as a number: an Enum of numbers, or a Decimal, is the number a save writes."""
+    stored = storable(value)
+    return isinstance(stored, (int, float)) and not isinstance(stored, bool)
 
 
 def _packed(value: Any) -> str:
@@ -202,7 +204,11 @@ def _packed(value: Any) -> str:
 
 
 def _string(value: Any) -> str:
-    """A value as text, as JavaScript's String writes it: a boolean in lower case."""
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    return str(value)
+    """
+    A value as text, as JavaScript's String writes it: a boolean in lower case; an Enum, or a date, as the text a save
+    writes (see storable), so `Status.OPEN` is its value and not its name.
+    """
+    stored = storable(value)
+    if isinstance(stored, bool):
+        return "true" if stored else "false"
+    return str(stored)

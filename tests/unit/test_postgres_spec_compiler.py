@@ -33,6 +33,15 @@ def test_rewrites_every_occurrence_of_a_named_parameter():
     assert result.parameters == {"id": 7}
 
 
+def test_leaves_out_a_binding_whose_key_no_parameter_can_name_whatever_it_holds():
+    spec = QuerySpecification("select * from t where name = $name and x = '$c++ (draft)'").bind(
+        {"name": "Moon Girl", "c++ (draft)": 1}
+    )
+    result = compiled(spec)
+    assert result.statement == "select * from t where name = %(name)s and x = '$c++ (draft)'"
+    assert result.parameters == {"name": "Moon Girl"}
+
+
 def test_does_not_match_a_name_as_the_prefix_of_a_longer_one():
     spec = QuerySpecification("select * from t where id = $id or id = any($idList)").bind({"id": 1, "idList": [2, 3]})
     result = compiled(spec)

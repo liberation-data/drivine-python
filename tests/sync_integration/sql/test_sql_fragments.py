@@ -1,6 +1,7 @@
 # Written by scripts/unasync.py from tests/integration/sql/test_sql_fragments.py:
 # change that, and run the script again.
 from collections.abc import Iterator
+from enum import Enum
 from typing import Annotated
 
 import pytest
@@ -73,3 +74,20 @@ def test_takes_the_query_dsl(gom):
     q = refs(Ticket)
     typed = gom.load_all(Ticket, q.number.gte(102), order_by=q.number.desc())
     assert [it.id for it in typed] == ["t3", "t2"]
+
+
+class Priority(Enum):
+    LOW = 1
+    HIGH = 2
+
+
+class Task(NodeFragment, labels=["SqlTest", "Task"]):
+    id: Annotated[str, NodeId()]
+    priority: Priority
+
+
+def test_compares_an_enum_of_numbers_as_the_number_it_is_stored_as(gom):
+    gom.save_all([Task(id="a", priority=Priority.HIGH), Task(id="b", priority=Priority.LOW)])
+    q = refs(Task)
+    assert [it.id for it in gom.load_all(Task, q.priority.eq(Priority.HIGH))] == ["a"]
+    assert [it.id for it in gom.load_all(Task, q.priority.in_([Priority.LOW]))] == ["b"]

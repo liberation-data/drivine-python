@@ -6,6 +6,7 @@ import time
 from collections.abc import Mapping
 from typing import Any, TypeVar, cast
 
+from drivine.backend.sql.sql_json import to_json
 from drivine.connection.connection import Connection
 from drivine.connection.postgres.postgres_cursor import PostgresCursor
 from drivine.connection.postgres.postgres_result_mapper import PostgresResultMapper
@@ -80,7 +81,8 @@ class PostgresConnection(Connection):
 def _bindable(parameters: Mapping[str, Any]) -> Mapping[str, Any] | None:
     """
     The values as psycopg binds them, or None for none, so a statement without parameters is sent as it is: a dict as
-    `jsonb`, as Drivine's statements take a map, and a list of numbers some of which are whole as floats, as psycopg
+    `jsonb`, as Drivine's statements take a map, its values written as a save writes them (a date as ISO 8601 text, an
+    Enum as its value; see storable), and a list of numbers some of which are whole as floats, as psycopg
     binds a list of one type (a vector, say, `[1, 0.5]`). Everything else psycopg adapts itself.
     """
     if not parameters:
@@ -89,7 +91,7 @@ def _bindable(parameters: Mapping[str, Any]) -> Mapping[str, Any] | None:
 
     def bindable(value: Any) -> Any:
         if isinstance(value, dict):
-            return Jsonb(value)
+            return Jsonb(value, dumps=to_json)
         if isinstance(value, list):
             items = cast(list[Any], value)
             return [float(it) for it in items] if _mixed_numbers(items) else items

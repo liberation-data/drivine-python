@@ -28,7 +28,8 @@ class PostgresSpecCompiler(QuerySpecificationCompiler):
         text = self.statement.text
         if isinstance(parameters, Mapping):
             # Only the names the statement uses: Postgres refuses a parameter its statement does not name.
-            self._names = sorted(key for key in parameters if re.search(rf"\${re.escape(key)}(?![A-Za-z0-9_])", text))
+            used = {it.group(1) for it in _NAMED.finditer(text)}
+            self._names = sorted(key for key in parameters if key in used)
             self._values: dict[str, Any] = {key: parameters[key] for key in self._names}
         else:
             self._names = []

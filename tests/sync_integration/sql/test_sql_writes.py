@@ -87,6 +87,18 @@ def test_patches_where_a_condition_holds_with_all_four_outcomes(gom: StatelessGr
     assert (gom.load(Session, "s1")).last_activity is None
 
 
+def test_patches_where_a_text_condition_holds_with_its_quotes_taken_as_text(gom: StatelessGraphObjectManager):
+    gom.save(Session(id="s1", summary="O'Brien's"))
+    q = refs(Session)
+    assert gom.patch(Session, "s1", set={"last_activity": 1}, where=q.summary.eq("O'Brien")) == PatchResult(
+        True, False, False
+    )
+    assert gom.patch(Session, "s1", set={"last_activity": 2}, where=q.summary.eq("O'Brien's")) == PatchResult(
+        True, True, True
+    )
+    assert (gom.load(Session, "s1")).last_activity == 2
+
+
 def test_patches_many_in_order_making_none(gom: StatelessGraphObjectManager):
     gom.save_all([Session(id="s1", summary="a"), Session(id="s2", summary="b")])
     results = gom.patch_all(

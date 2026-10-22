@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Mapping
-from typing import Any, cast
+from typing import Any
 
 from drivine.backend.cypher_grammar import FALKORDB_GRAMMAR, NEO4J_GRAMMAR
+from drivine.backend.postgres.postgres_statement import value_of
 from drivine.connection.database_type import DatabaseType
 from drivine.drivine_error import DrivineError
 from drivine.query.query_specification import QuerySpecification
@@ -30,17 +31,6 @@ def _contended(failure: BaseException) -> bool:
             return True
         cause = cause.__cause__
     return False
-
-
-def _value_of(row: Any) -> Any:
-    """
-    A row of one column as that column's value, as the graph engines and Oracle give a record of one column: Postgres
-    gives a row as a record of its columns.
-    """
-    if not isinstance(row, Mapping):
-        return row
-    columns = cast(Mapping[Any, Any], row)
-    return next(iter(columns.values())) if len(columns) == 1 else columns
 
 
 class SchemaExecutor:
@@ -74,7 +64,8 @@ class SchemaExecutor:
             connection.release(error)
             raise DrivineError.with_root_cause(error) from error
         connection.release()
-        return [_value_of(it) for it in rows] if self.provider.type is DatabaseType.POSTGRES else rows
+        # Postgres gives a row as a record of its columns, where the graph engines give one column as its value.
+        return [value_of(it) for it in rows] if self.provider.type is DatabaseType.POSTGRES else rows
 
     def _native(self, operation: NativeOperation) -> list[Any]:
         constraint = getattr(self.provider, "constraint", None)

@@ -31,3 +31,10 @@ class PostgresGroups(SqlGroups):
 
     def _id_value(self, property: str) -> str:
         return json_value("p", property)
+
+    def _having_value(self, parameter: str) -> str:
+        """
+        A number, whatever the aggregate: Postgres takes a value bound without a type as the type of what it is compared
+        with, and a count is a whole number, so `0.5` compared with one would be refused.
+        """
+        return f"CAST({parameter} AS numeric)"

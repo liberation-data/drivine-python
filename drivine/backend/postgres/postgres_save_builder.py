@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from typing import Any
 
 from drivine.backend.postgres.postgres_graph import PostgresGraph
@@ -56,12 +56,6 @@ class _NodeWrite:
     """For an open NodeLabels field: the property recording the labels it wrote, and whether it is replaced."""
 
 
-@dataclass
-class _Stamped:
-    model: FragmentModel
-    ids: list[Any] = field(default_factory=lambda: [])
-
-
 class PostgresSaveBuilder:
     """
     Writes a save as one plan for drivine4j's write function, applied whole or not at all, with or without a
@@ -75,7 +69,8 @@ class PostgresSaveBuilder:
         self.graph = graph
         self.registry = registry
         self._plan = WritePlan()
-        self._stamped: list[_Stamped] = []
+        self._stamped: list[FragmentModel] = []
+        """The models of the related nodes handed their stamps back, each once."""
         self._handed: dict[str, tuple[int, Any]] = {}
         """For each index a related node's step was given, its stamped model's place among `_stamped`, and its id."""
         self._options = SaveOptions()
@@ -231,9 +226,9 @@ class PostgresSaveBuilder:
         """The index a related node of the model is handed its stamp back under, where the model declares one."""
         if not model.stamp_field:
             return None
-        place = next((i for i, it in enumerate(self._stamped) if it.model is model), None)
+        place = next((i for i, it in enumerate(self._stamped) if it is model), None)
         if place is None:
-            self._stamped.append(_Stamped(model))
+            self._stamped.append(model)
             place = len(self._stamped) - 1
         index = str(len(self._handed))
         self._handed[index] = (place, id_)
@@ -246,7 +241,7 @@ class PostgresSaveBuilder:
             root,
             root_object,
             expected,
-            [it.model for it in self._stamped],
+            list(self._stamped),
             self._handed,
         )
 

@@ -1,4 +1,5 @@
 from collections.abc import AsyncIterator
+from enum import Enum
 from typing import Annotated
 
 import pytest
@@ -71,3 +72,20 @@ async def test_takes_the_query_dsl(gom):
     q = refs(Ticket)
     typed = await gom.load_all(Ticket, q.number.gte(102), order_by=q.number.desc())
     assert [it.id for it in typed] == ["t3", "t2"]
+
+
+class Priority(Enum):
+    LOW = 1
+    HIGH = 2
+
+
+class Task(NodeFragment, labels=["SqlTest", "Task"]):
+    id: Annotated[str, NodeId()]
+    priority: Priority
+
+
+async def test_compares_an_enum_of_numbers_as_the_number_it_is_stored_as(gom):
+    await gom.save_all([Task(id="a", priority=Priority.HIGH), Task(id="b", priority=Priority.LOW)])
+    q = refs(Task)
+    assert [it.id for it in await gom.load_all(Task, q.priority.eq(Priority.HIGH))] == ["a"]
+    assert [it.id for it in await gom.load_all(Task, q.priority.in_([Priority.LOW]))] == ["b"]

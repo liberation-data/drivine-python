@@ -9,7 +9,7 @@ from drivine.annotation.direction import Direction
 from drivine.backend.fragment_group import FragmentGroup
 from drivine.backend.graph_statement import GraphStatement
 from drivine.backend.matched_node import MatchedNode
-from drivine.backend.postgres.found_stamp import FoundStamp
+from drivine.backend.postgres.found_stamp import FoundStamp, stamps_by_place
 from drivine.backend.postgres.postgres_graph import PostgresGraph
 from drivine.backend.postgres.postgres_save_builder import absent, present, stored_key, without_key
 from drivine.backend.postgres.postgres_write_statement import PostgresWriteStatement
@@ -115,12 +115,7 @@ class PostgresWrites:
                 )
 
         def reshaped(rows: list[str], bound: Mapping[str, Any]) -> list[Any]:
-            result: list[dict[str, list[Any]]] = [{"before": [], "after": []} for _ in groups]
-            for entry in (FoundStamp.of(it) for it in rows):
-                group, id_ = handed[entry.index]
-                result[group]["before"].append({"id": id_, "stamp": entry.found})
-                result[group]["after"].append({"id": id_, "stamp": entry.stamp})
-            return [{"groups": result}]
+            return [{"groups": stamps_by_place(rows, handed, len(groups))}]
 
         return PostgresWriteStatement.of(self.graph, "EACH_STAMP", lambda bound: (plan, None), reshaped)
 

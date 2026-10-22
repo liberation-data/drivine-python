@@ -1,4 +1,6 @@
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
+from enum import Enum
 from typing import Any
 
 import pytest
@@ -27,6 +29,21 @@ async def test_binds_named_parameters_a_map_as_jsonb_and_reads_jsonb_back_as_a_d
         QuerySpecification[Any]("SELECT n, doc FROM drivine_conn_test WHERE id = $id").bind({"id": "a"})
     )
     assert row == {"n": 1, "doc": {"tags": ["x", "y"], "nested": {"ok": True}}}
+
+
+class Level(Enum):
+    HIGH = 2
+
+
+async def test_binds_a_map_holding_a_date_and_an_enum_as_a_save_writes_them(pm):
+    doc = {"at": datetime(2024, 1, 2, 3, 4, 5, tzinfo=UTC), "level": Level.HIGH}
+    row = await pm.get_one(QuerySpecification[Any]("SELECT CAST($doc AS jsonb) AS doc").bind({"doc": doc}))
+    assert row == {"doc": {"at": "2024-01-02T03:04:05.000Z", "level": 2}}
+
+
+async def test_binds_a_list_of_whole_and_fractional_numbers_as_one_of_floats(pm):
+    row = await pm.get_one(QuerySpecification[Any]("SELECT CAST($v AS float8[]) AS v").bind({"v": [1, 0.5, 0]}))
+    assert row == {"v": [1.0, 0.5, 0.0]}
 
 
 async def test_a_row_is_a_dict_of_its_columns_as_plain_sql_reads_it(pm):
@@ -105,3 +122,15 @@ async def test_reads_a_cursor_in_batches_outside_a_transaction_and_in_one(regist
         assert seen == [1, 2, 3, 4, 5, 6, 7]
     finally:
         await connection.release()
+
+
+async def test_rolls_back_a_transaction_left_open_when_released(pm, table, registry: DatabaseRegistry):
+    provider = registry.connection_provider("postgres")
+    assert provider is not None
+    connection = await provider.connect()
+    try:
+        await connection.start_transaction()
+        await connection.query(QuerySpecification[Any]("INSERT INTO drivine_conn_test (id, n) VALUES ('open', 1)"))
+    finally:
+        await connection.release()
+    assert await pm.query(QuerySpecification[Any]("SELECT id FROM drivine_conn_test")) == []

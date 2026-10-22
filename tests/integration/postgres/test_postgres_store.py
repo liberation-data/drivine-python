@@ -6,6 +6,8 @@ catalog of indexes, and search, with an index and without. TypeScript's Postgres
 import dataclasses
 import json
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
+from enum import Enum
 from typing import Annotated, Any
 
 import pytest
@@ -19,6 +21,7 @@ from drivine import (
     GraphView,
     NodeFragment,
     NodeId,
+    PatchResult,
     PersistenceManager,
     PersistenceManagerFactory,
     QuerySpecification,
@@ -26,6 +29,8 @@ from drivine import (
     Root,
     StatelessGraphObjectManager,
     VectorIndex,
+    case_of,
+    equal_to,
     full_text_index,
     range_index,
     refs,
@@ -108,6 +113,23 @@ async def test_makes_a_graphs_tables_at_an_object_managers_first_statement_and_n
         QuerySpecification[Any](f"SELECT obj_description(to_regclass('{name}_node'), 'pg_class') AS version")
     )
     assert comment["version"] == PostgresGraph.VERSION
+    await pm.execute(QuerySpecification[Any](f"DROP TABLE {name}_edge, {name}_node, {name}_schema CASCADE"))
+
+
+async def test_makes_a_graphs_tables_when_its_managers_first_statement_is_a_batch_in_a_transaction_of_its_own(
+    pm: PersistenceManager, registry: DatabaseRegistry, factory: PersistenceManagerFactory
+):
+    name = "pgstore_batch"
+    await pm.execute(QuerySpecification[Any](f"DROP TABLE IF EXISTS {name}_edge, {name}_node, {name}_schema CASCADE"))
+    if registry.registered("postgres_batch") is None:
+        properties = dataclasses.replace(ConnectionProperties.from_env("postgres"), default_graph_path=name)
+        registry.builder().with_properties(properties).register("postgres_batch")
+    batch = StatelessGraphObjectManager(factory.get("postgres_batch"))
+    # A fragment and a view: two statements, which run in a transaction the batch opens.
+    await batch.save_all([Ticket(id="t1"), Holding(owner=Owner(id="o1"), items=[Item(id="i1")])])
+    assert await batch.count(Ticket) == 1
+    holding = await batch.load(Holding, "o1")
+    assert holding is not None and [it.id for it in holding.items] == ["i1"]
     await pm.execute(QuerySpecification[Any](f"DROP TABLE {name}_edge, {name}_node, {name}_schema CASCADE"))
 
 
@@ -234,3 +256,51 @@ async def test_mints_the_store_identity_once_as_a_node_of_the_graph(pm: Persiste
     identity = await StatelessGraphObjectManager(pm).store_identity()
     again = await StatelessGraphObjectManager(pm).store_identity()
     assert again.id == identity.id
+
+
+class Status(str, Enum):  # noqa: UP042 - not a StrEnum: str() of this one is its name, "Status.OPEN".
+    OPEN = "Open"
+
+
+class Level(Enum):
+    LOW = 1
+    HIGH = 2
+
+
+class Job(NodeFragment, labels=["PgStore", "Job"]):
+    id: Annotated[str, NodeId()]
+    title: str
+    level: Level
+
+
+async def test_tests_text_against_a_str_enum_as_the_value_it_is_stored_as(gom: StatelessGraphObjectManager, seed):
+    await gom.save_all([Job(id="a", title="Open", level=Level.HIGH), Job(id="b", title="Shut", level=Level.LOW)])
+    q = refs(Job)
+    assert [it.id for it in await gom.load_all(Job, q.title.eq_ignore_case(Status.OPEN))] == ["a"]
+    assert [it.id for it in await gom.load_all(Job, q.title.starts_with(Status.OPEN))] == ["a"]
+
+
+async def test_orders_by_a_case_comparing_with_an_enum_of_numbers_as_the_number_it_is_stored_as(
+    gom: StatelessGraphObjectManager, seed
+):
+    await gom.save_all([Job(id="a", title="Open", level=Level.HIGH), Job(id="b", title="Shut", level=Level.LOW)])
+    q = refs(Job)
+    ranking = case_of([equal_to(q.level, Level.LOW).then(0)], 1)
+    assert [it.id for it in await gom.load_all(Job, order_by=[ranking.asc(), q.id.asc()])] == ["b", "a"]
+
+
+async def test_patches_where_a_raw_condition_holds_with_each_kind_of_value_written_into_it(
+    gom: StatelessGraphObjectManager, seed
+):
+    await gom.save(Ticket(id="t1", title="Open"))
+    where = (
+        "(n.props ->> 'title') = $title AND CAST($flag AS boolean) AND $gone IS NULL "
+        "AND CAST($at AS timestamptz) < now() AND CAST($ids AS jsonb) @> (n.props -> 'id')"
+    )
+    values = {"title": "Open", "flag": True, "gone": None, "at": datetime(2024, 1, 2, tzinfo=UTC), "ids": ["t1"]}
+    unmet = await gom.patch(Ticket, "t1", set={"title": "Shut"}, where=where, bindings={**values, "flag": False})
+    assert unmet == PatchResult(True, False, False)
+    assert await gom.patch(Ticket, "t1", set={"title": "Shut"}, where=where, bindings=values) == PatchResult(
+        True, True, True
+    )
+    assert (await gom.load(Ticket, "t1")).title == "Shut"

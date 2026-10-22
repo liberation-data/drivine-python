@@ -207,3 +207,15 @@ def test_clears_under_clear_a_node_saved_more_than_once_as_oracle_then_keeps_it(
     gom.save(Note(id="n1", metadata={"source": "wiki", "rank": 2}))
     gom.save(Note(id="n1", metadata={"rank": 3}), null_policy=NullPolicy.CLEAR)
     assert (gom.load(Note, "n1")).metadata == {"rank": 3}
+
+
+def test_hands_a_related_node_held_twice_the_stamp_it_was_left_with_as_one_the_save_made(gom):
+    saved = gom.save(Career(person=Person(id="nan"), tag_list=[Tag(id="t1"), Tag(id="t1")]))
+    stamp = (gom.load(Tag, "t1")).stamp
+    assert [it.stamp for it in saved.tag_list] == [stamp, stamp]
+
+
+def test_hands_a_node_a_batch_holds_twice_the_stamp_it_was_left_with_as_one_the_batch_made(gom):
+    saved = gom.save_all([Tag(id="t1"), Tag(id="t1")])
+    stamp = (gom.load(Tag, "t1")).stamp
+    assert [it.stamp for it in saved] == [stamp, stamp]

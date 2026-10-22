@@ -116,6 +116,11 @@ def test_having_order_and_pages(gom, films):
         Movie, keys={"year": key(q.released)}, aggregates={"films": count()}, having=[("films", "gt", 1)]
     )
     assert big == [{"year": 2003, "films": 2}]
+    # A count compared with a fraction, as any number is.
+    halfway = gom.groups.load(
+        Movie, keys={"year": key(q.released)}, aggregates={"films": count()}, having=[("films", "gt", 1.5)]
+    )
+    assert halfway == [{"year": 2003, "films": 2}]
 
 
 def test_a_compound_key_and_count_by(gom, films):

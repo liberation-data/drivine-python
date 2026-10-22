@@ -87,7 +87,8 @@ class SqlGroups(ABC):
             if column is None or not column.startswith("a"):
                 raise DrivineError(f"having names {name}, which is not an aggregate of the read.")
             bindings[f"_having{i}"] = compared
-            having.append(f"{aggregate_expressions[int(column[1:])]} {COMPARISONS[comparison]} $_having{i}")
+            compared_with = self._having_value(f"$_having{i}")
+            having.append(f"{aggregate_expressions[int(column[1:])]} {COMPARISONS[comparison]} {compared_with}")
 
         def key_of(i: int) -> str:
             name, group_key = keys[i]
@@ -131,6 +132,10 @@ class SqlGroups(ABC):
             *([f"FETCH NEXT {whole_number(query.limit, 'limit')} ROWS ONLY"] if query.limit is not None else []),
         ]
         return GraphStatement("\n".join(text), bindings)
+
+    def _having_value(self, parameter: str) -> str:
+        """The bound value `having` compares an aggregate with, as the store reads a number bound without a type."""
+        return parameter
 
     @abstractmethod
     def _views(self) -> SqlViews:

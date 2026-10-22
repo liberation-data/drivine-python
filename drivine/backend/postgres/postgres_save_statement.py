@@ -4,7 +4,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from drivine.backend.postgres.found_stamp import FoundStamp
+from drivine.backend.postgres.found_stamp import stamps_by_place
 from drivine.backend.postgres.postgres_statement import value_of
 from drivine.backend.save_statement import SaveStatement
 from drivine.model.fragment_model import FragmentModel
@@ -50,22 +50,8 @@ class PostgresSaveStatement(SaveStatement):
 
     def _result(self, row: str) -> dict[str, Any]:
         stamp, *entries = row.split(",")
-        related: list[tuple[dict[Any, str], dict[Any, str]]] = [({}, {}) for _ in self.stamped_models]
-        for entry in (FoundStamp.of(it) for it in entries):
-            place, id_ = self.handed[entry.index]
-            before, after = related[place]
-            # A node held twice was found by its first step as it was before the save; its last says what it is now.
-            if id_ not in before:
-                before[id_] = entry.found
-            after[id_] = entry.stamp
         return {
             "found": self.expected_stamp or "",
             "now": stamp,
-            "related": [
-                {
-                    "before": [{"id": id_, "stamp": it} for id_, it in before.items()],
-                    "after": [{"id": id_, "stamp": it} for id_, it in after.items()],
-                }
-                for before, after in related
-            ],
+            "related": stamps_by_place(entries, self.handed, len(self.stamped_models)),
         }

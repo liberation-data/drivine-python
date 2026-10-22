@@ -297,4 +297,6 @@ class SqlQueryRenderer(ABC):
 
 
 def _numeric(value: Any) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
+    """Whether the value is stored as a number: an Enum of numbers, or a Decimal, is the number a save writes."""
+    stored = storable(value)
+    return isinstance(stored, (int, float)) and not isinstance(stored, bool)

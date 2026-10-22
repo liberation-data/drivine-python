@@ -6,6 +6,7 @@ from collections.abc import Mapping, Sequence
 from drivine.annotation.aggregate_function import AggregateFunction
 from drivine.annotation.direction import Direction
 from drivine.annotation.hop import Hop
+from drivine.backend.save_statement_builder import root_of
 from drivine.backend.sql.nodes_of import NodesOf
 from drivine.backend.sql.order_reads import OrderReads
 from drivine.backend.sql.sql_graph import SqlGraph, sql_text
@@ -320,4 +321,5 @@ def by_id(x: str) -> str:
 
 
 def labels_of(into: TargetModel) -> list[str]:
-    return (into.root if isinstance(into, GraphViewModel) else into).labels
+    """The labels of the node a relationship leads to: a view's root's, or the fragment's."""
+    return root_of(into).labels

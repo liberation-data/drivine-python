@@ -4,6 +4,7 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Protocol
 
 from drivine.annotation.direction import Direction
+from drivine.backend.cascade_depth_check import CascadeDepthCheck
 from drivine.backend.fragment_group import FragmentGroup
 from drivine.backend.graph_statement import GraphStatement
 from drivine.backend.matched_node import MatchedNode
@@ -90,6 +91,8 @@ class GraphBackend(Protocol):
     def delete(
         self, target: TargetModel, where: str | None = None, cascade: CascadeType = CascadeType.NONE
     ) -> GraphStatement: ...
+
+    def cascade_depth_checks(self, target: TargetModel, where: str | None = None) -> list[CascadeDepthCheck]: ...
 
     def delete_all(
         self, target: TargetModel, where: str | None = None, tested: Sequence[str] = ()

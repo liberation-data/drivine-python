@@ -15,7 +15,6 @@ from drivine.backend.oracle.oracle_graph import (
 from drivine.backend.sql.nodes_of import NodesOf
 from drivine.backend.sql.order_reads import OrderReads
 from drivine.backend.sql.sql_views import SqlViews, by_id
-from drivine.model.graph_view_model import GraphViewModel
 
 
 class OracleViews(SqlViews):
@@ -28,12 +27,6 @@ class OracleViews(SqlViews):
 
     def __init__(self, graph: OracleGraph, depth: Mapping[str, int] | None = None) -> None:
         super().__init__(graph, depth)
-
-    def cascaded(self, model: GraphViewModel, roots: str) -> list[str]:
-        """
-        Queries of the ids of the nodes a load of the view from the roots in the PL/SQL collection `roots` reaches.
-        """
-        return self._reached_from_roots(model, f"n.nid IN (SELECT column_value FROM TABLE({roots}))")
 
     def object(self, entries: Sequence[tuple[str, str]]) -> str:
         return f"JSON_OBJECT({', '.join(f'{sql_text(key)} VALUE {value}' for key, value in entries)} RETURNING JSON)"

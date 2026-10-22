@@ -450,11 +450,39 @@ class StatelessGraphObjectManager:
         Deletes the object whose root has the id, with the root's relationships. A view's root is deleted only if it
         meets the view's requirements, and `where`, a predicate over `n`, when given. A cascade deletes nodes the view
         reaches too. Returns the number of roots deleted: 1, or 0 when there was none.
+
+        A view that contains itself is deleted as it loads: every level of it, and what each level holds. A cascade
+        that finds a node one level below such a relationship's max_depth is refused before anything is written,
+        rather than leave that node and all it holds.
         """
         target = self.registry.model_of(type_)
         predicate, values = self._condition(target, where, bindings)
         statement = self.backend.delete(target, predicate, cascade)
-        return await self.persistence_manager.get_one(statement.spec({**values, "id": id}))
+        values = {**values, "id": id}
+        if cascade in (CascadeType.DELETE_ALL, CascadeType.DELETE_ORPHAN):
+            await self._refuse_cascade_below_depth(target, predicate, values)
+        return await self.persistence_manager.get_one(statement.spec(values))
+
+    async def _refuse_cascade_below_depth(
+        self, target: TargetModel, where: str | None, values: Mapping[str, Any]
+    ) -> None:
+        """
+        Refuses, before anything is written, a cascading delete that would stop short of the nodes a relationship to
+        views of the same class reaches. The cascade follows such a relationship to its max_depth; a node one level
+        further would have its relationship to a deleted node dropped and stay, with all it holds. The check is a read
+        run before the delete: on FalkorDB, which has no transactions, nothing else could stop the delete midway.
+        """
+        for check in self.backend.cascade_depth_checks(target, where):
+            beyond = int(await self.persistence_manager.get_one(check.statement.spec(values)))
+            if beyond > 0:
+                levels = "level" if check.max_depth == 1 else "levels"
+                nodes = "node" if beyond == 1 else "nodes"
+                raise DrivineError(
+                    f"Cannot cascade-delete {target.type.__name__} '{values['id']}': {check.view}.{check.field} "
+                    f"reaches {check.max_depth} {levels} deep (max_depth = {check.max_depth}), and {beyond} {nodes} "
+                    f"below that would be left behind. Raise max_depth on {check.field} to cover the deepest level. "
+                    "Nothing was deleted."
+                )
 
     async def delete_all(
         self, type_: type[Any], where: str | Where | None = None, bindings: Mapping[str, Any] | None = None

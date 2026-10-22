@@ -5,6 +5,7 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Literal
 
 from drivine.annotation.direction import Direction
+from drivine.backend.cascade_depth_check import CascadeDepthCheck
 from drivine.backend.fragment_group import FragmentGroup
 from drivine.backend.graph_statement import GraphStatement
 from drivine.backend.matched_node import MatchedNode
@@ -19,6 +20,7 @@ from drivine.backend.oracle.oracle_views import OracleViews
 from drivine.backend.oracle.oracle_writes import OracleWrites
 from drivine.backend.page import Page
 from drivine.backend.save_statement import SaveStatement
+from drivine.backend.sql.sql_cascade import beyond_count, kept_targets
 from drivine.backend.sql.sql_json import to_json
 from drivine.drivine_error import DrivineError
 from drivine.dsl.query import Query
@@ -140,21 +142,36 @@ class OracleBackend:
     def delete(
         self, target: TargetModel, where: str | None = None, cascade: CascadeType = CascadeType.NONE
     ) -> GraphStatement:
+        """
+        Deletes the root with id `$id` that meets `where`, and for a cascade the nodes a load of the view reaches from
+        it: every one, or with DELETE_ORPHAN those not kept (see kept_targets), which are read before anything is
+        deleted. Returns how many roots were deleted: `{deleted}`.
+        """
         root = target.root if isinstance(target, GraphViewModel) else target
-        id_ = self._id_predicate(root)
-        filter_ = self._root_where(target, f"{id_} AND ({where})" if where else id_)
+        filter_ = self._deleted_where(target, where)
         if cascade is CascadeType.NONE:
             return self._deleting(root, filter_)
         if not isinstance(target, GraphViewModel):
             raise DrivineError(f"A cascade follows a view's relationships. {root.type.__name__} is a NodeFragment.")
-        reached = OracleViews(self.graph).cascaded(target, "v_roots")
-        deletable = (
-            f" AND NOT EXISTS (SELECT 1 FROM {self.graph.edges} e WHERE e.src = x.nid OR e.dst = x.nid)"
-            if cascade is CascadeType.DELETE_ORPHAN
-            else ""
-        )
-        union = "\n        UNION ALL ".join(reached)
-        targets = f"SELECT DISTINCT nid BULK COLLECT INTO v_targets FROM ({union});" if reached else "NULL;"
+        cascaded = OracleViews(self.graph).cascade(target, "n.nid IN (SELECT column_value FROM TABLE(v_roots))")
+        reached = "\n        UNION ALL ".join(cascaded.reached)
+        if not cascaded.reached:
+            targets = "NULL;"
+        elif cascade is CascadeType.DELETE_ORPHAN:
+            targets = "\n".join(
+                [
+                    f"WITH cascade_targets AS (SELECT DISTINCT t.nid FROM ({reached}) t "
+                    "WHERE t.nid NOT IN (SELECT column_value FROM TABLE(v_roots))),",
+                    "    cascade_all AS (SELECT column_value AS nid FROM TABLE(v_roots) UNION SELECT nid FROM "
+                    "cascade_targets),",
+                    f"    cascade_kept (nid) AS (\n    {kept_targets(self.graph, cascaded.followed, 'UNION ALL')}",
+                    "    ) CYCLE nid SET looped TO 'Y' DEFAULT 'N'",
+                    "    SELECT nid BULK COLLECT INTO v_targets FROM cascade_targets WHERE nid NOT IN "
+                    "(SELECT nid FROM cascade_kept);",
+                ]
+            )
+        else:
+            targets = f"SELECT DISTINCT nid BULK COLLECT INTO v_targets FROM ({reached});"
         return GraphStatement(f"""DECLARE
     v_roots SYS.ODCINUMBERLIST;
     v_targets SYS.ODCINUMBERLIST := SYS.ODCINUMBERLIST();
@@ -165,11 +182,28 @@ BEGIN
     {targets}
     DELETE FROM {self.graph.nodes} WHERE nid IN (SELECT column_value FROM TABLE(v_roots));
     v_deleted := SQL%ROWCOUNT;
-    -- The roots' relationships went with them (the relationship table cascades), so an orphan is now one with none.
-    DELETE FROM {self.graph.nodes} x WHERE x.nid IN (SELECT column_value FROM TABLE(v_targets)){deletable};
+    DELETE FROM {self.graph.nodes} x WHERE x.nid IN (SELECT column_value FROM TABLE(v_targets));
     OPEN c FOR SELECT v_deleted AS "deleted" FROM dual;
     DBMS_SQL.RETURN_RESULT(c);
 END;""")
+
+    def cascade_depth_checks(self, target: TargetModel, where: str | None = None) -> list[CascadeDepthCheck]:
+        if not isinstance(target, GraphViewModel):
+            return []
+        roots = f"SELECT {ROW_ALIAS}.nid {self._from(target.root, self._deleted_where(target, where))}"
+        cascaded = OracleViews(self.graph).cascade(target, "n.nid IN (SELECT nid FROM cascade_roots)")
+        return [
+            CascadeDepthCheck(
+                it.view, it.field, it.max_depth, GraphStatement(beyond_count(roots, cascaded.reached, it.nodes))
+            )
+            for it in cascaded.beyond
+        ]
+
+    def _deleted_where(self, target: TargetModel, where: str | None) -> str | None:
+        """What the root a delete by `$id` takes meets: the id, `where`, and for a view the view's requirements."""
+        root = target.root if isinstance(target, GraphViewModel) else target
+        id_ = self._id_predicate(root)
+        return self._root_where(target, f"{id_} AND ({where})" if where else id_)
 
     def delete_all(self, target: TargetModel, where: str | None = None, tested: Sequence[str] = ()) -> GraphStatement:
         root = target.root if isinstance(target, GraphViewModel) else target

@@ -4,6 +4,7 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Literal
 
 from drivine.annotation.direction import Direction
+from drivine.backend.cascade_depth_check import CascadeDepthCheck
 from drivine.backend.fragment_group import FragmentGroup
 from drivine.backend.graph_statement import GraphStatement
 from drivine.backend.matched_node import MatchedNode
@@ -19,6 +20,7 @@ from drivine.backend.postgres.postgres_statement import PostgresStatement
 from drivine.backend.postgres.postgres_views import PostgresViews
 from drivine.backend.postgres.postgres_writes import PostgresWrites
 from drivine.backend.save_statement import SaveStatement
+from drivine.backend.sql.sql_cascade import beyond_count, kept_targets
 from drivine.backend.sql.sql_graph import sql_text
 from drivine.backend.sql.sql_json import to_json
 from drivine.drivine_error import DrivineError
@@ -144,38 +146,44 @@ class PostgresBackend:
     ) -> GraphStatement:
         """
         Deletes the root with id `$id` that meets `where`, and for a cascade the nodes a load of the view reaches from
-        it: every one, or only those left with no relationship but to the root. Postgres runs a statement's deletes on
-        one snapshot, so a node is an orphan when every relationship it has is to the root: those go with the root.
-        Returns how many roots were deleted: `{deleted}`.
+        it: every one, or with DELETE_ORPHAN those not kept (see kept_targets). Postgres runs a statement's deletes on
+        one snapshot, so what is kept is read before anything is deleted. Returns how many roots were deleted:
+        `{deleted}`.
         """
         root = target.root if isinstance(target, GraphViewModel) else target
-        id_ = self._id_predicate(root)
-        filter_ = self._root_where(target, f"{id_} AND ({where})" if where else id_)
+        filter_ = self._deleted_where(target, where)
         if cascade is CascadeType.NONE:
             return self._deleting(root, filter_)
         if not isinstance(target, GraphViewModel):
             raise DrivineError(f"A cascade follows a view's relationships. {root.type.__name__} is a NodeFragment.")
-        reached = PostgresViews(self.graph).cascaded(target, "n.nid IN (SELECT nid FROM cascade_roots)")
-        orphaned = (
-            f" AND NOT EXISTS (SELECT 1 FROM {self.graph.edges} e WHERE (e.src = x.nid AND e.dst NOT IN "
-            "(SELECT nid FROM cascade_roots)) OR (e.dst = x.nid AND e.src NOT IN (SELECT nid FROM cascade_roots)))"
-            if cascade is CascadeType.DELETE_ORPHAN
-            else ""
+        cascaded = PostgresViews(self.graph).cascade(target, "n.nid IN (SELECT nid FROM cascade_roots)")
+        orphans = cascade is CascadeType.DELETE_ORPHAN and bool(cascaded.reached)
+        union = "\n    UNION ALL ".join(cascaded.reached)
+        kept = (
+            [
+                "cascade_all AS (SELECT nid FROM cascade_roots UNION SELECT nid FROM cascade_targets),",
+                f"cascade_kept (nid) AS (\n    {kept_targets(self.graph, cascaded.followed, 'UNION')}),",
+            ]
+            if orphans
+            else []
         )
-        union = "\n    UNION ALL ".join(reached)
+        not_kept = " AND x.nid NOT IN (SELECT nid FROM cascade_kept)" if orphans else ""
         targets = (
             [
-                f"cascade_targets AS (SELECT DISTINCT t.nid FROM ({union}) t),",
-                f"deleted_targets AS (DELETE FROM {self.graph.nodes} x WHERE x.nid IN (SELECT nid FROM "
-                f"cascade_targets) AND x.nid NOT IN (SELECT nid FROM cascade_roots){orphaned} RETURNING 1),",
+                f"cascade_targets AS (SELECT DISTINCT t.nid FROM ({union}) t "
+                "WHERE t.nid NOT IN (SELECT nid FROM cascade_roots)),",
+                *kept,
+                f"deleted_targets AS (DELETE FROM {self.graph.nodes} x WHERE x.nid IN (SELECT nid FROM cascade_targets)"
+                f"{not_kept} RETURNING 1),",
             ]
-            if reached
+            if cascaded.reached
             else []
         )
         return PostgresStatement(
             "\n".join(
                 [
-                    f"WITH cascade_roots AS (SELECT {ROW_ALIAS}.nid {self._from(root, filter_)}),",
+                    f"WITH {'RECURSIVE ' if orphans else ''}cascade_roots AS "
+                    f"(SELECT {ROW_ALIAS}.nid {self._from(root, filter_)}),",
                     *targets,
                     f"deleted AS (DELETE FROM {self.graph.nodes} WHERE nid IN (SELECT nid FROM cascade_roots) "
                     "RETURNING 1)",
@@ -183,6 +191,24 @@ class PostgresBackend:
                 ]
             )
         )
+
+    def cascade_depth_checks(self, target: TargetModel, where: str | None = None) -> list[CascadeDepthCheck]:
+        if not isinstance(target, GraphViewModel):
+            return []
+        roots = f"SELECT {ROW_ALIAS}.nid {self._from(target.root, self._deleted_where(target, where))}"
+        cascaded = PostgresViews(self.graph).cascade(target, "n.nid IN (SELECT nid FROM cascade_roots)")
+        return [
+            CascadeDepthCheck(
+                it.view, it.field, it.max_depth, PostgresStatement(beyond_count(roots, cascaded.reached, it.nodes))
+            )
+            for it in cascaded.beyond
+        ]
+
+    def _deleted_where(self, target: TargetModel, where: str | None) -> str | None:
+        """What the root a delete by `$id` takes meets: the id, `where`, and for a view the view's requirements."""
+        root = target.root if isinstance(target, GraphViewModel) else target
+        id_ = self._id_predicate(root)
+        return self._root_where(target, f"{id_} AND ({where})" if where else id_)
 
     def delete_all(self, target: TargetModel, where: str | None = None, tested: Sequence[str] = ()) -> GraphStatement:
         root = target.root if isinstance(target, GraphViewModel) else target

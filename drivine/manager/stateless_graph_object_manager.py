@@ -398,7 +398,9 @@ class StatelessGraphObjectManager:
         set to None cleared, and for a view each relationship list that lost an item replaced (lists that only grew are
         added to). The save is checked against the stamp that was loaded; if the node changed meanwhile, it is loaded
         again and the change applied again, `attempts` times in all, then StaleObjectError is raised. Without a
-        NodeStamp field a change by another writer isn't noticed.
+        NodeStamp field a change by another writer isn't noticed. On Neo4j, whose reads take no snapshot, a load can be
+        handed another writer's stamp with the data from before its write, so the save compares each field of the root
+        as it was loaded too: each field's value, each property bag key by key, and the NodeLabels field.
 
         `change` may change the object it is given or return a copy (`model_copy`), but not give it another id or
         class, and may be async. Returns the saved object, or None when there is no such node or it is deleted
@@ -814,7 +816,8 @@ class StatelessGraphObjectManager:
                 after = set(_related_ids(rel, getattr(changed, rel.field, None)))
                 if any(it not in after for it in _related_ids(rel, getattr(before, rel.field, None))):
                     replace.append(rel.field)
-        return SaveOptions(replace=replace or None, null_policy=NullPolicy.CLEAR, only=only)
+        # The root as loaded, before the change ran: the save compares the node with it where a read takes no snapshot.
+        return SaveOptions(replace=replace or None, null_policy=NullPolicy.CLEAR, only=only, loaded=root_before)
 
     def _hand_back(self, obj: Any, statement: SaveStatement, result: Mapping[str, Any]) -> None:
         """

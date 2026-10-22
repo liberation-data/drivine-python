@@ -154,3 +154,14 @@ class Customer(NodeFragment, labels=["Customer"]):
 class AsWritten(NodeFragment, labels=["AsWritten"], property_names="as_written"):
     uuid: Annotated[str, NodeId()]
     full_name: str
+
+
+class Badge(NodeFragment, labels=["Badge"]):
+    """Two bags and an open set of labels beside a stamp: what an update on Neo4j compares as loaded."""
+
+    uuid: Annotated[str, NodeId()]
+    name: str
+    metadata: Annotated[dict[str, Any], PropertyBag()] = {}
+    extras: Annotated[dict[str, Any], PropertyBag(flat=True)] = {}
+    kinds: Annotated[list[str], NodeLabels()] = []
+    stamp: Annotated[str | None, NodeStamp()] = None

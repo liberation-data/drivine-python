@@ -1,13 +1,23 @@
 # Written by scripts/unasync.py from tests/integration/test_object_manager_saving.py:
 # change that, and run the script again.
+from collections.abc import Callable
+from enum import StrEnum
+from typing import Annotated, Any, TypeVar
 
 import pytest
 
 from drivine.sync import (
     CascadeType,
+    DatabaseType,
     DrivineError,
+    NodeFragment,
+    NodeId,
+    NodeLabels,
+    NodeStamp,
     NullPolicy,
     PersistenceManager,
+    PropertyBag,
+    QuerySpecification,
     RemovedTargets,
     StaleObjectError,
     StatelessGraphObjectManager,
@@ -26,6 +36,44 @@ from tests.models import (
     WorkHistory,
 )
 from tests.sync_integration.stores import equals, labels, nodes, set_property
+
+T = TypeVar("T")
+
+
+class Finding(NodeFragment, labels=["Finding"]):
+    id: Annotated[str, NodeId()]
+    sources: list[str] = []
+    stamp: Annotated[str | None, NodeStamp()] = None
+
+
+class Tagged(NodeFragment, labels=["Tagged"]):
+    id: Annotated[str, NodeId()]
+    text: str | None = None
+    meta: Annotated[dict[str, Any], PropertyBag()] = {}
+    stamp: Annotated[str | None, NodeStamp()] = None
+
+
+class Sticker(NodeFragment, labels=["Sticker"]):
+    """A flat bag and an open set of labels beside a stamp."""
+
+    id: Annotated[str, NodeId()]
+    labels: Annotated[list[str], NodeLabels()] = []
+    extras: Annotated[dict[str, Any], PropertyBag(flat=True)] = {}
+    stamp: Annotated[str | None, NodeStamp()] = None
+
+
+class Shade(StrEnum):
+    RED = "Red"
+    GREEN = "Green"
+    BLUE = "Blue"
+
+
+class Swatch(NodeFragment, labels=["Swatch"]):
+    """A closed set of labels: the field speaks for the Shade labels and no other."""
+
+    id: Annotated[str, NodeId()]
+    shades: Annotated[set[Shade], NodeLabels(Shade)] = set()
+    stamp: Annotated[str | None, NodeStamp()] = None
 
 
 @pytest.fixture
@@ -270,6 +318,97 @@ class TestUpdate:
         gom.update(PersonCareer, "p1", leave_babbage)
         loaded = gom.load(PersonCareer, "p1")
         assert loaded is not None and [it.role for it in loaded.employment_history] == ["Lead"]
+
+
+def applied_after_unmarked(
+    pm: PersistenceManager,
+    gom: StatelessGraphObjectManager,
+    type_: type[T],
+    id: str,
+    unmarked: str,
+    change: Callable[[T], Any],
+) -> int:
+    """
+    Runs an update whose first load is overtaken by `unmarked`, Cypher that changes the node and leaves its stamp alone:
+    the node as a load sees it when it is handed another writer's stamp with the data from before that writer's write.
+    Gives how many times the change was applied.
+    """
+    applied = 0
+
+    def overtaken(loaded: T) -> None:
+        nonlocal applied
+        applied += 1
+        if applied == 1:
+            pm.execute(QuerySpecification(unmarked))
+        change(loaded)
+
+    assert gom.update(type_, id, overtaken) is not None
+    return applied
+
+
+@pytest.fixture
+def reads_without_snapshot(pm: PersistenceManager) -> None:
+    """Neo4j reads without a snapshot: there an update compares the root's fields as loaded, not only the stamp."""
+    if pm.type is not DatabaseType.NEO4J:
+        pytest.skip("only Neo4j reads without a snapshot")
+
+
+@pytest.mark.usefixtures("reads_without_snapshot")
+class TestUpdateOfATornLoad:
+    def test_loads_again_when_a_field_differs_from_what_it_loaded_under_the_same_stamp(self, pm, gom):
+        gom.save(Finding(id="f1", sources=["first"]))
+
+        unmarked = "MATCH (n:Finding {id: 'f1'}) SET n.sources = n.sources + 'theirs'"
+        assert applied_after_unmarked(pm, gom, Finding, "f1", unmarked, lambda it: it.sources.append("mine")) == 2
+        loaded = gom.load(Finding, "f1")
+        assert loaded is not None and sorted(loaded.sources) == ["first", "mine", "theirs"]
+
+    def test_loads_again_when_a_bag_entry_differs_from_what_it_loaded_under_the_same_stamp(self, pm, gom):
+        gom.save(Tagged(id="t1", text="one", meta={"owner": "first"}))
+
+        unmarked = "MATCH (n:Tagged {id: 't1'}) SET n.`meta.owner` = 'theirs'"
+        assert applied_after_unmarked(pm, gom, Tagged, "t1", unmarked, lambda it: it.meta.update(mine="yes")) == 2
+        loaded = gom.load(Tagged, "t1")
+        assert loaded is not None and loaded.meta == {"owner": "theirs", "mine": "yes"}
+
+    def test_loads_again_when_a_bag_gained_an_entry_and_not_for_a_property_outside_it(self, pm, gom):
+        gom.save(Tagged(id="t1", text="one", meta={"owner": "first"}))
+
+        def text(value: str) -> Callable[[Tagged], None]:
+            return lambda it: setattr(it, "text", value)
+
+        gained = "MATCH (n:Tagged {id: 't1'}) SET n.`meta.extra` = 'theirs'"
+        outside = "MATCH (n:Tagged {id: 't1'}) SET n.unrelated = 'theirs'"
+        assert applied_after_unmarked(pm, gom, Tagged, "t1", gained, text("two")) == 2
+        assert applied_after_unmarked(pm, gom, Tagged, "t1", outside, text("three")) == 1
+        loaded = gom.load(Tagged, "t1")
+        assert loaded is not None and loaded.meta == {"owner": "first", "extra": "theirs"}
+
+    def test_loads_again_when_a_flat_bag_or_an_open_set_of_labels_differs(self, pm, gom):
+        gom.save(Sticker(id="s1", labels=["Shiny"], extras={"size": 1}))
+
+        def size(value: int) -> Callable[[Sticker], None]:
+            return lambda it: it.extras.update(size=value)
+
+        coloured = "MATCH (n:Sticker {id: 's1'}) SET n.colour = 'red'"
+        sneaked = "MATCH (n:Sticker {id: 's1'}) SET n:Sneaked"
+        assert applied_after_unmarked(pm, gom, Sticker, "s1", coloured, size(2)) == 2
+        assert applied_after_unmarked(pm, gom, Sticker, "s1", sneaked, size(3)) == 2
+        sticker = gom.load(Sticker, "s1")
+        assert sticker is not None and sticker.extras == {"size": 3, "colour": "red"}
+        assert "Sneaked" in sticker.labels
+
+    def test_loads_again_when_a_closed_set_of_labels_differs_and_not_for_a_label_outside_it(self, pm, gom):
+        gom.save(Swatch(id="w1", shades={Shade.BLUE}))
+
+        red = "MATCH (n:Swatch {id: 'w1'}) SET n:Red"
+        unrelated = "MATCH (n:Swatch {id: 'w1'}) SET n:Unrelated"
+        assert applied_after_unmarked(pm, gom, Swatch, "w1", red, lambda it: it.shades.add(Shade.GREEN)) == 2
+        assert applied_after_unmarked(pm, gom, Swatch, "w1", unrelated, lambda it: it.shades.discard(Shade.BLUE)) == 1
+        swatch = gom.load(Swatch, "w1")
+        assert swatch is not None and swatch.shades == {Shade.RED, Shade.GREEN}, (
+            "the label another writer added is kept"
+        )
 
 
 class TestDelete:

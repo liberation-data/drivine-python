@@ -31,3 +31,9 @@ class SaveOptions:
     Internal: the root's properties, read first under CLEAR to remove property-bag entries a dict no longer has and
     labels a NodeLabels field no longer holds.
     """
+    loaded: Any = None
+    """
+    Internal: the root as `update` loaded it, before its change ran. Where a read takes no snapshot (Neo4j), the checked
+    save compares the node with it under the node's lock, as well as the stamp: the stamp a load was handed may be newer
+    than the data it read.
+    """

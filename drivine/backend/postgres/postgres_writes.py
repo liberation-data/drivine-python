@@ -180,14 +180,15 @@ def _writes(props: Mapping[str, Any]) -> NodeWrites:
 def _literal(value: Any) -> str:
     """
     A value written into a statement as a literal, as a driver would bind it: a number as itself, anything else as
-    text, which Postgres reads as the type the statement wants there, as it reads a value bound without a type.
+    text, which Postgres reads as the type the statement wants there, as it reads a value bound without a type. A number
+    is written in parentheses, so a negative one after a minus is not read as the start of a comment.
     """
     if value is None:
         return "NULL"
     if isinstance(value, bool):
         return sql_text("true" if value else "false")
     if isinstance(value, (int, float)):
-        return str(value)
+        return f"({value})"
     if isinstance(value, (datetime, date, time)):
         return sql_text(storable(value))
     if isinstance(value, (dict, list, tuple)):

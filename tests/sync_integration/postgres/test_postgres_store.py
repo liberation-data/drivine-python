@@ -39,6 +39,7 @@ from drivine.sync import (
     full_text_index,
     range_index,
     refs,
+    transactional,
     uniqueness_constraint,
     vector_index,
 )
@@ -133,6 +134,44 @@ def test_makes_a_graphs_tables_when_its_managers_first_statement_is_a_batch_in_a
     holding = batch.load(Holding, "o1")
     assert holding is not None and [it.id for it in holding.items] == ["i1"]
     pm.execute(QuerySpecification[Any](f"DROP TABLE {name}_edge, {name}_node, {name}_schema CASCADE"))
+
+
+def test_keeps_a_graphs_tables_made_at_a_transactions_first_statement_though_the_transaction_rolls_back(
+    pm: PersistenceManager, registry: DatabaseRegistry, factory: PersistenceManagerFactory
+):
+    name = "pgstore_rolled"
+    drop = f"DROP TABLE IF EXISTS {name}_edge, {name}_node, {name}_schema CASCADE"
+    pm.execute(QuerySpecification[Any](drop))
+    if registry.registered("postgres_rolled") is None:
+        properties = dataclasses.replace(ConnectionProperties.from_env("postgres"), default_graph_path=name)
+        registry.builder().with_properties(properties).register("postgres_rolled")
+    rolled = StatelessGraphObjectManager(factory.get("postgres_rolled"))
+
+    @transactional()
+    def open_ticket() -> None:
+        rolled.save(Ticket(id="rolled-1"))
+        raise ValueError("Changed our minds")
+
+    with pytest.raises(ValueError, match="Changed our minds"):
+        open_ticket()
+    assert exists(pm, f"{name}_node")
+    assert rolled.count(Ticket) == 0
+    pm.execute(QuerySpecification[Any](drop))
+
+
+def test_makes_a_graphs_tables_when_its_managers_first_statement_is_a_schema_statement(
+    pm: PersistenceManager, registry: DatabaseRegistry, factory: PersistenceManagerFactory
+):
+    name = "pgstore_schema_first"
+    drop = f"DROP TABLE IF EXISTS {name}_edge, {name}_node, {name}_schema CASCADE"
+    pm.execute(QuerySpecification[Any](drop))
+    if registry.registered("postgres_schema_first") is None:
+        properties = dataclasses.replace(ConnectionProperties.from_env("postgres"), default_graph_path=name)
+        registry.builder().with_properties(properties).register("postgres_schema_first")
+    schema_first = StatelessGraphObjectManager(factory.get("postgres_schema_first"))
+    assert (schema_first.indexes.ensure(range_index("Ticket", "title"))).status == "CREATED"
+    assert exists(pm, f"{name}_schema")
+    pm.execute(QuerySpecification[Any](drop))
 
 
 def test_refuses_a_graph_name_that_cant_name_its_tables_within_63_characters():

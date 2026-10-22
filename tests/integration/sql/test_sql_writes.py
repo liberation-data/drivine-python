@@ -20,7 +20,7 @@ from drivine import (
     node_ref,
     refs,
 )
-from tests.integration.sql.sql_seed import SqlSeed
+from tests.integration.sql.sql_seed import SqlSeed, raw_property
 
 STAMP = re.compile(r"^[0-9a-f]{16}:[0-9a-f]{16}$")
 
@@ -97,6 +97,19 @@ async def test_patches_where_a_text_condition_holds_with_its_quotes_taken_as_tex
     assert (await gom.load(Session, "s1")).last_activity == 2
 
 
+async def test_patches_where_a_raw_condition_holds_a_negative_number_bound_in_it(
+    pm: PersistenceManager, gom: StatelessGraphObjectManager
+):
+    await gom.save(Session(id="s1", last_activity=100))
+    where = f"{raw_property(pm, 'lastActivity', 'NUMBER')} > 150-$back"
+    assert await gom.patch(Session, "s1", set={"summary": "patched"}, where=where, bindings={"back": -60}) == (
+        PatchResult(True, False, False)
+    )
+    assert await gom.patch(Session, "s1", set={"summary": "patched"}, where=where, bindings={"back": 60}) == (
+        PatchResult(True, True, True)
+    )
+
+
 async def test_patches_many_in_order_making_none(gom: StatelessGraphObjectManager):
     await gom.save_all([Session(id="s1", summary="a"), Session(id="s2", summary="b")])
     results = await gom.patch_all(
@@ -140,6 +153,8 @@ async def test_relates_unrelates_and_loads_related_nodes_marking_both_ends(gom: 
     assert [it.id for it in back] == ["s1"]
     assert await gom.edges.unrelate(s1, m1, "HAS_MESSAGE") == 1
     assert await gom.edges.unrelate_all(s1, "HAS_MESSAGE") == 1
+    assert await gom.edges.unrelate(s1, node_ref(Message, "nobody"), "HAS_MESSAGE") == 0
+    assert await gom.edges.unrelate_all(node_ref(Session, "nobody"), "HAS_MESSAGE") == 0
     assert await gom.edges.load_related(s1, "HAS_MESSAGE", Message) == []
 
 

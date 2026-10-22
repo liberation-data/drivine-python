@@ -16,6 +16,9 @@ from drivine.sync import (
 ORACLE = os.environ.get("ORACLE_DATABASE_TYPE") == "ORACLE"
 """Whether Oracle is configured: with ORACLE_TESTS=true."""
 
+POSTGRES = os.environ.get("POSTGRES_DATABASE_TYPE") == "POSTGRES"
+"""Whether Postgres is configured, as the tests' own environment configures it."""
+
 ENGINES = ["default", "memgraph", "falkordb", *(["oracle"] if ORACLE else [])]
 """The registered names of the databases each test runs on: Neo4j, Memgraph and FalkorDB, and Oracle when set."""
 
@@ -26,6 +29,8 @@ def registry() -> Iterator[DatabaseRegistry]:
     registry.build_or_resolve_from_env()
     registry.build_or_resolve_from_env("memgraph")
     registry.build_or_resolve_from_env("falkordb")
+    if POSTGRES:
+        registry.build_or_resolve_from_env("postgres")
     if ORACLE:
         registry.build_or_resolve_from_env("oracle")
     yield registry

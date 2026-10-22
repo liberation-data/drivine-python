@@ -106,6 +106,36 @@ def _oracle_reach(started: DockerContainer) -> ContainerConnection:
     )
 
 
+TEST_CONTAINER_DATABASE = "drivine"
+"""The database a Postgres container is made with, which its datasources are pointed at."""
+
+
+def _postgres(image: str) -> DockerContainer:
+    # The server is ready once, for the init scripts, before it restarts and is ready for good.
+    return (
+        DockerContainer(image)
+        .with_env("POSTGRES_USER", TEST_CONTAINER_USER)
+        .with_env("POSTGRES_PASSWORD", TEST_CONTAINER_PASSWORD)
+        .with_env("POSTGRES_DB", TEST_CONTAINER_DATABASE)
+        .with_exposed_ports(5432)
+        .waiting_for(
+            LogMessageWaitStrategy(
+                re.compile(r"database system is ready to accept connections"), times=2
+            ).with_startup_timeout(120)
+        )
+    )
+
+
+def _postgres_reach(started: DockerContainer) -> ContainerConnection:
+    return ContainerConnection(
+        started.get_container_host_ip(),
+        int(started.get_exposed_port(5432)),
+        TEST_CONTAINER_USER,
+        TEST_CONTAINER_PASSWORD,
+        TEST_CONTAINER_DATABASE,
+    )
+
+
 TEST_CONTAINER_SPECS: dict[DatabaseType, TestContainerSpec] = {
     DatabaseType.NEO4J: TestContainerSpec(
         "neo4j:5.26-community", 7687, _neo4j, _reach(7687, "neo4j", TEST_CONTAINER_PASSWORD)
@@ -117,6 +147,8 @@ TEST_CONTAINER_SPECS: dict[DatabaseType, TestContainerSpec] = {
         "memgraph/memgraph:3.12.0", 7687, _memgraph, _reach(7687), ready=_bolt_ready
     ),
     DatabaseType.ORACLE: TestContainerSpec("gvenzl/oracle-free:23-faststart", 1521, _oracle, _oracle_reach),
+    # pgvector's image: Postgres with the extension a vector search uses, which the object manager makes where it can.
+    DatabaseType.POSTGRES: TestContainerSpec("pgvector/pgvector:pg16", 5432, _postgres, _postgres_reach),
 }
 """The containers Drivine can start, by the type of the datasource that wants one."""
 

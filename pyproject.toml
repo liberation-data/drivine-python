@@ -1,7 +1,7 @@
 [project]
 name = "drivine"
 version = "0.1.0"
-description = "Graph database client for Python: Neo4j, Memgraph, FalkorDB, Neptune and Oracle."
+description = "Graph database client for Python: Neo4j, Memgraph, FalkorDB, Neptune, Oracle and Postgres."
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
@@ -10,7 +10,7 @@ requires-python = ">=3.11"
 dependencies = [
     "pydantic>=2.7",
 ]
-keywords = ["graph", "database", "neo4j", "memgraph", "falkordb", "neptune", "cypher", "ogm"]
+keywords = ["graph", "database", "neo4j", "memgraph", "falkordb", "neptune", "oracle", "postgres", "cypher", "ogm"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Framework :: AsyncIO",
@@ -30,6 +30,10 @@ falkordb = [
 oracle = [
     "oracledb>=3.0",
 ]
+postgres = [
+    "psycopg[binary]>=3.2",
+    "psycopg-pool>=3.2",
+]
 
 [project.entry-points.pytest11]
 drivine = "drivine.testing.plugin"
@@ -40,7 +44,7 @@ Repository = "https://github.com/liberation-data/drivine-python"
 
 [dependency-groups]
 dev = [
-    "drivine[neo4j,falkordb,oracle,pilgrim,testing]",
+    "drivine[neo4j,falkordb,oracle,postgres,pilgrim,testing]",
     "pytest-asyncio>=0.24",
     "pyright>=1.1.380",
     "ruff>=0.6",
@@ -76,6 +80,8 @@ select = ["E", "F", "I", "UP", "B", "ASYNC"]
 [tool.ruff.lint.per-file-ignores]
 # The PL/SQL prelude is TypeScript's Drivine's, line for line, so that the two write the same statements.
 "drivine/backend/oracle/oracle_save_builder.py" = ["E501"]
+# drivine4j's block that makes a Postgres store, line for line, as scripts/postgres_store.py writes it.
+"drivine/backend/postgres/postgres_store_text.py" = ["E501"]
 
 [tool.pyright]
 include = ["drivine"]

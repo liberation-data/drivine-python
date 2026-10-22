@@ -71,10 +71,22 @@ class TestDatabaseRegistry:
         with pytest.raises(DrivineError, match="Neo4j requires a user name"):
             DatabaseRegistry().builder().database_type(DatabaseType.NEO4J).host("localhost").register()
 
-    def test_an_engine_not_ported_yet_says_so(self):
+    def test_postgres_requires_a_database_name(self):
         builder = DatabaseRegistry().builder().database_type(DatabaseType.POSTGRES).host("localhost")
-        with pytest.raises(DrivineError, match="not supported by drivine-python yet"):
+        with pytest.raises(DrivineError, match="Postgres requires a database name"):
             builder.register()
+
+    def test_postgres_names_the_graph_an_object_manager_works_on(self):
+        registry = DatabaseRegistry()
+        builder = registry.builder().database_type(DatabaseType.POSTGRES).host("localhost").database_name("app")
+        assert builder.register().graph_name == "drivine"
+        named = registry.builder().database_type(DatabaseType.POSTGRES).host("localhost").database_name("app")
+        assert named.default_graph_path("contracts").register("contracts").graph_name == "contracts"
+
+    def test_postgres_refuses_a_graph_name_that_cant_name_its_tables(self):
+        builder = DatabaseRegistry().builder().database_type(DatabaseType.POSTGRES).host("localhost")
+        with pytest.raises(DrivineError, match="can't name a graph on Postgres"):
+            builder.database_name("app").default_graph_path("no-dashes").register()
 
 
 class TestQuerySpecification:

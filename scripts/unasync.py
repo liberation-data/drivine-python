@@ -69,6 +69,9 @@ RENAMES = {
     "AsyncResult": "Result",
     "create_pool_async": "create_pool",
     "connect_async": "connect",
+    "AsyncConnectionPool": "ConnectionPool",
+    "AsyncConnection": "Connection",
+    "AsyncCursor": "Cursor",
     "AsyncIteratorFixture": "IteratorFixture",
 }
 """Names whose sync counterpart is another name: the language's, and each driver's."""

@@ -19,6 +19,9 @@ logger = logging.getLogger("drivine.connection")
 _AUTO_COMMIT_ENGINES = (DatabaseType.FALKORDB,)
 """Engines without multi-statement transactions, which honour TransactionMode."""
 
+_GRAPH_STORES = (DatabaseType.ORACLE, DatabaseType.POSTGRES)
+"""The stores that keep a graph of a name in tables of its own: `default_graph_path` names it."""
+
 
 class ConnectionProviderBuilder:
     def __init__(self, registry: DatabaseRegistry) -> None:
@@ -111,7 +114,7 @@ class ConnectionProviderBuilder:
             raise DrivineError("A database type is required.")
         if not self._host:
             raise DrivineError("host config is required")
-        if self._default_graph_path and self._type is not DatabaseType.ORACLE:
+        if self._default_graph_path and self._type not in _GRAPH_STORES:
             logger.warning("default_graph_path is ignored by %s, which names no graph", self._type)
         if self._transaction_mode and self._type not in _AUTO_COMMIT_ENGINES:
             logger.warning("transaction_mode is ignored by %s, which supports transactions", self._type)
@@ -123,6 +126,8 @@ class ConnectionProviderBuilder:
             provider = self._falkordb_provider(name)
         elif self._type is DatabaseType.ORACLE:
             provider = self._oracle_provider(name)
+        elif self._type is DatabaseType.POSTGRES:
+            provider = self._postgres_provider(name)
         else:
             raise DrivineError(f"{self._type} is not supported by drivine-python yet.")
         self.registry.register(provider)
@@ -196,5 +201,25 @@ class ConnectionProviderBuilder:
             self._password,
             self._pool_max,
             self._connection_timeout,
+            self._default_graph_path,
+        )
+
+    def _postgres_provider(self, name: str) -> ConnectionProvider:
+        """`database_name` is the database; `default_graph_path` names the graph, `drivine` by default."""
+        from drivine.sync.connection.postgres.postgres_connection_provider import PostgresConnectionProvider
+
+        if not self._database_name:
+            raise DrivineError("Postgres requires a database name")
+        assert self._host is not None
+        return PostgresConnectionProvider(
+            name,
+            self._host,
+            self._port or 5432,
+            self._database_name,
+            self._user_name,
+            self._password,
+            self._pool_max,
+            self._connection_timeout,
+            self._idle_timeout,
             self._default_graph_path,
         )

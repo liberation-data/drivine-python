@@ -34,6 +34,9 @@ def test_matches_renumbers_a_backreference_for_the_group_that_anchors_the_expres
     assert bound(r"a\\1") == r"^(a\\1)$"
     assert bound(r"[\1]x") == r"^([\1]x)$"
     assert bound(r"[]\1](a)\1") == r"^([]\1](a)\2)$"
+    assert bound(r"[^]\1](a)\1") == r"^([^]\1](a)\2)$"
+    # An escaped bracket opens no bracket expression.
+    assert bound(r"\[(a)\1]") == r"^(\[(a)\2])$"
 
 
 def test_matches_refuses_a_reference_to_a_ninth_group_which_would_need_a_tenth():

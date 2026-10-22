@@ -141,7 +141,11 @@ On Oracle, `DATABASE_NAME` is the service (`FREEPDB1`, say), and `DATABASE_DEFAU
 property graph over them, made on the first connection when they aren't there, so one store serves the JVM, Node and
 Python. The object manager writes SQL for it, and the query DSL, grouped reads, search and schema management work as on
 the graph engines. A raw `where` is SQL over the node's row, `n`: its `labels`, `props` (a JSON object keyed by stored
-name) and `stamp`, say `JSON_VALUE(n.props, '$.name') = $name`. Your own statements are SQL too.
+name) and `stamp`, say `JSON_VALUE(n.props, '$.name') = $name`. Your own statements are SQL too. `matches` takes a
+regular expression in Oracle's POSIX dialect, matched against the whole value. A leading `(?i)` ignores case; what Java
+adds, such as `(?:…)`, a look-around or `\b`, is not read. A backreference names the group the expression numbers it by,
+`\1` to `\8`; `\9` is refused, as the group that anchors the expression would make it the tenth, which POSIX does not
+have.
 
 On Postgres, `DATABASE_NAME` is the database, and `DATABASE_DEFAULT_GRAPH_PATH` names the graph, `drivine` by default:
 see [Postgres](#postgres).

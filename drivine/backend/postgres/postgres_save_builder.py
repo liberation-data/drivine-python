@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any
 
 from drivine.backend.postgres.postgres_graph import PostgresGraph
@@ -110,8 +110,7 @@ class PostgresSaveBuilder:
         clear = self._options.null_policy is NullPolicy.CLEAR
         held = self._options.held_properties
         props = dict(object_props(model, obj, self._options))
-        bagged = replace(model, property_bags=[it for it in model.property_bags if keep(it.field)])
-        props.update(bag_entries(bagged, obj, list(held), clear))
+        props.update(bag_entries(model, obj, list(held), clear, keep))
         labels_clear = clear if model.node_labels and keep(model.node_labels.field) else None
         write = self._node_write(model, obj, props, labels_clear, held)
         expected = getattr(obj, model.stamp_field, None) if model.stamp_field else None

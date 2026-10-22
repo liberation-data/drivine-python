@@ -106,6 +106,29 @@ class TestFragments:
         assert loaded is not None
         assert loaded.model_dump(exclude={"extras"}) == customer.model_dump(exclude={"extras"})
 
+    @pytest.mark.parametrize("key", ["fullName", "uuid", "LEGACY", "metadata.source", "__drivine.stamp"])
+    async def test_refuses_a_flat_bag_entry_a_field_another_bag_or_the_stamp_is_stored_under(self, pm, gom, key):
+        customer = Customer(uuid="c1", full_name="Ada L", extras={key: "x"})
+        with pytest.raises(DrivineError, match=f"Customer.extras has an entry '{key}', which is the property of a"):
+            await gom.save(customer)
+        with pytest.raises(DrivineError, match="which is the property of a declared field"):
+            await gom.save_all([customer])
+        with pytest.raises(DrivineError, match="which is the property of a declared field"):
+            await gom.save(customer, only=["extras"])
+        assert await nodes(pm, "Customer") == []
+
+    async def test_a_flat_bag_takes_an_entry_named_like_a_field_stored_under_another_name(self, gom):
+        await gom.save(Customer(uuid="c1", full_name="Ada L", extras={"full_name": "open", "size": 3}))
+        loaded = await gom.load(Customer, "c1")
+        assert loaded is not None
+        assert (loaded.full_name, loaded.extras) == ("Ada L", {"full_name": "open", "size": 3})
+
+    async def test_a_flat_bag_stores_a_key_that_isnt_a_string_under_its_text(self, gom):
+        await gom.save(Customer.model_construct(uuid="c1", full_name="Ada L", extras={1: "x"}))
+        loaded = await gom.load(Customer, "c1")
+        assert loaded is not None
+        assert loaded.extras == {"1": "x"}
+
     async def test_a_subclass_is_written_with_its_own_labels(self, pm, gom):
         await gom.save(Puppy(uuid="a1", name="Bit", age_in_weeks=9))
         assert await labels(pm, "a1") == ["Animal", "Dog", "Puppy"]

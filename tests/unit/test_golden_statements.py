@@ -380,6 +380,7 @@ def queries(registry: ModelRegistry, backend: GraphBackend) -> dict[str, GraphSt
                 ]
             ),
         ),
+        "query.Movie.matches": load(registry.fragment(Movie), Query(where=m.title.matches("(?i)the.*"))),
         "query.Animal.labels": load(
             registry.fragment(Animal), Query(where=any_of(a.instance_of(Puppy), a.has_any_label("Dog", "Cat")))
         ),

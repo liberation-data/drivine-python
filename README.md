@@ -499,7 +499,9 @@ people = await gom.edges.load_related(node_ref(Issue, a), "ASSIGNED_TO", Person)
 - **Stamps refuse a stale save.** On a class with a `NodeStamp` field, a save of an object loaded before another
   writer changed the node raises `StaleObjectError` and writes nothing. Use the object a save returns: it carries the
   new stamp. `update` loads, applies your change and saves what it altered, again if the node changed meanwhile.
-- **`save_all`** runs its statements in one transaction, or in yours, so a failure leaves nothing written.
+- **`save_all`** runs its statements in one transaction, or in yours, so a failure leaves nothing written. It writes
+  the fragments' classes in the order of their names and the fragments of each in the order of their ids, so two
+  batches over the same nodes take their locks in the same order. The objects come back in the order given.
 - **`patch`** writes named fields of one node by id, if it meets a condition, without loading it, and says whether it
   found the node, applied the patch and changed anything. It never makes a node.
 - **Edges** relate and unrelate stored nodes by id, marking both ends' stamps.

@@ -468,6 +468,8 @@ class StatelessGraphObjectManager:
         Saves many objects, fragments and views of any classes, together. Fragments go in one statement for each 1,000,
         each merged on its id; a view is a statement of its own, as `save` writes it. Outside a transaction of the
         caller's, the statements run in one transaction, so a failure leaves nothing written; inside one, they join it.
+        The fragments' classes go in the order of their names and the rows of each in the order of their ids, so that
+        two batches over the same nodes take their locks in the same order.
 
         A fragment's stamp isn't checked: a batch only adds, and a fragment with a stale stamp is written all the same,
         keeping the stamp it had. A view that carries a stamp is checked as `save` checks it, and a stale one raises
@@ -488,7 +490,7 @@ class StatelessGraphObjectManager:
                 raise DrivineError(f"replace applies to views. The batch holds a {target_.type.__name__}.")
             fragments.setdefault(target_.type, FragmentGroup(target_)).objects.append(obj)
         entries: list[tuple[GraphStatement, list[FragmentGroup] | None, Any]] = []
-        for chunk in _chunked(list(fragments.values()), BATCH_ROWS):
+        for chunk in _chunked(_lock_ordered(list(fragments.values())), BATCH_ROWS):
             entries.append((self.backend.fragment_batch(chunk, options), chunk, None))
         for view in views:
             statement = self.backend.save(self.registry.model_of(type(view)), view, options, False, self.registry)
@@ -907,6 +909,18 @@ class _StaleInBatch(Exception):
     def __init__(self, statement: SaveStatement) -> None:
         super().__init__()
         self.statement = statement
+
+
+def _lock_ordered(groups: list[FragmentGroup]) -> list[FragmentGroup]:
+    """
+    The groups of a batch in the order of their classes' names, and the objects of each in the order of their ids, so
+    that two batches over the same nodes take their locks in the same order whatever order they were given in. Objects
+    of one id keep the order they were given in.
+    """
+    return [
+        FragmentGroup(group.model, sorted(group.objects, key=lambda it, model=group.model: str(id_of(model, it))))
+        for group in sorted(groups, key=lambda it: it.model.type.__name__)
+    ]
 
 
 def _chunked(groups: list[FragmentGroup], size: int) -> list[list[FragmentGroup]]:

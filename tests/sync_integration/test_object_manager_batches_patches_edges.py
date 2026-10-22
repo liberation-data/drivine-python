@@ -45,6 +45,17 @@ class TestSaveAll:
         loaded = gom.load(Customer, "c1")
         assert loaded is not None and loaded.metadata == {"source": "wiki"}
 
+    def test_hands_each_fragment_its_own_stamp_when_given_out_of_the_order_they_are_written_in(self, gom):
+        gom.save(Person(uuid="p1", name="Before"))
+        p1 = gom.load(Person, "p1")
+        p1.name = "One"
+        objects = [Person(uuid="p2", name="Two"), Organization(uuid="o1", name="Acme"), p1]
+        saved = gom.save_all(objects)
+        assert [it.uuid for it in saved] == ["p2", "o1", "p1"]
+        assert saved[0].stamp == (gom.load(Person, "p2")).stamp
+        assert saved[2].stamp == (gom.load(Person, "p1")).stamp
+        assert saved[0].stamp != saved[2].stamp
+
     @pytest.mark.rolls_back
     def test_a_batch_that_fails_writes_nothing(self, gom):
         gom.save(Person(uuid="p1", name="Ada"))

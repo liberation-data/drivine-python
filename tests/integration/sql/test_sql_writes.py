@@ -66,6 +66,21 @@ async def test_saves_fragments_of_several_classes_in_one_batch_handing_back_stam
     assert (await gom.load(Message, "m1")).stamp == objects[2].stamp
 
 
+async def test_hands_each_fragment_its_own_stamp_when_given_out_of_the_order_they_are_written_in(
+    gom: StatelessGraphObjectManager,
+):
+    await gom.save(Message(id="m1", text="Before"))
+    m1 = await gom.load(Message, "m1")
+    m1.text = "One"
+    objects = [Message(id="m2", text="Two"), Session(id="s1"), m1]
+    await gom.save_all(objects)
+    assert objects[0].stamp != objects[2].stamp
+    assert [it.id for it in objects] == ["m2", "s1", "m1"]
+    assert objects[0].stamp == (await gom.load(Message, "m2")).stamp
+    assert objects[2].stamp == (await gom.load(Message, "m1")).stamp
+    assert objects[1].stamp == (await gom.load(Session, "s1")).stamp
+
+
 async def test_patches_where_a_condition_holds_with_all_four_outcomes(gom: StatelessGraphObjectManager):
     await gom.save(Session(id="s1", last_activity=100))
     q = refs(Session)

@@ -8,7 +8,7 @@ from drivine.backend.matching_search import MatchingSearch
 from drivine.backend.nearest_search import NearestSearch
 from drivine.backend.oracle.oracle_graph import OracleGraph, has_labels, json_key, node_document
 from drivine.backend.oracle.oracle_views import OracleViews
-from drivine.backend.oracle.text_query import TextQuery
+from drivine.backend.sql.text_query import TextQuery
 from drivine.drivine_error import DrivineError
 from drivine.model.graph_view_model import GraphViewModel
 from drivine.model.target_model import TargetModel

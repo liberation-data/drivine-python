@@ -22,7 +22,13 @@ from drivine.sync.schema.schema_options import SchemaOptions
 
 logger = logging.getLogger("drivine.schema")
 
-GRAPH_TYPES = (DatabaseType.NEO4J, DatabaseType.MEMGRAPH, DatabaseType.FALKORDB, DatabaseType.ORACLE)
+GRAPH_TYPES = (
+    DatabaseType.NEO4J,
+    DatabaseType.MEMGRAPH,
+    DatabaseType.FALKORDB,
+    DatabaseType.ORACLE,
+    DatabaseType.POSTGRES,
+)
 
 MARKER_LABEL = "_DrivineSchema"
 """The label of the schema markers: drivine4j's and TypeScript's, so all read one."""

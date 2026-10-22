@@ -12,7 +12,6 @@ from drivine.backend.matching_search import MatchingSearch
 from drivine.backend.nearest_search import NearestSearch
 from drivine.backend.oracle.oracle_graph import OracleGraph, has_labels, json_key, node_document
 from drivine.backend.oracle.oracle_groups import OracleGroups
-from drivine.backend.oracle.oracle_json import to_json
 from drivine.backend.oracle.oracle_query_renderer import OracleQueryRenderer
 from drivine.backend.oracle.oracle_save_builder import OracleSaveBuilder
 from drivine.backend.oracle.oracle_search import OracleSearch
@@ -20,6 +19,7 @@ from drivine.backend.oracle.oracle_views import OracleViews
 from drivine.backend.oracle.oracle_writes import OracleWrites
 from drivine.backend.page import Page
 from drivine.backend.save_statement import SaveStatement
+from drivine.backend.sql.sql_json import to_json
 from drivine.drivine_error import DrivineError
 from drivine.dsl.query import Query
 from drivine.dsl.rendered_query import RenderedQuery

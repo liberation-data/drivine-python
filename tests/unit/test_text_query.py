@@ -3,7 +3,7 @@
 import pytest
 
 from drivine import DrivineError
-from drivine.backend.oracle.text_query import TextQuery
+from drivine.backend.sql.text_query import TextQuery
 
 
 def word(text: str) -> str:
@@ -26,6 +26,11 @@ def test_a_plus_or_and_requires_a_word_and_a_minus_or_not_excludes_one():
     assert query.scored == [word("kotlin"), word("graph"), word("store")]
     assert query.required == [word("kotlin"), word("store")]
     assert query.excluded == [word("python"), word("rust")]
+
+
+def test_gives_the_words_of_each_scoring_term_which_a_store_narrows_a_search_by():
+    query = TextQuery.parse('"Graph data" data* -python +Kotlin')
+    assert query.scored_words == [["graph", "data"], ["data"], ["kotlin"]]
 
 
 def test_reads_a_phrase_as_its_words_a_star_as_a_prefix_and_a_fields_word_as_the_word():

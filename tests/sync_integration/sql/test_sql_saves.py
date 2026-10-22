@@ -1,4 +1,4 @@
-# Written by scripts/unasync.py from tests/integration/oracle/test_oracle_saves.py:
+# Written by scripts/unasync.py from tests/integration/sql/test_sql_saves.py:
 # change that, and run the script again.
 import re
 from collections.abc import Iterator
@@ -7,6 +7,7 @@ from typing import Annotated, Any
 import pytest
 
 from drivine.sync import (
+    DatabaseType,
     Direction,
     GraphProperty,
     GraphView,
@@ -25,12 +26,12 @@ from drivine.sync import (
     StaleObjectError,
     TargetNode,
 )
-from tests.sync_integration.oracle.oracle_seed import ON_ORACLE, OracleSeed
+from tests.sync_integration.sql.sql_seed import SqlSeed, raw_props
 
 STAMP = re.compile(r"^[0-9a-f]{16}:[0-9a-f]{16}$")
 
 
-class Person(NodeFragment, labels=["OraSave", "Person"]):
+class Person(NodeFragment, labels=["SqlSave", "Person"]):
     id: Annotated[str, NodeId()]
     name: str | None = None
     born: Annotated[int | None, GraphProperty("born_in")] = None
@@ -43,19 +44,19 @@ class Pilot(Person, labels=["Pilot"]):
     pass
 
 
-class Tag(NodeFragment, labels=["OraSave", "Tag"]):
+class Tag(NodeFragment, labels=["SqlSave", "Tag"]):
     id: Annotated[str, NodeId()]
     stamp: Annotated[str | None, NodeStamp()] = None
 
 
-class Note(NodeFragment, labels=["OraSave", "Note"]):
+class Note(NodeFragment, labels=["SqlSave", "Note"]):
     """A bag and no NodeLabels: a save merges its properties in place, as Oracle then keeps them (OSON version 2)."""
 
     id: Annotated[str, NodeId()]
     metadata: Annotated[dict[str, Any], PropertyBag()] = {}
 
 
-class Org(NodeFragment, labels=["OraSave", "Org"]):
+class Org(NodeFragment, labels=["SqlSave", "Org"]):
     id: Annotated[str, NodeId()]
     name: str | None = None
 
@@ -80,13 +81,11 @@ class Team(GraphView):
 
 @pytest.fixture(autouse=True)
 def cleared(pm: PersistenceManager) -> Iterator[None]:
-    seed = OracleSeed(pm, "OraSave")
+    seed = SqlSeed(pm, "SqlSave")
+    seed.prepare()
     seed.clear()
     yield
     seed.clear()
-
-
-pytestmark = ON_ORACLE
 
 
 def test_saves_hands_back_a_whole_stamp_and_keeps_the_data_token_when_nothing_changed(pm, gom):
@@ -100,17 +99,14 @@ def test_saves_hands_back_a_whole_stamp_and_keeps_the_data_token_when_nothing_ch
     changed = gom.save(loaded)
     assert changed.stamp.split(":")[0] != ada.stamp.split(":")[0]
     assert changed.stamp.split(":")[1] == ada.stamp.split(":")[1]
-    raw = pm.get_one(
-        QuerySpecification[Any](
-            'SELECT n.props AS "props" FROM drivine_node n WHERE JSON_EXISTS(n.labels, \'$?(@ == "OraSave")\')'
-        )
-    )
-    assert raw == {
+    raw = pm.get_one(QuerySpecification[Any](raw_props(pm, "SqlSave")))
+    assert raw.get("props", raw) == {
         "id": "ada",
         "name": "Ada Lovelace",
         "born_in": 1815,
         "metadata.source": "wiki",
-        "__drivine.labels.tags": [],
+        # An open label field's record of the labels it holds: drivine4j's write function removes one that is empty.
+        **({"__drivine.labels.tags": []} if pm.type is DatabaseType.ORACLE else {}),
     }
 
 
@@ -211,3 +207,15 @@ def test_clears_under_clear_a_node_saved_more_than_once_as_oracle_then_keeps_it(
     gom.save(Note(id="n1", metadata={"source": "wiki", "rank": 2}))
     gom.save(Note(id="n1", metadata={"rank": 3}), null_policy=NullPolicy.CLEAR)
     assert (gom.load(Note, "n1")).metadata == {"rank": 3}
+
+
+def test_hands_a_related_node_held_twice_the_stamp_it_was_left_with_as_one_the_save_made(gom):
+    saved = gom.save(Career(person=Person(id="nan"), tag_list=[Tag(id="t1"), Tag(id="t1")]))
+    stamp = (gom.load(Tag, "t1")).stamp
+    assert [it.stamp for it in saved.tag_list] == [stamp, stamp]
+
+
+def test_hands_a_node_a_batch_holds_twice_the_stamp_it_was_left_with_as_one_the_batch_made(gom):
+    saved = gom.save_all([Tag(id="t1"), Tag(id="t1")])
+    stamp = (gom.load(Tag, "t1")).stamp
+    assert [it.stamp for it in saved] == [stamp, stamp]

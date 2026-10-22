@@ -4,6 +4,7 @@ models: tests/golden/statements.json is written by its test/1.Unit/golden/Golden
 """
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -49,6 +50,10 @@ from drivine.backend.nearest_search import NearestSearch
 from drivine.backend.oracle.oracle_backend import OracleBackend
 from drivine.backend.oracle.oracle_graph import OracleGraph
 from drivine.backend.page import Page
+from drivine.backend.postgres.postgres_backend import PostgresBackend
+from drivine.backend.postgres.postgres_graph import PostgresGraph
+from drivine.backend.postgres.postgres_save_statement import PostgresSaveStatement
+from drivine.backend.postgres.postgres_write_statement import PostgresWriteStatement
 from drivine.connection.database_type import DatabaseType
 from drivine.dsl.query import Query
 from drivine.manager.group_query import GroupQuery
@@ -87,7 +92,8 @@ GOLDEN = json.loads((Path(__file__).parent.parent / "golden" / "statements.json"
 
 CYPHER_WHERE = "n.name = $name"
 SQL_WHERE = "JSON_VALUE(n.props, '$.name') = $name"
-"""A filter in the store's own language: Cypher over `n`, or SQL over the node row `n` on Oracle."""
+POSTGRES_WHERE = "(n.props ->> 'name') = $name"
+"""A filter in the store's own language: Cypher over `n`, or SQL over the node row `n` on Oracle and Postgres."""
 
 
 def statements(grammar: CypherGrammar) -> dict[str, str]:
@@ -150,7 +156,54 @@ def indexed_reads(backend: OracleBackend) -> dict[str, str]:
     }
 
 
+def postgres_statements() -> dict[str, str]:
+    """
+    Postgres's statements: the same cases, a filter in SQL, and the searches through an index. A write on Postgres is
+    one call of drivine4j's write function, the same text for every write, so the plan it binds is written too, its
+    fresh stamps written as `<stamp>`: TypeScript makes the same plan for the same object.
+    """
+    backend = PostgresBackend(PostgresGraph())
+    person = ModelRegistry().fragment(Person)
+    cases = written_cases(backend, POSTGRES_WHERE, True)
+    # What the manager binds when it runs a patch, which its plan is made from.
+    bound: dict[str, dict[str, Any]] = {
+        "Person.patch": {"id": "p1", "set": {"name": "Ada", "bio": None}, "vectors": {}},
+        "Person.patch.where": {"id": "p1", "set": {"name": "Ada"}, "vectors": {}, "name": "O'Brien"},
+        "Person.patchAll": {
+            "rows": [{"id": "p1", "props": {"name": "Ada"}, "vectors": {}}, {"id": 2, "props": {"bio": None}}]
+        },
+    }
+    plans: dict[str, str] = {}
+    for name, it in cases.items():
+        if not isinstance(it, (PostgresWriteStatement, PostgresSaveStatement)):
+            continue
+        parameters: Any = it.spec(bound.get(name, {})).parameters
+        plan = {"plan": json.loads(parameters["_plan"]), "shapes": json.loads(parameters["_shapes"])}
+        if parameters["_patchedIf"]:
+            plan["patchedIf"] = parameters["_patchedIf"]
+        shown = json.dumps(plan, separators=(",", ":"), ensure_ascii=False)
+        plans[f"{name}.plan"] = re.sub(r"[0-9a-f]{16}:[0-9a-f]{16}", "<stamp>", shown)
+    return {
+        **{name: it.text for name, it in cases.items()},
+        **plans,
+        "Person.nearest.indexed": backend.nearest(
+            person, NearestSearch("Person", "embedding", "EUCLIDEAN", 20, limit=5, table="3", dimensions=3)
+        ).text,
+        "Person.matching.indexed": backend.matching(
+            person,
+            MatchingSearch(
+                "Person", ("name", "bio"), 10, text="graph -relational", table="drivine_t_Personnamebio_4d5e6f"
+            ),
+        ).text,
+        "Person.searchIndexTable": backend.search_index_table("VECTOR", "Person", ["embedding"]).text,
+    }
+
+
 def written(backend: GraphBackend, where: str, orphans: bool) -> dict[str, str]:
+    return {name: it.text for name, it in written_cases(backend, where, orphans).items()}
+
+
+def written_cases(backend: GraphBackend, where: str, orphans: bool) -> dict[str, GraphStatement]:
     registry = ModelRegistry()
     fragment, view = registry.fragment, registry.view
     cases = {
@@ -175,7 +228,7 @@ def written(backend: GraphBackend, where: str, orphans: bool) -> dict[str, str]:
     cases.update(queries(registry, backend))
     cases.update(groups(registry, backend))
     cases.update(searches(registry, backend, where))
-    return {name: it.text for name, it in cases.items()}
+    return cases
 
 
 def searches(registry: ModelRegistry, backend: GraphBackend, where: str) -> dict[str, GraphStatement]:
@@ -485,7 +538,21 @@ def test_writes_what_typescript_writes_for_oracle():
     expect_golden("ORACLE", {**oracle_statements(), **schema(schema_grammar_for(DatabaseType.ORACLE))})
 
 
+def test_writes_what_typescript_writes_for_postgres():
+    expect_golden(
+        "POSTGRES", {**postgres_statements(), **schema(schema_grammar_for(DatabaseType.POSTGRES, PostgresGraph()))}
+    )
+
+
 def expect_golden(engine: str, statements: dict[str, str]) -> None:
+    """
+    Each statement as TypeScript writes it, character for character. A plan is compared as the JSON it is: the keys of
+    a step's properties are in the order the object holds them, which is its fields' in Python and the order a
+    TypeScript object was given them in, and the write function reads them alike in any order.
+    """
     assert statements.keys() == GOLDEN[engine].keys()
     for name, text in statements.items():
-        assert text == GOLDEN[engine][name], name
+        if name.endswith(".plan"):
+            assert json.loads(text) == json.loads(GOLDEN[engine][name]), name
+        else:
+            assert text == GOLDEN[engine][name], name

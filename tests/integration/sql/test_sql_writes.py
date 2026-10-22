@@ -20,25 +20,25 @@ from drivine import (
     node_ref,
     refs,
 )
-from tests.integration.oracle.oracle_seed import ON_ORACLE, OracleSeed
+from tests.integration.sql.sql_seed import SqlSeed, raw_property
 
 STAMP = re.compile(r"^[0-9a-f]{16}:[0-9a-f]{16}$")
 
 
-class Session(NodeFragment, labels=["OraWrite", "Session"]):
+class Session(NodeFragment, labels=["SqlWrite", "Session"]):
     id: Annotated[str, NodeId()]
     last_activity: int | None = None
     summary: str | None = None
     stamp: Annotated[str | None, NodeStamp()] = None
 
 
-class Message(NodeFragment, labels=["OraWrite", "Message"]):
+class Message(NodeFragment, labels=["SqlWrite", "Message"]):
     id: Annotated[str, NodeId()]
     text: str | None = None
     stamp: Annotated[str | None, NodeStamp()] = None
 
 
-class Person(NodeFragment, labels=["OraWrite", "Person"]):
+class Person(NodeFragment, labels=["SqlWrite", "Person"]):
     id: Annotated[str, NodeId()]
     name: str | None = None
 
@@ -51,13 +51,11 @@ class Conversation(GraphView):
 
 @pytest.fixture(autouse=True)
 async def cleared(pm: PersistenceManager) -> AsyncIterator[None]:
-    seed = OracleSeed(pm, "OraWrite")
+    seed = SqlSeed(pm, "SqlWrite")
+    await seed.prepare()
     await seed.clear()
     yield
     await seed.clear()
-
-
-pytestmark = ON_ORACLE
 
 
 async def test_saves_fragments_of_several_classes_in_one_batch_handing_back_stamps(gom: StatelessGraphObjectManager):
@@ -85,6 +83,31 @@ async def test_patches_where_a_condition_holds_with_all_four_outcomes(gom: State
     assert after.stamp.split(":")[0] != before.split(":")[0]
     await gom.patch(Session, "s1", clear=["last_activity"])
     assert (await gom.load(Session, "s1")).last_activity is None
+
+
+async def test_patches_where_a_text_condition_holds_with_its_quotes_taken_as_text(gom: StatelessGraphObjectManager):
+    await gom.save(Session(id="s1", summary="O'Brien's"))
+    q = refs(Session)
+    assert await gom.patch(Session, "s1", set={"last_activity": 1}, where=q.summary.eq("O'Brien")) == PatchResult(
+        True, False, False
+    )
+    assert await gom.patch(Session, "s1", set={"last_activity": 2}, where=q.summary.eq("O'Brien's")) == PatchResult(
+        True, True, True
+    )
+    assert (await gom.load(Session, "s1")).last_activity == 2
+
+
+async def test_patches_where_a_raw_condition_holds_a_negative_number_bound_in_it(
+    pm: PersistenceManager, gom: StatelessGraphObjectManager
+):
+    await gom.save(Session(id="s1", last_activity=100))
+    where = f"{raw_property(pm, 'lastActivity', 'NUMBER')} > 150-$back"
+    assert await gom.patch(Session, "s1", set={"summary": "patched"}, where=where, bindings={"back": -60}) == (
+        PatchResult(True, False, False)
+    )
+    assert await gom.patch(Session, "s1", set={"summary": "patched"}, where=where, bindings={"back": 60}) == (
+        PatchResult(True, True, True)
+    )
 
 
 async def test_patches_many_in_order_making_none(gom: StatelessGraphObjectManager):
@@ -130,6 +153,8 @@ async def test_relates_unrelates_and_loads_related_nodes_marking_both_ends(gom: 
     assert [it.id for it in back] == ["s1"]
     assert await gom.edges.unrelate(s1, m1, "HAS_MESSAGE") == 1
     assert await gom.edges.unrelate_all(s1, "HAS_MESSAGE") == 1
+    assert await gom.edges.unrelate(s1, node_ref(Message, "nobody"), "HAS_MESSAGE") == 0
+    assert await gom.edges.unrelate_all(node_ref(Session, "nobody"), "HAS_MESSAGE") == 0
     assert await gom.edges.load_related(s1, "HAS_MESSAGE", Message) == []
 
 

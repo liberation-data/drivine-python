@@ -7,8 +7,8 @@
 
 **Docs: [drivine.org](https://drivine.org/py/)**, for Python, TypeScript, and Kotlin & Java.
 
-A graph database client for Python, supporting **Neo4j**, **Memgraph**, **FalkorDB**, **Amazon Neptune** and **Oracle**
-(SQL/PGQ). Async first, with a sync API written from it, typed, and fast: one statement per round trip, no session
+A graph database client for Python, supporting **Neo4j**, **Memgraph**, **FalkorDB**, **Oracle** (SQL/PGQ) and
+**Postgres** as graph stores, plus **Amazon Neptune** through the low-level API. Async first, with a sync API written from it, typed, and fast: one statement per round trip, no session
 cache, no lazy loading. It gives you two ways to work with a graph:
 
 1. **PersistenceManager**: a low-level API where you write the queries yourself.
@@ -28,6 +28,7 @@ may still change. See [the design](docs/design.md) for how it came about.
 pip install "drivine[neo4j]"      # Neo4j, Memgraph, Neptune
 pip install "drivine[falkordb]"   # FalkorDB
 pip install "drivine[oracle]"     # Oracle 23ai and 26ai, through python-oracledb in thin mode
+pip install "drivine[postgres]"   # Postgres 14 or later, through psycopg 3
 pip install "drivine[pilgrim]"    # DrivineAssembly, for pi-pilgrim; optional
 ```
 
@@ -142,11 +143,56 @@ Python. The object manager writes SQL for it, and the query DSL, grouped reads, 
 the graph engines. A raw `where` is SQL over the node's row, `n`: its `labels`, `props` (a JSON object keyed by stored
 name) and `stamp`, say `JSON_VALUE(n.props, '$.name') = $name`. Your own statements are SQL too.
 
+On Postgres, `DATABASE_NAME` is the database, and `DATABASE_DEFAULT_GRAPH_PATH` names the graph, `drivine` by default:
+see [Postgres](#postgres).
+
 Or in code:
 
 ```python
 registry.builder().database_type(DatabaseType.MEMGRAPH).host("localhost").register("graph")
 ```
+
+### Postgres
+
+Postgres 14 or later (tested on 16), as drivine4j states, keeps a graph in two tables, as Oracle does, read with joins
+and written through a function the store keeps. No extension is needed but pgvector, for vector search, which Drivine
+makes where the server has it. Models, the query DSL and the object manager are the same as on the graph engines; the
+persistence manager runs plain SQL, with cursors and transactions.
+
+```
+DATABASE_TYPE=POSTGRES
+DATABASE_HOST=localhost
+DATABASE_PORT=5432
+DATABASE_NAME=app
+DATABASE_USER=app
+DATABASE_PASSWORD=…
+DATABASE_DEFAULT_GRAPH_PATH=drivine   # names the graph's tables; this is the default
+```
+
+The graph's name names tables, so it is letters, digits and underscores, begins with a letter, and is at most 49
+characters; Postgres folds it to lower case. The tables are made when an object manager first runs a statement, so a
+database used only for plain SQL is left as it is.
+
+**How a graph is stored.** drivine4j's store, byte for byte, so the JVM, Node and Python read and write one graph:
+`<graph>_node (nid, labels, props, stamp)` and `<graph>_edge (eid, src, dst, type, props)`, with `labels` and `props`
+as `jsonb` and a GIN index over the labels, so a node carries any number of them; `<graph>_schema`, the indexes and
+constraints Drivine made; and `<graph>_write`, the function a save's steps are carried out by, as one statement that is
+applied whole or not at all.
+
+- A statement you write yourself is SQL. Parameters are named `$name`, as in Cypher, and a statement is bound only the
+  ones it names. A row comes back as a dict of its columns, a `jsonb` column as Python values.
+- A raw `where`, for a load or a delete, is SQL over the root's row: its `props`, `labels` and `stamp`, say
+  `(n.props ->> 'name') = $name`.
+- A number is compared as a number only where one is stored: `'7'` is not `7`, as on the graph engines.
+- A save checks the stamp, as on the graph engines. A save turned away by a serialization failure (`40001`) or a
+  deadlock (`40P01`) is run again.
+- Index the id of each class you save: a range index or a uniqueness constraint is a partial index over the label's
+  nodes, which finds a node by its id.
+- `matches` takes a Postgres regular expression, matched against the whole value.
+- A vector index is a pgvector HNSW index over the embeddings of the label's nodes of its size; `load_nearest` is
+  approximate through it, and exact with no index made. A full-text index is a trigram index over the text a search
+  reads, which narrows the search; `load_matching` scores the same with it and without it, and reads words, a
+  `"phrase"`, `+must`, `-not` and a `prefix*`.
 
 Drivine reads `os.environ`, and doesn't load `.env` files itself: use python-dotenv, pydantic-settings, or your
 platform's way.
@@ -489,7 +535,9 @@ Without pi-pilgrim, enforce it yourself: `await SchemaManager(registry, factory,
 - **By hand:** `gom.indexes.ensure(range_index("Session", ["lastActivityAt", "sessionId"]))`, `gom.indexes.recreate`,
   `gom.indexes.drop`, `gom.constraints.ensure(uniqueness_constraint("Person", "email"))`, and `list`.
 - **Each engine's DDL** is written for it: named items on Neo4j, Memgraph's text and vector indexes, FalkorDB's index per
-  property and its constraint commands. Vector index tuning (`hnsw_m`, `hnsw_ef_construction`, and an engine's own
+  property and its constraint commands, Oracle's tables beside the nodes, and Postgres's partial indexes over a label's
+  nodes, recorded in the graph's catalog as drivine4j records them (a pgvector HNSW index for a vector index, a trigram
+  index for a full-text one). Neptune has no schema management. Vector index tuning (`hnsw_m`, `hnsw_ef_construction`, and an engine's own
   options) is passed where the engine takes it, and reported where it doesn't.
 
 ### Search
@@ -596,9 +644,10 @@ tests on every engine. It is a Poetry project of its own, whose build writes its
 drivine_test_containers = true
 ```
 
-it starts a container for each datasource the environment configures, Neo4j, Memgraph, FalkorDB or Oracle, before the
-tests run, and points the datasource at it. Datasources of one type share a container. `USE_LOCAL_NEO4J=true` (or
-`_MEMGRAPH`, `_FALKORDB`, `_ORACLE`) leaves that type's datasources as they are, to test against your own instance, and
+it starts a container for each datasource the environment configures, Neo4j, Memgraph, FalkorDB, Postgres (pgvector's
+image, with user `drivine`, password `drivine-test` and database `drivine`) or Oracle, before the tests run, and points
+the datasource at it. Datasources of one type share a container. `USE_LOCAL_NEO4J=true` (or `_MEMGRAPH`, `_FALKORDB`,
+`_POSTGRES`, `_ORACLE`) leaves that type's datasources as they are, to test against your own instance, and
 `NEO4J_TEST_IMAGE` picks another image.
 
 Drivine's own tests run on Oracle only with `ORACLE_TESTS=true`: its image is large, and the database wants two
@@ -614,7 +663,7 @@ logger when the application hasn't.
 
 ```
 uv sync
-uv run pytest            # starts Neo4j, Memgraph and FalkorDB in Docker
+uv run pytest            # starts Neo4j, Memgraph, FalkorDB and Postgres in Docker
 uv run ruff check . && uv run pyright
 ```
 

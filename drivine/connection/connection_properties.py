@@ -27,8 +27,8 @@ class ConnectionProperties:
     """For engines without multi-statement transactions. Defaults to WARN. See `TransactionMode`."""
     default_graph_path: str | None = None
     """
-    On Oracle, the graph to work on: it names the property graph and its tables. Defaults to `drivine`. drivine4j's
-    `default-graph-path`.
+    On Oracle and Postgres, the graph to work on: it names the graph's tables (on Oracle, its property graph too).
+    Defaults to `drivine`. drivine4j's `default-graph-path`.
     """
 
     @classmethod

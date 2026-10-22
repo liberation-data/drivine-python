@@ -5,7 +5,7 @@ from collections.abc import Mapping
 from datetime import date, datetime
 from typing import Any
 
-from drivine.backend.oracle.oracle_json import to_json
+from drivine.backend.sql.sql_json import to_json
 from drivine.drivine_error import DrivineError
 from drivine.query.query_specification import QuerySpecification
 from drivine.query.query_specification_compiler import QuerySpecificationCompiler

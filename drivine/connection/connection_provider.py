@@ -15,7 +15,10 @@ class ConnectionProvider(ABC):
     """The name the database is registered under."""
     type: DatabaseType
     graph_name: str | None = None
-    """The graph the store names, where it names one: on Oracle, the property graph and its tables."""
+    """
+    The graph the store names, where it names one: on Oracle, the property graph and its tables; on Postgres, the
+    tables an object manager works on.
+    """
 
     @abstractmethod
     async def connect(self) -> Connection: ...

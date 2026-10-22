@@ -41,7 +41,7 @@ Non-goals:
 | FalkorDB | `falkordb.asyncio` | yes | yes |
 | Oracle 23ai/26ai | `oracledb` (async, thin mode) | yes | yes (SQL/PGQ backend) |
 | Neptune | `neo4j` (async, Bolt) | yes | no |
-| Postgres | `psycopg` 3 (async) | yes | no |
+| Postgres | `psycopg` 3 (async) | yes | yes (SQL backend) |
 
 All four drivers have async APIs today: `neo4j.AsyncGraphDatabase`, `falkordb.asyncio.FalkorDB`,
 `oracledb.connect_async` / `create_pool_async`, and `psycopg.AsyncConnection`. Each is an optional extra, so an
@@ -69,7 +69,7 @@ drivine/
   query/          QuerySpecification, CursorSpecification, statements, per-engine compilers
   model/          NodeFragment, RelationshipFragment, GraphView, markers, ModelRegistry, stamps
   dsl/            references, conditions, order expressions, the renderer
-  backend/        GraphBackend, CypherBackend and CypherGrammar per engine, oracle/
+  backend/        GraphBackend, CypherBackend and CypherGrammar per engine, sql/, oracle/, postgres/
   mapper/         rows to models, per-engine native values
   cursor/         async cursors
   schema/         SchemaCatalog, SchemaManager, IndexManager, ConstraintManager, per-engine DDL
@@ -626,6 +626,9 @@ A Python port must write what the others read. These are the formats, from the T
 - **Store identity** and the `_DrivineSchema` marker nodes, with their version and inventory.
 - **Oracle:** the `<graph>_node`, `<graph>_edge` and `<graph>_schema` tables, the property graph over them, and the
   vector and text side tables (`src/backend/oracle/`).
+- **Postgres:** drivine4j's store, the same three tables with `jsonb` columns and the `<graph>_write` function a write's
+  plan is carried out by, made by the block `scripts/postgres_store.py` writes from drivine4j's text
+  (`src/backend/postgres/`).
 - **Property names:** see [Property names](#property-names).
 
 An integration test writes with one language and reads with the other, on each engine, for each of these.
@@ -654,8 +657,9 @@ Each milestone ends with tests passing on every engine it covers, and is releasa
 **Progress:** 1 to 10 are done, on Neo4j, Memgraph and FalkorDB, and on Oracle 23ai/26ai for 8. Neptune connects for
 the `PersistenceManager`, untested: there is no container for it. Index advice moved to milestone 7, which lists the
 database's indexes. The golden statements are in drivine's `test/1.Unit/golden`, copied to `tests/golden`; Oracle's are
-checked there too. The object-manager suites run on Oracle with `ORACLE_TESTS=true`, beside the Oracle-only suites in
-`tests/integration/oracle`; tests written in Cypher are marked `graph_engines`.
+checked there too, and Postgres's, its write plans among them. The object-manager suites run on Postgres, and on Oracle
+with `ORACLE_TESTS=true`, beside the suites both run in `tests/integration/sql` and each one's own in
+`tests/integration/postgres` and `tests/integration/oracle`; tests written in Cypher are marked `graph_engines`.
 
 1. **Connections and `PersistenceManager` on Neo4j.**
    - The registry and environment configuration, query specifications, mapping and cursors.
@@ -669,7 +673,7 @@ checked there too. The object-manager suites run on Oracle with `ORACLE_TESTS=tr
 5. **The query DSL.** References, conditions, ordering, `seek`, groups and index advice.
 6. **Memgraph, FalkorDB and Neptune.** The grammars and the workarounds.
 7. **Search and schema.** Vectors, full-text, and schema management. Store identity.
-8. **Oracle.** The SQL/PGQ backend.
+8. **Oracle.** The SQL/PGQ backend. Then **Postgres**, the SQL backend, beside it on a shared SQL base.
 9. **Typed reference stubs.**
 10. **The sync API.**
 11. **Docs:** a Python topic on drivine.org beside TypeScript and Kotlin & Java, with the landing page's sample in

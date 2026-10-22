@@ -6,7 +6,6 @@ from typing import Any
 
 from drivine.annotation.direction import Direction
 from drivine.backend.oracle.oracle_graph import OracleGraph, has_labels, json_key, sql_text
-from drivine.backend.oracle.oracle_json import to_json
 from drivine.backend.save_statement import SaveStatement
 from drivine.backend.save_statement_builder import (
     bag_entries,
@@ -19,6 +18,8 @@ from drivine.backend.save_statement_builder import (
     replaced_fields,
     root_of,
 )
+from drivine.backend.sql.sql_json import to_json
+from drivine.backend.sql.sql_saves import fragment_of, stamp_excluded
 from drivine.backend.view_projector import target
 from drivine.drivine_error import DrivineError
 from drivine.manager.null_policy import NullPolicy
@@ -181,7 +182,7 @@ class OracleSaveBuilder:
                 root = root_of(into)
                 concrete = self._concrete(root, node_object)
                 self._stamped_id(root, id_of(root, node_object))
-                props = dict(props_of(concrete, node_object, _stamp_excluded(concrete)))
+                props = dict(props_of(concrete, node_object, stamp_excluded(concrete)))
                 props.update(bag_entries(concrete, node_object))
                 write = self._node_write(
                     concrete, node_object, props, False if concrete.node_labels else None, {}, root
@@ -226,7 +227,7 @@ class OracleSaveBuilder:
                 )
             into = root_of(target(rel))
             keep = [
-                id_of(root_of(target(it)), _fragment(it, item))
+                id_of(root_of(target(it)), fragment_of(it, item))
                 for it in view.relationships
                 if it.type == rel.type and it.direction is rel.direction
                 for item in items(it, getattr(obj, it.field, None))
@@ -587,14 +588,3 @@ def _referenced_as(value: Direction) -> str:
     if value is Direction.UNDIRECTED:
         return "(r.src = x.nid OR r.dst = x.nid)"
     return "r.dst = x.nid"
-
-
-def _stamp_excluded(model: FragmentModel) -> list[str]:
-    return [model.stamp_field] if model.stamp_field else []
-
-
-def _fragment(rel: RelationshipModel, item: Any) -> Any:
-    """The node an item of a relationship field leads to; for a view, its root, which holds the id."""
-    node = node_of(rel, item)
-    into = target(rel)
-    return getattr(node, into.root_field, None) if isinstance(into, GraphViewModel) else node

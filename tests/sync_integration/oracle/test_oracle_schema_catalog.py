@@ -18,6 +18,7 @@ from drivine.backend.oracle.oracle_graph import OracleGraph
 from drivine.sync import (
     ConnectionProperties,
     DatabaseRegistry,
+    DrivineError,
     NodeFragment,
     NodeId,
     PersistenceManager,
@@ -221,6 +222,52 @@ def test_completes_a_range_index_that_lost_the_constraint_standing_for_its_label
     assert (gom.indexes.ensure(served)).status == "CREATED"
     assert not incomplete()
     assert OracleGraph(GRAPH).object_name("lx", ["Person", "uuid"]).upper() in indexes(pm, GRAPH)
+
+
+def test_keeps_the_index_two_labels_share_over_a_property_until_the_last_range_index_over_it_is_dropped(
+    pm: PersistenceManager, managers: GraphObjectManagerFactory
+):
+    gom = fresh_graph(pm, managers, GRAPH)
+    graph = OracleGraph(GRAPH)
+    shared = graph.object_name("ix", ["name"]).upper()
+    person, company = range_index("Person", "name"), range_index("Company", "name")
+    assert (gom.indexes.ensure(person)).status == "CREATED"
+    assert (gom.indexes.ensure(company)).status == "CREATED"
+    assert [it for it in indexes(pm, GRAPH) if it == shared] == [shared]
+
+    gom.indexes.drop(person)
+    assert shared in indexes(pm, GRAPH)
+    assert graph.object_name("lx", ["Person", "name"]).upper() not in indexes(pm, GRAPH)
+    assert [(it.label, it.incomplete) for it in gom.indexes.list("RANGE")] == [("Company", False)]
+
+    gom.indexes.drop(company)
+    assert shared not in indexes(pm, GRAPH)
+    assert rows(pm, GRAPH) == []
+
+
+def test_leaves_the_range_index_incomplete_where_the_data_refuses_its_constraint_for_an_ensure_to_complete(
+    pm: PersistenceManager, managers: GraphObjectManagerFactory
+):
+    gom = fresh_graph(pm, managers, GRAPH)
+    graph = OracleGraph(GRAPH)
+    unique = UNIQUES[0]
+    served = range_index(unique.label, unique.properties)
+    assert (gom.indexes.ensure(served)).status == "CREATED"
+    for _ in range(2):
+        run(pm, f'INSERT INTO {graph.nodes} (labels, props) VALUES (JSON(\'["Person"]\'), JSON(\'{{"uuid": "u1"}}\'))')
+
+    def incomplete() -> bool:
+        return next(it for it in gom.indexes.list("RANGE") if it.label == "Person").incomplete
+
+    # Unchecked, the unique index is refused (ORA-01452) after the labelled index it would stand for was dropped.
+    with pytest.raises(DrivineError, match="ORA-01452"):
+        gom.constraints.ensure(unique, 0)
+    assert gom.constraints.list() == []
+    assert incomplete()
+
+    assert (gom.indexes.ensure(served)).status == "CREATED"
+    assert not incomplete()
+    assert graph.object_name("lx", ["Person", "uuid"]).upper() in indexes(pm, GRAPH)
 
 
 def test_understands_a_store_this_library_wrote_before_it_recorded_what_drivine4j_records(

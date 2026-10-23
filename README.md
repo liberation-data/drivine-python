@@ -586,8 +586,9 @@ raises `DrivineError` there rather than on first use. Without pi-pilgrim, enforc
   say) is reported as DRIFT and left, unless `recreate_on_drift`. A uniqueness constraint the data already breaks is a
   VIOLATION, with a sample of the keys that repeat: each its `properties`, the `count` of nodes that hold it, and
   `nodes`, up to the sample size of them, each named by the engine's id (`elementId`) and, for a constraint read from
-  a fragment, its `NodeId` (`uniqueness_constraint(..., node_id_property="uuid")` by hand). `mode="FAIL_FAST"`, the
-  default, raises on either; `"WARN"` logs.
+  a fragment, its `NodeId` (`uniqueness_constraint(..., node_id_property="uuid")` by hand). This is a breaking change
+  from 0.1, where each entry was the repeated value itself: it is now a `ViolatingKey`, the value in its `properties`.
+  `mode="FAIL_FAST"`, the default, raises on either; `"WARN"` logs.
 - **Versions.** `catalog.with_version("2")` recreates the catalog's items once, the first time it is enforced. Items an
   owner applied before and no longer declares are reported, never dropped. Each owner's version and inventory are kept
   in a `_DrivineSchema` node, as drivine4j and TypeScript keep them.

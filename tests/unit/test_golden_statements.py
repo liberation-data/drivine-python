@@ -570,13 +570,6 @@ def test_writes_what_typescript_writes_for_postgres():
     )
 
 
-AWAITING_TWIN: set[str] = set()
-"""
-Statements Python writes ahead of TypeScript, skipped until the golden file copied from the TS twin holds them. Remove a
-key once it does.
-"""
-
-
 def expect_golden(engine: str, statements: dict[str, str]) -> None:
     """
     Each statement as TypeScript writes it, character for character. A plan is compared as the JSON it is: the keys of
@@ -585,8 +578,6 @@ def expect_golden(engine: str, statements: dict[str, str]) -> None:
     """
     assert statements.keys() == GOLDEN[engine].keys()
     for name, text in statements.items():
-        if name in AWAITING_TWIN:
-            continue
         if name.endswith(".plan"):
             assert json.loads(text) == json.loads(GOLDEN[engine][name]), name
         else:

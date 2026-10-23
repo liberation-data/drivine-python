@@ -86,7 +86,7 @@ from drivine.model.relationship_fragment import RelationshipFragment
 from drivine.query.query_specification import QuerySpecification
 from drivine.query.statement import Statement, cypher_file, cypher_statement, sql_file, sql_statement
 from drivine.schema.engine_vector_options import EngineVectorOptions
-from drivine.schema.ensure_result import EnsureResult
+from drivine.schema.ensure_result import EnsureResult, ViolatingKey
 from drivine.schema.schema_catalog import SchemaCatalog
 from drivine.schema.schema_specs import full_text_index, range_index, uniqueness_constraint, vector_index
 from drivine.store.store_identity import StoreIdentity
@@ -242,5 +242,6 @@ __all__ = [
     "ValueRef",
     "vector_index",
     "VectorIndex",
+    "ViolatingKey",
     "Where",
 ]

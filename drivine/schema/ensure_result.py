@@ -1,13 +1,27 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Generic, Literal, TypeVar
+from typing import Any, Generic, Literal, TypedDict, TypeVar
 
 from drivine.schema.schema_item import SchemaItem
 
 S = TypeVar("S")
 
 EnsureStatus = Literal["CREATED", "ALREADY_MATCHING", "DRIFT", "VIOLATION", "RECREATED", "BLOCKED_BY_INDEX"]
+
+
+class ViolatingKey(TypedDict):
+    """
+    A key of a uniqueness constraint that more than one node holds, as a violation's sample gives it: TypeScript's
+    `ViolatingKey`, so that a sample reads alike from each library.
+    """
+
+    properties: dict[str, Any]
+    """The constraint's properties, each with the value the nodes hold alike."""
+    count: int
+    """How many nodes hold the key, however many of them `nodes` names."""
+    nodes: list[dict[str, Any]]
+    """Up to the sample size of the nodes that hold it, each its `elementId` and the spec's `node_id_property`."""
 
 
 @dataclass(frozen=True)
@@ -23,12 +37,12 @@ class EnsureResult(Generic[S]):
 
     status: EnsureStatus
     spec: S
-    sample: tuple[Any, ...] | None = None
+    sample: tuple[ViolatingKey, ...] | None = None
     """
-    For a VIOLATION: a sample of the keys more than one node holds, each `{"properties": {...}, "count": n, "nodes":
-    [...]}`, with up to the sample size of the nodes that hold it: each its `elementId`, the engine's own id (Neo4j's
-    `elementId(n)`, Memgraph's and FalkorDB's `id(n)`, the node row's `nid` on Oracle and Postgres), and the spec's
-    `node_id_property` where it has one that isn't a key.
+    For a VIOLATION: a sample of the keys more than one node holds, each a `ViolatingKey`, with up to the sample size of
+    the nodes that hold it: each its `elementId`, the engine's own id (Neo4j's `elementId(n)`, Memgraph's and
+    FalkorDB's `id(n)`, the node row's `nid` on Oracle and Postgres), and the spec's `node_id_property` where it has one
+    that isn't a key.
     """
     found: SchemaItem | None = None
     """For a DRIFT: what the engine holds."""

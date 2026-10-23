@@ -48,6 +48,19 @@ class Finding(NodeFragment, labels=["Finding"]):
     stamp: Annotated[str | None, NodeStamp()] = None
 
 
+class Note(NodeFragment, labels=["Note"]):
+    """A fragment with no NodeStamp field: no save of it is checked."""
+
+    id: Annotated[str, NodeId()]
+    text: str | None = None
+
+
+class Loose(NodeFragment, labels=["Loose"]):
+    """A fragment with no NodeId field: no save of it can merge on an id."""
+
+    text: str | None = None
+
+
 class Tagged(NodeFragment, labels=["Tagged"]):
     id: Annotated[str, NodeId()]
     text: str | None = None
@@ -577,8 +590,30 @@ class TestSaveFromTheObjectAsLoaded:
             gom.save(mine, from_=Tagged(id="f1", text="one", stamp=loaded.stamp))  # pyright: ignore
         with pytest.raises(DrivineError, match="from_ is the object saved itself"):
             gom.save(mine, from_=mine)
+        note = Note(id="n1", text="one")
+        with pytest.raises(DrivineError, match="Note has no NodeStamp field"):
+            gom.save(note.model_copy(update={"text": "two"}), from_=note)
+        assert nodes(pm, "Note") == [], "nothing written"
+        loose = Loose(text="one")
+        with pytest.raises(DrivineError, match="Loose has no NodeId field"):
+            gom.save(loose.model_copy(update={"text": "two"}), from_=loose)
+        assert nodes(pm, "Loose") == [], "nothing written"
 
         assert sorted(it["sources"][0] for it in nodes(pm, "Finding")) == ["first", "second"], "nothing written"
+
+    def test_a_view_without_its_root_on_either_side_is_refused_before_anything_is_written(self, pm, gom):
+        gom.save(PersonCareer(person=Person(uuid="p1", name="Ada")))
+        loaded = gom.load(PersonCareer, "p1")
+        assert loaded is not None
+        rootless = loaded.model_copy(update={"person": None})
+        renamed = loaded.model_copy(update={"person": loaded.person.model_copy(update={"name": "Grace"})})
+
+        with pytest.raises(DrivineError, match="The PersonCareer saved has no root fragment"):
+            gom.save(rootless, from_=loaded)
+        with pytest.raises(DrivineError, match="The PersonCareer given as from_ has no root fragment"):
+            gom.save(renamed, from_=rootless)
+
+        assert stored(pm, "Person", "name") == "Ada", "nothing written"
 
     def test_of_a_view_copied_to_change_a_relationship_alone_is_applied(self, gom):
         gom.save(PersonCareer(person=Person(uuid="p1", name="Ada")))

@@ -894,20 +894,27 @@ class StatelessGraphObjectManager:
             raise DrivineError(f"The {type(obj).__name__} saved has no root fragment.")
         if loaded_root is None:
             raise DrivineError(f"The {type(from_).__name__} given as from_ has no root fragment.")
-        assert root.node_id_field is not None
+        if root.node_id_field is None:
+            raise DrivineError(
+                f"{root.type.__name__} has no NodeId field, so it can't be saved: a save merges on the id."
+            )
         id_, loaded_id = getattr(saved_root, root.node_id_field, None), getattr(loaded_root, root.node_id_field, None)
         if loaded_id != id_:
             raise DrivineError(
                 f"from_ is the {type(from_).__name__} {loaded_id!r}, and the object saved {id_!r}. Give the object as "
                 f"it was loaded."
             )
-        loaded_stamp = getattr(loaded_root, root.stamp_field, None) if root.stamp_field else None
+        if root.stamp_field is None:
+            raise DrivineError(
+                f"{root.type.__name__} has no NodeStamp field, so a save of a {type(obj).__name__} has no stamp to be "
+                f"checked against what was loaded. Give it one, or save without from_."
+            )
+        loaded_stamp = getattr(loaded_root, root.stamp_field, None)
         if loaded_stamp is None:
             raise DrivineError(
                 f"The {type(from_).__name__} given as from_ carries no stamp, so nothing says what it was loaded with. "
                 f"Give it as it was loaded, with its NodeStamp field."
             )
-        assert root.stamp_field is not None
         setattr(saved_root, root.stamp_field, loaded_stamp)
         return loaded_root
 

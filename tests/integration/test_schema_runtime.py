@@ -492,6 +492,20 @@ async def test_nothing_given_ensures_nothing(schema):
     assert await schema.record("dice") is None
 
 
+async def test_catalogs_that_are_all_empty_leave_the_store_as_it_was(schema, caplog):
+    await schema.manager(schema.dice("d-1")).enforce()
+    recorded = await schema.record("dice")
+
+    # The owner's catalog came out empty, as one waiting on an embedding model does: as drivine4j, nothing is applied,
+    # so its marker isn't rewritten and what it applied before isn't called an orphan.
+    with caplog.at_level(logging.WARNING, "drivine.schema"):
+        assert await schema.manager(SchemaCatalog.of().named("dice").for_database(schema.db)).enforce() == {}
+
+    assert await schema.record("dice") == recorded
+    assert await schema.version("dice") == "d-1"
+    assert orphan_warnings(caplog) == []
+
+
 async def test_a_marker_records_and_reads_back_runtime_and_stale_entries(schema):
     await schema.write_marker("dice", "v1", inventory_entries(["a", "b", "c"], {"b", "c"}, {"c"}))
     assert await schema.record("dice") == RecordedInventory(("a", "b", "c"), ("b", "c"), ("c",))

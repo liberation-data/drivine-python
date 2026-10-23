@@ -7,7 +7,7 @@ import logging
 
 import pytest
 
-from drivine import DatabaseRegistry, PersistenceManagerFactory, SchemaCatalog, SchemaOptions, range_index
+from drivine import DatabaseRegistry, DrivineError, PersistenceManagerFactory, SchemaCatalog, SchemaOptions, range_index
 from drivine import SchemaManager as AsyncSchemaManager
 from drivine.drivine_assembly import DrivineAssembly
 from drivine.manager.graph_object_manager_factory import GraphObjectManagerFactory
@@ -133,3 +133,14 @@ async def test_the_start_of_an_assembly_with_no_catalog_says_it(caplog):
 
     assert len(lines(caplog)) == 2
     assert all("found no SchemaCatalog" in it.getMessage() for it in lines(caplog))
+
+
+async def test_the_start_of_an_assembly_with_no_catalog_registers_the_databases_from_the_environment(monkeypatch):
+    # As drivine4j, `start` registers the databases even with nothing to apply, so a missing setting fails there.
+    monkeypatch.delenv("DATABASE_TYPE", raising=False)
+    monkeypatch.setenv("DATABASE_HOST", "localhost")
+
+    with pytest.raises(DrivineError, match="DATABASE_TYPE for named connection is required"):
+        await DrivineAssembly().start()
+    with pytest.raises(DrivineError, match="DATABASE_TYPE for named connection is required"):
+        SyncDrivineAssembly().start()

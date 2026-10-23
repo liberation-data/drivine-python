@@ -578,7 +578,9 @@ class AppDrivine(DrivineAssembly):
 await AssemblyHolder.shared(AppDrivine).start()      # makes what is missing; idempotent
 ```
 
-Without pi-pilgrim, enforce it yourself: `await SchemaManager(registry, factory, options).enforce()`.
+`start()` registers the databases whether or not there are catalogs, as drivine4j does, so a missing `DATABASE_TYPE`
+raises `DrivineError` there rather than on first use. Without pi-pilgrim, enforce it yourself:
+`await SchemaManager(registry, factory, options).enforce()`.
 
 - **`ensure` is idempotent.** An item that is there is left; one there with another shape (a vector index's dimensions,
   say) is reported as DRIFT and left, unless `recreate_on_drift`. A uniqueness constraint the data already breaks is a

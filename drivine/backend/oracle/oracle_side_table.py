@@ -15,8 +15,11 @@ class OracleSideTable:
 
     @staticmethod
     def dropping(name: str) -> list[str]:
-        """Drops the trigger, then the table (the index over it goes with it); neither fails when absent."""
-        return [f"DROP TRIGGER IF EXISTS {name}_t", f"DROP TABLE IF EXISTS {name} PURGE"]
+        """
+        Drops the trigger, then the table (the index over it goes with it); neither fails when absent. The table is
+        named by `name`, an expression of PL/SQL (the name a catalog's record holds), so each is a statement to execute.
+        """
+        return [f"'DROP TRIGGER IF EXISTS ' || {name} || '_t'", f"'DROP TABLE IF EXISTS ' || {name} || ' PURGE'"]
 
     def __init__(
         self,

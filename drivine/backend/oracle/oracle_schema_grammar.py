@@ -2,96 +2,169 @@
 # pyright: reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnknownArgumentType=false
 from __future__ import annotations
 
-import hashlib
 import re
-from collections.abc import Sequence
-from typing import Any, Literal
+from typing import Any
 
 from drivine.backend.oracle.oracle_graph import OracleGraph, has_labels, json_key, labelled_value, sql_text
 from drivine.backend.oracle.oracle_side_table import OracleSideTable
-from drivine.backend.sql.sql_json import to_json
+from drivine.backend.sql.sql_catalog import CATALOG_KINDS, CatalogKind, catalog_properties, catalog_record
 from drivine.schema.full_text_index_spec import FullTextIndexSpec
+from drivine.schema.range_index_spec import RangeIndexSpec
 from drivine.schema.schema_grammar import SchemaGrammar, portable_pins
 from drivine.schema.schema_item import SchemaItem
 from drivine.schema.schema_listing import SchemaListing
-from drivine.schema.schema_specs import item_name
+from drivine.schema.schema_specs import item_name, range_index
 from drivine.schema.uniqueness_constraint_spec import UniquenessConstraintSpec
 from drivine.schema.vector_index_spec import VectorIndexSpec
 
-_Kind = Literal["RANGE", "UNIQUE"]
+_Spec = RangeIndexSpec | UniquenessConstraintSpec | VectorIndexSpec | FullTextIndexSpec
 
-_BLOCK_ENDS = re.compile(r"^BEGIN\s*|\s*END;$")
+_EARLIER: dict[CatalogKind, str] = {"RANGE": "RANGE", "UNIQUE": "UNIQUE", "VECTOR": "VECTOR", "FULLTEXT": "FULLTEXT"}
+"""
+What this library recorded each kind as before it recorded drivine4j's: Drivine's own name for it, with the objects
+named otherwise. These are read beside drivine4j's kinds and never written, so a store written so is still understood:
+listed, searched through, and dropped as it was made.
+"""
+
+
+def recorded_as(kind: CatalogKind) -> list[str]:
+    """The kinds a record of `kind` is read as."""
+    return [CATALOG_KINDS[kind], _EARLIER[kind]]
+
+
+_LABELLED_THERE = (
+    "EXISTS (SELECT 1 FROM user_indexes l WHERE l.index_name = UPPER(JSON_VALUE(c.details, '$.labelled')))"
+)
+"""Whether the labelled index the catalog's record `c` names is there."""
+
+_UNIQUE_THERE = (
+    f"u.kind IN ({', '.join(sql_text(it) for it in recorded_as('UNIQUE'))}) "
+    "AND EXISTS (SELECT 1 FROM user_indexes q WHERE q.index_name = UPPER(u.object_name))"
+)
+"""
+Whether the catalog's record `u` is of a uniqueness constraint whose index is there, which stands for a labelled one.
+"""
+
+_PLAIN_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _drivine4j_step(key: str) -> str:
+    """
+    The step of a JSON path naming `key` as drivine4j writes it: bare where SQL would take it for an identifier, else
+    quoted as `json_key` quotes it, for the SQL literal it is written in.
+    """
+    return key if _PLAIN_KEY.match(key) and key not in ("true", "false", "null") else json_key(key)[1:]
+
+
+def _made(ddl: str) -> str:
+    """A block that runs `ddl`, an object another session made meanwhile (ORA-00955) taken as made."""
+    return f"""DECLARE
+    e_exists EXCEPTION;
+    PRAGMA EXCEPTION_INIT(e_exists, -955);
+BEGIN
+    EXECUTE IMMEDIATE {sql_text(ddl)};
+EXCEPTION
+    WHEN e_exists THEN NULL;
+END;"""
 
 
 def oracle_schema_grammar(graph: OracleGraph) -> SchemaGrammar:
     """
-    Indexes and constraints on Oracle, as drivine4j makes them: over the JSON properties of one label's nodes, a
-    function-based index of `CASE WHEN <the node carries the label> THEN JSON_VALUE(props, '$.<p>') END` for each
-    property, so other labels' nodes are left out (their entries are null, which an index holds none of). A uniqueness
-    constraint is the same index, unique. Each item is recorded in the graph's catalog with the name of the object made
-    for it; listing reads the catalog, keeping items whose object is still there, and a drop drops the object recorded.
+    Indexes and constraints on Oracle, made and recorded as drivine4j makes and records them, so a store's schema is
+    one whichever library made it. A property is a path into the JSON column `props`, so each index is over an
+    expression:
+
+    - a range index is two indexes. One reads the properties as text whatever the label, so two labels that index a
+      property of one name share it. The other, the labelled index, reads the properties of the label's nodes and is
+      null for every other node (see `labelled_value`), which an index holds none of: a filter on the label's nodes is
+      read through it, so the one index answers both the label and the property;
+    - a uniqueness constraint is a unique index of the labelled index's expression. So it stands for one: the range
+      index it comes with is recorded as served by it, and has no labelled index of its own (Oracle refuses a second
+      index over the same expressions).
 
     A vector index keeps the label's embeddings in a table beside the nodes (Oracle indexes a VECTOR column, and an
     embedding is a list among a node's JSON properties), with a vector index over it by neighbour partitions, which
     have no HNSW parameters. A full-text index, where the database has Oracle Text, keeps the text in a table beside
     the nodes with a JSON search index over it; without Oracle Text it is only recorded, and a search reads every node.
+    Oracle's dictionary holds the expressions and not what they were made for, so each item is recorded in the graph's
+    catalog with the object made for it, and read back from there.
     """
     grammar = _OracleSchema(graph)
     return SchemaGrammar(
         engine="Oracle",
         list_ranges=grammar.listing("RANGE"),
         list_uniques=grammar.listing("UNIQUE"),
-        list_vectors=grammar.list_vectors(),
-        list_full_texts=grammar.listing("FULLTEXT", made=False),
-        create_range=lambda spec: [grammar.create("RANGE", spec.label, spec.properties)],
-        drop_range=lambda spec: [grammar.drop("RANGE", spec.label, spec.properties)],
-        create_unique=lambda spec: [grammar.create("UNIQUE", spec.label, spec.properties)],
-        drop_unique=lambda spec: [grammar.drop("UNIQUE", spec.label, spec.properties)],
+        list_vectors=grammar.listing("VECTOR"),
+        list_full_texts=grammar.listing("FULLTEXT"),
+        create_range=grammar.create_range,
+        drop_range=lambda spec: [grammar.forgotten(spec)],
+        create_unique=lambda spec: [*grammar.create_unique(spec)],
+        drop_unique=lambda spec: [grammar.forgotten(spec)],
         create_vector=grammar.create_vector,
-        drop_vector=grammar.drop_vector,
+        drop_vector=lambda spec: [grammar.forgotten(spec)],
         create_full_text=grammar.create_full_text,
-        drop_full_text=lambda spec, name: grammar.drop_full_text(spec),
+        drop_full_text=lambda spec, name: [grammar.forgotten(spec)],
         unsupported_vector_tuning=portable_pins,
         conflicts=grammar.conflicts,
         labelled_indexes=True,
     )
 
 
-def object_name(graph: OracleGraph, kind: _Kind, label: str, properties: Sequence[str]) -> str:
-    """The name of the object made for an item: the graph's, the kind, and a hash of what it is over."""
-    hashed = hashlib.sha1("\u0000".join([kind, label, *properties]).encode()).hexdigest()[:12]
-    return f"{graph.name}_{'r' if kind == 'RANGE' else 'u'}_{hashed}".upper()
-
-
 class _OracleSchema:
     def __init__(self, graph: OracleGraph) -> None:
         self.graph = graph
 
-    def listing(self, kind: _Kind | Literal["FULLTEXT"], made: bool = True) -> SchemaListing:
-        exists = " AND EXISTS (SELECT 1 FROM user_indexes i WHERE i.index_name = c.object_name)" if made else ""
-        return SchemaListing(
-            "SELECT JSON_OBJECT('label' VALUE c.label, 'properties' VALUE JSON(c.properties), 'name' VALUE c.name "
-            f"RETURNING JSON) AS \"item\" FROM {self.graph.catalog} c WHERE c.kind = '{kind}'{exists}",
-            lambda rows: [SchemaItem(it["label"], tuple(it["properties"]), it["name"]) for it in rows],
-        )
+    def create_range(self, spec: RangeIndexSpec) -> list[str]:
+        """
+        A range index: the index over the properties of every node, and the labelled index, unless a uniqueness
+        constraint's stands for it. It is recorded with the labelled index's name among its details, and a record there
+        already takes them, so one listed as incomplete is made whole.
+        """
+        shared, index = self._shared_index(spec)
+        labelled = self.graph.object_name("lx", [spec.label, *spec.properties])
+        columns = ", ".join(labelled_value("n", spec.label, it) for it in spec.properties)
+        ddl = f"CREATE INDEX IF NOT EXISTS {labelled} ON {self.graph.nodes} n ({columns})"
+        return [
+            index,
+            f"""DECLARE
+    v_unique NUMBER;
+    e_exists EXCEPTION;
+    PRAGMA EXCEPTION_INIT(e_exists, -955);
+BEGIN
+    SELECT COUNT(*) INTO v_unique FROM {self.graph.catalog} u WHERE u.label = {sql_text(spec.label)} """
+            f"""AND u.properties = {sql_text(catalog_properties(spec.properties))} AND {_UNIQUE_THERE};
+    IF v_unique = 0 THEN
+        EXECUTE IMMEDIATE {sql_text(ddl)};
+    END IF;
+EXCEPTION
+    WHEN e_exists THEN NULL;
+END;""",
+            self._recorded(spec, shared, f'{{"labelled": "{labelled}"}}', updated=True),
+        ]
 
-    def list_vectors(self) -> SchemaListing:
-        """Vector indexes as recorded: each with the table made for it, where one was."""
-        return SchemaListing(
-            "SELECT JSON_OBJECT('label' VALUE c.label, 'properties' VALUE JSON(c.properties), 'name' VALUE c.name, "
-            f"'details' VALUE c.details RETURNING JSON) AS \"item\" FROM {self.graph.catalog} c "
-            "WHERE c.kind = 'VECTOR'",
-            lambda rows: [
-                SchemaItem(
-                    it["label"],
-                    tuple(it["properties"]),
-                    it["name"],
-                    dimensions=_number(it["details"].get("dimensions")),
-                    similarity=it["details"].get("similarity"),
-                )
-                for it in rows
-            ],
-        )
+    def create_unique(self, spec: UniquenessConstraintSpec) -> list[str]:
+        """
+        A uniqueness constraint, with the range index a node is found by, which it serves: the range index is recorded
+        as served by the unique index, and a labelled index made for it before is dropped first, as Oracle would refuse
+        the unique index over the same expressions (ORA-01408). Data the constraint refuses stops the statements at the
+        unique index, and leaves the range index incomplete, to be made whole by an `ensure` of it.
+
+        drivine4j's unique index over several properties is of another expression than its labelled index, and it
+        makes both; this library's is the labelled index's expression whatever the number of properties, so it stands
+        for one.
+        """
+        name = self.graph.object_name("uq", [spec.label, *spec.properties])
+        columns = ", ".join(labelled_value("n", spec.label, it) for it in spec.properties)
+        served_range = range_index(spec.label, spec.properties)
+        shared, index = self._shared_index(served_range)
+        served = f'{{"unique": "{name}"}}'
+        return [
+            index,
+            self._recorded(served_range, shared, served),
+            self._served_by(served_range, served),
+            _made(f"CREATE UNIQUE INDEX IF NOT EXISTS {name} ON {self.graph.nodes} n ({columns})"),
+            self._recorded(spec, name),
+        ]
 
     def create_vector(self, spec: VectorIndexSpec) -> list[str]:
         """
@@ -119,20 +192,15 @@ class _OracleSchema:
             side.backfill,
             f"CREATE VECTOR INDEX IF NOT EXISTS {side.index} ON {side.name} (embedding) ORGANIZATION NEIGHBOR "
             f"PARTITIONS DISTANCE {metric}",
-            self._record("VECTOR", spec, {"dimensions": spec.dimensions, "similarity": spec.similarity}, side.name),
-        ]
-
-    def drop_vector(self, spec: VectorIndexSpec) -> list[str]:
-        return [
-            *OracleSideTable.dropping(self.graph.vectors(spec.label, spec.properties[0])),
-            self._unrecord("VECTOR", spec),
+            self._recorded(spec, side.name, f'{{"dimensions": {spec.dimensions}, "similarity": "{spec.similarity}"}}'),
         ]
 
     def create_full_text(self, spec: FullTextIndexSpec) -> list[str]:
         """
         Not over the node table: once an Oracle Text index is there, Oracle answers ordinary tests of a JSON property
         from it, and it holds only what has been committed, so a save would not find a node it made a moment before
-        (drivine4j's finding). Without Oracle Text (ORA-29833) nothing is made, and the index is recorded.
+        (drivine4j's finding). Without Oracle Text (ORA-29833) nothing is made, and the index is recorded with no
+        object.
         """
         side = OracleSideTable(
             self.graph.texts(spec.label, spec.properties),
@@ -167,20 +235,14 @@ BEGIN
             WHEN e_exists THEN NULL;
             WHEN e_no_text THEN
                 EXECUTE IMMEDIATE 'DROP TABLE {side.name} PURGE';
-                {_BLOCK_ENDS.sub("", self._record("FULLTEXT", spec, {}))}
+                {self._recorded(spec, None).replace(chr(10), chr(10) + " " * 16)}
                 RETURN;
         END;
     END IF;
     EXECUTE IMMEDIATE {sql_text(side.trigger_ddl)};
     EXECUTE IMMEDIATE {sql_text(side.backfill)};
-    {_BLOCK_ENDS.sub("", self._record("FULLTEXT", spec, {}, side.name))}
+    {self._recorded(spec, side.name).replace(chr(10), chr(10) + " " * 4)}
 END;"""
-        ]
-
-    def drop_full_text(self, spec: FullTextIndexSpec) -> list[str]:
-        return [
-            *OracleSideTable.dropping(self.graph.texts(spec.label, spec.properties)),
-            self._unrecord("FULLTEXT", spec),
         ]
 
     def conflicts(self, spec: UniquenessConstraintSpec, limit: int) -> str:
@@ -194,71 +256,144 @@ END;"""
             f"GROUP BY {', '.join(values)} HAVING COUNT(*) > 1 FETCH FIRST {limit} ROWS ONLY"
         )
 
-    def create(self, kind: _Kind, label: str, properties: Sequence[str]) -> str:
+    def _shared_index(self, spec: RangeIndexSpec) -> tuple[str, str]:
         """
-        Makes the index and records it, in one block; an item recorded already is recorded again. Another session may
-        make and record the same item at once, as managers that start together each ensure the store's key: an index
-        of the name is this one, its name a hash of what it is over, and a record of the item is this record.
+        The index over the properties of every node, whatever the label: its name, and the statement that makes it. Its
+        paths are drivine4j's, so it is one index whichever library makes it, and not those this library reads a
+        property by (`'$."p"'`): Oracle would then read the property through this index's column inside a filter on
+        the labelled index's expression, which it then no longer matches to the labelled index, and reads every node.
         """
-        made = object_name(self.graph, kind, label, properties)
-        columns = ", ".join(labelled_value("n", label, it) for it in properties)
-        ddl = f"CREATE {'UNIQUE ' if kind == 'UNIQUE' else ''}INDEX {made} ON {self.graph.nodes} n ({columns})"
-        name = f"{label}_{'_'.join(properties)}_{'range' if kind == 'RANGE' else 'unique'}"
-        listed = sql_text(to_json(list(properties)))
-        return f"""DECLARE
-    e_exists EXCEPTION;
-    PRAGMA EXCEPTION_INIT(e_exists, -955);
-BEGIN
-    BEGIN EXECUTE IMMEDIATE {sql_text(ddl)}; EXCEPTION WHEN e_exists THEN NULL; END;
-    DELETE FROM {self.graph.catalog} WHERE kind = '{kind}' AND label = {sql_text(label)} AND properties = {listed};
-    INSERT INTO {self.graph.catalog} (kind, label, properties, name, object_name, details)
-        VALUES ('{kind}', {sql_text(label)}, {listed}, {sql_text(name)}, '{made}', JSON('{{}}'));
+        name = self.graph.object_name("ix", spec.properties)
+        columns = ", ".join(f"JSON_VALUE(props, '$.{_drivine4j_step(it)}')" for it in spec.properties)
+        return name, _made(f"CREATE INDEX IF NOT EXISTS {name} ON {self.graph.nodes} ({columns})")
+
+    def listing(self, kind: CatalogKind) -> SchemaListing:
+        """
+        What is recorded of the kind, and still there: an index or a table beside the nodes dropped by hand is not
+        listed, so that it is made again when asked for. A range index with neither its labelled index nor a uniqueness
+        constraint's to stand for it is listed as incomplete, so that `ensure` makes the rest; an earlier record's
+        object is its labelled index, so it is whole while it is there.
+        """
+        incomplete = (
+            f"CASE WHEN c.kind = {sql_text(CATALOG_KINDS['RANGE'])} AND NOT {_LABELLED_THERE} "
+            f"AND NOT EXISTS (SELECT 1 FROM {self.graph.catalog} u WHERE u.label = c.label "
+            f"AND u.properties = c.properties AND {_UNIQUE_THERE}) THEN 'true' END"
+        )
+        kinds = ", ".join(sql_text(it) for it in recorded_as(kind))
+        return SchemaListing(
+            "SELECT JSON_OBJECT('label' VALUE c.label, 'properties' VALUE JSON(c.properties), 'name' VALUE c.name, "
+            f"'details' VALUE c.details, 'incomplete' VALUE {incomplete} RETURNING JSON) AS \"item\" "
+            f"FROM {self.graph.catalog} c WHERE c.kind IN ({kinds}) "
+            "AND (c.object_name IS NULL "
+            "OR EXISTS (SELECT 1 FROM user_indexes i WHERE i.index_name = UPPER(c.object_name)) "
+            "OR EXISTS (SELECT 1 FROM user_tables t WHERE t.table_name = UPPER(c.object_name))) "
+            "ORDER BY c.label, c.properties",
+            _items,
+        )
+
+    def _recorded(self, spec: _Spec, object_name: str | None, details: str = "{}", updated: bool = False) -> str:
+        """
+        Records the item as made, as `object_name` (none for one nothing was made for), unless it is recorded already;
+        with `updated`, a record there already takes `details`. A MERGE doesn't read again before it inserts, so of two
+        sessions recording it at once the second is refused on the catalog's key: that refusal is taken as recorded.
+        """
+        key = (
+            f"SELECT {sql_text(CATALOG_KINDS[spec.kind])} AS kind, {sql_text(spec.label)} AS label, "
+            f"{sql_text(catalog_properties(spec.properties))} AS properties FROM dual"
+        )
+        values = ", ".join(
+            [sql_text(item_name(spec)), sql_text(object_name) if object_name else "NULL", sql_text(details)]
+        )
+        matched = f"\n    WHEN MATCHED THEN UPDATE SET c.details = {sql_text(details)}" if updated else ""
+        return f"""BEGIN
+    MERGE INTO {self.graph.catalog} c
+    USING ({key}) k
+    ON (c.kind = k.kind AND c.label = k.label AND c.properties = k.properties){matched}
+    WHEN NOT MATCHED THEN INSERT (kind, label, properties, name, object_name, details)
+        VALUES (k.kind, k.label, k.properties, {values});
 EXCEPTION
     WHEN DUP_VAL_ON_INDEX THEN NULL;
 END;"""
 
-    def drop(self, kind: _Kind, label: str, properties: Sequence[str]) -> str:
-        where = f"kind = '{kind}' AND label = {sql_text(label)} AND properties = {sql_text(to_json(list(properties)))}"
+    def _served_by(self, spec: RangeIndexSpec, details: str) -> str:
+        """
+        Records the range index as served by a uniqueness constraint's index, `details`, and drops the labelled index it
+        was made with, when it was: the one its record names, and an earlier record's, which the record now made stands
+        for. The index is dropped first: a drop that fails leaves the record naming it, for the next constraint made to
+        find and drop.
+        """
+        record = catalog_record(spec.kind, spec.label, spec.properties)
+        earlier = catalog_record(spec.kind, spec.label, spec.properties, [_EARLIER["RANGE"]])
         return f"""DECLARE
-    e_missing EXCEPTION;
-    PRAGMA EXCEPTION_INIT(e_missing, -1418);
+    v_labelled VARCHAR2(128);
 BEGIN
-    FOR it IN (SELECT object_name FROM {self.graph.catalog} WHERE {where}) LOOP
-        BEGIN EXECUTE IMMEDIATE 'DROP INDEX ' || it.object_name; EXCEPTION WHEN e_missing THEN NULL; END;
+    SELECT MAX(JSON_VALUE(details, '$.labelled')) INTO v_labelled FROM {self.graph.catalog} WHERE {record};
+    IF v_labelled IS NOT NULL THEN
+        EXECUTE IMMEDIATE 'DROP INDEX IF EXISTS ' || v_labelled;
+    END IF;
+    FOR it IN (SELECT object_name FROM {self.graph.catalog} WHERE {earlier}) LOOP
+        EXECUTE IMMEDIATE 'DROP INDEX IF EXISTS ' || it.object_name;
     END LOOP;
-    DELETE FROM {self.graph.catalog} WHERE {where};
+    DELETE FROM {self.graph.catalog} WHERE {earlier};
+    UPDATE {self.graph.catalog} SET details = {sql_text(details)} WHERE {record};
+    COMMIT;
 END;"""
 
-    def _record(
-        self,
-        kind: Literal["VECTOR", "FULLTEXT"],
-        spec: VectorIndexSpec | FullTextIndexSpec,
-        details: dict[str, Any],
-        made: str | None = None,
-    ) -> str:
-        """Records an index: what it is over and how, and the table made for it, if one was."""
-        listed = sql_text(to_json(list(spec.properties)))
-        values = ", ".join(
-            [
-                f"'{kind}'",
-                sql_text(spec.label),
-                listed,
-                sql_text(item_name(spec)),
-                sql_text(made) if made else "NULL",
-                f"JSON({sql_text(to_json(details))})",
-            ]
+    def forgotten(self, spec: _Spec) -> str:
+        """
+        Forgets the item, recorded as drivine4j records it or as this library did before, and drops what each record was
+        made as when nothing else recorded uses it: an index, or for a vector or a full-text index the table beside the
+        nodes with its trigger, which takes the index over it along. What is dropped is the object the record names, so
+        an item is dropped as it was made whatever a later version would call it. A range index's labelled index is its
+        own, and is dropped with the record. Dropped first and forgotten last: a drop that fails leaves the record
+        naming what is still there, for the next drop to find.
+        """
+        record = catalog_record(spec.kind, spec.label, spec.properties, recorded_as(spec.kind))
+        drops = (
+            OracleSideTable.dropping("it.object_name")
+            if spec.kind in ("VECTOR", "FULLTEXT")
+            else ["'DROP INDEX IF EXISTS ' || it.object_name"]
         )
-        return f"""BEGIN
-    DELETE FROM {self.graph.catalog} WHERE kind = '{kind}' AND label = {sql_text(spec.label)} AND properties = {listed};
-    INSERT INTO {self.graph.catalog} (kind, label, properties, name, object_name, details)
-        VALUES ({values});
+        labelled = (
+            """
+        IF it.labelled IS NOT NULL THEN
+            EXECUTE IMMEDIATE 'DROP INDEX IF EXISTS ' || it.labelled;
+        END IF;"""
+            if spec.kind == "RANGE"
+            else ""
+        )
+        dropped = "\n            ".join(f"EXECUTE IMMEDIATE {it};" for it in drops)
+        rows = (
+            "SELECT object_name, JSON_VALUE(details, '$.labelled') AS labelled "
+            f"FROM {self.graph.catalog} WHERE {record}"
+        )
+        return f"""DECLARE
+    v_others NUMBER;
+BEGIN
+    FOR it IN ({rows}) LOOP
+        SELECT COUNT(*) INTO v_others FROM {self.graph.catalog}
+            WHERE UPPER(object_name) = UPPER(it.object_name) AND NOT ({record});{labelled}
+        IF it.object_name IS NOT NULL AND v_others = 0 THEN
+            {dropped}
+        END IF;
+    END LOOP;
+    DELETE FROM {self.graph.catalog} WHERE {record};
+    COMMIT;
 END;"""
 
-    def _unrecord(self, kind: Literal["VECTOR", "FULLTEXT"], spec: VectorIndexSpec | FullTextIndexSpec) -> str:
-        return (
-            f"DELETE FROM {self.graph.catalog} WHERE kind = '{kind}' AND label = {sql_text(spec.label)} "
-            f"AND properties = {sql_text(to_json(list(spec.properties)))}"
+
+def _items(rows: list[Any]) -> list[SchemaItem]:
+    return [
+        SchemaItem(
+            it["label"],
+            tuple(it["properties"]),
+            it["name"],
+            dimensions=_number((it.get("details") or {}).get("dimensions")),
+            similarity=(it.get("details") or {}).get("similarity"),
+            incomplete=it.get("incomplete") == "true",
         )
+        for it in rows
+    ]
 
 
 def _number(value: Any) -> int | None:

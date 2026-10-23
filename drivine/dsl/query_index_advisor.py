@@ -70,12 +70,15 @@ class QueryIndexAdvisor:
             logger.warning(message)
 
     async def indexed(self) -> list[SchemaItem]:
-        """The range indexes and uniqueness constraints there are, read once and kept as for advice."""
+        """
+        The range indexes and uniqueness constraints there are, read once and kept as for advice: those whole, as a
+        filter is read through them.
+        """
         if self._indexes is None:
             self._indexes = await self._read("indexes", lambda: self._index_manager().list("RANGE"))
         if self._constraints is None:
             self._constraints = await self._read("constraints", lambda: self._constraint_manager().list())
-        return [*self._indexes, *self._constraints]
+        return [it for it in [*self._indexes, *self._constraints] if not it.incomplete]
 
     def refresh(self) -> None:
         """Forgets the index list, so the next check reads it again."""

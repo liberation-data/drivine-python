@@ -24,6 +24,7 @@ from drivine import (
     refs,
     uniqueness_constraint,
 )
+from drivine.backend.oracle.oracle_graph import OracleGraph
 from drivine.backend.page import Page
 from drivine.dsl.query import Query
 from tests.integration.oracle.oracle_seed import ON_ORACLE, OracleSeed
@@ -135,12 +136,13 @@ async def test_reads_the_index_and_not_the_label_for_a_comparison_every_root_mee
     gom: StatelessGraphObjectManager, pm: PersistenceManager
 ):
     await gom.indexes.ensure(BY_REPO)
+    labelled = OracleGraph().object_name("lx", ["OraIssue", "repoKey"]).upper()
     indexed = await plan_of(gom, pm, [q.repo_key.eq("r7"), q.state.eq("closed")])
-    assert any(it.startswith("DRIVINE_R_") for it in indexed)
+    assert labelled in indexed
     assert "DRIVINE_NODE_LABELS" not in indexed
     # Inside an or, the label is read as before.
     either = await plan_of(gom, pm, any_of(q.repo_key.eq("r1"), q.repo_key.eq("r2")))
-    assert not any(it.startswith("DRIVINE_R_") for it in either)
+    assert labelled not in either
 
 
 async def test_reads_a_uniqueness_constraint_over_the_property_as_it_reads_a_range_index(
@@ -148,7 +150,7 @@ async def test_reads_a_uniqueness_constraint_over_the_property_as_it_reads_a_ran
 ):
     await gom.constraints.ensure(UNIQUE_CODE)
     plan = await plan_of(gom, pm, q.code.eq("c42"))
-    assert any(it.startswith("DRIVINE_U_") for it in plan)
+    assert OracleGraph().object_name("uq", ["OraIssue", "code"]).upper() in plan
     assert "DRIVINE_NODE_LABELS" not in plan
     assert await ids(gom, q.code.eq("c42")) == ["i42"]
 

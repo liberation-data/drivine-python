@@ -15,13 +15,14 @@ from drivine.backend.oracle.oracle_graph import OracleGraph, has_labels, json_ke
 from drivine.backend.oracle.oracle_groups import OracleGroups
 from drivine.backend.oracle.oracle_query_renderer import OracleQueryRenderer
 from drivine.backend.oracle.oracle_save_builder import OracleSaveBuilder
+from drivine.backend.oracle.oracle_schema_grammar import recorded_as
 from drivine.backend.oracle.oracle_search import OracleSearch
 from drivine.backend.oracle.oracle_views import OracleViews
 from drivine.backend.oracle.oracle_writes import OracleWrites
 from drivine.backend.page import Page
 from drivine.backend.save_statement import SaveStatement
 from drivine.backend.sql.sql_cascade import beyond_count, kept_targets
-from drivine.backend.sql.sql_json import to_json
+from drivine.backend.sql.sql_catalog import catalog_properties
 from drivine.drivine_error import DrivineError
 from drivine.dsl.query import Query
 from drivine.dsl.rendered_query import RenderedQuery
@@ -213,12 +214,14 @@ END;""")
     ) -> GraphStatement:
         """
         The statement giving the name of the table an index made for a search is over, for the index over the label's
-        properties: one row, or none when the index was not made.
+        properties, recorded as drivine4j records it or as this library did before: one row, or none when the index was
+        not made.
         """
+        recorded, earlier = recorded_as(kind)
         return GraphStatement(
-            f'SELECT object_name AS "table" FROM {self.graph.catalog} WHERE kind = $kind AND label = $label '
-            "AND properties = $properties AND object_name IS NOT NULL",
-            {"kind": kind, "label": label, "properties": to_json(list(properties))},
+            f'SELECT object_name AS "table" FROM {self.graph.catalog} WHERE kind IN ($kind, $earlier) '
+            "AND label = $label AND properties = $properties AND object_name IS NOT NULL",
+            {"kind": recorded, "earlier": earlier, "label": label, "properties": catalog_properties(properties)},
         )
 
     def nearest(self, target: TargetModel, search: NearestSearch) -> GraphStatement:

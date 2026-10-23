@@ -46,6 +46,16 @@ class IndexManager:
     async def ensure(self, spec: S) -> EnsureResult[S]:
         self._warn_unsupported(spec)
         found = await self._find(spec)
+        if found is not None and found.incomplete:
+            await self._create(spec)
+            self.changed()
+            logger.info(
+                "Completed the %s index on %s(%s): it lacked part of what is made for it",
+                spec.kind,
+                spec.label,
+                ", ".join(spec.properties),
+            )
+            return EnsureResult("CREATED", spec)
         if found is not None:
             if self._matches(spec, found):
                 return EnsureResult("ALREADY_MATCHING", spec)

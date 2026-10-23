@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any, Literal
+from typing import Any
 
 from drivine.backend.postgres.postgres_graph import PostgresGraph, has_labels, text_of
 from drivine.backend.postgres.postgres_search import embedding, holds, searched_text
+from drivine.backend.sql.sql_catalog import CATALOG_KINDS, CatalogKind, catalog_properties, catalog_record
 from drivine.backend.sql.sql_graph import sql_text
-from drivine.backend.sql.sql_json import to_json
 from drivine.schema.full_text_index_spec import FullTextIndexSpec
 from drivine.schema.range_index_spec import RangeIndexSpec
 from drivine.schema.schema_grammar import SchemaGrammar, portable_pins
@@ -17,16 +17,6 @@ from drivine.schema.schema_listing import SchemaListing
 from drivine.schema.schema_specs import item_name
 from drivine.schema.uniqueness_constraint_spec import UniquenessConstraintSpec
 from drivine.schema.vector_index_spec import VectorIndexSpec
-
-_Kind = Literal["RANGE", "UNIQUE", "VECTOR", "FULLTEXT"]
-
-_KINDS: dict[str, str] = {
-    "RANGE": "RANGE_INDEX",
-    "UNIQUE": "UNIQUENESS_CONSTRAINT",
-    "VECTOR": "VECTOR_INDEX",
-    "FULLTEXT": "FULLTEXT_INDEX",
-}
-"""What drivine4j records each kind of item as, in the graph's catalog."""
 
 _Spec = RangeIndexSpec | UniquenessConstraintSpec | VectorIndexSpec | FullTextIndexSpec
 
@@ -133,10 +123,10 @@ class _PostgresSchema:
 
     def _recorded(self, spec: _Spec, object_name: str, details: str = "{}") -> str:
         """Records the item as made, as `object_name`, unless it is recorded already. Two processes record it once."""
-        listed = sql_text(to_json(list(spec.properties)))
+        listed = sql_text(catalog_properties(spec.properties))
         return (
             f"INSERT INTO {self.graph.catalog} (kind, label, properties, name, object_name, details) "
-            f"VALUES ({sql_text(_KINDS[spec.kind])}, {sql_text(spec.label)}, {listed}, "
+            f"VALUES ({sql_text(CATALOG_KINDS[spec.kind])}, {sql_text(spec.label)}, {listed}, "
             f"{sql_text(item_name(spec))}, {sql_text(object_name)}, {sql_text(details)}) "
             "ON CONFLICT (kind, label, properties) DO NOTHING"
         )
@@ -146,10 +136,7 @@ class _PostgresSchema:
         Forgets the item, and drops what it was made as when nothing else recorded uses it: the object the record names,
         so an item is dropped as it was made whatever a later version would call it.
         """
-        record = (
-            f"kind = {sql_text(_KINDS[spec.kind])} AND label = {sql_text(spec.label)} "
-            f"AND properties = {sql_text(to_json(list(spec.properties)))}"
-        )
+        record = catalog_record(spec.kind, spec.label, spec.properties)
         return f"""DO $forget$
 DECLARE
     v_object text;
@@ -167,14 +154,15 @@ BEGIN
 END
 $forget$"""
 
-    def listing(self, kind: _Kind) -> SchemaListing:
+    def listing(self, kind: CatalogKind) -> SchemaListing:
         """
         What is recorded of the kind, and still there: an index dropped by hand is not listed, so that it is made again
         when asked for.
         """
         return SchemaListing(
             "SELECT jsonb_build_object('label', c.label, 'properties', c.properties::jsonb, 'name', c.name, "
-            f"'details', c.details) AS \"item\" FROM {self.graph.catalog} c WHERE c.kind = {sql_text(_KINDS[kind])} "
+            f"'details', c.details) AS \"item\" FROM {self.graph.catalog} c "
+            f"WHERE c.kind = {sql_text(CATALOG_KINDS[kind])} "
             "AND (c.object_name IS NULL OR to_regclass(c.object_name) IS NOT NULL) ORDER BY c.label, c.properties",
             _items,
         )

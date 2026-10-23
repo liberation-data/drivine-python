@@ -295,6 +295,20 @@ async def test_a_tree_of_exactly_max_depth_and_a_ring_are_deleted(pm: Persistenc
     assert removed == loaded
 
 
+async def test_a_ring_through_a_shelf_back_to_the_tree_it_shelves_is_deleted(pm: PersistenceManager):
+    gom = StatelessGraphObjectManager(pm)
+    # One level past max_depth is the shelved tree again: a node the cascade takes, so nothing is refused.
+    shelved: Graph = ([("Session", "rc-shelf")], [("rc-s0", "PART_OF", "rc-s3"), ("rc-shelf", "SHELVES", "rc-s0")])
+    await seed(pm, plus(chain(3), shelved))
+    loaded = {"rc-shelf", *await load_tree(gom, "rc-s0")}
+
+    removed, _ = await removed_by(
+        pm, lambda: gom.delete(DeletableSessionShelf, "rc-shelf", cascade=CascadeType.DELETE_ALL)
+    )
+
+    assert removed == loaded
+
+
 async def test_a_tree_deeper_than_max_depth_is_refused(pm: PersistenceManager):
     gom = StatelessGraphObjectManager(pm)
     # Four levels below the root, one past max_depth = 3.

@@ -199,7 +199,7 @@ class PostgresBackend:
         cascaded = PostgresViews(self.graph).cascade(target, "n.nid IN (SELECT nid FROM cascade_roots)")
         return [
             CascadeDepthCheck(
-                it.view, it.field, it.max_depth, PostgresStatement(beyond_count(roots, cascaded.reached, it.nodes))
+                it.view, it.field, it.max_depth, PostgresStatement(beyond_count(roots, it.within, it.nodes))
             )
             for it in cascaded.beyond
         ]

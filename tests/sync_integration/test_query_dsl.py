@@ -3,6 +3,7 @@
 import pytest
 
 from drivine.sync import (
+    DatabaseType,
     DrivineError,
     PatchResult,
     PersistenceManager,
@@ -98,6 +99,21 @@ class TestConditions:
         ]
         assert titles(gom.load_all(Movie, where=q.title.eq_ignore_case("speed"))) == ["Speed"]
         assert titles(gom.load_all(Movie, where=q.title.matches("J.*k"))) == ["John Wick"]
+
+    def test_matches_ignores_case_for_a_leading_flag(self, pm, gom, movies):
+        if pm.type is DatabaseType.MEMGRAPH:
+            pytest.skip("Memgraph's expressions take no inline flag.")
+        q = refs(Movie)
+        assert titles(gom.load_all(Movie, where=q.title.matches("(?i)the matrix.*"))) == [
+            "The Matrix",
+            "The Matrix Reloaded",
+        ]
+
+    def test_matches_numbers_the_groups_as_the_expression_writes_them(self, pm, gom, movies):
+        if pm.type is DatabaseType.FALKORDB:
+            pytest.skip("FalkorDB's expressions take no backreference.")
+        q = refs(Movie)
+        assert titles(gom.load_all(Movie, where=q.title.matches(".*(e)\\1.*"))) == ["Speed"]
 
     def test_logic(self, gom, movies):
         q = refs(Movie)

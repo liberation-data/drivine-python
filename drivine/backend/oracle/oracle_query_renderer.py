@@ -194,7 +194,61 @@ class OracleQueryRenderer(SqlQueryRenderer):
             bound = self._bind(value)
             return f"SUBSTR({text}, -LENGTH({bound})) = {bound}"
         if operator == "MATCHES":
-            return f"REGEXP_LIKE({text}, '^(' || {self._bind(value)} || ')$')"
+            return self._matches(text, str(value))
         if operator == "CONTAINS_IGNORE_CASE":
             return f"INSTR(LOWER({text}), {self._bind(str(value).lower())}) > 0"
         return f"LOWER({text}) = {self._bind(str(value).lower())}"
+
+    def _matches(self, text: str, pattern: str) -> str:
+        """
+        A regular expression that must match the whole value, as Cypher's `=~` does. A leading `(?i)` ignores case. The
+        expression itself is Oracle's, in the POSIX dialect: what Java adds to it, such as `(?:…)`, a look-around or
+        `\\b`, is not read, and a flag anywhere but the start is not either.
+
+        The expression is anchored in a group of its own, which POSIX can only write as one that captures: so each group
+        the caller wrote is one further on, and a backreference to it is renumbered to match (see `_renumbered`).
+        """
+        ignore_case = pattern.startswith("(?i)")
+        body = _renumbered(pattern[4:] if ignore_case else pattern)
+        flags = ", 'i'" if ignore_case else ""
+        return f"REGEXP_LIKE({text}, {self._bind(f'^({body})$')}{flags})"
+
+
+def _renumbered(body: str) -> str:
+    """
+    `body` with each backreference, `\\1` to `\\8`, one higher, for the group that anchors it is the first. An escaped
+    backslash is no backreference, nor is a backslash inside a bracket expression, where POSIX reads it as itself. `\\9`
+    would need a tenth group, which POSIX does not have, and is refused.
+    """
+    out: list[str] = []
+    i = 0
+    while i < len(body):
+        c = body[i]
+        if c == "[":
+            # A bracket expression is copied whole: `[`, a `^`, a `]` first among its characters, and on to the `]` that
+            # ends it.
+            end = i + 1
+            if body[end : end + 1] == "^":
+                end += 1
+            if body[end : end + 1] == "]":
+                end += 1
+            close = body.find("]", end)
+            end = len(body) if close < 0 else close + 1
+            out.append(body[i:end])
+            i = end
+        elif c == "\\" and i + 1 < len(body):
+            following = body[i + 1]
+            if "1" <= following <= "8":
+                out.append(f"\\{int(following) + 1}")
+            elif following == "9":
+                raise DrivineError(
+                    f"matches on Oracle reads at most eight groups by reference: '{body}' refers to the ninth, and "
+                    "Oracle's expressions have no tenth to anchor it beside."
+                )
+            else:
+                out.append(c + following)
+            i += 2
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)

@@ -582,7 +582,10 @@ Without pi-pilgrim, enforce it yourself: `await SchemaManager(registry, factory,
 
 - **`ensure` is idempotent.** An item that is there is left; one there with another shape (a vector index's dimensions,
   say) is reported as DRIFT and left, unless `recreate_on_drift`. A uniqueness constraint the data already breaks is a
-  VIOLATION, with a sample of the values. `mode="FAIL_FAST"`, the default, raises on either; `"WARN"` logs.
+  VIOLATION, with a sample of the keys that repeat: each its `properties`, the `count` of nodes that hold it, and
+  `nodes`, up to the sample size of them, each named by the engine's id (`elementId`) and, for a constraint read from
+  a fragment, its `NodeId` (`uniqueness_constraint(..., node_id_property="uuid")` by hand). `mode="FAIL_FAST"`, the
+  default, raises on either; `"WARN"` logs.
 - **Versions.** `catalog.with_version("2")` recreates the catalog's items once, the first time it is enforced. Items an
   owner applied before and no longer declares are reported, never dropped. Each owner's version and inventory are kept
   in a `_DrivineSchema` node, as drivine4j and TypeScript keep them.

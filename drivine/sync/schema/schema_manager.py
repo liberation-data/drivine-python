@@ -168,7 +168,10 @@ class SchemaManager:
             spec = result.spec
             message = f"{result.status} for the {spec.kind} on {spec.label}({', '.join(spec.properties)})"
             if result.sample:
-                message += f": values held more than once include {json.dumps(list(result.sample), default=str)}"
+                message += (
+                    f": keys held more than once, with nodes that hold them, include "
+                    f"{json.dumps(list(result.sample), default=str)}"
+                )
             if result.found:
                 message += f": the engine holds {result.found}"
             if self.options.mode == "WARN":
@@ -212,8 +215,14 @@ class SchemaManager:
             return it.engine_options if isinstance(it, VectorIndexSpec) else ()
 
         def portable(it: SchemaSpec) -> SchemaSpec:
+            if isinstance(it, UniquenessConstraintSpec):
+                return dataclasses.replace(it, node_id_property=None)
             return dataclasses.replace(it, engine_options=()) if isinstance(it, VectorIndexSpec) else it
 
+        if isinstance(held, UniquenessConstraintSpec) and isinstance(spec, UniquenessConstraintSpec):
+            # The node id names a violation's nodes and makes nothing: two that differ in it alone are one, keeping it.
+            if portable(held) == portable(spec):
+                return held if held.node_id_property is not None else spec
         a, b = options_of(held), options_of(spec)
         if portable(held) == portable(spec):
             if not b or a == b:

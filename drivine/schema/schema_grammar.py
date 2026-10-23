@@ -60,18 +60,42 @@ class SchemaGrammar:
     """
 
     conflicts: Callable[[UniquenessConstraintSpec, int], str] = field(
-        default=lambda spec, limit: _conflicts(spec, limit)
+        default=lambda spec, limit: _conflicts(spec, limit, "id")
     )
-    """A statement giving up to `limit` values that more than one of the label's nodes hold, one per row."""
+    """
+    A statement giving up to `limit` keys that more than one of the label's nodes hold, one per row: each the
+    `properties` that repeat, the `count` of nodes that hold them, and `nodes`, up to `limit` of them, each named by
+    its `elementId` and the spec's `node_id_property` (see `sampled_node_id`). drivine4j's `sampleConflictsQuery`.
+    """
 
 
-def _conflicts(spec: UniquenessConstraintSpec, limit: int) -> str:
-    values = [f"n.{quote_name(it)}" for it in spec.properties]
-    present = " AND ".join(f"{it} IS NOT NULL" for it in values)
-    key = values[0] if len(values) == 1 else f"[{', '.join(values)}]"
-    return (
-        f"MATCH (n{label_expression([spec.label])}) WHERE {present} WITH {key} AS value, count(*) AS holders "
-        f"WHERE holders > 1 RETURN value LIMIT {limit}"
+def sampled_node_id(spec: UniquenessConstraintSpec) -> str | None:
+    """
+    The property a violation's sample names a node by, beside its engine id: the spec's `node_id_property`, unless it
+    is one of the keys, which every node of a conflict holds alike.
+    """
+    held = spec.node_id_property
+    return held if held is not None and held not in spec.properties else None
+
+
+def _conflicts(spec: UniquenessConstraintSpec, limit: int, element_id: str) -> str:
+    """drivine4j's statement, line for line; `element_id` is the function that gives a node's own id."""
+    not_null = " AND ".join(f"n.{quote_name(it)} IS NOT NULL" for it in spec.properties)
+    aliases = ", ".join(f"n.{quote_name(it)} AS _k{i}" for i, it in enumerate(spec.properties))
+    keys = ", ".join(f"{quote_name(it)}: _k{i}" for i, it in enumerate(spec.properties))
+    node_id = sampled_node_id(spec)
+    node = ", ".join(
+        [f"elementId: {element_id}(n)", *([f"{quote_name(node_id)}: n.{quote_name(node_id)}"] if node_id else [])]
+    )
+    return "\n".join(
+        [
+            f"MATCH (n{label_expression([spec.label])})",
+            f"WHERE {not_null}",
+            f"WITH {aliases}, count(*) AS _count, collect({{{node}}}) AS _nodes",
+            "WHERE _count > 1",
+            f"RETURN {{properties: {{{keys}}}, count: _count, nodes: _nodes[0..{limit}]}}",
+            f"LIMIT {limit}",
+        ]
     )
 
 
@@ -182,6 +206,7 @@ NEO4J_SCHEMA = SchemaGrammar(
         f"ON EACH [{_props(spec)}]"
     ],
     drop_full_text=lambda spec, name: [f"DROP INDEX {quote_name(name or item_name(spec))} IF EXISTS"],
+    conflicts=lambda spec, limit: _conflicts(spec, limit, "elementId"),
 )
 
 

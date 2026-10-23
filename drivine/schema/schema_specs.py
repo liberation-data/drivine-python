@@ -20,8 +20,11 @@ def range_index(label: str, properties: str | Iterable[str]) -> RangeIndexSpec:
     return RangeIndexSpec(label, _names(properties))
 
 
-def uniqueness_constraint(label: str, properties: str | Iterable[str]) -> UniquenessConstraintSpec:
-    return UniquenessConstraintSpec(label, _names(properties))
+def uniqueness_constraint(
+    label: str, properties: str | Iterable[str], *, node_id_property: str | None = None
+) -> UniquenessConstraintSpec:
+    """`node_id_property` names each node of a violation's sample, beside the engine's id; it changes nothing made."""
+    return UniquenessConstraintSpec(label, _names(properties), node_id_property=node_id_property)
 
 
 def full_text_index(label: str, properties: str | Iterable[str]) -> FullTextIndexSpec:

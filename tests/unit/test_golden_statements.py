@@ -568,6 +568,24 @@ def test_writes_what_typescript_writes_for_postgres():
     )
 
 
+AWAITING_TWIN = {"schema.conflicts"}
+"""
+Statements Python writes as drivine4j does ahead of TypeScript, whose golden text is copied from the TS twin once it
+lands (liberation-data/drivine4j#128: a violation's sample names its nodes). test_conflict_sample checks them against
+drivine4j's text meanwhile. Remove a key once the golden file holds what Python writes.
+"""
+
+
+def test_the_statements_awaiting_typescript_are_not_yet_in_its_golden_file():
+    """Fails once the golden file is copied from the TS twin: then empty AWAITING_TWIN, and the goldens hold again."""
+    ours = {
+        **schema(NEO4J_SCHEMA),
+        **{f"oracle.{k}": v for k, v in schema(schema_grammar_for(DatabaseType.ORACLE)).items()},
+    }
+    assert any(ours[name] != GOLDEN["NEO4J"][name] for name in AWAITING_TWIN)
+    assert any(ours[f"oracle.{name}"] != GOLDEN["ORACLE"][name] for name in AWAITING_TWIN)
+
+
 def expect_golden(engine: str, statements: dict[str, str]) -> None:
     """
     Each statement as TypeScript writes it, character for character. A plan is compared as the JSON it is: the keys of
@@ -576,6 +594,8 @@ def expect_golden(engine: str, statements: dict[str, str]) -> None:
     """
     assert statements.keys() == GOLDEN[engine].keys()
     for name, text in statements.items():
+        if name in AWAITING_TWIN:
+            continue
         if name.endswith(".plan"):
             assert json.loads(text) == json.loads(GOLDEN[engine][name]), name
         else:

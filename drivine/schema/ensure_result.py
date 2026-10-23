@@ -22,6 +22,11 @@ class EnsureResult(Generic[S]):
     status: EnsureStatus
     spec: S
     sample: tuple[Any, ...] | None = None
-    """For a VIOLATION: a sample of the values more than one node holds."""
+    """
+    For a VIOLATION: a sample of the keys more than one node holds, each `{"properties": {...}, "count": n, "nodes":
+    [...]}`, with up to the sample size of the nodes that hold it: each its `elementId`, the engine's own id (Neo4j's
+    `elementId(n)`, Memgraph's and FalkorDB's `id(n)`, the node row's `nid` on Oracle and Postgres), and the spec's
+    `node_id_property` where it has one that isn't a key.
+    """
     found: SchemaItem | None = None
     """For a DRIFT: what the engine holds."""

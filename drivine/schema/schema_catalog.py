@@ -45,7 +45,8 @@ class SchemaCatalog:
     ) -> SchemaCatalog:
         """
         The items fragments declare with RangeIndex, Unique, VectorIndex and FullTextIndex, over their first label and
-        their fields' stored names. A vector index's dimensions come from `dimensions` unless its marker gives them.
+        their fields' stored names. A vector index's dimensions come from `dimensions` unless its marker gives them. A
+        uniqueness constraint names a violation's nodes by the fragment's NodeId, as it is stored.
         """
         models = registry or ModelRegistry()
         items: list[SchemaSpec] = []
@@ -54,7 +55,7 @@ class SchemaCatalog:
             label = model.labels[0]
             for it in model.schema:
                 if it.kind == "UNIQUE":
-                    items.append(uniqueness_constraint(label, it.properties))
+                    items.append(uniqueness_constraint(label, it.properties, node_id_property=model.node_id_property))
                 elif it.kind == "FULLTEXT":
                     items.append(full_text_index(label, it.properties))
                 elif it.kind == "RANGE":

@@ -1,0 +1,188 @@
+# Written by scripts/unasync.py from tests/integration/test_cypher_compiled.py:
+# change that, and run the script again.
+"""
+What the Cypher spec (tests/cypher) can't say, on Neo4j and on the SQL stores Cypher is compiled for: values that change
+on every run (a UUID, the time), parameters of Python's temporal types, statements built in code, a cursor, and what
+needs a transaction of its own. drivine4j keeps the same in its Cypher*CrossEngineTest.
+"""
+
+import re
+from datetime import UTC, date, datetime, time, timedelta, timezone
+from typing import Any
+
+import pytest
+
+from drivine.model import stamps
+from drivine.query.statement import cypher_statement
+from drivine.sync import (
+    CursorSpecification,
+    DatabaseType,
+    DrivineError,
+    PersistenceManager,
+    PersistenceManagerFactory,
+    QuerySpecification,
+    transaction,
+)
+from tests.sync_integration.conftest import ORACLE, POSTGRES
+
+UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
+
+def spec(cypher: str, parameters: dict[str, Any] | None = None) -> QuerySpecification[Any]:
+    return QuerySpecification[Any](cypher_statement(cypher)).bind(parameters)
+
+
+def clear(pm: PersistenceManager) -> None:
+    if pm.type is DatabaseType.NEO4J:
+        pm.execute(QuerySpecification("MATCH (n) DETACH DELETE n"))
+    else:
+        pm.execute(QuerySpecification("DELETE FROM drivine_edge"))
+        pm.execute(QuerySpecification("DELETE FROM drivine_node"))
+
+
+def test_random_uuid_gives_a_new_uuid_each_time(cypher_pm: PersistenceManager):
+    a, b = cypher_pm.query(spec("UNWIND [1, 2] AS x RETURN randomUUID()"))
+    assert a != b and UUID.fullmatch(a), (a, b)
+
+
+def test_a_day_and_a_moment_are_their_iso_text_on_a_sql_store(cypher_pm: PersistenceManager):
+    day, moment = cypher_pm.get_one(spec("RETURN [date(), localdatetime()]"))
+    if cypher_pm.type is DatabaseType.NEO4J:
+        # A graph engine's driver gives a day and a moment as values of its own: the standard library's here.
+        assert isinstance(day, date) and isinstance(moment, datetime)
+        return
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", day), day
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?", moment), moment
+
+
+def test_a_statement_of_hundreds_of_creates_each_naming_nodes_made_before_it_makes_them_all(
+    cypher_pm: PersistenceManager,
+):
+    clear(cypher_pm)
+    clauses = [
+        f"CREATE (n{i}:CyWrite {{i: {i}}})" + (f" CREATE (n{i - 1})-[:NEXT]->(n{i})" if i else "") for i in range(300)
+    ]
+    cypher_pm.query(spec("\n".join(clauses)))
+    counted = "MATCH (n:CyWrite) OPTIONAL MATCH (n)-[r:NEXT]->() RETURN [count(DISTINCT n), count(r)]"
+    assert cypher_pm.query(spec(counted)) == [[300, 299]]
+
+
+def test_drivines_stamp_is_written_as_a_nodes_property_is_and_read_back_as_one(cypher_pm: PersistenceManager):
+    clear(cypher_pm)
+    stamp = f"`{stamps.PROPERTY}`"
+    cypher_pm.query(spec(f"CREATE (:CyWrite {{id: 1, {stamp}: 'aaaaaaaaaaaaaaaa:bbbbbbbbbbbbbbbb'}})"))
+    read = spec(f"MATCH (n:CyWrite {{id: 1}}) RETURN n.{stamp}")
+    assert cypher_pm.query(read) == ["aaaaaaaaaaaaaaaa:bbbbbbbbbbbbbbbb"]
+    cypher_pm.query(spec(f"MATCH (n:CyWrite {{id: 1}}) SET {stamps.set_clause('n')}"))
+    token, links = (cypher_pm.get_one(read)).split(":")
+    assert len(token) == 16 and token != "aaaaaaaaaaaaaaaa" and links == "bbbbbbbbbbbbbbbb", (token, links)
+    properties = cypher_pm.query(spec("MATCH (n:CyWrite {id: 1}) RETURN properties(n)"))
+    assert properties == [{"id": 1, stamps.PROPERTY: f"{token}:{links}"}]
+    cypher_pm.query(spec(f"MATCH (n:CyWrite {{id: 1}}) REMOVE n.{stamp}"))
+    assert cypher_pm.query(read) == [None]
+
+
+def test_datetimes_epoch_milliseconds_and_timestamp_are_the_moment_the_statement_runs(
+    cypher_pm: PersistenceManager,
+):
+    clear(cypher_pm)
+    before = int(datetime.now(UTC).timestamp() * 1000) - 60_000
+    millis, stamp = cypher_pm.get_one(
+        spec("CREATE (n:CyWrite) SET n.at = datetime().epochMillis RETURN [n.at, timestamp()]")
+    )
+    after = int(datetime.now(UTC).timestamp() * 1000) + 60_000
+    assert before <= millis <= after and before <= stamp <= after, (millis, stamp)
+
+
+def test_a_parameter_of_a_date_or_a_zoned_datetime_is_a_temporal_value_of_its_kind(cypher_pm: PersistenceManager):
+    found = cypher_pm.get_one(
+        spec(
+            "RETURN {year: $day.year, later: $at > datetime('2024-01-01T00:00:00Z')}",
+            {"day": date(2024, 3, 15), "at": datetime(2024, 6, 1, tzinfo=UTC)},
+        )
+    )
+    assert found == {"year": 2024, "later": True}
+
+
+def test_a_parameter_of_a_time_a_local_or_zoned_datetime_or_a_timedelta_is_a_temporal_value_of_its_kind(
+    cypher_pm: PersistenceManager,
+):
+    found = cypher_pm.get_one(
+        spec(
+            "RETURN {minute: $time.minute, hour: $ldt.hour, zoned: $z.timezone, later: ($ldt + duration('PT36H')).day, "
+            "days: $d.days, hours: ($ldt + $d).hour}",
+            {
+                "time": time(10, 30),
+                "ldt": datetime(2024, 3, 15, 10, 0),
+                "z": datetime(2024, 3, 15, 10, 0, tzinfo=timezone(timedelta(hours=2))),
+                "d": timedelta(days=1, hours=2),
+            },
+        )
+    )
+    assert found == {"minute": 30, "hour": 10, "zoned": "+02:00", "later": 16, "days": 1, "hours": 12}
+
+
+def test_a_zoned_parameter_keeps_its_kind_in_reduce(cypher_pm: PersistenceManager):
+    found = cypher_pm.query(
+        spec(
+            "RETURN reduce(s = false, x IN [1] | $a < $b)",
+            {
+                "a": datetime(2024, 3, 15, 10, 0, tzinfo=timezone(timedelta(hours=2))),
+                "b": datetime(2024, 3, 15, 9, 0, tzinfo=UTC),
+            },
+        )
+    )
+    assert found == [True]
+
+
+def test_a_cursor_reads_a_cypher_statements_rows(cypher_pm: PersistenceManager):
+    cursor_spec = CursorSpecification[Any](cypher_statement("UNWIND range(1, 5) AS i RETURN {i: i}")).batch_size(2)
+    with cypher_pm.open_cursor(cursor_spec) as cursor:
+        assert [it for it in cursor] == [{"i": i} for i in range(1, 6)]
+
+
+def test_a_cypher_statement_takes_named_parameters_on_a_sql_store(cypher_pm: PersistenceManager):
+    positional = QuerySpecification[Any](cypher_statement("RETURN $1")).bind([1])
+    if cypher_pm.type is DatabaseType.NEO4J:
+        assert cypher_pm.query(positional) == [1]
+        return
+    with pytest.raises(DrivineError, match=r"takes named parameters \(\$name\), not a list of them"):
+        cypher_pm.query(positional)
+
+
+@pytest.mark.skipif(not POSTGRES, reason="Postgres isn't configured.")
+def test_a_write_in_a_transaction_rolled_back_leaves_nothing_and_runs_again_after(
+    factory: PersistenceManagerFactory,
+):
+    pm = factory.get("postgres")
+    clear(pm)
+    with transaction(rollback=True):
+        pm.query(spec("CREATE (:CyWrite {name: 'Ada'})"))
+        assert pm.query(spec("MATCH (n:CyWrite) RETURN n.name")) == ["Ada"]
+    assert pm.query(spec("MATCH (n:CyWrite) RETURN count(n)")) == [0]
+    # The function the write was compiled to went with the transaction, and is made again.
+    pm.query(spec("CREATE (:CyWrite {name: 'Ada'})"))
+    assert pm.query(spec("MATCH (n:CyWrite) RETURN count(n)")) == [1]
+
+
+@pytest.mark.skipif(not ORACLE, reason="Oracle isn't configured: set ORACLE_TESTS=true.")
+def test_nodes_of_two_labels_a_transaction_has_made_and_not_yet_committed_are_found_by_both(
+    factory: PersistenceManagerFactory,
+):
+    pm = factory.get("oracle")
+    clear(pm)
+    with transaction(rollback=True):
+        pm.query(
+            spec("CREATE (:CyWrite:Dog {name: 'Buddy'}), (:CyWrite:Cat {name: 'Tom'}), (:CyWrite:Dog {name: 'Max'})")
+        )
+        assert pm.query(spec("MATCH (d:CyWrite:Dog) RETURN d.name ORDER BY d.name")) == ["Buddy", "Max"]
+        assert pm.query(spec("MATCH (c) WHERE c:Cat:CyWrite RETURN c.name")) == ["Tom"]
+
+
+@pytest.mark.skipif(not ORACLE, reason="Oracle isn't configured: set ORACLE_TESTS=true.")
+def test_a_cypher_statement_that_writes_is_not_read_through_a_cursor_on_oracle(
+    factory: PersistenceManagerFactory,
+):
+    cursor_spec = CursorSpecification[Any](cypher_statement("CREATE (n:CyWrite) RETURN n"))
+    with pytest.raises(DrivineError, match="is a block on Oracle"):
+        factory.get("oracle").open_cursor(cursor_spec)

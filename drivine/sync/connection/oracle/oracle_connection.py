@@ -7,9 +7,12 @@ import re
 import time
 from typing import Any, TypeVar
 
+from drivine.backend.sql.sql_graph import DEFAULT_GRAPH
 from drivine.connection.oracle.oracle_result_mapper import OracleResultMapper
 from drivine.connection.oracle.oracle_spec_compiler import OracleSpecCompiler
 from drivine.cursor.cursor_specification import CursorSpecification
+from drivine.cypher.cypher_specification import cypher_compiled
+from drivine.drivine_error import DrivineError
 from drivine.logger import log_statement
 from drivine.query.query_specification import QuerySpecification
 from drivine.sync.connection.connection import Connection
@@ -26,19 +29,22 @@ _BLOCK = re.compile(r"^\s*(DECLARE|BEGIN)\b", re.IGNORECASE)
 class OracleConnection(Connection):
     """
     A connection to Oracle. Outside a transaction each statement commits itself, as a statement does on the graph
-    engines. A PL/SQL block hands its rows back with `DBMS_SQL.RETURN_RESULT`; the first such set is its result.
+    engines. A PL/SQL block hands its rows back with `DBMS_SQL.RETURN_RESULT`; the first such set is its result. A
+    Cypher statement is compiled to SQL over the graph's tables (see SqlCypherCompiler): a read to a query, and a write
+    to a block.
     """
 
-    def __init__(self, connection: Any, release: Any, session_id: str) -> None:
+    def __init__(self, connection: Any, release: Any, session_id: str, graph: str = DEFAULT_GRAPH) -> None:
         self.connection = connection
         self._release = release
         self.session_id = session_id
+        self.graph = graph
         self.result_mapper = OracleResultMapper()
         self._in_transaction = False
 
     def query(self, spec: QuerySpecification[T]) -> list[T]:
         finalized = spec.finalized_copy("SQL")
-        compiled = OracleSpecCompiler(finalized).compile()
+        compiled = OracleSpecCompiler(cypher_compiled(finalized, "ORACLE", self.graph)[0]).compile()
         start = time.perf_counter()
         self.connection.autocommit = not self._in_transaction
         cursor: Any = self.connection.cursor()
@@ -61,7 +67,14 @@ class OracleConnection(Connection):
 
     def open_cursor(self, spec: CursorSpecification[T]) -> OracleCursor[T]:
         finalized = spec.finalized_copy("SQL")
-        compiled = OracleSpecCompiler(finalized).compile()
+        sql = cypher_compiled(finalized, "ORACLE", self.graph)[0]
+        compiled = OracleSpecCompiler(sql).compile()
+        if sql is not finalized and _BLOCK.match(compiled.statement):
+            raise DrivineError(
+                "A Cypher statement that writes is a block on Oracle, which hands its rows back whole: run it with "
+                "query, not through a cursor.",
+                spec,
+            )
         self.connection.autocommit = not self._in_transaction
         cursor = self.connection.cursor()
         cursor.arraysize = spec.batch

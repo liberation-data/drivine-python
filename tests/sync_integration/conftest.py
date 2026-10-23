@@ -64,6 +64,23 @@ def pm(request: pytest.FixtureRequest, factory: PersistenceManagerFactory) -> It
     yield manager
 
 
+CYPHER_STORES = ["default", *(["postgres"] if POSTGRES else []), *(["oracle"] if ORACLE else [])]
+"""
+The registered names of the stores a Cypher statement is checked on, to give the same rows: Neo4j, and the SQL stores it
+is compiled for, as the tests' environment has them.
+"""
+
+
+@pytest.fixture(params=CYPHER_STORES)
+def cypher_pm(request: pytest.FixtureRequest, factory: PersistenceManagerFactory) -> PersistenceManager:
+    """A manager of each store a Cypher statement is checked on: its graph is the test's to clear."""
+    manager = factory.get(request.param)
+    if manager.type is DatabaseType.POSTGRES:
+        # The store is made by an object manager, so it may not be there yet.
+        manager.execute(QuerySpecification(PostgresGraph().ensuring))
+    return manager
+
+
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     """
     A test marked `rolls_back` needs multi-statement transactions, which FalkorDB doesn't have. One marked

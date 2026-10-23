@@ -128,7 +128,9 @@ class SchemaManager:
         uniqueness constraint, so two processes enforcing at once can't each make one.
         """
         await gom.persistence_manager.execute(gom.backend.prune_schema_markers().spec({"scope": owner}))
-        await gom.constraints.ensure(uniqueness_constraint(MARKER_LABEL, "scope"))
+        # A plain index on the marker's key (a hand-made fix, say) is in the way on Neo4j. The label is Drivine's, so
+        # the constraint replaces it.
+        await gom.constraints.ensure(uniqueness_constraint(MARKER_LABEL, "scope"), replace_blocking_index=True)
 
     async def _report_orphans(
         self, gom: StatelessGraphObjectManager, database: str, owner: str, declared: list[str], co_owned: set[str]
@@ -153,7 +155,11 @@ class SchemaManager:
         if isinstance(spec, UniquenessConstraintSpec):
             if recreate:
                 await gom.constraints.drop(spec)
-            return self._judge(await gom.constraints.ensure(spec, self.options.violation_sample_size))
+            return self._judge(
+                await gom.constraints.ensure(
+                    spec, self.options.violation_sample_size, self.options.replace_blocking_index
+                )
+            )
         if recreate:
             return await gom.indexes.recreate(spec)
         result = await gom.indexes.ensure(spec)
@@ -162,9 +168,14 @@ class SchemaManager:
         return self._judge(result)
 
     def _judge(self, result: EnsureResult[Any]) -> EnsureResult[Any]:
-        if result.status in ("DRIFT", "VIOLATION"):
+        if result.status in ("DRIFT", "VIOLATION", "BLOCKED_BY_INDEX"):
             spec = result.spec
             message = f"{result.status} for the {spec.kind} on {spec.label}({', '.join(spec.properties)})"
+            if result.index is not None:
+                message += (
+                    f": the index {result.index.name} is in the way of it. Drop the index, or replace it with the "
+                    "constraint: replace_blocking_index=True"
+                )
             if result.sample:
                 message += f": values held more than once include {json.dumps(list(result.sample), default=str)}"
             if result.found:

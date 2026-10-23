@@ -586,6 +586,12 @@ Without pi-pilgrim, enforce it yourself: `await SchemaManager(registry, factory,
 - **Versions.** `catalog.with_version("2")` recreates the catalog's items once, the first time it is enforced. Items an
   owner applied before and no longer declares are reported, never dropped. Each owner's version and inventory are kept
   in a `_DrivineSchema` node, as drivine4j and TypeScript keep them.
+- **An index in the way.** Neo4j refuses a uniqueness constraint while a plain range index covers the same label and
+  properties. `ensure` reports that as BLOCKED_BY_INDEX, naming the index, and changes nothing: `FAIL_FAST` raises,
+  `WARN` logs. With `replace_blocking_index=True` (on `gom.constraints.ensure`, or in `SchemaOptions`) the data is
+  read, and unless a value repeats the index is dropped and the constraint made, its own index taking the plain one's
+  place. Drivine's own keys (the schema marker's, the store's) always replace one. On FalkorDB the constraint needs the
+  range index, and Memgraph, Oracle and Postgres make it beside one, so none is ever reported in the way there.
 - **By hand:** `gom.indexes.ensure(range_index("Session", ["lastActivityAt", "sessionId"]))`, `gom.indexes.recreate`,
   `gom.indexes.drop`, `gom.constraints.ensure(uniqueness_constraint("Person", "email"))`, and `list`.
 - **Each engine's DDL** is written for it: named items on Neo4j, Memgraph's text and vector indexes, FalkorDB's index per

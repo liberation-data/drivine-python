@@ -2,6 +2,7 @@
 # change that, and run the script again.
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 
 from drivine.drivine_error import DrivineError
@@ -14,6 +15,8 @@ from drivine.sync import concurrency
 from drivine.sync.schema.index_manager import IndexManager
 from drivine.sync.schema.schema_executor import SchemaExecutor
 
+logger = logging.getLogger("drivine.schema")
+
 VIOLATION_SAMPLE = 10
 """How many conflicting values a constraint violation reports."""
 
@@ -21,7 +24,9 @@ VIOLATION_SAMPLE = 10
 class ConstraintManager:
     """
     Uniqueness constraints, made idempotently. Before making one, the data is checked: if two nodes already hold the
-    same values, nothing is made and the result is a VIOLATION with a sample of the values.
+    same values, nothing is made and the result is a VIOLATION with a sample of the values. On Neo4j a plain range index
+    over the same label and properties is in the way of one: the result is then BLOCKED_BY_INDEX, naming it, unless
+    the index is to be replaced.
     """
 
     def __init__(
@@ -36,11 +41,17 @@ class ConstraintManager:
         return self.grammar.list_uniques.read(self.executor.run(self.grammar.list_uniques.statement))
 
     def ensure(
-        self, spec: UniquenessConstraintSpec, sample_size: int = VIOLATION_SAMPLE
+        self, spec: UniquenessConstraintSpec, sample_size: int = VIOLATION_SAMPLE, replace_blocking_index: bool = False
     ) -> EnsureResult[UniquenessConstraintSpec]:
         """
         Makes the constraint unless it is there. The data is checked first, and up to `sample_size` values held more
         than once are reported; 0 skips the check, leaving the engine to refuse a constraint the data breaks.
+
+        A plain range index over the label and properties, in their order, that the engine says is in the way of the
+        constraint (Neo4j) is reported as BLOCKED_BY_INDEX, and nothing is changed. With `replace_blocking_index`, the
+        index is dropped and the constraint made, its own index taking the plain one's place. The data is read first,
+        however `sample_size` is set: a value held more than once keeps the index and is a VIOLATION, and data that
+        can't be read keeps the index and raises the engine's refusal.
         """
         if self._exists(spec):
             return EnsureResult("ALREADY_MATCHING", spec)
@@ -49,8 +60,41 @@ class ConstraintManager:
             return EnsureResult("VIOLATION", spec, sample=tuple(sample))
         if self.grammar.unique_needs_range:
             IndexManager(self.executor, self.grammar, self.changed).ensure(range_index(spec.label, spec.properties))
-        for statement in self.grammar.create_unique(spec):
-            self.executor.run(statement)
+        try:
+            for statement in self.grammar.create_unique(spec):
+                self.executor.run(statement)
+        except Exception as refusal:
+            index = self._blocking_index(spec) if self.grammar.blocked_by_index(refusal) else None
+            if index is None or not index.name:
+                raise
+            if not replace_blocking_index:
+                logger.warning(
+                    "Could not make the uniqueness constraint on %s(%s): the index %s is in the way of it",
+                    spec.label,
+                    ", ".join(spec.properties),
+                    index.name,
+                )
+                return EnsureResult("BLOCKED_BY_INDEX", spec, index=index)
+            if sample_size <= 0:
+                # The engine refuses for the index before it reads the data, so a value held twice would refuse the
+                # constraint once the index is gone: look first, and keep the index, as when the data can't be read.
+                try:
+                    repeated = self.executor.run(self.grammar.conflicts(spec, 1))
+                except Exception as unreadable:
+                    refusal.add_note(f"The index was kept: the data could not be read ({unreadable}).")
+                    raise refusal from refusal.__cause__
+                if repeated:
+                    return EnsureResult("VIOLATION", spec, sample=())
+            for statement in self.grammar.drop_named_range(index.name):
+                self.executor.run(statement)
+            self.changed()
+            logger.info(
+                "Dropped the index %s on %s(%s), in the way of a uniqueness constraint that replaces it",
+                index.name,
+                spec.label,
+                ", ".join(spec.properties),
+            )
+            return self.ensure(spec, sample_size)
         self._await_built(spec)
         self.changed()
         return EnsureResult("CREATED", spec)
@@ -60,6 +104,11 @@ class ConstraintManager:
             for statement in self.grammar.drop_unique(spec):
                 self.executor.run(statement)
             self.changed()
+
+    def _blocking_index(self, spec: UniquenessConstraintSpec) -> SchemaItem | None:
+        """The plain range index over the constraint's label and properties, in its order; None when there is none."""
+        held = IndexManager(self.executor, self.grammar).list("RANGE")
+        return next((it for it in held if it.label == spec.label and it.properties == spec.properties), None)
 
     def _exists(self, spec: UniquenessConstraintSpec) -> bool:
         # Order means nothing to uniqueness, and engines reorder the properties.

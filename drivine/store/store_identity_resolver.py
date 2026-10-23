@@ -69,7 +69,8 @@ class StoreIdentityResolver:
         if self.constraints is None:
             return False
         try:
-            result = await self.constraints.ensure(_KEY_CONSTRAINT)
+            # The label is Drivine's, so a plain index on the key (Neo4j) is replaced by the constraint.
+            result = await self.constraints.ensure(_KEY_CONSTRAINT, replace_blocking_index=True)
         except Exception as error:
             logger.warning("Could not ensure the DrivineStore key constraint: %s. Identity is best-effort.", error)
             return False

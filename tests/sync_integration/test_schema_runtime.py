@@ -5,6 +5,7 @@ Schema known only at runtime, ensured under an owner with `SchemaManager.ensure`
 SchemaManagerRuntimeIntegrationTest. A second SchemaManager over the same database stands for the next process.
 """
 
+import dataclasses
 import logging
 import uuid
 from collections.abc import Iterator, Sequence
@@ -16,9 +17,12 @@ from drivine.schema.recorded_inventory import RecordedInventory, inventory_entri
 from drivine.schema.schema_catalog import DEFAULT_SCOPE
 from drivine.schema.schema_specs import SchemaSpec
 from drivine.sync import (
+    ConnectionProperties,
+    DatabaseRegistry,
     DrivineError,
     PersistenceManager,
     PersistenceManagerFactory,
+    QuerySpecification,
     SchemaCatalog,
     SchemaManager,
     SchemaOptions,
@@ -30,6 +34,7 @@ from drivine.sync import (
 )
 from drivine.sync.manager.graph_object_manager_factory import GraphObjectManagerFactory
 from drivine.sync.schema.schema_manager import inventory_key
+from tests.sync_integration.conftest import ENGINES, POSTGRES
 from tests.sync_integration.stores import create
 
 
@@ -441,13 +446,44 @@ def test_a_runtime_item_that_conflicts_on_one_database_applies_nothing_on_any_ot
         _drop_labelled(neo4j, label)
 
 
-def test_ensure_by_owner_applies_on_every_graph_database(factory, registry):
+def test_ensure_by_owner_applies_on_every_graph_database():
+    # A registry of its own: the session's may hold a store another test made and dropped.
+    own = DatabaseRegistry()
+    for name in ENGINES:
+        own.build_or_resolve_from_env(None if name == "default" else name)
+    factory = PersistenceManagerFactory(own)
     label = f"R{uuid.uuid4().hex[:10]}"
-    manager = SchemaManager(factory.registry, GraphObjectManagerFactory(factory), SchemaOptions())
+    manager = SchemaManager(own, GraphObjectManagerFactory(factory), SchemaOptions())
     try:
         report = manager.ensure("tenants", range_index(label, "slug"))
-        assert sorted(report) == sorted(it.name for it in registry.providers)
+        assert sorted(report) == sorted(it.name for it in own.providers)
         assert {statuses(report, it)[0] for it in report} == {"CREATED"}
     finally:
-        for it in registry.providers:
+        for it in own.providers:
             _drop_labelled(StatelessGraphObjectManager(factory.get(it.name)), label)
+        own.close()
+
+
+@pytest.mark.skipif(not POSTGRES, reason="Postgres is not configured.")
+def test_ensure_on_a_postgres_store_not_yet_made_makes_the_store_first(factory):
+    name = f"pgstore_ensure_{uuid.uuid4().hex[:8]}"
+    own = DatabaseRegistry()
+    properties = dataclasses.replace(ConnectionProperties.from_env("postgres"), default_graph_path=name)
+    own.builder().with_properties(properties).register("fresh")
+    manager = SchemaManager(own, GraphObjectManagerFactory(PersistenceManagerFactory(own)), SchemaOptions())
+    spec = range_index("Tenant", "slug")
+    try:
+        report = manager.ensure("tenants", spec)
+        assert statuses(report, "fresh") == ["CREATED"]
+        gom = StatelessGraphObjectManager(PersistenceManagerFactory(own).get("fresh"))
+        record = read_inventory(
+            gom.backend.marker_items(
+                gom.persistence_manager.maybe_get_one(gom.backend.schema_marker("items").spec({"scope": "tenants"}))
+            )
+        )
+        assert record == RecordedInventory((inventory_key(spec),), (inventory_key(spec),))
+    finally:
+        factory.get("postgres").execute(
+            QuerySpecification[Any](f"DROP TABLE IF EXISTS {name}_edge, {name}_node, {name}_schema CASCADE")
+        )
+        own.close()

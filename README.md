@@ -505,6 +505,9 @@ people = await gom.edges.load_related(node_ref(Issue, a), "ASSIGNED_TO", Person)
 - **Edges** relate and unrelate stored nodes by id, marking both ends' stamps.
 - **Outside a transaction**, a save the engine turns away because another writer held the node is run again after a
   pause. Inside one, it joins the transaction, and fails for its owner to decide.
+- A save that lost its connection, or whose authorization expired, is not run again, though the Neo4j driver calls that
+  retryable: it may have been applied, and a second run would find its own stamp and report a save that was applied as
+  refused.
 
 The store format, stamps included, is TypeScript's and drivine4j's, so the three can share a store.
 

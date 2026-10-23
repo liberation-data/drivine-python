@@ -43,13 +43,23 @@ def _falkordb_some_match(pattern: str, node: str, rel: str, where: Callable[[str
     )
 
 
+_TRANSIENT_CODE = re.compile(r"^[^.]+\.TransientError\.")
+
+
 def _transient_over_bolt(failure: BaseException) -> bool:
-    """A transient error over Bolt: a deadlock on Neo4j, a conflicting transaction on Memgraph."""
+    """
+    A transient error over Bolt: a deadlock on Neo4j (`Neo.TransientError.*`), a conflicting transaction on Memgraph
+    (`Memgraph.TransientError.*`). The driver already gives a terminated transaction a client error's code.
+
+    A lost connection (`ServiceUnavailable`, `SessionExpired`) or an expired authorization is not run again, though the
+    driver calls it retryable: the save may have been applied before the connection went, and a second run would find
+    its own stamp and report a save that was applied as refused.
+    """
     try:
         from neo4j.exceptions import Neo4jError
     except ImportError:  # the neo4j extra isn't installed, so no failure came from it
         return False
-    return isinstance(failure, Neo4jError) and failure.is_retryable()
+    return isinstance(failure, Neo4jError) and _TRANSIENT_CODE.match(failure.code or "") is not None
 
 
 def _plain_vector(expression: str) -> str:

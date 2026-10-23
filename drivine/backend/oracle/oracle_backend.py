@@ -194,9 +194,7 @@ END;""")
         roots = f"SELECT {ROW_ALIAS}.nid {self._from(target.root, self._deleted_where(target, where))}"
         cascaded = OracleViews(self.graph).cascade(target, "n.nid IN (SELECT nid FROM cascade_roots)")
         return [
-            CascadeDepthCheck(
-                it.view, it.field, it.max_depth, GraphStatement(beyond_count(roots, cascaded.reached, it.nodes))
-            )
+            CascadeDepthCheck(it.view, it.field, it.max_depth, GraphStatement(beyond_count(roots, it.within, it.nodes)))
             for it in cascaded.beyond
         ]
 

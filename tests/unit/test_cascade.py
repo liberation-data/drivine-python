@@ -137,11 +137,22 @@ def test_leaves_the_levels_of_a_view_nested_in_itself_through_a_field_marked_rea
     assert backend.cascade_depth_checks(registry.view(ReadOnlyTree)) == []
 
 
-def test_reads_the_nodes_past_the_depth_through_the_shelf_and_counts_those_the_cascade_does_not_reach():
+def test_reads_the_nodes_past_the_depth_through_the_shelf_and_counts_those_not_a_level_of_the_view():
     [check] = CypherBackend(NEO4J_GRAMMAR).cascade_depth_checks(registry.view(Shelf))
     beyond = "[(n)-[:SHELVES]->(c1:Doc)<-[:PART_OF]-(c3:Doc)<-[:PART_OF]-(c5:Doc)<-[:PART_OF]-(c7:Doc) | c7] AS beyond"
     assert beyond in check.statement.text
-    assert "WHERE NOT b IN targets AND b <> n" in check.statement.text
+    # The trees the shelf holds and their levels, which a ring may come back to; not the notes each level holds, which
+    # can't be a level, and would only make the statement longer to plan.
+    levels = (
+        "WITH n, [(n)-[:SHELVES]->(c1:Doc) | c1] + [(n)-[:SHELVES]->(c1:Doc)<-[:PART_OF]-(c3:Doc) | c3] + "
+        "[(n)-[:SHELVES]->(c1:Doc)<-[:PART_OF]-(c3:Doc)<-[:PART_OF]-(c5:Doc) | c5] AS levels"
+    )
+    assert levels in check.statement.text
+    assert ":HAS]" not in check.statement.text
+    assert "WHERE NOT b IN levels AND b <> n" in check.statement.text
+    [sql] = PostgresBackend(PostgresGraph()).cascade_depth_checks(registry.view(Shelf))
+    assert "'HAS'" not in sql.statement.text
+    assert "WHERE b.nid NOT IN (SELECT nid FROM cascade_levels)" in sql.statement.text
 
 
 def test_keeps_below_a_kept_node_the_far_end_of_each_step_the_cascade_follows_in_its_direction():

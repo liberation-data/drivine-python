@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
 
 
@@ -15,3 +16,10 @@ class CascadeBeyond:
     field: str
     max_depth: int
     nodes: str
+    within: list[str] = dataclasses.field(default_factory=lambda: [])
+    """
+    The nodes of the view the cascade takes, wherever it reaches the view: the levels of the relationship, and the node
+    a level is first reached from. A node one level further that is one of these is not left behind. Only these are
+    read, and not every target, since a read of each comprehension the cascade has is a statement the graph engines
+    take long to plan.
+    """

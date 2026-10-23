@@ -43,6 +43,10 @@ class CascadeTargets:
         self._alias_count = 0
         self._followed: list[RelationshipModel] = []
         self._beyond: list[CascadeBeyond] = []
+        self._beyond_views: list[type] = []
+        """The class of the view each of `_beyond` is a relationship of."""
+        self._views: dict[type, list[str]] = {}
+        """The lists of the roots of each view the cascade reaches, by the view's class."""
 
     def of(self, model: GraphViewModel, root: str) -> str:
         return self.cascade(model, root).targets
@@ -53,6 +57,8 @@ class CascadeTargets:
         of the same class the nodes one level below its max_depth.
         """
         lists = self._view(model, f"({root})", [], [])
+        for beyond, view in zip(self._beyond, self._beyond_views, strict=True):
+            beyond.within.extend(self._views.get(view, []))
         steps: list[RelationshipModel] = []
         for rel in self._followed:
             if not any(it.type == rel.type and it.direction is rel.direction for it in steps):
@@ -77,11 +83,13 @@ class CascadeTargets:
                 if isinstance(into, GraphViewModel) and into.type is model.type:
                     beyond, _, _ = self._step(rel, into, chain, conditions)
                     self._beyond.append(CascadeBeyond(model.type.__name__, rel.field, rel.max_depth, beyond))
+                    self._beyond_views.append(model.type)
                 continue
             self._followed.append(rel)
             here, extended, every = self._step(rel, into, chain, conditions)
             lists.append(here)
             if isinstance(into, GraphViewModel):
+                self._views.setdefault(into.type, []).append(here)
                 lists.extend(self._view(into, extended, every, [*path, rel]))
         return lists
 

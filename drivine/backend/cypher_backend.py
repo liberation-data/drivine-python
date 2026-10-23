@@ -224,9 +224,9 @@ class CypherBackend:
                         [
                             self._deleted(target, where),
                             f"\nWITH {NODE_ALIAS}",
-                            f"\nWITH {NODE_ALIAS}, {cascaded.targets} AS targets, {beyond.nodes} AS beyond",
+                            f"\nWITH {NODE_ALIAS}, {' + '.join(beyond.within)} AS levels, {beyond.nodes} AS beyond",
                             "\nUNWIND beyond AS b",
-                            f"\nWITH {NODE_ALIAS}, targets, b WHERE NOT b IN targets AND b <> {NODE_ALIAS}",
+                            f"\nWITH {NODE_ALIAS}, levels, b WHERE NOT b IN levels AND b <> {NODE_ALIAS}",
                             "\nRETURN count(DISTINCT b) AS beyond",
                         ]
                     )

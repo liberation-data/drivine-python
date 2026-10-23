@@ -59,18 +59,19 @@ def kept_targets(graph: SqlGraph, followed: Sequence[RelationshipModel], union: 
     )
 
 
-def beyond_count(roots: str, reached: Sequence[str], beyond: str) -> str:
+def beyond_count(roots: str, within: Sequence[str], beyond: str) -> str:
     """
-    The read that counts the nodes `beyond` selects, one level below a relationship's max_depth, that the cascade does
-    not reach otherwise (`reached`) nor starts from (`roots`, the query of the roots' ids): those the delete would
-    leave behind. `reached` and `beyond` read the roots from `cascade_roots`. Returns one number: `{beyond}`.
+    The read that counts the nodes `beyond` selects, one level below a relationship's max_depth, that are not nodes of
+    the view the cascade takes otherwise (`within`) nor its roots (`roots`, the query of the roots' ids): those the
+    delete would leave behind. `within` and `beyond` read the roots from `cascade_roots`. Returns one number:
+    `{beyond}`.
     """
-    reached_text = "\n    UNION ALL ".join(reached)
+    within_text = "\n    UNION ALL ".join(within)
     return "\n".join(
         [
             f"WITH cascade_roots AS ({roots}),",
-            f"cascade_targets AS (SELECT t.nid FROM ({reached_text}) t)",
+            f"cascade_levels AS (SELECT t.nid FROM ({within_text}) t)",
             f'SELECT CAST(COUNT(DISTINCT b.nid) AS integer) AS "beyond" FROM ({beyond}) b',
-            "WHERE b.nid NOT IN (SELECT nid FROM cascade_targets) AND b.nid NOT IN (SELECT nid FROM cascade_roots)",
+            "WHERE b.nid NOT IN (SELECT nid FROM cascade_levels) AND b.nid NOT IN (SELECT nid FROM cascade_roots)",
         ]
     )

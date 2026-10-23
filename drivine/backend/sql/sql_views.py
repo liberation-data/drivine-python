@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 
 from drivine.annotation.aggregate_function import AggregateFunction
 from drivine.annotation.direction import Direction
@@ -96,9 +97,11 @@ class SqlViews(ABC):
         followed; and for a relationship to views of the same class, the query of the nodes one level below its
         max_depth.
         """
-        cascade = SqlCascade()
-        self._reached_from(model, "n", [], [f"FROM {self.graph.nodes} n"], [roots], cascade)
-        return cascade
+        walk = _CascadeWalk(SqlCascade())
+        self._reached_from(model, "n", [], [f"FROM {self.graph.nodes} n"], [roots], walk)
+        for beyond, view in zip(walk.cascade.beyond, walk.beyond, strict=True):
+            beyond.within.extend(walk.views.get(view, []))
+        return walk.cascade
 
     def _reached_from(
         self,
@@ -107,8 +110,9 @@ class SqlViews(ABC):
         path: list[RelationshipModel],
         froms: list[str],
         wheres: list[str],
-        cascade: SqlCascade,
+        walk: _CascadeWalk,
     ) -> None:
+        cascade = walk.cascade
         # A read-only field (marked so, or a list of fragments read over several hops) is not the view's to delete. A
         # view nested in itself is not one: each level is one relationship from the level above.
         for rel in (it for it in model.relationships if not it.read_only):
@@ -125,11 +129,13 @@ class SqlViews(ABC):
             query = f"SELECT {step.node}.nid {' '.join(next_froms)} WHERE {' AND '.join(next_wheres)}"
             if deep:
                 cascade.beyond.append(CascadeBeyond(model.type.__name__, rel.field, depth, query))
+                walk.beyond.append(model.type)
                 continue
             cascade.followed.append(rel)
             cascade.reached.append(query)
             if isinstance(into, GraphViewModel):
-                self._reached_from(into, step.node, [*path, rel], next_froms, next_wheres, cascade)
+                walk.views.setdefault(into.type, []).append(query)
+                self._reached_from(into, step.node, [*path, rel], next_froms, next_wheres, walk)
 
     def _view(self, model: GraphViewModel, alias: str, path: list[RelationshipModel]) -> str:
         entries = [
@@ -326,3 +332,15 @@ def by_id(x: str) -> str:
 def labels_of(into: TargetModel) -> list[str]:
     """The labels of the node a relationship leads to: a view's root's, or the fragment's."""
     return root_of(into).labels
+
+
+@dataclass
+class _CascadeWalk:
+    """
+    A cascade as it is walked: what it reaches, the queries of the roots of each view it reaches by the view's class,
+    and the class of the view each of its `beyond` is a relationship of.
+    """
+
+    cascade: SqlCascade
+    views: dict[type, list[str]] = field(default_factory=lambda: {})
+    beyond: list[type] = field(default_factory=lambda: [])

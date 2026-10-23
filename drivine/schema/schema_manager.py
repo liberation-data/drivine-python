@@ -64,8 +64,8 @@ class SchemaManager:
     Holds catalogs of indexes and constraints on the databases they apply to. `enforce` is idempotent: it makes what is
     missing, and recreates a catalog's items when its version changed. `recreate_all` drops and makes everything.
     The catalogs are read once, from the options the manager is built with. Schema known only later is given to
-    `ensure`, under an owner, and joins what that owner declared. With nothing to apply, no catalog or only empty ones,
-    it says so at INFO, naming the empty ones.
+    `ensure`, under an owner, and joins what that owner declared. With nothing to apply, no catalog or only empty ones
+    and nothing ensured, it says so at INFO, naming the empty ones.
     """
 
     def __init__(self, registry: DatabaseRegistry, factory: GraphObjectManagerFactory, options: SchemaOptions) -> None:
@@ -143,12 +143,14 @@ class SchemaManager:
             return report
 
     async def _apply(self, recreate: bool) -> dict[str, list[EnsureResult[Any]]]:
-        if not any(it.items for it in self.options.catalogs):
-            self._log_nothing_to_apply()
-            return {}
         async with self._lock:
+            runtime = _runtime_catalogs(self._runtime)
+            # Items ensured at runtime are something to apply, as drivine4j counts them.
+            if not any(it.items for it in [*self.options.catalogs, *runtime]):
+                self._log_nothing_to_apply()
+                return {}
             declared = self._catalogs_by_database(self.options.catalogs)
-            ensured = self._catalogs_by_database(_runtime_catalogs(self._runtime))
+            ensured = self._catalogs_by_database(runtime)
             report: dict[str, list[EnsureResult[Any]]] = {}
             for database in dict.fromkeys([*declared, *ensured]):
                 plan = self._plan(database, declared.get(database, []), ensured.get(database, []))
@@ -209,14 +211,14 @@ class SchemaManager:
     def _log_nothing_to_apply(self) -> None:
         """
         Says why there is nothing to apply, so that an application with no schema, one that never passed its catalog
-        and one whose catalogs all came out empty can be told apart. Both lines name the snapshot: a catalog made after
-        the manager isn't seen.
+        and one whose catalogs all came out empty can be told apart. Both lines name the snapshot, a catalog made after
+        the manager isn't seen, and say where schema known later goes.
         """
         catalogs = self.options.catalogs
         if not catalogs:
             logger.info(
                 "Schema management found no SchemaCatalog; nothing to apply. Catalogs are read once, when the "
-                "SchemaManager is built."
+                "SchemaManager is built; schema known later is given to SchemaManager.ensure."
             )
             return
         counts: dict[str, int] = {}
@@ -225,7 +227,7 @@ class SchemaManager:
             counts[owner] = counts.get(owner, 0) + 1
         logger.info(
             "Schema management found %s SchemaCatalog(s), all empty: %s; nothing to apply. Catalogs are read once, "
-            "when the SchemaManager is built.",
+            "when the SchemaManager is built; schema known later is given to SchemaManager.ensure.",
             len(catalogs),
             ", ".join(owner if count == 1 else f"{owner} ({count})" for owner, count in counts.items()),
         )

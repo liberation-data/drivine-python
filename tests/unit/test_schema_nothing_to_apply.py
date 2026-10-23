@@ -7,7 +7,7 @@ import logging
 
 import pytest
 
-from drivine import DatabaseRegistry, PersistenceManagerFactory, SchemaCatalog, SchemaOptions
+from drivine import DatabaseRegistry, PersistenceManagerFactory, SchemaCatalog, SchemaOptions, range_index
 from drivine import SchemaManager as AsyncSchemaManager
 from drivine.drivine_assembly import DrivineAssembly
 from drivine.manager.graph_object_manager_factory import GraphObjectManagerFactory
@@ -50,7 +50,9 @@ async def test_no_catalog_at_all_is_said_at_info_with_the_catalogs_read_once(cap
 
     line = only_line(caplog)
     assert "found no SchemaCatalog; nothing to apply" in line
-    assert "Catalogs are read once, when the SchemaManager is built" in line
+    assert line.endswith(
+        "Catalogs are read once, when the SchemaManager is built; schema known later is given to SchemaManager.ensure."
+    )
 
 
 async def test_catalogs_that_are_all_empty_are_named_an_unnamed_one_as_unnamed(caplog):
@@ -66,7 +68,9 @@ async def test_catalogs_that_are_all_empty_are_named_an_unnamed_one_as_unnamed(c
 
     line = only_line(caplog)
     assert "found 4 SchemaCatalog(s), all empty: 'dice', unnamed (2), 'rag'; nothing to apply" in line
-    assert "Catalogs are read once" in line
+    assert line.endswith(
+        "Catalogs are read once, when the SchemaManager is built; schema known later is given to SchemaManager.ensure."
+    )
 
 
 async def test_every_way_in_says_it(caplog):
@@ -80,6 +84,36 @@ async def test_every_way_in_says_it(caplog):
 
     assert len(lines(caplog)) == 4
     assert all("all empty: 'dice'" in it.getMessage() for it in lines(caplog))
+
+
+async def test_items_ensured_at_runtime_are_something_to_apply(caplog):
+    # With no catalog, and with only an empty one, items given to `ensure` are applied by every way in, never reported
+    # as nothing to apply. No database is registered, so they apply to none.
+    for schema in (manager(), manager(SchemaCatalog.of().named("dice"))):
+        await schema.ensure("dice", range_index("Proposition", ["text"]))
+        with caplog.at_level(logging.INFO, "drivine.schema"):
+            assert await schema.enforce() == {}
+            assert await schema.recreate_all() == {}
+    for sync_schema in (sync_manager(), sync_manager(SchemaCatalog.of().named("dice"))):
+        sync_schema.ensure("dice", range_index("Proposition", ["text"]))
+        with caplog.at_level(logging.INFO, "drivine.schema"):
+            assert sync_schema.enforce() == {}
+            assert sync_schema.recreate_all() == {}
+
+    assert [it.getMessage() for it in lines(caplog) if "nothing to apply" in it.getMessage()] == []
+
+
+async def test_the_sync_manager_says_it_in_the_same_words(caplog):
+    with caplog.at_level(logging.INFO, "drivine.schema"):
+        await manager().enforce()
+        sync_manager().enforce()
+        await manager(SchemaCatalog.of().named("dice"), SchemaCatalog.of()).enforce()
+        sync_manager(SchemaCatalog.of().named("dice"), SchemaCatalog.of()).enforce()
+
+    said = [it.getMessage() for it in lines(caplog)]
+    assert len(said) == 4
+    assert said[0] == said[1]
+    assert said[2] == said[3]
 
 
 class _NoDatabases(DrivineAssembly):

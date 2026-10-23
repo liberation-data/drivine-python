@@ -20,6 +20,7 @@ from drivine.sync import (
     ConnectionProperties,
     DatabaseRegistry,
     DrivineError,
+    EngineVectorOptions,
     PersistenceManager,
     PersistenceManagerFactory,
     QuerySpecification,
@@ -284,6 +285,25 @@ def test_a_recreate_all_by_a_manager_made_later_marks_a_runtime_item_and_a_later
     assert orphan_warnings(caplog) == []
 
 
+def test_recreate_on_startup_by_a_manager_made_later_marks_a_runtime_item_and_the_next_ensure_recreates_it(
+    schema,
+):
+    first = schema.manager(schema.dice())
+    first.enforce()
+    first.ensure_catalog(schema.runtime("dice", schema.vector(3)))
+
+    following = schema.manager(schema.dice(), recreate_on_startup=True)
+    following.enforce()
+    vector = inventory_key(schema.vector(3))
+    record = schema.record("dice")
+    assert record is not None and record.stale == (vector,)
+
+    report = following.ensure_catalog(schema.runtime("dice", schema.vector(3)))
+    assert statuses(report, schema.db) == ["RECREATED"]
+    record = schema.record("dice")
+    assert record is not None and record.stale == ()
+
+
 def test_a_runtime_item_marked_while_its_manager_holds_it_keeps_the_mark_until_that_manager_applies_it(schema):
     tag = range_index(schema.label, "name")
     manager = schema.manager(schema.dice())
@@ -367,6 +387,19 @@ def test_a_runtime_item_that_conflicts_with_the_owners_own_declaration_raises_an
     assert schema.dimensions() == 3
 
 
+def test_a_conflict_names_the_owner_whose_declaration_won_the_merge_not_the_first_to_declare_the_item(schema):
+    def vector(hnsw_m: int | None = None) -> SchemaSpec:
+        options = () if hnsw_m is None else (EngineVectorOptions("Neo4j", hnsw_m=hnsw_m),)
+        return vector_index(schema.label, "embedding", 3, engine_options=options)
+
+    # app's plain declaration agrees with rag's, whose engine options win; tenants' differ from rag's.
+    app = SchemaCatalog.of(vector()).named("app").for_database(schema.db)
+    rag = SchemaCatalog.of(vector(16)).named("rag").for_database(schema.db)
+
+    with pytest.raises(DrivineError, match="Schema catalogs of 'rag' and 'tenants' declare"):
+        schema.manager(app, rag).ensure_catalog(schema.runtime("tenants", vector(32)))
+
+
 def test_a_runtime_item_identical_to_another_owners_is_co_owned_and_the_two_dedupe(schema):
     shared = range_index(schema.label, "slug")
     manager = schema.manager(SchemaCatalog.of(shared).named("app").for_database(schema.db))
@@ -376,6 +409,16 @@ def test_a_runtime_item_identical_to_another_owners_is_co_owned_and_the_two_dedu
 
     assert statuses(report, schema.db) == ["ALREADY_MATCHING"]
     assert schema.record("rag") == RecordedInventory((inventory_key(shared),), (inventory_key(shared),))
+
+
+def test_an_item_the_owner_declares_ensured_again_at_runtime_is_recorded_as_declared(schema):
+    manager = schema.manager(schema.dice())
+    manager.enforce()
+
+    report = manager.ensure_catalog(schema.runtime("dice", schema.startup))
+
+    assert statuses(report, schema.db) == ["ALREADY_MATCHING"]
+    assert schema.record("dice") == RecordedInventory((inventory_key(schema.startup),)), "not marked runtime"
 
 
 def test_a_runtime_item_renamed_is_an_orphan_of_its_owner_under_the_old_name(schema, caplog):
@@ -442,8 +485,31 @@ def test_a_runtime_item_that_conflicts_on_one_database_applies_nothing_on_any_ot
             )
         held = [it for it in neo4j.indexes.list("RANGE") if it.label == label]
         assert held == [], "nothing applied on one database before the conflict on the other was found"
+        manager.enforce()  # would raise, were the conflicting item kept
     finally:
         _drop_labelled(neo4j, label)
+        _drop_labelled(StatelessGraphObjectManager(factory.get("memgraph")), label)
+
+
+def test_an_item_ensured_again_on_the_same_databases_named_in_another_order_replaces_it(factory):
+    # drivine4j keeps a catalog's databases as a set: the order they are named in is no part of the owner's items.
+    label = f"R{uuid.uuid4().hex[:10]}"
+    options = SchemaOptions(recreate_on_drift=True)
+    manager = SchemaManager(factory.registry, GraphObjectManagerFactory(factory), options)
+    goms = [StatelessGraphObjectManager(factory.get(it)) for it in ("default", "memgraph")]
+    try:
+        rag = SchemaCatalog.of(vector_index(label, "embedding", 3)).named("rag")
+        manager.ensure_catalog(rag.for_databases("default", "memgraph"))
+        again = SchemaCatalog.of(vector_index(label, "embedding", 4)).named("rag")
+        manager.ensure_catalog(again.for_databases("memgraph", "default"))
+
+        manager.enforce()  # would raise, were both kept
+
+        for gom in goms:
+            assert [it.dimensions for it in gom.indexes.list("VECTOR") if it.label == label] == [4]
+    finally:
+        for gom in goms:
+            _drop_labelled(gom, label)
 
 
 def test_ensure_by_owner_applies_on_every_graph_database():

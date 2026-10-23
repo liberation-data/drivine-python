@@ -593,7 +593,8 @@ Without pi-pilgrim, enforce it yourself: `await SchemaManager(registry, factory,
   options; a later `enforce` or `recreate_all` applies them with the rest. A declaration that conflicts with another
   owner's, or the owner's own, raises, and nothing is kept or applied. The marker records them as ensured at runtime
   (`runtime:` before the key, as drivine4j writes it), so the next process's `enforce` keeps them rather than calling
-  them orphans; when it recreates the owner, it marks them (`runtime-stale:`), and the next `ensure` recreates them.
+  them orphans; when it recreates the owner (on a version change, under `recreate_on_startup`, or by `recreate_all`), it
+  marks them (`runtime-stale:`), and the next `ensure` recreates them.
   A version change is left to `enforce`.
 - **By hand:** `gom.indexes.ensure(range_index("Session", ["lastActivityAt", "sessionId"]))`, `gom.indexes.recreate`,
   `gom.indexes.drop`, `gom.constraints.ensure(uniqueness_constraint("Person", "email"))`, and `list`.

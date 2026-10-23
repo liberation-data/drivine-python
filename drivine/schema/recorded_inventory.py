@@ -22,6 +22,11 @@ is recreated when next ensured.
 
 @dataclass(frozen=True)
 class RecordedInventory:
+    """
+    What one owner's marker records, read by `read_inventory`: the runtime entries are kept apart so that an enforce
+    by a later process carries them rather than reporting them as orphans.
+    """
+
     keys: tuple[str, ...]
     """Every item's inventory key, without its prefix, in the order recorded."""
     runtime: tuple[str, ...] = ()

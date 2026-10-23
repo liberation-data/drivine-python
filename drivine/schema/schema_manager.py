@@ -104,9 +104,10 @@ class SchemaManager:
         another owner's, or with the owner's own, raises, and nothing is kept or applied.
 
         The marker records them as ensured at runtime, so an `enforce` by a manager made later (the next process) keeps
-        them in the inventory, not as orphans, until they are ensured again. When that enforce recreates the owner, it
-        marks them, and the next `ensure` of one recreates it. A version change is left to `enforce`, and
-        `recreate_on_startup` doesn't apply; the catalog can't carry a version.
+        them in the inventory, not as orphans, until they are ensured again. When that manager recreates the owner (a
+        version change, `recreate_on_startup` or `recreate_all`), it marks them, and the next `ensure` of one recreates
+        it. A version change is left to `enforce`, and `recreate_on_startup` doesn't apply; the catalog can't carry a
+        version.
         """
         if catalog.version is not None:
             raise DrivineError(
@@ -145,7 +146,9 @@ class SchemaManager:
     def _with_runtime(self, catalog: SchemaCatalog) -> dict[tuple[str, tuple[str, ...] | None], dict[str, SchemaSpec]]:
         """The runtime items with the catalog's added, each replacing the item of its identity, owner and databases."""
         copy = {key: dict(specs) for key, specs in self._runtime.items()}
-        specs = copy.setdefault((catalog.name, catalog.databases), {})
+        # The databases as a set, as drivine4j keeps a catalog's: the order they are named in is no part of the key.
+        databases = None if catalog.databases is None else tuple(sorted(set(catalog.databases)))
+        specs = copy.setdefault((catalog.name, databases), {})
         for spec in catalog.items:
             specs[_key_of(spec)] = spec
         return copy
@@ -347,6 +350,8 @@ class SchemaManager:
                     owners[key] = catalog.name
                 else:
                     items[key] = self._reconciled(database, held, spec, owners[key], catalog.name)
+                    if items[key] is not held:  # its engine options won: a later conflict is with this one
+                        owners[key] = catalog.name
         return items
 
     @staticmethod

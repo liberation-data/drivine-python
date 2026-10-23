@@ -144,8 +144,9 @@ class CypherBackend:
     ) -> GraphStatement:
         """
         Deletes the root whose id is the parameter `id`, if it meets the optional predicate (and, for a view, the view's
-        requirements), with its relationships. A cascade, for a view only, deletes nodes the view reaches too: every
-        one, or with DELETE_ORPHAN those not kept. Returns the number of roots deleted.
+        requirements), with its relationships. A cascade, for a view only, deletes nodes the view reaches too, through
+        the relationships a save writes: every one, or with DELETE_ORPHAN those not kept. Returns the number of roots
+        deleted.
         """
         root = target.root if isinstance(target, GraphViewModel) else target
         head = self._deleted(target, where)

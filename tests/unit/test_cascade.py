@@ -79,6 +79,14 @@ class ReviewedTree(GraphView):
     parts: Annotated[list["ReviewedTree"], Relationship("PART_OF", Direction.INCOMING, max_depth=2)] = []
 
 
+class ReadOnlyTree(GraphView):
+    """A view nested in itself through a field marked read-only: a cascade leaves its levels, and checks no depth."""
+
+    doc: Annotated[Doc, Root()]
+    notes: Annotated[list[Note], Relationship("HAS")] = []
+    parts: Annotated[list["ReadOnlyTree"], Relationship("PART_OF", Direction.INCOMING, max_depth=2), ReadOnly()] = []
+
+
 registry = ModelRegistry()
 
 BACKENDS: list[GraphBackend] = [
@@ -116,6 +124,17 @@ def test_follows_only_what_a_save_writes_every_level_of_a_view_nested_in_itself_
     # The list read over several hops would be a variable-length read of PART_OF.
     assert not re.search(r"\*1\.\.3|LEVEL <= 3|depth < 3", text)
     assert [it.field for it in backend.cascade_depth_checks(registry.view(ReviewedTree))] == ["parts"]
+
+
+@pytest.mark.parametrize("backend", BACKENDS, ids=["cypher", "oracle", "postgres"])
+@pytest.mark.parametrize("cascade", [CascadeType.DELETE_ALL, CascadeType.DELETE_ORPHAN])
+def test_leaves_the_levels_of_a_view_nested_in_itself_through_a_field_marked_read_only(
+    backend: GraphBackend, cascade: CascadeType
+):
+    text = backend.delete(registry.view(ReadOnlyTree), None, cascade).text
+    assert "HAS" in text
+    assert "PART_OF" not in text
+    assert backend.cascade_depth_checks(registry.view(ReadOnlyTree)) == []
 
 
 def test_reads_the_nodes_past_the_depth_through_the_shelf_and_counts_those_the_cascade_does_not_reach():

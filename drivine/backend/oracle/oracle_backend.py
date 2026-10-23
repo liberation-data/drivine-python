@@ -144,8 +144,9 @@ class OracleBackend:
     ) -> GraphStatement:
         """
         Deletes the root with id `$id` that meets `where`, and for a cascade the nodes a load of the view reaches from
-        it: every one, or with DELETE_ORPHAN those not kept (see kept_targets), which are read before anything is
-        deleted. Returns how many roots were deleted: `{deleted}`.
+        it through the relationships a save writes (see SqlViews.cascade): every one, or with DELETE_ORPHAN those not
+        kept (see kept_targets), which are read before anything is deleted. Returns how many roots were deleted:
+        `{deleted}`.
         """
         root = target.root if isinstance(target, GraphViewModel) else target
         filter_ = self._deleted_where(target, where)

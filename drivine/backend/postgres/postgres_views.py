@@ -16,7 +16,6 @@ from drivine.backend.sql.order_reads import OrderReads
 from drivine.backend.sql.sql_graph import sql_text
 from drivine.backend.sql.sql_views import SqlViews
 from drivine.model import stamps
-from drivine.model.graph_view_model import GraphViewModel
 
 
 class PostgresViews(SqlViews):
@@ -29,10 +28,6 @@ class PostgresViews(SqlViews):
 
     def __init__(self, graph: PostgresGraph, depth: Mapping[str, int] | None = None) -> None:
         super().__init__(graph, depth)
-
-    def cascaded(self, model: GraphViewModel, roots: str) -> list[str]:
-        """Queries of the ids of the nodes a load of the view from the roots `roots` selects reaches."""
-        return self._reached_from_roots(model, roots)
 
     def object(self, entries: Sequence[tuple[str, str]]) -> str:
         return f"jsonb_build_object({', '.join(f'{sql_text(key)}, {value}' for key, value in entries)})"

@@ -4,6 +4,7 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from drivine.annotation.direction import Direction
+from drivine.backend.cascade_depth_check import CascadeDepthCheck
 from drivine.backend.cascade_targets import CascadeTargets
 from drivine.backend.cypher import label_expression, quote_name
 from drivine.backend.cypher_grammar import CypherGrammar
@@ -143,13 +144,11 @@ class CypherBackend:
     ) -> GraphStatement:
         """
         Deletes the root whose id is the parameter `id`, if it meets the optional predicate (and, for a view, the view's
-        requirements), with its relationships. A cascade, for a view only, deletes nodes the view reaches too. Returns
-        the number of roots deleted.
+        requirements), with its relationships. A cascade, for a view only, deletes nodes the view reaches too: every
+        one, or with DELETE_ORPHAN those not kept. Returns the number of roots deleted.
         """
         root = target.root if isinstance(target, GraphViewModel) else target
-        id_ = self._id_predicate(root)
-        condition = f"{id_} AND ({where})" if where else id_
-        head = "".join([self._match(root), self._root_where(target, condition)])
+        head = self._deleted(target, where)
         if cascade is CascadeType.NONE:
             return GraphStatement(f"{head}\nDETACH DELETE {NODE_ALIAS}\nRETURN count(*) AS deleted")
         if not isinstance(target, GraphViewModel):
@@ -159,27 +158,87 @@ class CypherBackend:
                 f"CascadeType.DELETE_ORPHAN is not available on {self.grammar.engine}: "
                 f"{self.grammar.orphan_delete_limit}."
             )
-        targets = CascadeTargets(self.grammar).of(target, NODE_ALIAS)
-        deletable = (
-            "targets"
-            if cascade is CascadeType.DELETE_ALL
-            else f"[x IN targets WHERE NOT {self.grammar.existence_check('(x)--()')}]"
-        )
+        cascaded = CascadeTargets(self.grammar).cascade(target, NODE_ALIAS)
+        # WITH before the list: FalkorDB errors on a WHERE and a projection that both hold comprehensions
+        # (FalkorDB/FalkorDB#3387).
+        targets = [f"\nWITH {NODE_ALIAS}", f"\nWITH {NODE_ALIAS}, {cascaded.targets} AS targets"]
+        if cascade is CascadeType.DELETE_ALL:
+            return GraphStatement(
+                "".join(
+                    [
+                        head,
+                        *targets,
+                        f"\nDETACH DELETE {NODE_ALIAS}",
+                        "\nWITH targets",
+                        "\nFOREACH (t IN targets | DETACH DELETE t)",
+                        "\nRETURN count(*) AS deleted",
+                    ]
+                )
+            )
+        # A node is kept when a node outside the cascade refers to it, or when it is one step of a relationship the
+        # cascade follows below a kept one: a kept message keeps its attachments, and its session is still deleted.
+        # What is kept is read before anything is deleted, so a node's relationships to others the cascade takes do
+        # not keep it. Holders chain through the targets (a part of two sessions starts a second run of levels), so the
+        # walk takes as many steps as there are targets; `found` is what is kept, and how much of it the step before
+        # had: each step reads holders among the newly kept only, and once one keeps nothing new the rest pass it on.
         return GraphStatement(
             "".join(
                 [
                     head,
-                    # WITH before the list: FalkorDB errors on a WHERE and a projection that both hold comprehensions
-                    # (FalkorDB/FalkorDB#3387).
-                    f"\nWITH {NODE_ALIAS}",
-                    f"\nWITH {NODE_ALIAS}, {targets} AS targets",
+                    *targets,
+                    # A node reached by two paths, or the root reached again, is in the targets once, and the root not
+                    # at all.
+                    f"\nWITH {NODE_ALIAS}, reduce(seen = [], t IN targets | "
+                    f"CASE WHEN t IN seen OR t = {NODE_ALIAS} THEN seen ELSE seen + t END) AS targets",
+                    f"\nWITH {NODE_ALIAS}, targets, [t IN targets WHERE any(m IN [(t)--(m) | m] "
+                    f"WHERE m <> {NODE_ALIAS} AND NOT m IN targets)] AS kept",
+                    f"\nWITH {NODE_ALIAS}, targets, reduce(found = [kept, 0], step IN range(1, size(targets)) | "
+                    "CASE WHEN found[1] = size(found[0]) THEN found ELSE [found[0] + [t IN targets WHERE NOT t IN "
+                    f"found[0] AND any(h IN {cascaded.holders('t')} WHERE h IN found[0][found[1]..])], size(found[0])] "
+                    "END)[0] AS kept",
+                    f"\nWITH {NODE_ALIAS}, [t IN targets WHERE NOT t IN kept] AS orphans",
                     f"\nDETACH DELETE {NODE_ALIAS}",
-                    "\nWITH targets",
-                    f"\nFOREACH (t IN {deletable} | DETACH DELETE t)",
+                    "\nWITH orphans",
+                    "\nFOREACH (t IN orphans | DETACH DELETE t)",
                     "\nRETURN count(*) AS deleted",
                 ]
             )
         )
+
+    def cascade_depth_checks(self, target: TargetModel, where: str | None = None) -> list[CascadeDepthCheck]:
+        """
+        The reads a cascading `delete` of the same root runs first, one for each relationship to views of its own class
+        that the cascade follows: see CascadeDepthCheck. Empty when it follows none.
+        """
+        if not isinstance(target, GraphViewModel):
+            return []
+        cascaded = CascadeTargets(self.grammar).cascade(target, NODE_ALIAS)
+        return [
+            CascadeDepthCheck(
+                beyond.view,
+                beyond.field,
+                beyond.max_depth,
+                GraphStatement(
+                    "".join(
+                        [
+                            self._deleted(target, where),
+                            f"\nWITH {NODE_ALIAS}",
+                            f"\nWITH {NODE_ALIAS}, {cascaded.targets} AS targets, {beyond.nodes} AS beyond",
+                            "\nUNWIND beyond AS b",
+                            f"\nWITH {NODE_ALIAS}, targets, b WHERE NOT b IN targets AND b <> {NODE_ALIAS}",
+                            "\nRETURN count(DISTINCT b) AS beyond",
+                        ]
+                    )
+                ),
+            )
+            for beyond in cascaded.beyond
+        ]
+
+    def _deleted(self, target: TargetModel, where: str | None) -> str:
+        """The match of the root a delete by `$id` takes, if it meets `where`, and for a view its requirements."""
+        root = target.root if isinstance(target, GraphViewModel) else target
+        id_ = self._id_predicate(root)
+        return "".join([self._match(root), self._root_where(target, f"{id_} AND ({where})" if where else id_)])
 
     def delete_all(self, target: TargetModel, where: str | None = None, tested: Sequence[str] = ()) -> GraphStatement:
         """Deletes every root a load would find, with its relationships. Returns the number deleted."""

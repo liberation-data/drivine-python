@@ -520,6 +520,14 @@ people = await gom.edges.load_related(node_ref(Issue, a), "ASSIGNED_TO", Person)
 - **`patch`** writes named fields of one node by id, if it meets a condition, without loading it, and says whether it
   found the node, applied the patch and changed anything. It never makes a node.
 - **Edges** relate and unrelate stored nodes by id, marking both ends' stamps.
+- **A cascading delete** of a view follows its relationships, through nested views: `DELETE_ALL` deletes every node the
+  view reaches, and `DELETE_ORPHAN` each one that nothing outside the view still needs. That keeps a node something
+  outside the view refers to, at any level, with everything the view holds below it: a bookmarked message keeps its
+  attachments, and a pinned sub-session its messages and sub-sessions. The rest goes, the session that held a kept
+  message among it. `DELETE_ORPHAN` isn't available on Memgraph. A view that contains itself (`parts:
+  list["SessionTree"]`, with a `max_depth`) deletes what a load of it reads, every level and what each holds; one that
+  reaches below its `max_depth` is refused with a `DrivineError` before anything is written, saying how deep the view
+  reads: raise the `max_depth` to cover the deepest level.
 - **Outside a transaction**, a save the engine turns away because another writer held the node is run again after a
   pause. Inside one, it joins the transaction, and fails for its owner to decide.
 - A save that lost its connection, or whose authorization expired, is not run again, though the Neo4j driver calls that

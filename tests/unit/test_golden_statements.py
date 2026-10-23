@@ -451,6 +451,7 @@ def saves(registry: ModelRegistry, backend: GraphBackend, where: str, orphans: b
         "PersonCareer.delete.all": backend.delete(view(PersonCareer), None, CascadeType.DELETE_ALL),
         "LocationHierarchy.delete.all": backend.delete(view(LocationHierarchy), None, CascadeType.DELETE_ALL),
         "LocationAncestors.delete.all": backend.delete(view(LocationAncestors), None, CascadeType.DELETE_ALL),
+        "LocationHierarchy.delete.depthCheck": backend.cascade_depth_checks(view(LocationHierarchy))[0].statement,
         "Person.heldProperties": backend.held_properties(fragment(Person)),
         "Person.foundStamp": backend.found_stamp(fragment(Person)),
         "saveAll.fragments": backend.fragment_batch(
@@ -487,6 +488,9 @@ def saves(registry: ModelRegistry, backend: GraphBackend, where: str, orphans: b
     }
     if orphans:
         cases["PersonCareer.delete.orphans"] = backend.delete(view(PersonCareer), None, CascadeType.DELETE_ORPHAN)
+        cases["LocationHierarchy.delete.orphans"] = backend.delete(
+            view(LocationHierarchy), None, CascadeType.DELETE_ORPHAN
+        )
     return cases
 
 

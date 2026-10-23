@@ -121,3 +121,40 @@ def set_property(pm: PersistenceManager, label: str, prop: str, value: Any) -> N
         )
     else:
         pm.execute(QuerySpecification[Any](f"MATCH (n:{label}) SET n.{prop} = $value").bind({"value": value}))
+
+
+def relate(pm: PersistenceManager, src: str, type: str, dst: str) -> None:
+    """Relates the node whose `id` is `src` to the one whose `id` is `dst`, outside any object manager."""
+    bindings = {"a": src, "b": dst, "type": type}
+    if is_oracle(pm):
+        pm.execute(
+            QuerySpecification[Any](
+                "INSERT INTO drivine_edge (src, dst, type, props) SELECT a.nid, b.nid, $type, JSON('{}') "
+                "FROM drivine_node a, drivine_node b WHERE JSON_VALUE(a.props, '$.id') = $a "
+                "AND JSON_VALUE(b.props, '$.id') = $b"
+            ).bind(bindings)
+        )
+    elif is_postgres(pm):
+        pm.execute(
+            QuerySpecification[Any](
+                "INSERT INTO drivine_edge (src, dst, type, props) SELECT a.nid, b.nid, CAST($type AS text), "
+                "CAST('{}' AS jsonb) FROM drivine_node a, drivine_node b WHERE (a.props ->> 'id') = CAST($a AS text) "
+                "AND (b.props ->> 'id') = CAST($b AS text)"
+            ).bind(bindings)
+        )
+    else:
+        pm.execute(
+            QuerySpecification[Any](f"MATCH (a {{id: $a}}), (b {{id: $b}}) CREATE (a)-[:{type}]->(b)").bind(bindings)
+        )
+
+
+def node_ids(pm: PersistenceManager) -> list[str]:
+    """The `id` of every node, in order."""
+    if is_oracle(pm):
+        rows = pm.query(QuerySpecification[Any]("SELECT JSON_VALUE(n.props, '$.id') FROM drivine_node n"))
+    elif is_postgres(pm):
+        found = pm.query(QuerySpecification[Any]("SELECT n.props ->> 'id' AS id FROM drivine_node n"))
+        rows = [it["id"] for it in found]
+    else:
+        rows = pm.query(QuerySpecification[Any]("MATCH (n) RETURN n.id"))
+    return sorted(rows)

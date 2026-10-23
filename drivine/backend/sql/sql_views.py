@@ -6,9 +6,11 @@ from collections.abc import Mapping, Sequence
 from drivine.annotation.aggregate_function import AggregateFunction
 from drivine.annotation.direction import Direction
 from drivine.annotation.hop import Hop
+from drivine.backend.cascade_beyond import CascadeBeyond
 from drivine.backend.save_statement_builder import root_of
 from drivine.backend.sql.nodes_of import NodesOf
 from drivine.backend.sql.order_reads import OrderReads
+from drivine.backend.sql.sql_cascade import SqlCascade
 from drivine.backend.sql.sql_graph import SqlGraph, sql_text
 from drivine.backend.sql.sql_step import SqlStep
 from drivine.backend.view_projector import target
@@ -86,13 +88,16 @@ class SqlViews(ABC):
             self.has_labels(node, labels) if labels else "1 = 1",
         )
 
-    def _reached_from_roots(self, model: GraphViewModel, roots: str) -> list[str]:
+    def cascade(self, model: GraphViewModel, roots: str) -> SqlCascade:
         """
-        Queries of the ids of the nodes a load of the view from the roots `roots` selects of the node row `n` reaches:
-        as far as each relationship's max_depth, and only into nested views whose requirements a node meets, as a load
-        would.
+        What a cascade from the roots the predicate `roots` selects of the node row `n` reaches: queries of the ids of
+        the nodes a load of the view reaches, as far as each relationship's max_depth, and only into nested views whose
+        requirements a node meets, as a load would; each relationship followed; and for a relationship to views of the
+        same class, the query of the nodes one level below its max_depth.
         """
-        return self._reached_from(model, "n", [], [f"FROM {self.graph.nodes} n"], [roots])
+        cascade = SqlCascade()
+        self._reached_from(model, "n", [], [f"FROM {self.graph.nodes} n"], [roots], cascade)
+        return cascade
 
     def _reached_from(
         self,
@@ -101,8 +106,8 @@ class SqlViews(ABC):
         path: list[RelationshipModel],
         froms: list[str],
         wheres: list[str],
-    ) -> list[str]:
-        queries: list[str] = []
+        cascade: SqlCascade,
+    ) -> None:
         for rel in model.relationships:
             depth = self.depth.get(rel.field, rel.max_depth)
             into = target(rel)
@@ -111,22 +116,28 @@ class SqlViews(ABC):
                 r = self.next_alias("r")
                 reached = self.reached(rel.type, rel.direction, from_, depth)
                 tests = [*wheres, self.has_labels(x, labels_of(into))]
-                queries.append(
+                cascade.followed.append(rel)
+                cascade.reached.append(
                     f"{self._select(by_id(x))}{x}.nid {' '.join(froms)} CROSS JOIN LATERAL ({reached}) {r} "
                     f"JOIN {self.graph.nodes} {x} ON {x}.nid = {r}.nid WHERE {' AND '.join(tests)}"
                 )
                 continue
-            if sum(1 for it in path if it is rel) >= depth:
+            deep = sum(1 for it in path if it is rel) >= depth
+            if deep and not (isinstance(into, GraphViewModel) and into.type is model.type):
                 continue
             step = self.step(rel.type, rel.direction, from_, labels_of(into))
             from_clause, where_clause = step.from_.split("\nWHERE ")
             next_froms = [*froms, from_clause.replace("FROM ", "CROSS JOIN ", 1)]
             required = self.requirements(into, step.node) if isinstance(into, GraphViewModel) else []
             next_wheres = [*wheres, where_clause, step.x, *required]
-            queries.append(f"SELECT {step.node}.nid {' '.join(next_froms)} WHERE {' AND '.join(next_wheres)}")
+            query = f"SELECT {step.node}.nid {' '.join(next_froms)} WHERE {' AND '.join(next_wheres)}"
+            if deep:
+                cascade.beyond.append(CascadeBeyond(model.type.__name__, rel.field, depth, query))
+                continue
+            cascade.followed.append(rel)
+            cascade.reached.append(query)
             if isinstance(into, GraphViewModel):
-                queries.extend(self._reached_from(into, step.node, [*path, rel], next_froms, next_wheres))
-        return queries
+                self._reached_from(into, step.node, [*path, rel], next_froms, next_wheres, cascade)
 
     def _view(self, model: GraphViewModel, alias: str, path: list[RelationshipModel]) -> str:
         entries = [

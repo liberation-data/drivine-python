@@ -1,6 +1,7 @@
 """
 The statements the backend writes for the test models, checked against those TypeScript's Drivine writes for the same
-models: tests/golden/statements.json is written by its test/1.Unit/golden/GoldenStatements.spec.ts.
+models: tests/golden/statements.json is written by its test/1.Unit/golden/GoldenStatements.spec.ts, and copied here by
+scripts/sync_golden.py, which records the commit it came from in tests/golden/VERSION.
 """
 
 import json

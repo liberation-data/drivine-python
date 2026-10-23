@@ -5,7 +5,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, time
 from enum import Enum
-from typing import Any
+from typing import Any, cast
 
 from pydantic import BaseModel
 from pydantic_core import to_jsonable_python
@@ -20,6 +20,7 @@ from drivine.drivine_error import DrivineError
 from drivine.manager.null_policy import NullPolicy
 from drivine.manager.removed_targets import RemovedTargets
 from drivine.manager.save_options import SaveOptions
+from drivine.mapper.graph_object_mapper import empty_collection
 from drivine.model import stamps
 from drivine.model.field_mapping import FieldMapping
 from drivine.model.fragment_model import FragmentModel
@@ -273,12 +274,14 @@ class SaveStatementBuilder:
             if value is None:
                 declared.append(f"{stored_} IS NULL")
                 continue
-            packed = json.dumps(to_jsonable_python(value)) if field_ in model.json_packed else stored(value)
+            packed = (
+                json.dumps(to_jsonable_python(value)) if field_ in model.json_packed else _as_compared(stored(value))
+            )
             param = bind(f"_loaded{i}", packed)
             expression = self.grammar.vector_value(param) if field_ in model.vector_fields else param
             same = f"NOT coalesce({stored_} <> {expression}, false)"
             # A value a load gives a node that holds none may have been loaded from none.
-            declared.append(same if value == _absent(model, field_) else f"{stored_} IS NOT NULL AND {same}")
+            declared.append(same if value == _absent(model, field_, loaded) else f"{stored_} IS NOT NULL AND {same}")
         reserved = list(model.graph_properties.values())
         namespaces = [it.namespace for it in model.property_bags if not it.flat]
         # A bag holds the keys it owns, each with its value: none added, none removed, none changed. What a bag owns is
@@ -288,7 +291,11 @@ class SaveStatementBuilder:
             values: Mapping[str, Any] = getattr(loaded, bag.field, None) or {}
             held = bind(
                 f"_loadedBag{i}",
-                {f"{bag.namespace}{key}": stored(value) for key, value in values.items() if value is not None},
+                {
+                    f"{bag.namespace}{key}": _as_compared(stored(value))
+                    for key, value in values.items()
+                    if value is not None
+                },
             )
             if bag.flat:
                 owned = (
@@ -592,14 +599,30 @@ def replaced_fields(view: GraphViewModel, obj: Any, options: SaveOptions) -> lis
     return [it.field for it in view.relationships if not it.read_only]
 
 
-def _absent(model: FragmentModel, field_: str) -> Any:
-    """What a load gives a field of a node that holds no property for it: its default, or an empty collection."""
+def _absent(model: FragmentModel, field_: str, loaded: Any) -> Any:
+    """
+    What a load gives a field of a node that holds no property for it: its default, made of the other fields as
+    `loaded` holds them where its factory takes them, or an empty collection.
+    """
     kind = model.empty_when_absent.get(field_)
     if kind is not None:
-        empty: dict[str, Any] = {"dict": {}, "set": set(), "tuple": ()}
-        return empty.get(kind, [])
+        return empty_collection(kind)
     info = model.type.model_fields.get(field_) if issubclass(model.type, BaseModel) else None
-    return None if info is None or info.is_required() else info.get_default(call_default_factory=True)
+    if info is None or info.is_required():
+        return None
+    return info.get_default(call_default_factory=True, validated_data=dict(loaded))
+
+
+def _as_compared(value: Any) -> Any:
+    """
+    A loaded value as the check binds it: None, which no comparison tells from what the node holds, for a datetime the
+    driver handed back in UTC. It hands a UTC offset and the zone UTC back alike, and binds both as the zone, which
+    Neo4j holds unequal to the offset: compared, a datetime saved at offset zero would refuse every update.
+    """
+    held: Any = value
+    values: list[Any] = cast(list[Any], value) if isinstance(value, list) else [value]
+    utc = any(isinstance(it, datetime) and getattr(it.tzinfo, "zone", None) == "UTC" for it in values)
+    return None if utc else held
 
 
 def _stamp_excluded(model: FragmentModel) -> list[str]:

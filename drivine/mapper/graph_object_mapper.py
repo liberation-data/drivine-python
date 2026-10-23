@@ -110,8 +110,13 @@ class GraphObjectMapper:
             values[field] = _unpacked(value) if field in mapping.json_packed else value
         for field, kind in mapping.empty_when_absent.items():
             if values.get(field) is None:
-                values[field] = {} if kind == "dict" else _collected([], kind)
+                values[field] = empty_collection(kind)
         return values
+
+
+def empty_collection(kind: CollectionKind) -> Any:
+    """What a load gives an EmptyWhenAbsent field of a node that holds no property for it, or holds null."""
+    return {} if kind == "dict" else _collected([], kind)
 
 
 def _instance(type_: type[BaseModel], values: dict[str, Any], validate: bool) -> Any:

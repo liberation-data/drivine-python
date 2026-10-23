@@ -1,5 +1,6 @@
 import asyncio
 from collections.abc import Callable
+from datetime import UTC, date, datetime
 from enum import StrEnum
 from typing import Annotated, Any, TypeVar
 
@@ -73,6 +74,31 @@ class Swatch(NodeFragment, labels=["Swatch"]):
     id: Annotated[str, NodeId()]
     shades: Annotated[set[Shade], NodeLabels(Shade)] = set()
     stamp: Annotated[str | None, NodeStamp()] = None
+
+
+class Reading(NodeFragment, labels=["Reading"]):
+    """Fields of the kinds a driver hands back in a form of its own, compared as loaded."""
+
+    id: Annotated[str, NodeId()]
+    taken: datetime
+    on: date
+    shade: Shade
+    value: float
+    count: int
+    pair: tuple[str, str]
+    stamp: Annotated[str | None, NodeStamp()] = None
+
+
+class Pet(NodeFragment, labels=["Pet"]):
+    id: Annotated[str, NodeId()]
+    name: str
+    labels: Annotated[list[str], NodeLabels()] = []
+    extras: Annotated[dict[str, Any], PropertyBag(flat=True)] = {}
+    stamp: Annotated[str | None, NodeStamp()] = None
+
+
+class Hound(Pet, labels=["Hound"]):
+    breed: str | None = None
 
 
 @pytest.fixture
@@ -379,6 +405,51 @@ class TestUpdateOfATornLoad:
         assert await applied_after_unmarked(pm, gom, Finding, "f1", unmarked, lambda it: it.sources.append("mine")) == 2
         loaded = await gom.load(Finding, "f1")
         assert loaded is not None and sorted(loaded.sources) == ["first", "mine", "theirs"]
+
+    async def test_takes_a_field_loaded_as_its_default_from_a_node_that_holds_none_as_it_was_loaded(self, pm, gom):
+        await gom.save(Finding(id="f1"))
+        await pm.execute(QuerySpecification("MATCH (n:Finding {id: 'f1'}) REMOVE n.sources"))
+
+        applied = 0
+
+        def mine(it: Finding) -> None:
+            nonlocal applied
+            applied += 1
+            it.sources.append("mine")
+
+        assert await gom.update(Finding, "f1", mine, attempts=2) is not None
+        assert applied == 1, "a load gives the absent property its default, so the default is what was loaded"
+        loaded = await gom.load(Finding, "f1")
+        assert loaded is not None and loaded.sources == ["mine"]
+
+    async def test_takes_fields_a_driver_hands_back_in_its_own_form_as_they_were_loaded(self, pm, gom):
+        taken = datetime(2026, 10, 23, 9, 30, 15, 123456, tzinfo=UTC)
+        await gom.save(
+            Reading(id="r1", taken=taken, on=date(2026, 10, 23), shade=Shade.RED, value=0.1, count=3, pair=("a", "b"))
+        )
+
+        def more(it: Reading) -> None:
+            it.count += 1
+
+        assert await applied_after_unmarked(pm, gom, Reading, "r1", "RETURN 1", more) == 1
+        loaded = await gom.load(Reading, "r1")
+        assert loaded is not None and loaded.count == 4 and loaded.taken == taken
+
+    async def test_takes_a_subclass_loaded_as_its_base_as_it_was_loaded(self, pm, gom):
+        await gom.save(Hound(id="h1", name="Rex", breed="beagle", labels=["Good"], extras={"size": 1}))
+
+        def renamed(it: Pet) -> None:
+            it.name = "Max"
+
+        assert await applied_after_unmarked(pm, gom, Pet, "h1", "RETURN 1", renamed) == 1, (
+            "the subclass's own field and label are not the base's bag or labels"
+        )
+        loaded = await gom.load(Pet, "h1")
+        assert isinstance(loaded, Hound) and (loaded.name, loaded.labels, loaded.extras) == (
+            "Max",
+            ["Good"],
+            {"size": 1},
+        )
 
     async def test_loads_again_when_a_bag_entry_differs_from_what_it_loaded_under_the_same_stamp(self, pm, gom):
         await gom.save(Tagged(id="t1", text="one", meta={"owner": "first"}))

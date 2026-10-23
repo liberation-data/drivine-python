@@ -1,11 +1,26 @@
 """The check of the save `update` makes of what it loaded, where a read takes no snapshot (Neo4j)."""
 
+from datetime import datetime
 from enum import StrEnum
 from typing import Annotated, Any
 
 import pytest
+from pydantic import Field
 
-from drivine import ModelRegistry, NodeFragment, NodeId, NodeLabels, NodeStamp, NullPolicy, PropertyBag, SaveOptions
+from drivine import (
+    EmptyWhenAbsent,
+    JsonPacked,
+    ModelRegistry,
+    NodeFragment,
+    NodeId,
+    NodeLabels,
+    NodeStamp,
+    NullPolicy,
+    PropertyBag,
+    SaveOptions,
+    StaleObjectError,
+    VectorIndex,
+)
 from drivine.backend.cypher_grammar import FALKORDB_GRAMMAR, MEMGRAPH_GRAMMAR, NEO4J_GRAMMAR, CypherGrammar
 from drivine.backend.save_statement_builder import SaveStatementBuilder
 
@@ -47,6 +62,19 @@ class Swatch(NodeFragment, labels=["Swatch"]):
 
     id: Annotated[str, NodeId()]
     shades: Annotated[set[Shade], NodeLabels(Shade)] = set()
+    stamp: Annotated[str | None, NodeStamp()] = None
+
+
+class Note(NodeFragment, labels=["Note"]):
+    """Fields whose value a load gives a node that holds no property for them: a default made of another field, an
+    empty collection, a packed default."""
+
+    id: Annotated[str, NodeId()]
+    title: str
+    slug: str = Field(default_factory=lambda data: data["title"].lower())
+    tags: Annotated[set[str], EmptyWhenAbsent()]
+    extra: Annotated[dict[str, Any], JsonPacked()] = {}
+    embedding: Annotated[list[float] | None, VectorIndex(dimensions=2)] = None
     stamp: Annotated[str | None, NodeStamp()] = None
 
 
@@ -138,3 +166,52 @@ def test_holds_a_closed_set_of_labels_to_its_own_members_alone(registry):
     assert "size([l IN labels(n) WHERE l IN $_loadedLabelsClosed]) = size($_loadedLabels)" in check
     assert set(bindings["_loadedLabelsClosed"]) == {"Red", "Green", "Blue"}
     assert bindings["_loadedLabels"] == ["Blue"]
+
+
+def test_lets_a_field_loaded_as_a_load_gives_an_absent_property_be_held_as_none(registry):
+    loaded = Note(id="n1", title="Ada", tags=set(), stamp=STAMP)
+    check, bindings = check_of_change(registry, loaded, loaded.model_copy(update={"title": "Grace"}))
+
+    assert "n.embedding IS NULL AND NOT coalesce(n.extra <> $_loaded1, false)" in check, "the packed default"
+    assert "AND NOT coalesce(n.slug <> $_loaded2, false)" in check, "the default made of the title as loaded"
+    assert "AND NOT coalesce(n.tags <> $_loaded3, false)" in check, "the empty collection of EmptyWhenAbsent"
+    assert "n.title IS NOT NULL AND NOT coalesce(n.title <> $_loaded4, false)" in check
+    assert (bindings["_loaded1"], bindings["_loaded2"], bindings["_loaded3"]) == ("{}", "ada", [])
+
+
+def test_compares_a_packed_field_as_stored_and_a_vector_in_the_engines_form(registry):
+    loaded = Note(id="n1", title="Ada", slug="custom", tags={"x"}, extra={"a": 1}, embedding=[0.5, 1.0], stamp=STAMP)
+    check, bindings = check_of_change(registry, loaded, loaded.model_copy(update={"title": "Grace"}))
+
+    assert "n.slug IS NOT NULL AND NOT coalesce(n.slug <> $_loaded2, false)" in check
+    assert "n.extra IS NOT NULL AND NOT coalesce(n.extra <> $_loaded1, false)" in check
+    assert f"n.embedding IS NOT NULL AND NOT coalesce(n.embedding <> {NEO4J_GRAMMAR.vector_value('$_loaded0')}" in check
+    assert (bindings["_loaded0"], bindings["_loaded1"], bindings["_loaded3"]) == ([0.5, 1.0], '{"a": 1}', ["x"])
+
+
+class Logged(NodeFragment, labels=["Logged"]):
+    id: Annotated[str, NodeId()]
+    at: datetime
+    meta: Annotated[dict[str, Any], PropertyBag()] = {}
+    stamp: Annotated[str | None, NodeStamp()] = None
+
+
+def test_binds_a_datetime_the_driver_handed_back_in_utc_as_one_no_comparison_tells_apart(registry):
+    pytz = pytest.importorskip("pytz")
+    # The driver hands an offset of zero back as the zone UTC, and binds it as the zone: Neo4j holds that unequal to
+    # the offset a datetime may have been saved with.
+    utc = datetime(2026, 10, 23, 9, 30, tzinfo=pytz.FixedOffset(0))
+    eastern = datetime(2026, 10, 23, 9, 30, tzinfo=pytz.FixedOffset(600))
+    loaded = Logged(id="l1", at=utc, meta={"seen": utc, "since": eastern}, stamp=STAMP)
+    check, bindings = check_of_change(registry, loaded, loaded.model_copy(update={"meta": {}}))
+
+    assert "n.at IS NOT NULL AND NOT coalesce(n.at <> $_loaded0, false)" in check
+    assert bindings["_loaded0"] is None
+    assert bindings["_loadedBag0"] == {"meta.seen": None, "meta.since": eastern}, "an offset other than zero is kept"
+
+
+def test_says_a_field_is_not_as_loaded_when_a_save_is_refused_under_the_stamp_it_expected():
+    refused = StaleObjectError(Claim, "c1", STAMP, STAMP, False)
+    assert str(refused) == (
+        f"Claim 'c1' changed since it was loaded, under the stamp {STAMP}: a field is not as it was loaded."
+    )

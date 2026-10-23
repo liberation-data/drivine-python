@@ -207,12 +207,6 @@ def written(backend: GraphBackend, where: str, orphans: bool) -> dict[str, str]:
 
 def written_cases(backend: GraphBackend, where: str, orphans: bool) -> dict[str, GraphStatement]:
     registry = ModelRegistry()
-
-    def badge(name: str) -> Badge:
-        return Badge(
-            uuid="b1", name=name, metadata={"source": "wiki"}, extras={"size": 3}, kinds=["Shiny"], stamp=STAMP
-        )
-
     fragment, view = registry.fragment, registry.view
     cases = {
         "Person.loadAll": backend.load_all_fragments(fragment(Person)),

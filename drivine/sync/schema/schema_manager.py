@@ -11,6 +11,7 @@ from typing import Any
 from drivine.backend.sql.sql_catalog import CATALOG_KINDS
 from drivine.connection.database_type import DatabaseType
 from drivine.drivine_error import DrivineError
+from drivine.schema import vector_annotation_check
 from drivine.schema.ensure_result import EnsureResult
 from drivine.schema.schema_catalog import SchemaCatalog
 from drivine.schema.schema_specs import SchemaSpec, item_name, uniqueness_constraint
@@ -51,6 +52,8 @@ class SchemaManager:
     """
     Holds catalogs of indexes and constraints on the databases they apply to. `enforce` is idempotent: it makes what is
     missing, and recreates a catalog's items when its version changed. `recreate_all` drops and makes everything.
+    Before anything is applied, a vector index over a fragment's field that has no `VectorIndex` is refused, naming the
+    class, the field and the spec; a fragment whose model is built later is checked against the specs applied here.
     """
 
     def __init__(self, registry: DatabaseRegistry, factory: GraphObjectManagerFactory, options: SchemaOptions) -> None:
@@ -67,6 +70,8 @@ class SchemaManager:
         return self._apply(True)
 
     def _apply(self, recreate: bool) -> dict[str, list[EnsureResult[Any]]]:
+        # Before anything is applied: a vector index over a fragment's field without VectorIndex is refused.
+        vector_annotation_check.register(spec for it in self.options.catalogs for spec in it.items)
         report: dict[str, list[EnsureResult[Any]]] = {}
         for database, catalogs in self._catalogs_by_database().items():
             gom = self.factory.get(database)

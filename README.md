@@ -586,6 +586,11 @@ Without pi-pilgrim, enforce it yourself: `await SchemaManager(registry, factory,
 - **Versions.** `catalog.with_version("2")` recreates the catalog's items once, the first time it is enforced. Items an
   owner applied before and no longer declares are reported, never dropped. Each owner's version and inventory are kept
   in a `_DrivineSchema` node, as drivine4j and TypeScript keep them.
+- **A vector field needs its `VectorIndex`.** Drivine knows a field is an embedding from the marker alone: without it
+  the field is saved as a plain list, not as a vector FalkorDB's index serves, and `load_nearest` can't find the
+  index. So a catalog's `vector_index` over a fragment's field without one is refused with a `DrivineError` naming
+  the class, the field and the spec, whether the catalog is enforced first or the fragment's model is built first.
+  A spec beside the marker is allowed (it tunes the index), as is one on a label no fragment maps.
 - **By hand:** `gom.indexes.ensure(range_index("Session", ["lastActivityAt", "sessionId"]))`, `gom.indexes.recreate`,
   `gom.indexes.drop`, `gom.constraints.ensure(uniqueness_constraint("Person", "email"))`, and `list`.
 - **Each engine's DDL** is written for it: named items on Neo4j, Memgraph's text and vector indexes, FalkorDB's index per

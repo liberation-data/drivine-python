@@ -15,6 +15,7 @@ from drivine import (
     Direction,
     EngineVectorOptions,
     ModelRegistry,
+    NullPolicy,
     RelateMode,
     RemovedTargets,
     SaveOptions,
@@ -72,6 +73,7 @@ from tests.models import (
     ActorWithLatestMovie,
     ActorWithMovies,
     Animal,
+    Badge,
     Customer,
     Director,
     Dog,
@@ -409,6 +411,11 @@ def saves(registry: ModelRegistry, backend: GraphBackend, where: str, orphans: b
     def place(uuid: str, *below: LocationHierarchy) -> LocationHierarchy:
         return LocationHierarchy(location=Location(uuid=uuid, name=uuid, type="place"), sub_locations=list(below))
 
+    def badge(name: str) -> Badge:
+        return Badge(
+            uuid="b1", name=name, metadata={"source": "wiki"}, extras={"size": 3}, kinds=["Shiny"], stamp=STAMP
+        )
+
     fragment, view = registry.fragment, registry.view
     cases = {
         "Person.save": save(fragment(Person), Person(uuid="p1", name="Ada")),
@@ -418,6 +425,18 @@ def saves(registry: ModelRegistry, backend: GraphBackend, where: str, orphans: b
         "Customer.save": save(
             fragment(Customer),
             Customer(uuid="c1", full_name="Ada", metadata={"source": "wiki", "score": 3}, tiers={Tier.GOLD}),
+        ),
+        # The save update makes of what it loaded: the root's fields as loaded are compared where a read takes no
+        # snapshot.
+        "Person.update": save(
+            fragment(Person),
+            Person(uuid="p1", name="Ada", stamp=STAMP),
+            SaveOptions(only=["name"], null_policy=NullPolicy.CLEAR, loaded=Person(uuid="p1", name="Ada", stamp=STAMP)),
+        ),
+        "Badge.update": save(
+            fragment(Badge),
+            badge("Grace"),
+            SaveOptions(only=["name"], null_policy=NullPolicy.CLEAR, held_properties={}, loaded=badge("Ada")),
         ),
         "PersonCareer.save": save(view(PersonCareer), career()),
         "PersonCareer.save.replace": save(

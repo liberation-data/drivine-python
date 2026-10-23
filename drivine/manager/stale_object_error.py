@@ -19,6 +19,11 @@ class StaleObjectError(DrivineError):
                 f"{type_.__name__} {id!r} may have changed since it was loaded: another writer held it each time the "
                 f"save was tried."
             )
+        elif found_stamp == expected_stamp:
+            message = (
+                f"{type_.__name__} {id!r} changed since it was loaded, under the stamp {found_stamp}: a field is not "
+                f"as it was loaded."
+            )
         else:
             message = (
                 f"{type_.__name__} {id!r} changed since it was loaded: expected stamp {expected_stamp}, found "

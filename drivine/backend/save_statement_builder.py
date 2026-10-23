@@ -5,7 +5,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, time
 from enum import Enum
-from typing import Any
+from typing import Any, cast
 
 from pydantic import BaseModel
 from pydantic_core import to_jsonable_python
@@ -20,6 +20,7 @@ from drivine.drivine_error import DrivineError
 from drivine.manager.null_policy import NullPolicy
 from drivine.manager.removed_targets import RemovedTargets
 from drivine.manager.save_options import SaveOptions
+from drivine.mapper.graph_object_mapper import empty_collection
 from drivine.model import stamps
 from drivine.model.field_mapping import FieldMapping
 from drivine.model.fragment_model import FragmentModel
@@ -231,6 +232,9 @@ class SaveStatementBuilder:
         ok = [f"left(n.{STAMP}, {t}) = left({EXPECTED}, {t})"]
         if replacing:
             ok.append(f"size({EXPECTED}) = {2 * t + 1} AND right(n.{STAMP}, {t}) = right({EXPECTED}, {t})")
+        # The fields as loaded are compared only where a load may have been handed a stamp newer than its data.
+        if self._options.loaded is not None and self.grammar.reads_without_snapshot:
+            ok.extend(self._still_as_loaded(model, self._options.loaded))
         return "\n".join(
             [
                 f"MATCH (n{labels} {id_})",
@@ -242,6 +246,91 @@ class SaveStatementBuilder:
                 *write,
             ]
         )
+
+    def _still_as_loaded(self, model: FragmentModel, loaded: Any) -> list[str]:
+        """
+        What the checked save of `loaded`, the root as `update` loaded it, requires of the node besides the stamp. A
+        load that ran while another writer committed can hold that writer's stamp with the data from before its write.
+        Each field is compared as it was loaded too, under the lock, so the save of such an object is refused, as a
+        stale one is: a field its value, a bag the keys it owns and their values, the labels field the labels it reads.
+        A comparison that can't tell (a list holding a None) is not a difference: the stamp still speaks for the field.
+        """
+
+        def bind(name: str, value: Any) -> str:
+            self._bindings[name] = value
+            return f"${name}"
+
+        fields = sorted(
+            (
+                (name, field_)
+                for field_, name in model.graph_properties.items()
+                if field_ not in (model.node_id_field, model.stamp_field)
+            ),
+        )
+        declared: list[str] = []
+        for i, (name, field_) in enumerate(fields):
+            stored_ = f"n.{quote_name(name)}"
+            value = getattr(loaded, field_, None)
+            if value is None:
+                declared.append(f"{stored_} IS NULL")
+                continue
+            packed = self._packed_as_loaded(name, value) if field_ in model.json_packed else _as_compared(stored(value))
+            param = bind(f"_loaded{i}", packed)
+            expression = self.grammar.vector_value(param) if field_ in model.vector_fields else param
+            same = f"NOT coalesce({stored_} <> {expression}, false)"
+            # A value a load gives a node that holds none may have been loaded from none.
+            declared.append(same if value == _absent(model, field_, loaded) else f"{stored_} IS NOT NULL AND {same}")
+        reserved = list(model.graph_properties.values())
+        namespaces = [it.namespace for it in model.property_bags if not it.flat]
+        # A bag holds the keys it owns, each with its value: none added, none removed, none changed. What a bag owns is
+        # what a load hands it: a prefixed bag the keys under its prefix, a flat one what no field or other bag takes.
+        bags: list[str] = []
+        for i, bag in enumerate(model.property_bags):
+            values: Mapping[str, Any] = getattr(loaded, bag.field, None) or {}
+            held = bind(
+                f"_loadedBag{i}",
+                {
+                    f"{bag.namespace}{key}": _as_compared(stored(value))
+                    for key, value in values.items()
+                    if value is not None
+                },
+            )
+            if bag.flat:
+                owned = (
+                    f"NOT k IN {bind(f'_loadedBag{i}Reserved', reserved)} AND "
+                    f"none(p IN {bind(f'_loadedBag{i}ReservedPrefixes', [RESERVED_PREFIX, *namespaces])} "
+                    f"WHERE k STARTS WITH p)"
+                )
+            else:
+                owned = f"k STARTS WITH {bind(f'_loadedBag{i}Prefix', bag.namespace)}"
+            bags.append(
+                f"size([k IN keys(n) WHERE {owned}]) = size(keys({held})) AND "
+                f"all(k IN keys({held}) WHERE n[k] IS NOT NULL AND NOT coalesce(n[k] <> {held}[k], false))"
+            )
+        # The labels field reads the node's labels: a closed one its members, an open one those not the fragment's own.
+        labels_field = model.node_labels
+        if labels_field is None:
+            return [*declared, *bags]
+        held = bind(
+            "_loadedLabels", [stored(it) for it in dict.fromkeys(getattr(loaded, labels_field.field, None) or [])]
+        )
+        if labels_field.members is not None:
+            read = f"[l IN labels(n) WHERE l IN {bind('_loadedLabelsClosed', list(labels_field.members))}]"
+        else:
+            read = f"[l IN labels(n) WHERE NOT l IN {bind('_loadedLabelsOwn', list(model.labels))}]"
+        return [*declared, *bags, f"size({read}) = size({held}) AND all(l IN {held} WHERE l IN labels(n))"]
+
+    def _packed_as_loaded(self, name: str, value: Any) -> Any:
+        """
+        A JsonPacked field's value as the node held it: the text the load read, so that text another writer packed with
+        other spacing or escaping isn't taken for a change, and a value held as other than text, which a load hands as
+        it is, as it was held. A value the node held none for (one a load gives an absent property) is packed as a save
+        packs it.
+        """
+        held = self._options.loaded_properties.get(name)
+        if held is None:
+            return json.dumps(to_jsonable_python(value))
+        return held if isinstance(held, str) else _as_compared(held)
 
     def _removals(
         self, view: GraphViewModel, obj: Any, replaced: list[str], removed_targets: RemovedTargets
@@ -518,6 +607,32 @@ def replaced_fields(view: GraphViewModel, obj: Any, options: SaveOptions) -> lis
             f"holds its defaults, not what the store holds. Load it first, or name the fields to replace."
         )
     return [it.field for it in view.relationships if not it.read_only]
+
+
+def _absent(model: FragmentModel, field_: str, loaded: Any) -> Any:
+    """
+    What a load gives a field of a node that holds no property for it: its default, made of the other fields as
+    `loaded` holds them where its factory takes them, or an empty collection.
+    """
+    kind = model.empty_when_absent.get(field_)
+    if kind is not None:
+        return empty_collection(kind)
+    info = model.type.model_fields.get(field_) if issubclass(model.type, BaseModel) else None
+    if info is None or info.is_required():
+        return None
+    return info.get_default(call_default_factory=True, validated_data=dict(loaded))
+
+
+def _as_compared(value: Any) -> Any:
+    """
+    A loaded value as the check binds it: None, which no comparison tells from what the node holds, for a datetime the
+    driver handed back in UTC. It hands a UTC offset and the zone UTC back alike, and binds both as the zone, which
+    Neo4j holds unequal to the offset: compared, a datetime saved at offset zero would refuse every update.
+    """
+    held: Any = value
+    values: list[Any] = cast(list[Any], value) if isinstance(value, list) else [value]
+    utc = any(isinstance(it, datetime) and getattr(it.tzinfo, "zone", None) == "UTC" for it in values)
+    return None if utc else held
 
 
 def _stamp_excluded(model: FragmentModel) -> list[str]:

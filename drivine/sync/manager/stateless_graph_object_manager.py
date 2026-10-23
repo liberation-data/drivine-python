@@ -199,8 +199,12 @@ class StatelessGraphObjectManager:
 
     def load(self, type_: type[T], id: Any, *, depth: Mapping[str, int] | None = None) -> T | None:
         """The object whose root has the id, or None."""
+        found = self._load_row(type_, id, _checked(depth))
+        return None if found is None else found[0]
+
+    def _load_row(self, type_: type[T], id: Any, depth: Mapping[str, int] | None = None) -> tuple[T, Any] | None:
+        """The object whose root has the id, and the row it was mapped from; None when there is none."""
         target = self.registry.model_of(type_)
-        depth = _checked(depth)
         if isinstance(target, GraphViewModel):
             statement = self.backend.load_view(target, depth)
         else:
@@ -211,8 +215,8 @@ class StatelessGraphObjectManager:
         if not rows:
             return None
         if isinstance(target, GraphViewModel):
-            return self.mapper.view(target, rows[0])
-        return self.mapper.fragment(target, rows[0])
+            return self.mapper.view(target, rows[0]), rows[0]
+        return self.mapper.fragment(target, rows[0]), rows[0]
 
     def count(
         self, type_: type[Any], where: str | Where | None = None, bindings: Mapping[str, Any] | None = None
@@ -396,7 +400,9 @@ class StatelessGraphObjectManager:
         set to None cleared, and for a view each relationship list that lost an item replaced (lists that only grew are
         added to). The save is checked against the stamp that was loaded; if the node changed meanwhile, it is loaded
         again and the change applied again, `attempts` times in all, then StaleObjectError is raised. Without a
-        NodeStamp field a change by another writer isn't noticed.
+        NodeStamp field a change by another writer isn't noticed. On Neo4j, whose reads take no snapshot, a load can be
+        handed another writer's stamp with the data from before its write, so the save compares each field of the root
+        as it was loaded too: each field's value, each property bag key by key, and the NodeLabels field.
 
         `change` may change the object it is given or return a copy (`model_copy`), but not give it another id or
         class, and may be async. Returns the saved object, or None when there is no such node or it is deleted
@@ -406,15 +412,21 @@ class StatelessGraphObjectManager:
         attempt = 0
         while True:
             attempt += 1
-            loaded = self.load(type_, id)
-            if loaded is None:
+            found = self._load_row(type_, id)
+            if found is None:
                 return None
+            loaded, row = found
             before = _copy(loaded)
             result = change(loaded)
             if inspect.isawaitable(result):
                 result = result
             changed: T = loaded if result is None else result  # pyright: ignore[reportAssignmentType]
-            options = self._change_of(target_, before, changed)
+            # The root's properties as the load read them, which the save compares a packed field with.
+            root_row: Mapping[str, Any] = (row.get("root") if isinstance(target_, GraphViewModel) else row) or {}
+            loaded_properties: dict[str, Any] = dict(root_row.get("props") or {})
+            options = dataclasses.replace(
+                self._change_of(target_, before, changed), loaded_properties=loaded_properties
+            )
             try:
                 return self._write(changed, options, False)
             except StaleObjectError as failure:
@@ -808,7 +820,8 @@ class StatelessGraphObjectManager:
                 after = set(_related_ids(rel, getattr(changed, rel.field, None)))
                 if any(it not in after for it in _related_ids(rel, getattr(before, rel.field, None))):
                     replace.append(rel.field)
-        return SaveOptions(replace=replace or None, null_policy=NullPolicy.CLEAR, only=only)
+        # The root as loaded, before the change ran: the save compares the node with it where a read takes no snapshot.
+        return SaveOptions(replace=replace or None, null_policy=NullPolicy.CLEAR, only=only, loaded=root_before)
 
     def _hand_back(self, obj: Any, statement: SaveStatement, result: Mapping[str, Any]) -> None:
         """

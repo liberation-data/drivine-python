@@ -159,6 +159,14 @@ class CypherGrammar:
     outside the match: FalkorDB 6 plans a match of several hops from a labelled far end, reading every relationship of
     the last hop's type, whether the label is in the pattern or in its WHERE (FalkorDB/FalkorDB#3332).
     """
+    reads_without_snapshot: bool = False
+    """
+    Whether a read takes no snapshot, so one query can find a node's properties as different commits left them. Neo4j
+    reads under read committed without a lock: a load that runs while another writer commits can be handed that
+    writer's stamp with the data from before its write, however the query orders its reads. The checked save of what
+    `update` loaded then compares the root's fields as loaded too, under the node's lock. Memgraph reads from a
+    snapshot, and FalkorDB runs no read beside a write.
+    """
 
 
 NEO4J_GRAMMAR = CypherGrammar(
@@ -171,6 +179,7 @@ NEO4J_GRAMMAR = CypherGrammar(
     _transient_over_bolt,
     _neo4j_vector_search,
     _neo4j_full_text_search,
+    reads_without_snapshot=True,
 )
 
 MEMGRAPH_GRAMMAR = CypherGrammar(

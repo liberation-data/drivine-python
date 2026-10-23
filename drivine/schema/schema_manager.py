@@ -103,10 +103,11 @@ class SchemaManager:
         items given, by database.
 
         The items join what the owner declared, for the life of this manager, and are applied as `enforce` applies the
-        owner's: under the options' `mode`, `recreate_on_drift` and `violation_sample_size`, and recorded in the
-        owner's marker. Only the items given are applied. Ensuring an item again with the same identity (kind, label,
-        properties) replaces it; two of one identity given at once are merged as a catalog's are. A later `enforce` or
-        `recreate_all` applies them with the rest, and they count as the owner's when another owner declares one too.
+        owner's: under the options' `mode`, `recreate_on_drift`, `violation_sample_size` and `replace_blocking_index`,
+        and recorded in the owner's marker. Only the items given are applied. Ensuring an item again with the same
+        identity (kind, label, properties) replaces it; two of one identity given at once are merged as a catalog's
+        are. A later `enforce` or `recreate_all` applies them with the rest, and they count as the owner's when another
+        owner declares one too.
         Every database is planned first: a declaration that conflicts with another owner's, with the owner's own, or
         with another given at once, raises, and nothing is kept or applied. So does a vector index over a fragment's
         field that has no `VectorIndex`, as in a catalog.

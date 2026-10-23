@@ -247,6 +247,32 @@ class TestAnIndexInTheWayOfAConstraint:
         gom.constraints.drop(uniqueness_constraint(label, "e"))
         gom.indexes.drop(range_index(label, "e"))
 
+    def test_a_constraint_ensured_at_runtime_fails_fast_naming_the_index_warns_or_replaces_it_by_the_options(
+        self, factory, pm, gom, label, caplog
+    ):
+        neo4j_only(pm)
+        pm.execute(QuerySpecification(f"CREATE INDEX hand_{label} FOR (n:{label}) ON (n.e)"))
+        spec = uniqueness_constraint(label, "e")
+        # On this database alone: ensure targets every graph database the registry holds.
+        given = SchemaCatalog.of(spec).named(label).for_database(pm.database)
+        managers = GraphObjectManagerFactory(factory)
+
+        def manager(**options: Any) -> SchemaManager:
+            return SchemaManager(factory.registry, managers, SchemaOptions([], **options))
+
+        with pytest.raises(DrivineError, match=f"the index hand_{label} is in the way of it"):
+            manager().ensure_catalog(given)
+        with caplog.at_level(logging.WARNING):
+            warned = (manager(mode="WARN").ensure_catalog(given))[pm.database]
+        assert [it.status for it in warned] == ["BLOCKED_BY_INDEX"]
+        assert f"hand_{label} is in the way" in caplog.text
+        assert [it.name for it in ranges(gom, label)] == [f"hand_{label}"], "WARN leaves it"
+        replaced = (manager(replace_blocking_index=True).ensure_catalog(given))[pm.database]
+        assert [it.status for it in replaced] == ["CREATED"]
+        assert ranges(gom, label) == [], "the constraint's own index takes its place"
+        assert [it.properties for it in uniques(gom, label)] == [("e",)]
+        gom.constraints.drop(spec)
+
     def test_the_markers_key_reclaims_a_plain_index_made_on_it_by_hand(self, factory, pm, gom, label):
         neo4j_only(pm)
         marker = uniqueness_constraint("_DrivineSchema", "scope")

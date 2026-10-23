@@ -488,6 +488,7 @@ saved = await gom.save(career)                                       # fields th
 await gom.save(career, replace=["employment_history"])               # this list is the whole list
 await gom.save(person, only=["name"])                                # or except_=["embedding"]
 await gom.save(person, null_policy=NullPolicy.CLEAR)                 # a field assigned None clears its property
+await gom.save(edited, from_=loaded)                                 # checked against the object as it was loaded
 created = await gom.create(person)                                   # only if absent; None when it was there
 updated = await gom.update(Person, uuid, lambda it: it.model_copy(update={"name": "Ada"}))
 await gom.delete(PersonCareer, uuid, cascade=CascadeType.DELETE_ORPHAN)
@@ -513,11 +514,26 @@ people = await gom.edges.load_related(node_ref(Issue, a), "ASSIGNED_TO", Person)
 - **On Neo4j a load can be handed a stamp newer than its data.** Neo4j reads under read committed, without a snapshot,
   so a load that runs while another writer commits can find that writer's stamp and the data from before its write.
   `update` therefore compares each field of the root as it loaded it too, under the node's lock, and loads again if one
-  differs: a field's value (a `JsonPacked` field's as the text the node held), a `PropertyBag`'s keys and their
-  values, and the labels a `NodeLabels` field reads. A `save` of an object you loaded yourself has only the stamp to go
-  on, and in that moment it can write over the other writer's change: where every writer's change must be kept, change
-  the node with `update`. Memgraph reads from a snapshot, FalkorDB runs no read beside a write, and Oracle and Postgres
-  read a statement whole, so on them the stamp is what was read.
+  differs: a field's value (a `JsonPacked` field's as the text the node held), a `PropertyBag`'s keys and their values,
+  and the labels a `NodeLabels` field reads. A `save` checks the same when you give it the object as loaded, as `from_`.
+  Without `from_` it has only the stamp to go on, and in that moment it can write over the other writer's change: hold
+  on to what you loaded and pass it, or change the node with `update`. Where only the stamp makes the round trip, as
+  through a web form, the stamp is all there is. Memgraph reads from a snapshot, FalkorDB runs no read beside a write,
+  and Oracle and Postgres read a statement whole, so on them the stamp is what was read.
+- **`from_` is the object as you loaded it**, when what you save is a changed copy of it. The save is then checked
+  against the stamp `from_` carries, whatever stamp the copy carries, as `update` checks against what it loaded, and on
+  Neo4j against each field of `from_`'s root too. A `JsonPacked` field is compared as a save packs it: `from_` holds the
+  value, not the text the node held, so where another writer packed the same value with other spacing the save is
+  refused, and `update`, which compares the text, is the way to change the node. A `from_` of another class, with
+  another id, or with no stamp is refused before anything is written, and so is the object saved itself. A copy may
+  share an unchanged root with `from_`, as a view copied to change only a relationship does; change the root through a
+  copy (`model_copy`), not in place.
+
+  ```python
+  loaded = await gom.load(Person, uuid)
+  # ... later, from what the user changed:
+  await gom.save(loaded.model_copy(update={"email": form.email}), from_=loaded)
+  ```
 - **`save_all`** runs its statements in one transaction, or in yours, so a failure leaves nothing written. It writes
   the fragments' classes in the order of their names and the fragments of each in the order of their ids, so two
   batches over the same nodes take their locks in the same order. The objects come back in the order given.

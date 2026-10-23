@@ -365,6 +365,7 @@ class StatelessGraphObjectManager:
         null_policy: NullPolicy = NullPolicy.IGNORE,
         only: Sequence[str] | None = None,
         except_: Sequence[str] | None = None,
+        from_: T | None = None,
     ) -> T:
         """
         Writes the object in one statement: its fields that aren't None, and for a view, its relationships, each related
@@ -376,8 +377,20 @@ class StatelessGraphObjectManager:
         written and StaleObjectError is raised. Outside a transaction, a save the engine turns away because another
         writer held what it writes is run again, after a pause. Inside one, it fails, and the transaction's owner
         decides.
+
+        `from_` is the object as it was loaded, when `obj` is a changed copy of it. The save is then checked against the
+        stamp `from_` carries, whatever stamp `obj` carries, which `obj` is given; and on an engine whose reads take no
+        snapshot (Neo4j) also against each field of its root, as `update` checks its save: a load there can be handed
+        another writer's stamp with the data from before its write, and a save checked by the stamp alone would write
+        over that writer's change. A JsonPacked field is compared as a save packs it, so a node whose packed text
+        another writer wrote with other spacing refuses the save. A copy may share an unchanged root with `from_`, as a
+        view copied to change only a relationship does; change the root through a copy, not in place, or `from_` holds
+        the change. A `from_` of another class, with another id, or with no stamp, and `obj` itself, which holds the
+        changes rather than what was loaded, is refused with DrivineError before anything is written.
         """
         options = SaveOptions(replace, removed_targets, null_policy, only, except_)
+        if from_ is not None:
+            options = dataclasses.replace(options, loaded=self._loaded_as(obj, from_))
         saved = await self._write(obj, options, False)
         assert saved is not None
         return saved
@@ -858,6 +871,53 @@ class StatelessGraphObjectManager:
         # The root as loaded, before the change ran: the save compares the node with it where a read takes no snapshot.
         return SaveOptions(replace=replace or None, null_policy=NullPolicy.CLEAR, only=only, loaded=root_before)
 
+    def _loaded_as(self, obj: Any, from_: Any) -> Any:
+        """
+        Readies `obj` to be saved as a changed copy of `from_`, the object as it was loaded: its root is given the stamp
+        `from_` carries, as `update` puts back the stamp it loaded. Returns `from_`'s root, which the save compares the
+        node with where a read takes no snapshot.
+        """
+        if type(from_) is not type(obj):
+            raise DrivineError(
+                f"from_ is a {type(from_).__name__}, and the object saved a {type(obj).__name__}. Give the object as "
+                f"it was loaded."
+            )
+        if from_ is obj:
+            raise DrivineError(_SAVED_ITSELF)
+        target_ = self.registry.model_of(type(obj))
+        root = root_of(target_)
+        if isinstance(target_, GraphViewModel):
+            saved_root, loaded_root = getattr(obj, target_.root_field, None), getattr(from_, target_.root_field, None)
+        else:
+            saved_root, loaded_root = obj, from_
+        if saved_root is None:
+            raise DrivineError(f"The {type(obj).__name__} saved has no root fragment.")
+        if loaded_root is None:
+            raise DrivineError(f"The {type(from_).__name__} given as from_ has no root fragment.")
+        if root.node_id_field is None:
+            raise DrivineError(
+                f"{root.type.__name__} has no NodeId field, so it can't be saved: a save merges on the id."
+            )
+        id_, loaded_id = getattr(saved_root, root.node_id_field, None), getattr(loaded_root, root.node_id_field, None)
+        if loaded_id != id_:
+            raise DrivineError(
+                f"from_ is the {type(from_).__name__} {loaded_id!r}, and the object saved {id_!r}. Give the object as "
+                f"it was loaded."
+            )
+        if root.stamp_field is None:
+            raise DrivineError(
+                f"{root.type.__name__} has no NodeStamp field, so a save of a {type(obj).__name__} has no stamp to be "
+                f"checked against what was loaded. Give it one, or save without from_."
+            )
+        loaded_stamp = getattr(loaded_root, root.stamp_field, None)
+        if loaded_stamp is None:
+            raise DrivineError(
+                f"The {type(from_).__name__} given as from_ carries no stamp, so nothing says what it was loaded with. "
+                f"Give it as it was loaded, with its NodeStamp field."
+            )
+        setattr(saved_root, root.stamp_field, loaded_stamp)
+        return loaded_root
+
     def _hand_back(self, obj: Any, statement: SaveStatement, result: Mapping[str, Any]) -> None:
         """
         Gives the object (its root, and its stamped related nodes) the stamps a save left, as far as each was current.
@@ -885,6 +945,12 @@ class StatelessGraphObjectManager:
         return StaleObjectError(
             statement.root.type, statement.root_id, statement.expected_stamp, found[0] if found else None, not found
         )
+
+
+_SAVED_ITSELF = (
+    "from_ is the object saved itself, so it holds the changes, not what was loaded. Save a copy changed from it "
+    "(model_copy) and give from_ unchanged."
+)
 
 
 def _searched_vector(root: FragmentModel, property: str | None) -> VectorField:

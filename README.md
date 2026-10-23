@@ -509,11 +509,11 @@ people = await gom.edges.load_related(node_ref(Issue, a), "ASSIGNED_TO", Person)
 - **On Neo4j a load can be handed a stamp newer than its data.** Neo4j reads under read committed, without a snapshot,
   so a load that runs while another writer commits can find that writer's stamp and the data from before its write.
   `update` therefore compares each field of the root as it loaded it too, under the node's lock, and loads again if one
-  differs: a field's value, a `PropertyBag`'s keys and their values, and the labels a `NodeLabels` field reads. A `save`
-  of an object you loaded yourself has only the stamp to go on, and in that moment it can write over the other writer's
-  change: where every writer's change must be kept, change the node with `update`. Memgraph reads from a snapshot,
-  FalkorDB runs no read beside a write, and Oracle and Postgres read a statement whole, so on them the stamp is what was
-  read.
+  differs: a field's value (a `JsonPacked` field's as the text the node held), a `PropertyBag`'s keys and their
+  values, and the labels a `NodeLabels` field reads. A `save` of an object you loaded yourself has only the stamp to go
+  on, and in that moment it can write over the other writer's change: where every writer's change must be kept, change
+  the node with `update`. Memgraph reads from a snapshot, FalkorDB runs no read beside a write, and Oracle and Postgres
+  read a statement whole, so on them the stamp is what was read.
 - **`save_all`** runs its statements in one transaction, or in yours, so a failure leaves nothing written. It writes
   the fragments' classes in the order of their names and the fragments of each in the order of their ids, so two
   batches over the same nodes take their locks in the same order. The objects come back in the order given.

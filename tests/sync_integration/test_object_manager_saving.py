@@ -11,6 +11,7 @@ from drivine.sync import (
     CascadeType,
     DatabaseType,
     DrivineError,
+    JsonPacked,
     NodeFragment,
     NodeId,
     NodeLabels,
@@ -74,6 +75,13 @@ class Swatch(NodeFragment, labels=["Swatch"]):
 
     id: Annotated[str, NodeId()]
     shades: Annotated[set[Shade], NodeLabels(Shade)] = set()
+    stamp: Annotated[str | None, NodeStamp()] = None
+
+
+class Packed(NodeFragment, labels=["Packed"]):
+    id: Annotated[str, NodeId()]
+    text: str | None = None
+    prefs: Annotated[dict[str, Any], JsonPacked()] = {}
     stamp: Annotated[str | None, NodeStamp()] = None
 
 
@@ -326,6 +334,20 @@ class TestUpdate:
         gom.save(Person(uuid="p1", name="Ada"))
         with pytest.raises(DrivineError, match="another id"):
             gom.update(Person, "p1", lambda it: it.model_copy(update={"uuid": "p2"}))
+
+    def test_updates_a_node_whose_packed_text_another_writer_wrote_with_other_spacing_at_the_first_attempt(
+        self, pm, gom
+    ):
+        if pm.type in (DatabaseType.ORACLE, DatabaseType.POSTGRES):
+            pytest.skip("the text is written in Cypher")
+        gom.save(Packed(id="k1", text="one", prefs={"a": 1}))
+        # As TypeScript's Drivine, or a migration, packs it: not as json.dumps would.
+        pm.execute(QuerySpecification("""MATCH (n:Packed {id: 'k1'}) SET n.prefs = '{"a":1}'"""))
+
+        gom.update(Packed, "k1", lambda it: setattr(it, "text", "two"), attempts=1)
+
+        updated = gom.load(Packed, "k1")
+        assert updated is not None and (updated.text, updated.prefs) == ("two", {"a": 1})
 
     def test_replaces_a_list_that_lost_an_item(self, gom):
         gom.save(

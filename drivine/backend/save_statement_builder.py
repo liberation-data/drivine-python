@@ -274,9 +274,7 @@ class SaveStatementBuilder:
             if value is None:
                 declared.append(f"{stored_} IS NULL")
                 continue
-            packed = (
-                json.dumps(to_jsonable_python(value)) if field_ in model.json_packed else _as_compared(stored(value))
-            )
+            packed = self._packed_as_loaded(name, value) if field_ in model.json_packed else _as_compared(stored(value))
             param = bind(f"_loaded{i}", packed)
             expression = self.grammar.vector_value(param) if field_ in model.vector_fields else param
             same = f"NOT coalesce({stored_} <> {expression}, false)"
@@ -321,6 +319,15 @@ class SaveStatementBuilder:
         else:
             read = f"[l IN labels(n) WHERE NOT l IN {bind('_loadedLabelsOwn', list(model.labels))}]"
         return [*declared, *bags, f"size({read}) = size({held}) AND all(l IN {held} WHERE l IN labels(n))"]
+
+    def _packed_as_loaded(self, name: str, value: Any) -> Any:
+        """
+        A JsonPacked field's value as the node held it: the text the load read, so that text another writer packed with
+        other spacing or escaping isn't taken for a change. A value the node held no text for (one a load gives an
+        absent property) is packed as a save packs it.
+        """
+        text = self._options.loaded_properties.get(name)
+        return text if isinstance(text, str) else json.dumps(to_jsonable_python(value))
 
     def _removals(
         self, view: GraphViewModel, obj: Any, replaced: list[str], removed_targets: RemovedTargets

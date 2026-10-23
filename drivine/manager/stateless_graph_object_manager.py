@@ -199,8 +199,12 @@ class StatelessGraphObjectManager:
 
     async def load(self, type_: type[T], id: Any, *, depth: Mapping[str, int] | None = None) -> T | None:
         """The object whose root has the id, or None."""
+        found = await self._load_row(type_, id, _checked(depth))
+        return None if found is None else found[0]
+
+    async def _load_row(self, type_: type[T], id: Any, depth: Mapping[str, int] | None = None) -> tuple[T, Any] | None:
+        """The object whose root has the id, and the row it was mapped from; None when there is none."""
         target = self.registry.model_of(type_)
-        depth = _checked(depth)
         if isinstance(target, GraphViewModel):
             statement = self.backend.load_view(target, depth)
         else:
@@ -211,8 +215,8 @@ class StatelessGraphObjectManager:
         if not rows:
             return None
         if isinstance(target, GraphViewModel):
-            return self.mapper.view(target, rows[0])
-        return self.mapper.fragment(target, rows[0])
+            return self.mapper.view(target, rows[0]), rows[0]
+        return self.mapper.fragment(target, rows[0]), rows[0]
 
     async def count(
         self, type_: type[Any], where: str | Where | None = None, bindings: Mapping[str, Any] | None = None
@@ -410,15 +414,21 @@ class StatelessGraphObjectManager:
         attempt = 0
         while True:
             attempt += 1
-            loaded = await self.load(type_, id)
-            if loaded is None:
+            found = await self._load_row(type_, id)
+            if found is None:
                 return None
+            loaded, row = found
             before = _copy(loaded)
             result = change(loaded)
             if inspect.isawaitable(result):
                 result = await result
             changed: T = loaded if result is None else result  # pyright: ignore[reportAssignmentType]
-            options = self._change_of(target_, before, changed)
+            # The root's properties as the load read them, which the save compares a packed field with.
+            root_row: Mapping[str, Any] = (row.get("root") if isinstance(target_, GraphViewModel) else row) or {}
+            loaded_properties: dict[str, Any] = dict(root_row.get("props") or {})
+            options = dataclasses.replace(
+                self._change_of(target_, before, changed), loaded_properties=loaded_properties
+            )
             try:
                 return await self._write(changed, options, False)
             except StaleObjectError as failure:

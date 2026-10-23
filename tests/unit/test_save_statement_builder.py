@@ -215,3 +215,16 @@ def test_says_a_field_is_not_as_loaded_when_a_save_is_refused_under_the_stamp_it
     assert str(refused) == (
         f"Claim 'c1' changed since it was loaded, under the stamp {STAMP}: a field is not as it was loaded."
     )
+
+
+def test_compares_a_packed_field_as_the_text_the_load_read_and_packs_one_the_node_held_none_for(registry):
+    loaded = Note(id="n1", title="T", tags=set(), extra={"a": 1}, stamp=STAMP)
+    changed = loaded.model_copy(update={"title": "U"})
+
+    def packed(loaded_properties: dict[str, Any]) -> list[Any]:
+        options = SaveOptions(null_policy=NullPolicy.CLEAR, loaded=loaded, loaded_properties=loaded_properties)
+        statement = SaveStatementBuilder(NEO4J_GRAMMAR, registry).build(registry.fragment(Note), changed, options)
+        return [value for key, value in statement.bindings.items() if key.startswith("_loaded") and "a" in str(value)]
+
+    assert packed({"id": "n1", "extra": '{"a":1}'}) == ['{"a":1}'], "as another writer packed it"
+    assert packed({"id": "n1"}) == ['{"a": 1}']

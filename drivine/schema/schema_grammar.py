@@ -59,6 +59,16 @@ class SchemaGrammar:
     gives the backend's render_query the ones there are.
     """
 
+    blocked_by_index: Callable[[BaseException], bool] = field(default=lambda failure: False)
+    """
+    Whether a failure making a uniqueness constraint says a plain range index over the same label and properties is in
+    the way of it. Only where the constraint brings its own index, so the plain one may be dropped for it (Neo4j);
+    never where the constraint needs the plain index (`unique_needs_range`, FalkorDB) or is made beside one (Memgraph,
+    Oracle, Postgres).
+    """
+    drop_named_range: Callable[[str], list[str]] = field(default=lambda name: [])
+    """Drops the range index the engine names so: one in the way of a constraint, whatever made it."""
+
     conflicts: Callable[[UniquenessConstraintSpec, int], str] = field(
         default=lambda spec, limit: _conflicts(spec, limit)
     )
@@ -73,6 +83,25 @@ def _conflicts(spec: UniquenessConstraintSpec, limit: int) -> str:
         f"MATCH (n{label_expression([spec.label])}) WHERE {present} WITH {key} AS value, count(*) AS holders "
         f"WHERE holders > 1 RETURN value LIMIT {limit}"
     )
+
+
+INDEX_ALREADY_EXISTS = "Neo.ClientError.Schema.IndexAlreadyExists"
+"""
+Neo4j's code for "There already exists an index (:Label {prop}). A constraint cannot be created until the index has
+been dropped.", which Neo4j 4.4 to 2026 all give.
+"""
+
+
+def _neo4j_blocked_by_index(failure: BaseException) -> bool:
+    """By the code of the driver's error, under whatever wraps it; never by the message, or a clash of names."""
+    cause: BaseException | None = failure
+    for _ in range(10):
+        if cause is None:
+            return False
+        if getattr(cause, "code", None) == INDEX_ALREADY_EXISTS:
+            return True
+        cause = cause.__cause__
+    return False
 
 
 def _pattern(spec: Any) -> str:
@@ -182,6 +211,8 @@ NEO4J_SCHEMA = SchemaGrammar(
         f"ON EACH [{_props(spec)}]"
     ],
     drop_full_text=lambda spec, name: [f"DROP INDEX {quote_name(name or item_name(spec))} IF EXISTS"],
+    blocked_by_index=_neo4j_blocked_by_index,
+    drop_named_range=lambda name: [f"DROP INDEX {quote_name(name)} IF EXISTS"],
 )
 
 

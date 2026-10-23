@@ -608,6 +608,13 @@ raises `DrivineError` there rather than on first use. Without pi-pilgrim, enforc
   the class, the field and the spec, whether the catalog is enforced first or the fragment's model is built first.
   One given to `ensure` is refused the same way, before it is kept or applied.
   A spec beside the marker is allowed (it tunes the index), as is one on a label no fragment maps.
+- **An index in the way.** Neo4j refuses a uniqueness constraint while a plain range index covers the same label and
+  properties. `ensure` reports that as BLOCKED_BY_INDEX, naming the index, and changes nothing: `FAIL_FAST` raises,
+  `WARN` logs. With `replace_blocking_index=True` (on `gom.constraints.ensure`, or in `SchemaOptions`) the data is
+  read, and unless a value repeats the index is dropped and the constraint made, its own index taking the plain one's
+  place. A constraint given to `schema_manager.ensure` is reported and replaced the same way. Drivine's own keys (the
+  schema marker's, the store's) always replace one. On FalkorDB the constraint needs the range index, and Memgraph,
+  Oracle and Postgres make it beside one, so none is ever reported in the way there.
 - **By hand:** `gom.indexes.ensure(range_index("Session", ["lastActivityAt", "sessionId"]))`, `gom.indexes.recreate`,
   `gom.indexes.drop`, `gom.constraints.ensure(uniqueness_constraint("Person", "email"))`, and `list`.
 - **Each engine's DDL** is written for it: named items on Neo4j, Memgraph's text and vector indexes, FalkorDB's index per

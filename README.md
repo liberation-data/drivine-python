@@ -578,7 +578,9 @@ class AppDrivine(DrivineAssembly):
 await AssemblyHolder.shared(AppDrivine).start()      # makes what is missing; idempotent
 ```
 
-Without pi-pilgrim, enforce it yourself: `await SchemaManager(registry, factory, options).enforce()`.
+`start()` registers the databases whether or not there are catalogs, as drivine4j does, so a missing `DATABASE_TYPE`
+raises `DrivineError` there rather than on first use. Without pi-pilgrim, enforce it yourself:
+`await SchemaManager(registry, factory, options).enforce()`.
 
 - **`ensure` is idempotent.** An item that is there is left; one there with another shape (a vector index's dimensions,
   say) is reported as DRIFT and left, unless `recreate_on_drift`. A uniqueness constraint the data already breaks is a
@@ -596,6 +598,10 @@ Without pi-pilgrim, enforce it yourself: `await SchemaManager(registry, factory,
   them orphans; when it recreates the owner (on a version change, under `recreate_on_startup`, or by `recreate_all`), it
   marks them (`runtime-stale:`), and the next `ensure` recreates them.
   A version change is left to `enforce`.
+- **Catalogs are read once**, from the options the manager is built with; a catalog made later isn't seen, and schema
+  known later is given to `ensure`. With nothing to apply, no catalog or only empty ones and nothing ensured, the
+  manager says so at INFO: that it found no `SchemaCatalog`, or that all it found are empty, naming their owners. So a
+  missing catalog, and one left empty until an embedding model exists, can be told from an application with no schema.
 - **By hand:** `gom.indexes.ensure(range_index("Session", ["lastActivityAt", "sessionId"]))`, `gom.indexes.recreate`,
   `gom.indexes.drop`, `gom.constraints.ensure(uniqueness_constraint("Person", "email"))`, and `list`.
 - **Each engine's DDL** is written for it: named items on Neo4j, Memgraph's text and vector indexes, FalkorDB's index per

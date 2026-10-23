@@ -1,6 +1,7 @@
-"""What a cascading delete through a view follows: every level of a view that contains itself, what a kept node holds,
-and the reads that refuse a cascade that would stop short."""
+"""What a cascading delete through a view follows: only what a save writes, every level of a view that contains itself,
+what a kept node holds, and the reads that refuse a cascade that would stop short."""
 
+import re
 from typing import Annotated, Any
 
 import pytest
@@ -15,6 +16,7 @@ from drivine import (
     NodeFragment,
     NodeId,
     QuerySpecification,
+    ReadOnly,
     Relationship,
     Root,
     StatelessGraphObjectManager,
@@ -67,6 +69,16 @@ class Plain(GraphView):
     notes: Annotated[list[Note], Relationship("HAS")] = []
 
 
+class ReviewedTree(GraphView):
+    """A tree with fields it only reads: reviewers marked so, and the docs below it as a list read over several hops."""
+
+    doc: Annotated[Doc, Root()]
+    notes: Annotated[list[Note], Relationship("HAS")] = []
+    reviewers: Annotated[list[Note], Relationship("REVIEWED_BY"), ReadOnly()] = []
+    below: Annotated[list[Doc], Relationship("PART_OF", Direction.INCOMING, max_depth=3)] = []
+    parts: Annotated[list["ReviewedTree"], Relationship("PART_OF", Direction.INCOMING, max_depth=2)] = []
+
+
 registry = ModelRegistry()
 
 BACKENDS: list[GraphBackend] = [
@@ -90,6 +102,20 @@ def test_checks_a_recursive_field_one_level_below_its_depth_where_it_is_reached(
     [check] = backend.cascade_depth_checks(registry.view(Shelf))
     assert (check.view, check.field, check.max_depth) == ("Tree", "parts", 2)
     assert "beyond" in check.statement.text
+
+
+@pytest.mark.parametrize("backend", BACKENDS, ids=["cypher", "oracle", "postgres"])
+@pytest.mark.parametrize("cascade", [CascadeType.DELETE_ALL, CascadeType.DELETE_ORPHAN])
+def test_follows_only_what_a_save_writes_every_level_of_a_view_nested_in_itself_among_it(
+    backend: GraphBackend, cascade: CascadeType
+):
+    text = backend.delete(registry.view(ReviewedTree), None, cascade).text
+    assert "REVIEWED_BY" not in text
+    assert "PART_OF" in text
+    assert "HAS" in text
+    # The list read over several hops would be a variable-length read of PART_OF.
+    assert not re.search(r"\*1\.\.3|LEVEL <= 3|depth < 3", text)
+    assert [it.field for it in backend.cascade_depth_checks(registry.view(ReviewedTree))] == ["parts"]
 
 
 def test_reads_the_nodes_past_the_depth_through_the_shelf_and_counts_those_the_cascade_does_not_reach():

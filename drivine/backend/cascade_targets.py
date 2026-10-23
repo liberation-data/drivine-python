@@ -33,8 +33,9 @@ class CascadeTargets:
     because FalkorDB evaluates nested ones wrongly when they are combined (FalkorDB/FalkorDB#2006, #3386).
 
     The view's max_depth and the requirements of its nested views apply, so the list holds what loading the view would
-    load. A node reached by two paths is listed twice. A view that contains itself is read a level at a time, each
-    level holding what the root does.
+    load through the relationships a save writes. A read-only field is not followed: other code writes what it loads. A
+    node reached by two paths is listed twice. A view that contains itself is read a level at a time, each level
+    holding what the root does.
     """
 
     def __init__(self, grammar: CypherGrammar) -> None:
@@ -58,7 +59,7 @@ class CascadeTargets:
                 steps.append(rel)
 
         def holders(node: str) -> str:
-            return " + ".join(f"[(h){_hop(rel, '')}({node}) | h]" for rel in steps) if steps else "[]"
+            return " + ".join(f"[(h){_hop(rel)}({node}) | h]" for rel in steps) if steps else "[]"
 
         return Cascade(" + ".join(lists) if lists else "[]", holders, self._beyond)
 
@@ -67,6 +68,10 @@ class CascadeTargets:
     ) -> list[str]:
         lists: list[str] = []
         for rel in model.relationships:
+            # A read-only field (marked so, or a list of fragments read over several hops) is not the view's to delete.
+            # A view nested in itself is not one: each level is one relationship from the level above.
+            if rel.read_only:
+                continue
             into = target(rel)
             if sum(1 for it in path if it is rel) >= rel.max_depth:
                 if isinstance(into, GraphViewModel) and into.type is model.type:
@@ -86,9 +91,8 @@ class CascadeTargets:
         """The nodes one step of the relationship reaches from the end of `chain`, and the chain that ends in them."""
         self._alias_count += 1
         alias = f"c{self._alias_count}"
-        hops = f"*1..{rel.max_depth}" if isinstance(into, FragmentModel) and rel.max_depth > 1 else ""
         labels = into.root.labels if isinstance(into, GraphViewModel) else into.labels
-        step = f"{chain}{_hop(rel, hops)}({alias}"
+        step = f"{chain}{_hop(rel)}({alias}"
         extended = f"{step}{label_expression(labels)})"
         own = ViewProjector(self.grammar).requirements(into, alias) if isinstance(into, GraphViewModel) else []
         every = [*conditions, *own]
@@ -100,8 +104,8 @@ class CascadeTargets:
         return f"[{extended}{where} | {alias}]", extended, every
 
 
-def _hop(rel: RelationshipModel, hops: str) -> str:
-    edge = f"[:{quote_name(rel.type)}{hops}]"
+def _hop(rel: RelationshipModel) -> str:
+    edge = f"[:{quote_name(rel.type)}]"
     if rel.direction is Direction.INCOMING:
         return f"<-{edge}-"
     if rel.direction is Direction.UNDIRECTED:

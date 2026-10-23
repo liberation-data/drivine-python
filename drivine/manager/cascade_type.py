@@ -3,7 +3,9 @@ from enum import StrEnum
 
 class CascadeType(StrEnum):
     """
-    What deleting a view by id deletes besides its root.
+    What deleting a view by id deletes besides its root. A cascade follows only the relationships a save of the view
+    writes: it leaves the nodes of a read-only field (one marked `ReadOnly()`, a `GraphPath`, or a list of fragments
+    read over several hops), and follows each level of a view that contains itself.
     """
 
     NONE = "NONE"

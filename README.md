@@ -1,1536 +1,186 @@
 <a href="https://drivine.org/"><img src="https://raw.githubusercontent.com/liberation-data/drivine/master/website/public/images/splash.jpg" alt="Drivine: graph database client for TypeScript, Python and the JVM"></a>
-# <a href="https://drivine.org/">drivine</a>
 
-**Docs: [drivine.org](https://drivine.org/ts/)**, for TypeScript, Python, and Kotlin & Java.
+# drivine-python
 
-Drivine is a graph database client for Node.js and TypeScript, with a [NestJS](https://nestjs.com/) module, and no need
-for one: see [Without Nest](#3-without-nest). It supports **Neo4j**, **Memgraph**, **FalkorDB**, **Oracle** (SQL/PGQ)
-and **Postgres** as graph stores, plus Amazon Neptune through the low-level API. It gives you two ways to work with a
-graph:
+[![PyPI](https://img.shields.io/pypi/v/drivine.svg)](https://pypi.org/project/drivine/)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
 
-1. **PersistenceManager**: a low-level API where you write the queries yourself. This is the classic Drivine approach.
-2. **Object manager** (`StatelessGraphObjectManager`): a high-level API that maps decorated classes, with a typed
-   query DSL whose references come from the classes themselves.
+**Docs: [drivine.org](https://drivine.org/py/)**, for Python, TypeScript, and Kotlin & Java.
 
-> **On Python or the JVM?** [drivine-python](https://github.com/liberation-data/drivine-python) (`pip install drivine`)
-> is Drivine's Python twin, async first with a sync API. [drivine4j](https://github.com/liberation-data/drivine4j)
-> (`org.drivine:drivine4j`) is its Java and Kotlin twin, the graph client for [Embabel](https://hub.embabel.com), with
-> Spring Boot support and a code-generated DSL. The three share a storage format: a store written from any of them is
-> read, stamped and checked alike by the others.
+A graph database client for Python, supporting **Neo4j**, **Memgraph**, **FalkorDB**, **Oracle** (SQL/PGQ) and
+**Postgres** as graph stores, plus **Amazon Neptune** through the low-level API. Async first, with a sync API written from it, typed, and fast: one statement per round trip, no session
+cache, no lazy loading. It gives you two ways to work with a graph:
 
-Its design goals:
+1. **PersistenceManager**: a low-level API where you write the queries yourself.
+2. **Object manager** (`StatelessGraphObjectManager`): a high-level API that maps Pydantic models, with a query DSL
+   whose typed references are stubs generated from your models.
 
-* Support multiple graph databases, simultaneously if you wish.
-* **Scale to hundreds and thousands of transactions per second, without compromising architectural integrity.**
+Neptune connects for the `PersistenceManager`; the object manager runs on the others. 0.1 is an alpha release: the API
+may still change. See [the design](docs/design.md) for how it came about.
 
-## Contents
+> **On Node.js or the JVM?** [Drivine](https://github.com/liberation-data/drivine)
+> (`npm install @liberation-data/drivine`) and [drivine4j](https://github.com/liberation-data/drivine4j)
+> (`org.drivine:drivine4j`) are its TypeScript and Kotlin & Java twins, with the same object manager, query DSL, schema
+> management and engines. The three share a storage format: a store written from any of them is read, stamped and
+> checked alike by the others.
 
-- [Philosophy](#philosophy)
-- [Installation](#installation)
-- [Quick Start](#quick-start)
-  - [With Nest](#2-with-nest)
-  - [Without Nest](#3-without-nest)
-- [Object Manager](#object-manager)
-  - [Key Concepts](#key-concepts)
-  - [Loading Data](#loading-data)
-  - [Query DSL](#query-dsl)
-  - [Grouped Reads](#grouped-reads-groups)
-  - [Saving Data](#saving-data)
-  - [@NodeStamp](#nodestamp-refusing-a-save-when-the-node-changed)
-  - [Deleting Data](#deleting-data)
-  - [Polymorphism](#polymorphism)
-  - [Mapping Decorators](#mapping-decorators)
-  - [Relationships of a Runtime Type](#relationships-of-a-runtime-type)
-- [PersistenceManager](#persistencemanager)
-- [Supported Engines](#supported-engines)
-- [Schema Management](#schema-management-indexes--constraints)
-- [Multi-Database Support](#multi-database-support)
-- [Security](#security)
-- [Testing](#testing)
-- [The Sample App](#the-sample-app)
-
-## Philosophy
-
-### Composition Over Inheritance
-
-A typical ORM defines one reusable object model, and generates statements to move data between that model and the
-database. That addresses the so-called impedance mismatch, at a cost:
-
-* Generated queries work well for simple cases, but can get out of hand and perform badly when things get complex.
-  Debugging generated statements can be painful.
-* One model for many use cases is a big ask. The original CRUD cases work well, but in harder cases the model gets in
-  the way more than it helps.
-
-Those trade-offs may be acceptable for a relational database, but with a graph database the mismatch hardly exists.
-
-Just as we favour composition over inheritance in software, we prefer composition when mapping the results of complex
-queries. A person plays many roles: sometimes we help them have a great holiday, sometimes they manage a team,
-sometimes they're a person of interest. With Drivine you compose a view for each use case:
-
-```typescript
-@GraphView()
-export class HolidayingPerson {
-    @Root() person: Person;
-
-    @GraphRelationship({ type: 'BOOKED_HOLIDAY', target: () => Holiday })
-    holidays: Holiday[];
-}
+```
+pip install "drivine[neo4j]"      # Neo4j, Memgraph, Neptune
+pip install "drivine[falkordb]"   # FalkorDB
+pip install "drivine[oracle]"     # Oracle 23ai and 26ai, through python-oracledb in thin mode
+pip install "drivine[postgres]"   # Postgres 14 or later, through psycopg 3
+pip install "drivine[pilgrim]"    # DrivineAssembly, for pi-pilgrim; optional
 ```
 
-Behind the scenes, Drivine writes one efficient statement:
+Python 3.11 or newer.
 
-```cypher
-MATCH (person:Person)
-WITH person, [(person)-[:BOOKED_HOLIDAY]->(holiday:Holiday) | holiday {.*}] AS holidays
-RETURN { person: properties(person), holidays: holidays }
+## Quick start
+
+Describe the database in the environment:
+
+```
+DATABASE_TYPE=NEO4J
+DATABASE_HOST=localhost
+DATABASE_USER=neo4j
+DATABASE_PASSWORD=…
 ```
 
-Composition lets you mix and match as needed.
+Declare a fragment for each node a use case reads, and a view that composes them:
 
-## Installation
+```python
+from typing import Annotated
 
-```bash
-npm install @liberation-data/drivine
+from drivine import GraphView, NodeFragment, NodeId, Relationship, RelationshipFragment, Root, TargetNode
+
+
+class Person(NodeFragment, labels=["Person"]):
+    uuid: Annotated[str, NodeId()]
+    name: str
+    bio: str | None = None
+
+
+class Organization(NodeFragment, labels=["Organization"]):
+    uuid: Annotated[str, NodeId()]
+    name: str
+
+
+class WorkHistory(RelationshipFragment):
+    role: str
+    organization: Annotated[Organization, TargetNode()]
+
+
+class PersonCareer(GraphView):
+    person: Annotated[Person, Root()]
+    employment_history: Annotated[list[WorkHistory], Relationship("WORKS_FOR")] = []
 ```
 
-Drivine needs `reflect-metadata` and `neo4j-driver` as peer dependencies, and NestJS (6 to 11) only for its module. The
-FalkorDB, Oracle (`oracledb`, thin mode, no Instant Client needed) and Postgres drivers are bundled.
+Then load and save, each in one statement:
 
-The object manager reads decorators and their type metadata, so enable both in `tsconfig.json`:
+```python
+import asyncio
 
-```json
-{
-    "compilerOptions": {
-        "experimentalDecorators": true,
-        "emitDecoratorMetadata": true
-    }
-}
+from drivine import DatabaseRegistry, PersistenceManagerFactory, StatelessGraphObjectManager, refs
+
+
+async def main() -> None:
+    registry = DatabaseRegistry()
+    registry.build_or_resolve_from_env()
+    gom = StatelessGraphObjectManager(PersistenceManagerFactory(registry).get())
+    try:
+        await gom.save(
+            PersonCareer(
+                person=Person(uuid="p1", name="Ada", bio="Design Lead"),
+                employment_history=[WorkHistory(role="Lead", organization=Organization(uuid="o1", name="Studio"))],
+            )
+        )
+        q = refs(PersonCareer)
+        for career in await gom.load_all(PersonCareer, where=q.person.bio.contains("Lead")):
+            print(career.person.name, [it.organization.name for it in career.employment_history])
+    finally:
+        await registry.close()
+
+
+asyncio.run(main())
 ```
 
-## Quick Start
+From here: [the persistence manager](#statements) for Cypher of your own, [transactions](#transactions),
+[queries](#queries) and [typed references](#typed-references), [the sync API](#sync), and
+[DrivineAssembly](#with-pi-pilgrim) to wire it into an application.
 
-### 1. Configuration
+## Connecting
 
-Connections come from the environment, or a `.env` file that Drivine loads. The default database is configured with
-`DATABASE_*`, and a named one with `<NAME>_DATABASE_*`:
+Describe a database in the environment, with the same variables as TypeScript's Drivine and drivine4j, so one `.env`
+serves an application in any of them:
 
-```bash
-DATABASE_TYPE=NEO4J          # NEO4J, MEMGRAPH, FALKORDB, ORACLE, NEPTUNE or POSTGRES
+```
+DATABASE_TYPE=NEO4J
 DATABASE_HOST=localhost
 DATABASE_PORT=7687
 DATABASE_USER=neo4j
-DATABASE_PASSWORD=password
-DATABASE_NAME=neo4j          # optional on the graph engines; on Oracle, the service, e.g. FREEPDB1
-DATABASE_POOL_MAX=40
-DATABASE_CONNECTION_TIMEOUT=5000
+DATABASE_PASSWORD=…
 ```
 
-Use them through Nest's module, or without Nest. Only the setup differs: the decorators, the DSL, `@Transactional`
-and the managers are the same.
+A second database takes a prefix, `ANALYTICS_DATABASE_TYPE` and so on. Then register them:
 
-### 2. With Nest
+```python
+from drivine import DatabaseRegistry, PersistenceManagerFactory
 
-Register the connections with the module, from `@liberation-data/drivine/nest`:
+registry = DatabaseRegistry()
+registry.build_or_resolve_from_env()              # "default"
+registry.build_or_resolve_from_env("analytics")   # ANALYTICS_DATABASE_*
 
-```typescript
-import { DrivineModule } from '@liberation-data/drivine/nest';
-
-@Module({
-    imports: [
-        DrivineModule.withOptions({
-            connectionProviders: [DatabaseRegistry.buildOrResolveFromEnv()]
-        })
-    ],
-    providers: [RouteRepository, PersonService]
-})
-export class AppModule {}
-```
-
-Then inject a persistence manager, an object manager or a statement. The `Inject…` decorators come from
-`@liberation-data/drivine/nest` too; everything else from `@liberation-data/drivine`:
-
-```typescript
-@Injectable()
-export class RouteRepository {
-    constructor(
-        @InjectPersistenceManager() readonly persistenceManager: PersistenceManager,
-        @InjectCypher(__dirname, 'routesBetween') readonly routesBetween: CypherStatement
-    ) {}
-
-    @Transactional() // Propagation.REQUIRED by default: join the current transaction, or start one.
-    async findFastestBetween(start: string, destination: string): Promise<Route> {
-        return this.persistenceManager.getOne(
-            new QuerySpecification<Route>()
-                .withStatement(this.routesBetween)
-                .bind([start, destination])
-                .limit(1)
-                .transform(Route)
-        );
-    }
-}
-```
-
-Or, with the object manager, declare what you want and let Drivine write the statement:
-
-```typescript
-@Injectable()
-export class PersonService {
-    constructor(@InjectGraphObjectManager() readonly gom: StatelessGraphObjectManager) {}
-
-    async leads(): Promise<PersonCareer[]> {
-        return this.gom.loadAll(PersonCareer, (q) => ({ where: q.person.bio.containsIgnoreCase('lead') }));
-    }
-}
-```
-
-The module closes the connections when the application stops.
-
-### 3. Without Nest
-
-In Express, Fastify, a job or a CLI, make the factories yourself, once, and hand the managers to your classes:
-
-```typescript
-import {
-    cypherStatement,
-    DatabaseRegistry,
-    GraphObjectManagerFactory,
-    inDrivineContext,
-    PersistenceManager,
-    PersistenceManagerFactory,
-    QuerySpecification,
-    StatelessGraphObjectManager,
-    Transactional
-} from '@liberation-data/drivine';
-import { readFileSync } from 'fs';
-
-DatabaseRegistry.buildOrResolveFromEnv();                  // and buildOrResolveFromEnv('ANALYTICS'), …
-const persistenceManagers = new PersistenceManagerFactory();
-const graphObjectManagers = new GraphObjectManagerFactory(persistenceManagers);
-
-export class RouteRepository {
-    private readonly routesBetween = cypherStatement(readFileSync(`${__dirname}/routesBetween.cypher`, 'utf8'));
-
-    constructor(readonly persistenceManager: PersistenceManager = persistenceManagers.get()) {}
-
-    @Transactional() // the same as in Nest: join the current transaction, or start one
-    async findFastestBetween(start: string, destination: string): Promise<Route> {
-        return this.persistenceManager.getOne(
-            new QuerySpecification<Route>()
-                .withStatement(this.routesBetween)
-                .bind([start, destination])
-                .limit(1)
-                .transform(Route)
-        );
-    }
-}
-
-export class PersonService {
-    constructor(readonly gom: StatelessGraphObjectManager = graphObjectManagers.get()) {}
-
-    async leads(): Promise<PersonCareer[]> {
-        return this.gom.loadAll(PersonCareer, (q) => ({ where: q.person.bio.containsIgnoreCase('lead') }));
-    }
-
-    @Transactional()
-    async hire(person: Person): Promise<void> {
-        await this.gom.save(person);
-    }
-}
-```
-
-**`@Transactional` needs no setup.** Drivine keeps the transaction in Node's `AsyncLocalStorage`, which follows every
-`await`. A marked method starts a transaction when none is running, and every marked method it calls, in any class,
-joins it. Nothing passes a transaction or a context around:
-
-```typescript
-class AuditLog {
-    constructor(readonly gom: StatelessGraphObjectManager = graphObjectManagers.get('AUDIT')) {}
-
-    @Transactional()
-    async record(event: AuditEvent): Promise<void> {
-        await this.gom.save(event);
-    }
-}
-
-class Onboarding {
-    constructor(readonly people = new PersonService(), readonly audit = new AuditLog()) {}
-
-    @Transactional()
-    async onboard(person: Person): Promise<void> {
-        await this.people.hire(person);                           // joins onboard's transaction
-        await this.audit.record(AuditEvent.hired(person));        // so does this, on another database
-    } // both commit here; a throw anywhere in it rolls both back
-}
-```
-
-To run a block in one transaction without a decorator:
-
-```typescript
-await inDrivineContext()
-    .withTransaction()
-    .run(async () => { /* … */ });
-```
-
-Close the connections when the application stops:
-
-```typescript
-await Promise.all(DatabaseRegistry.getInstance().providers.map(async (it) => it.end()));
-```
-
-### Return One Map
-
-When you write a statement yourself, return a **single map** or a **scalar**, not several columns. That maps cleanly
-with `.transform()` and avoids trouble with nulls:
-
-```cypher
--- Wrong: several columns, awkward to map
-RETURN a.name, a.age, b.title
-
--- Right: one map
-RETURN { name: a.name, age: a.age, title: b.title } AS result
-
--- Right: a node's properties, or a scalar
-RETURN properties(p)
-RETURN count(p) AS total
-```
-
-## Object Manager
-
-`StatelessGraphObjectManager` maps decorated classes to the graph. It writes the statements itself, and gives you a
-typed DSL for filtering and ordering.
-
-It keeps no state between calls. A load returns what the store holds. What a save writes depends only on the object
-and the options you pass.
-
-Inject one for each database:
-
-```typescript
-constructor(
-    @InjectGraphObjectManager() readonly gom: StatelessGraphObjectManager,              // the default database
-    @InjectGraphObjectManager('ANALYTICS') readonly analytics: StatelessGraphObjectManager
-) {}
-```
-
-Or take one from `GraphObjectManagerFactory`, which the module provides: `factory.get('ANALYTICS')`. Without Nest, from
-the factory you made: `graphObjectManagers.get('ANALYTICS')`.
-
-### Key Concepts
-
-#### 1. NodeFragment: a Node
-
-A `@NodeFragment` maps one node. Every property of the object is stored, unless it is marked `@GraphTransient()`:
-
-```typescript
-@NodeFragment({ labels: ['Person'] })
-export class Person {
-    @NodeId() uuid: string;
-    name: string;
-    bio?: string;
-}
-```
-
-A fragment names at least one label. A subclass carries its own labels as well as its superclass's: see
-[Polymorphism](#polymorphism).
-
-**Defaults for missing properties.** A property the node doesn't have keeps the class's initializer. Two decorators
-handle a stored null:
-
-```typescript
-@NodeFragment({ labels: ['User'] })
-export class UserNode {
-    @NodeId() id: string;
-    @Default() status = 'active';        // a stored null loads as 'active'
-    @EmptyWhenAbsent() tags: string[];   // absent or null loads as []; an object loads as {}
-}
-```
-
-#### 2. RelationshipFragment: a Relationship's Properties
-
-A `@RelationshipFragment` holds the properties of a relationship, and the node it leads to:
-
-```typescript
-@RelationshipFragment()
-export class WorkHistory {
-    startDate: string;                  // a property of the relationship
-    role: string;                       // and another
-    @TargetNode() target: Organization; // the node it leads to
-}
-```
-
-Use it for employment history, transactions, audit trails, or any relationship with data of its own.
-
-#### 3. GraphView: Composing Fragments
-
-A `@GraphView` composes fragments and relationships into one result. `@Root` marks where the query starts:
-
-```typescript
-@GraphView()
-export class PersonCareer {
-    @Root() person: Person;
-
-    @GraphRelationship({ type: 'WORKS_FOR', target: () => WorkHistory })
-    employmentHistory: WorkHistory[] = [];
-}
-```
-
-`@GraphRelationship` takes:
-
-| Option | Meaning |
-|---|---|
-| `type` | The relationship type. |
-| `direction` | `Direction.OUTGOING` (the default), `INCOMING` or `UNDIRECTED`. |
-| `target` | The class of the related item: a fragment, a relationship fragment or a view, as a function so that classes may refer to each other in either order. It is required for a list, since TypeScript records only `Array` as a list's type. For a single item it defaults to the property's type. |
-| `required` | Only roots that have the relationship are loaded. TypeScript erases `?:`, so a view says this rather than the type: see [Required Relationships](#required-relationships). |
-| `maxDepth` | For a recursive relationship, how deep to expand. Defaults to 1. |
-
-When a view refers to a class declared later in the same module, type the property with `Related<T>`, so the decorator
-metadata doesn't read the class before it exists: `@GraphRelationship({ type: 'TO_B', target: () => B }) b?: Related<B>`.
-
-#### 4. Recursive Relationships: Hierarchies and Ontologies
-
-A view whose relationship targets its own class is expanded to `maxDepth` levels:
-
-```typescript
-@NodeFragment({ labels: ['Location'] })
-export class Location {
-    @NodeId() uuid: string;
-    name: string;
-    type: string;
-}
-
-@GraphView()
-export class LocationHierarchy {
-    @Root() location: Location;
-
-    @GraphRelationship({ type: 'HAS_LOCATION', target: () => LocationHierarchy, maxDepth: 3 })
-    subLocations: LocationHierarchy[];
-}
-```
-
-At the last level a list is `[]` and a single item is undefined. To walk upwards, make another view with
-`direction: Direction.INCOMING`. A query can override the depth:
-
-```typescript
-await gom.loadAll(LocationHierarchy, (q) => ({
-    where: q.location.type.eq('continent'),
-    depth: { subLocations: 5 }
-}));
-```
-
-Cycles through other views (A → B → A) are expanded to `maxDepth` as well. A view nested in itself is saved, each level
-one relationship from the one above. A list of *fragments* read over several hops (`maxDepth` above 1 on a list of a
-fragment) is loaded and never written.
-
-#### 5. Path Traversal: Skipping Intermediate Nodes
-
-`@GraphRelationship` is one hop. `@GraphPath` follows several and maps only the node at the end:
-
-```typescript
-@GraphView()
-export class ActorDirectors {
-    @Root() actor: Actor;
-
-    @GraphPath([hop('ACTED_IN', Direction.OUTGOING, 'Movie'), hop('DIRECTED_BY')], { target: () => Director })
-    directors: Director[];
-}
-```
-
-Each node at the end is returned once: an actor who made two movies with one director gets that director once. A
-`hop`'s label constrains the node it reaches. `required: true` keeps only the roots the path leads somewhere from. A
-path is read-only.
-
-One hop may name an **order**: a property of the node it reaches, lowest first unless `ascending` is `false`. A list then
-holds its targets in the order of the first node of that hop that leads to each, and a single field holds the target the
-first such node leads to:
-
-```typescript
-@GraphView()
-export class SessionStarter {
-    @Root() session: Session;
-
-    // who wrote the earliest message
-    @GraphPath([hop('HAS_MESSAGE', Direction.OUTGOING, 'Message', 'sentAt'), hop('AUTHORED_BY')], { target: () => Person })
-    startedBy?: Person;
-}
-```
-
-A node of the ordered hop without the property comes last, whichever way the path is read. Targets whose first nodes
-hold equal values come in no set order. The property should hold values of one type: every backend reads the order the
-same way where it does, a text of digits such as `'0100'` is ordered as text, and an empty text is a text, the lowest
-one. Where it holds texts on some nodes and
-numbers on others, every backend reads every text before every number lowest first, and after them highest first, as
-Neo4j's ORDER BY does. A group key's path names no order: `pathKey` refuses one.
-
-#### 6. Aggregates: Counting and Summarising Without Loading
-
-`@Count` and `@Aggregate` compute a number for each root in the query, so you don't load a list just to size it:
-
-```typescript
-@GraphView()
-export class ActorStats {
-    @Root() actor: Actor;
-    @Count('ACTED_IN') movieCount: number;
-    @Aggregate({ function: AggregateFunction.AVG, type: 'RATED', property: 'score' }) avgRating?: number;
-    @Aggregate({ function: AggregateFunction.SUM, type: 'RATED', property: 'score' }) totalRating: number;
-}
-```
-
-`SUM` and `COUNT` over nothing are 0; `AVG`, `MIN` and `MAX` over nothing are undefined. Aggregates follow one hop and
-belong to one root. To group nodes by a key and rank the groups, use a [grouped read](#grouped-reads-groups).
-
-### Loading Data
-
-```typescript
-const everyone = await gom.loadAll(PersonCareer);
-const one = await gom.load(PersonCareer, uuid);                          // undefined when there is none
-const open = await gom.loadAll(Issue, (q) => ({ where: q.state.eq('open') }));
-const raw = await gom.loadAll(Issue, 'n.state = $state', { state: 'open' }); // a predicate of your own, over n
-```
-
-#### Count
-
-`count` counts exactly what `loadAll` would return for the same type and filter:
-
-```typescript
-await gom.count(Issue);
-await gom.count(Issue, (q) => ({ where: q.state.eq('open') }));
-await gom.count(RaisedAndAssignedIssue);   // only the issues that meet the view's required relationships
-```
-
-A fragment is counted by its labels. A view counts only the roots that meet its required relationships and paths, so
-the number equals `loadAll(...).length`, not a count of nodes.
-
-#### Vector Search (`loadNearest`)
-
-`loadNearest` runs an approximate nearest-neighbour search and returns each hit with a similarity score. It works on a
-view, by its root's embedding, and on a fragment:
-
-```typescript
-@NodeFragment({ labels: ['Proposition'] })
-export class PropositionNode {
-    @NodeId() id: string;
-    text: string;
-    @VectorIndex({ similarity: 'COSINE' }) embedding?: number[];
-}
-
-const hits: Scored<PropositionView>[] = await gom.loadNearest(PropositionView, queryEmbedding, { topK: 20 });
-hits.forEach((it) => console.log(it.score, it.value.proposition.text));
-```
-
-The searched embedding is the fragment's `@VectorIndex` field: inferred when there is one, and named with `property`
-when there are several. The score is a similarity, higher meaning more similar, on every engine, so `threshold` means
-the same thing everywhere.
-
-| Option | Meaning |
-|---|---|
-| `topK` | How many to return. Without `searchK`, also how many the index is asked for. |
-| `searchK` | How many the index is asked for, at least `topK`. `topK` then trims after the filter. |
-| `threshold` | The least score a hit may have. |
-| `where` | A condition applied after the search: references, or a predicate over `n` with `bindings`. |
-| `partitionLabel` | Search the index of another label over the same property: one index per corpus or tenant. |
-| `property` | Which `@VectorIndex` field, when the fragment has several. |
-| `depth` | `maxDepth` overrides for a view. |
-
-**`topK` is the index's `k`, not a promised count.** A view's required relationships, `threshold` and `where` filter
-after the search, so a search can return fewer than `topK`.
-
-**`k` is also the search's beam.** On Lucene-backed engines the result queue is the HNSW candidate queue, so a small
-`k` can miss a vector that really is nearest. `searchK` widens the search without widening the result:
-
-```typescript
-// search with a beam of 200, and return the best 40 that pass the filter
-await gom.loadNearest(PropositionView, queryEmbedding, {
-    topK: 40,
-    searchK: 200,
-    where: (q) => [q.proposition.contextId.eq(ctx), q.mentions.any((m) => m.resolvedId.eq(entityId))]
-});
-```
-
-A filtered search dilutes: at 22% selectivity, 40 asked for returns about 9, the nearest overall that happen to pass
-rather than the nearest of those that pass. `searchK` mitigates that. A per-partition index avoids it: with one vector
-index for each partition label, `partitionLabel` searches inside the partition, which is filtered by construction.
-
-#### Full-Text Search (`loadMatching`)
-
-`loadMatching` is the full-text mirror of `loadNearest`. The relevance is scaled to `[0, 1]`, the best hit being 1:
-
-```typescript
-@NodeFragment({ labels: ['Chunk'] })
-export class ChunkNode {
-    @NodeId() id: string;
-    @FullTextIndex() text: string;
-}
-
-await gom.loadMatching(ChunkNode, 'graph databases', { topK: 20 });
-await gom.loadMatching(ChunkView, 'graph databases', { topK: 20, threshold: 0.5, where: (q) => q.chunk.sectionId.eq('s1') });
-```
-
-The index is the fragment's `@FullTextIndex`: on a property for one field, or on the class,
-`@FullTextIndex({ properties: ['title', 'body'] })`, for several. Name one with `property` when the fragment declares
-more than one. The text is the engine's full-text language (Lucene on Neo4j): escape user input yourself.
-
-### Query DSL
-
-A query is a function of the class's **references**, `q`, which mirror its fields. The compiler checks each one, so a
-query over a field the class doesn't have, or a comparison with a value of the wrong type, doesn't compile:
-
-```typescript
-const leads = await gom.loadAll(PersonCareer, (q) => ({
-    where: q.person.bio.contains('Lead'),
-    orderBy: q.person.name.asc(),
-    limit: 20
-}));
-```
-
-A query may hold `where`, `orderBy`, `limit`, `skip`, `seek` and `depth`.
-
-#### Conditions
-
-```typescript
-// AND: a list of conditions
-where: [q.person.name.eq('Alice'), q.person.bio.isNotNull()]
-
-// OR, AND and NOT
-where: anyOf(q.person.name.eq('Alice'), q.person.name.eq('Bob'))
-where: [q.issue.state.eq('open'), anyOf(q.issue.id.eq(123), q.assignedTo.name.eq('Alice'))]
-where: not(q.issue.locked.eq(true))
-
-// a relationship's target, or a nested view's root and relationships
-where: q.assignedTo.name.eq('Alice')
-where: q.raisedBy.worksFor.name.startsWith('Ac')
-```
-
-A condition on a relationship holds when at least one related node meets it. Each condition is its own existence check,
-so two conditions need not hold of the same related node. When they must, use `any`:
-
-```typescript
-// propositions with at least one mention that resolves to this entity
-where: q.mentions.any((m) => m.resolvedId.eq(entityId))
-
-// one mention that is both the subject and resolves to this entity
-where: q.mentions.any((m) => [m.role.eq('SUBJECT'), m.resolvedId.eq(entityId)])
-
-// propositions with no such mention, including those with no mentions at all
-where: q.mentions.none((m) => m.resolvedId.eq(entityId))
-```
-
-#### Operators
-
-| Kind | Operators |
-|---|---|
-| Comparison | `eq`, `neq`, `gt`, `gte`, `lt`, `lte`, `in`, `notIn` |
-| Text | `contains`, `startsWith`, `endsWith`, `matches` (a regular expression; not on FalkorDB), `containsIgnoreCase`, `eqIgnoreCase` |
-| Null | `isNull()`, `isNotNull()` |
-| List property | `hasItem(value)`: the value is in a list-valued property, the mirror of `in` |
-| Logic | `anyOf(...)`, `allOf(...)`, `not(...)`, a list for AND |
-| Labels | `instanceOf(Type)`: the node carries all the labels of a fragment class. `hasAnyLabel('A', 'B')`: it carries any of them |
-| Order | `asc()`, `desc()`, then `nullsFirst()` or `nullsLast()` |
-
-`gt`, `gte`, `lt` and `lte` are offered on numbers, texts and dates, and the text operators on texts alone.
-
-#### Querying Fragments
-
-The DSL isn't only for views. Every fragment has references to its own fields:
-
-```typescript
-await gom.loadAll(ChunkNode, (q) => ({ where: q.sectionId.eq('sec-1') }));
-await gom.count(ChunkNode, (q) => ({ where: q.sectionId.eq('sec-1') }));
-await gom.loadAll(WebUser, (q) => ({ where: q.instanceOf(AnonymousWebUser) }));
-```
-
-A reference uses the field's name. Drivine maps it to the stored name, whether `@GraphProperty` renamed it or it is a
-`@NodeStamp` field, and an entry of a `@PropertyBag` is reached through the bag: `q.metadata.source.eq('wiki')`.
-
-#### Runtime Keys
-
-When the property isn't known until run time, such as an arbitrary bag key or a filter a caller names, give the stored
-name. Values are still bound as parameters:
-
-```typescript
-where: q.property('metadata.source').eq('wiki')
-where: q.predicate('metadata.tags', 'HAS_ITEM', 'kotlin')
-```
-
-A name that isn't a plain identifier is quoted for you, and can't break out of its quotes.
-
-#### Ordering
-
-```typescript
-orderBy: [q.person.name.asc(), q.person.uuid.asc()]
-orderBy: q.proposition.confidence.desc().nullsLast()
-```
-
-Left to itself, the database decides where rows with no value go. Cypher ranks null above every value, so a descending
-order starts with them. `nullsFirst()` and `nullsLast()` say otherwise. No index supplies that order, so leave it off a
-property that is never null.
-
-**An order by an expression.** A ranking computed from several properties is an expression over the root's
-properties, built from `plus`, `minus`, `times`, `div`, `negate`, `exp`, `floor`, `coalesce`, `epochSeconds` and
-`caseOf`. Every value you give is bound. The ranking runs in the database with its `limit`, and later terms break its
-ties:
-
-```typescript
-orderBy: [
-    caseOf([above(q.validFrom, asOf).or(atMost(q.validTo, asOf)).then(0)],
-           times(q.confidence, exp(negate(times(q.decay, floor(div(minus(epochSeconds(asOf), q.lastAccessedSeconds), 86400)))))))
-        .desc(),
-    q.id.asc()
-]
-```
-
-An expression reads only the root's properties, and is refused with `seek`.
-
-**Ordering a relationship's list.** An order on a relationship's property sorts that list in each object, not the
-roots: `orderBy: [q.issue.id.desc(), q.assignedTo.name.asc()]` orders the issues by id, and each issue's assignees by
-name. A nested view's list sorts the same way: `q.raisedBy.worksFor.name.desc()`. This works the same on every engine
-and needs no plugin. A recursive list can't be ordered by the query: use `@SortedBy`, which orders every level.
-
-**`@SortedBy`** sorts a list relationship after it is loaded, on every load of the view:
-
-```typescript
-@GraphRelationship({ type: 'HAS_CONTRIBUTOR', target: () => Contributor })
-@SortedBy('name')                      // ascending; @SortedBy('name', false) for descending
-contributors: Contributor[];
-
-@SortedBy('contributor.name')          // a path into a related view or relationship fragment
-```
-
-Nulls go last.
-
-#### Limit and Pagination
-
-`limit` and `skip` are applied in the database, after the order:
-
-```typescript
-await gom.loadAll(PropositionView, (q) => ({ orderBy: q.proposition.created.desc(), limit: 20 }));
-await gom.loadAll(PropositionView, (q) => ({ orderBy: q.proposition.created.desc(), skip: 40, limit: 20 }));
-```
-
-For a view, `limit` bounds the roots: each view still has all its relationships. Pair it with `orderBy`, or the subset
-is arbitrary. `count` ignores `limit` and `skip`.
-
-For large or changing results, page by **keyset** with `seek`. Its values follow the order's terms, in the same order.
-Drivine works out each comparison from the direction. End the order with a unique key, so that ties can't be skipped or
-repeated:
-
-```typescript
-const page = await gom.loadAll(SessionView, (q) => ({
-    orderBy: [q.session.lastActivityAt.desc(), q.session.sessionId.desc()],
-    seek: cursor ? [q.session.lastActivityAt.after(cursor.lastActivityAt), q.session.sessionId.after(cursor.sessionId)] : undefined,
-    limit: pageSize + 1   // one more than a page tells you whether there is a next one
-}));
-```
-
-- **The ordered properties must not be null.** A row whose key is null meets no comparison, so it drops out of every
-  page after the first.
-- `seek` is refused without a matching order, with a null cursor value, with `skip`, with an order that places its
-  nulls, and with an expression.
-- **Index the cursor.** A keyset is cheap only where the engine can seek into an index and stop. The index mirrors the
-  cursor: a range index over exactly the ordered properties, in order, such as
-  `@RangeIndex({ properties: ['lastActivityAt', 'sessionId'] })` on the class. Profiled on Neo4j with 200,000 nodes, a
-  page from the middle took 27 database accesses with that index, 200,020 with an index on the first key alone, and
-  500,010 with none.
-- This is about Neo4j. Memgraph and FalkorDB sort between the scan and the limit whatever is indexed, so a keyset costs
-  what is left rather than a page. `seek` is still worth having there, for pages that don't shift under concurrent
-  writes.
-
-**Drivine tells you when the index is missing.** An ordered query is checked against the database's indexes, and one
-that nothing mirrors is reported, once for each label and set of properties. Ordering without an index is correct,
-only unindexed, so the default is to warn. Turn it up in development or CI:
-
-```typescript
-DrivineModule.withOptions({
-    connectionProviders: [DatabaseRegistry.buildOrResolveFromEnv()],
-    query: { indexAdvice: 'FAIL' }   // 'WARN' (the default) or 'OFF'
-});
-```
-
-That applies to every manager the module makes. Without Nest, give it to the factory:
-`new GraphObjectManagerFactory(persistenceManagers, { indexAdvice: 'FAIL' })`. To change one manager:
-`gom.indexAdvice = 'FAIL'`. A query pinned to one root, by an equality on the id or on a uniquely constrained property,
-is never advised on. The index list is read once and kept; after making indexes as the application runs, call
-`gom.indexAdvisor.refresh()`.
-
-### Grouped Reads (`groups`)
-
-`gom.groups` groups a fragment's nodes by a key and gives numbers about each group: a count, a sum, a ranking. It is
-one statement on every engine, Oracle included, and nothing is loaded to be tallied in the application.
-
-Each part of a grouped read is a clause of the query you would write by hand:
-
-| Here | Cypher | SQL |
-| --- | --- | --- |
-| `groups.load(T, ...)` | `MATCH (n:T)` | `FROM t` |
-| `where` | `WHERE` before the `WITH` | `WHERE` |
-| `keys: { page: key(q.page) }` | `WITH n.page AS page, …` | `GROUP BY page` |
-| `keys: { user: pathKey(User, [...]) }` | `MATCH (n)-[…]->(user:User)`, then `WITH user, …` | a join, then `GROUP BY` its id |
-| `aggregates: { votes: count() }` | `count(n) AS votes` | `COUNT(*) AS votes` |
-| `aggregates: { likes: count(q.helpful.eq(true)) }` | `sum(CASE WHEN … THEN 1 ELSE 0 END) AS likes` | the same |
-| `having` | `WHERE` after the `WITH` | `HAVING` |
-| `orderBy`, `limit`, `skip` | `ORDER BY`, `LIMIT`, `SKIP` | `ORDER BY`, `OFFSET`, `FETCH FIRST` |
-
-The examples use a piece of feedback on a docs page:
-
-```typescript
-@NodeFragment({ labels: ['Feedback'] })
-export class Feedback {
-    @NodeId() id: string;
-    page: string;
-    helpful: boolean;
-    createdAt: Date;
-}
-```
-
-**Group and count.** "For each page, how many?"
-
-```typescript
-const votes: Map<string, number> = await gom.groups.countBy(Feedback, 'page');
-// Map { '/agents' => 2, '/install' => 3 }
+pm = PersistenceManagerFactory(registry).get()    # the default database
+...
+await registry.close()                            # when the application stops
 ```
 
-**Several numbers, and the three filters.**
+On FalkorDB, `DATABASE_NAME` names the graph, `graph` by default.
 
-```typescript
-const ratings = await gom.groups.load(Feedback, (q) => ({
-    where: q.createdAt.gte(march),                                // 1. which nodes are read at all
-    keys: { page: key(q.page) },
-    aggregates: { votes: count(), likes: count(q.helpful.eq(true)) }, // 2. which nodes count toward one number
-    having: [['votes', 'gte', 3]],                                // 3. which groups are returned
-    orderBy: [['votes', 'desc']],
-    limit: 10
-}));
-// [{ page: '/install', votes: 3, likes: 2 }, …]: each row is typed by its keys and aggregates
-```
-
-| Filter | Removes |
-| --- | --- |
-| `where` | nodes, before anything is grouped |
-| a filtered aggregate | nothing: it decides which nodes that one number counts |
-| `having` | whole groups, after they are counted |
-
-The mistake to look for is `helpful.eq(true)` moved into `where`. It is valid, and then `votes` counts only the helpful
-ones, so `likes` equals `votes` on every row.
-
-**Group by a node, not a value.** "For each user, how many messages did they write?" A path says how a message reaches
-its owner, and the key comes back as the node, mapped as a load of its fragment maps it:
-
-```typescript
-const top = await gom.groups.load(Message, (q) => ({
-    where: q.role.eq('USER'),
-    keys: { user: pathKey(GuideUser, [hop('HAS_MESSAGE', Direction.INCOMING, 'ChatSession'), hop('OWNED_BY')]) },
-    aggregates: { messages: count() },
-    orderBy: [['messages', 'desc']],
-    limit: 5
-}));
-top.map((it) => [it.user.username, it.messages]);
-```
-
-The aggregates are `count(filter?)`, `sum(property, filter?)`, `avg`, `min` and `max`. `having` compares an aggregate
-with a number by `eq`, `neq`, `gt`, `gte`, `lt` or `lte`, its entries joined by AND.
-
-What every engine agrees on:
-
-- A group exists because a node is in it.
-- A node that reaches no key node is in no group. One that reaches several is in each, and once in each, however many
-  ways lead there.
-- `sum`, `avg`, `min` and `max` skip a node with no value. Over no values `sum` is 0 and the others are undefined.
-- An aggregate's filter never takes a node out of its group: a group none of whose nodes meet it still has 0.
-- Ties are broken by the keys, ascending, so a top 5 is the same five on every engine.
-
-Where Oracle differs: `min` and `max` of a text skip a value stored as `""`, which Oracle reads as no value. A `sum` or
-an `avg` of decimals is decimal arithmetic, so 0.1 + 0.2 is 0.3 there.
-
-### Saving Data
-
-A save writes what the object holds. It doesn't depend on whether the object was loaded, or on anything the manager
-remembers, because the manager remembers nothing.
-
-```typescript
-await gom.save(view);                                            // every field that is set; relationships are added, never removed
-await gom.save(view, { replace: ['assignedTo'] });               // this field's list is the whole list
-await gom.save(view, { replace: 'all' });                        // every relationship field's list is the whole list
-await gom.save(chunk, { except: ['embedding'] });                // write everything but these
-await gom.save(person, { only: ['name'] });                      // write just these
-await gom.save(edited, { from: loaded });                        // checked against the object as it was loaded
-await gom.update(Person, id, (it) => { it.name = 'Ada'; });      // load, change, save what differs
-await gom.create(person);                                        // make it only if it is not there; undefined when it is
-await gom.edges.unrelate(nodeRef(Issue, a), nodeRef(Person, b), 'ASSIGNED_TO');
-```
-
-A save is one statement: the root, the relationships it drops, each related node and the relationship to it. It is
-applied whole or not at all, with or without a transaction, on every engine.
-
-`only` and `except` name fields of the object, and for a view fields of its root. A view's relationships are written
-whatever they name. Give one or the other, not both.
-
-`from` is the object as you loaded it, when what you save is a changed copy of it. The save is then checked against the
-stamp `from` carries, whatever stamp the copy carries, as `update` checks against what it loaded. On Neo4j it is also
-checked against each field of `from`'s root: see [When a Save Is Refused](#when-a-save-is-refused). It is refused before
-anything is written if `from` is the object saved itself, is of another class, has another id, or carries no stamp.
-Changed in place, an object no longer says what was loaded: save a copy. A copy of a view may share the root with
-`from` when it changes only relationships, but don't change a root it shares in place. `saveAll` takes no `from`.
-
-```typescript
-const loaded = (await gom.load(Person, id))!;
-// ... later, from what the user changed:
-await gom.save(Object.assign(new Person(), loaded, { name: form.name }), { from: loaded });
-```
-
-`save` returns the saved object. On a class with a [`@NodeStamp`](#nodestamp-refusing-a-save-when-the-node-changed)
-field, use the returned object from then on: it carries the stamps the save left, on the root and on each related node
-that has one.
-
-#### Relationships
-
-A save adds the relationships the object holds and removes none. To remove, name the field in `replace`: its list is
-then the whole list.
-
-- A field removes only what it loads: relationships of its type and direction, to nodes with its target's labels.
-- `removedTargets: RemovedTargets.DELETE_UNREFERENCED` also deletes a removed target that nothing else refers to the way
-  the field did. The root is never deleted, nor is a node the object still holds in another field.
-- `replace: 'all'` covers every relationship field of the view itself. It is refused for an object that carries no
-  stamp, because the lists of an object built from scratch are not what the store holds.
-- A list to replace that is null or undefined is refused. An empty list removes every relationship of the field, and a
-  single-valued field that is null or undefined removes its relationship.
-- `replace` is refused, on a root that carries a stamp, if any relationship of the root was added, removed or changed
-  since the object was loaded. A save that only adds is not: two writers who loaded the same view can each add to it.
-- An `UNDIRECTED` field is met by a relationship stored either way. One is made, from the root, only when there is none.
-- A read-only field is never written: a `@ReadOnly()` field, a `@GraphPath`, a `@Count` or `@Aggregate`, and a list of
-  fragments read over several hops.
-
-#### Load, Change and Save (`update`)
-
-`update` loads the object, applies your change, and writes only what the change altered: the fields that differ, a
-field set to null, and for a view the relationships it added or dropped. Your change may alter the object it is given,
-or return a copy.
-
-```typescript
-const saved = await gom.update(Person, id, (person) => {
-    person.name = 'Ada';
-});
-```
-
-- If the node changed between the load and the save, `update` loads it again and re-applies the change: three attempts
-  by default (the fourth argument), then `StaleObjectException`. That needs a `@NodeStamp` field; without one a change
-  by another writer goes unnoticed. On Neo4j the save compares the root's fields as they were loaded as well as the
-  stamp: see [When a Save Is Refused](#when-a-save-is-refused).
-- It returns undefined when there is no such node, or the node is deleted in between. It never makes a node.
-- A change that gives the object another id or another class is refused.
-
-#### Create If Absent (`create`)
-
-`create` makes the node only if no node has its id, in one statement. If one does, it writes nothing and returns
-undefined. With `update`, that saves an aggregate without losing any writer's data:
-
-```typescript
-const stored =
-    (await gom.create(proposition)) ?? (await gom.update(Proposition, proposition.id, (it) => it.merge(proposition)));
-```
-
-- An object that carries a stamp was loaded, and is refused.
-- Two writers at the same moment can both find the node absent. On Neo4j, Memgraph and Oracle only a uniqueness
-  constraint on the id keeps the second from making the node again: `uniquenessConstraint('Proposition', 'id')`.
-  FalkorDB runs one write at a time, so there the second always finds the first's node.
-
-#### Null-Write Policy (`NullPolicy`)
-
-```typescript
-await gom.save(chunk);                                       // IGNORE (default): merge-patch
-await gom.save(chunk, { nullPolicy: NullPolicy.CLEAR });     // a full overwrite: nulls clear
-```
-
-- **`IGNORE`** writes only fields that are set; a null or undefined field leaves the stored value. A partly-loaded
-  object never destroys stored data, an embedding included.
-- **`CLEAR`** makes the object authoritative: a null field clears its property. In JavaScript only keys the object holds
-  can be seen, so a declared field that was never assigned is not cleared. Use it with a complete object.
-
-In a view the policy governs the root. A related node is written as under `IGNORE`.
-
-#### Batch Save (`saveAll`)
-
-```typescript
-const saved = await gom.saveAll(views);
-await gom.saveAll(views, { replace: ['mentions'] });
-await gom.saveAll(chunks, { only: ['summary', 'summaryModel'] });
-```
-
-- Fragments go in one statement for each 1,000, of any classes and labels. A view is a statement of its own. Outside a
-  transaction of yours the statements run in one transaction, so a failure leaves nothing written; inside one they join
-  it. FalkorDB has no transactions: see [FalkorDB](#falkordb).
-- The objects come back in the order given, carrying the stamps the batch left.
-- A batch that only adds doesn't check a fragment's stamp: a stale one is written anyway, and keeps the stamp it had, so
-  a later `save` of it is refused.
-- `replace` applies to views; a batch holding a fragment is refused with it. A stale view throws
-  `StaleObjectException`, and the batch then writes nothing.
-- With `only` or `except`, a node deleted since its object was loaded is made again. To write only where the node still
-  exists, use `patchAll`.
-
-#### Conditional Write by Id (`patch`)
-
-Write named fields of one node, by its id, if the node meets a condition, in one statement. The node isn't loaded: the
-store evaluates the condition under the node's lock.
-
-```typescript
-const result: PatchResult = await gom.patch(Session, sessionId, {
-    set: { lastActivityAt: activityAt },
-    where: (q) => anyOf(q.lastActivityAt.isNull(), q.lastActivityAt.lt(activityAt))
-});
-result.found;    // a node has the id
-result.applied;  // the condition held, so the fields were written
-result.changed;  // a value differed, and the node's stamp was renewed
-```
-
-| Outcome | `found` | `applied` | `changed` |
-| --- | --- | --- | --- |
-| No node has that id | false | false | false |
-| The condition didn't hold | true | false | false |
-| It held, and every value was already as set | true | true | false |
-| It held, and a value differed | true | true | true |
-
-On a view the fields are the root's, and the condition may name a relationship:
-
-```typescript
-const narrated = (await gom.patch(MessageInSession, messageId, {
-    set: { narration },
-    where: (q) => q.session.sessionId.eq(sessionId)
-})).applied;   // false for a message that is there, but in another session
-```
-
-- `set` names fields to write, and `clear` fields to remove.
-- It never makes a node, isn't checked against a stamp, and hands none back. A node it changed has a new stamp, so an
-  object loaded before is refused when saved: load it again.
-- The id, the stamp, a bag's key, a `@NodeLabels` field and a related node's field can't be written.
-
-#### Batch Patch (`patchAll`)
-
-Write named fields of many nodes, where each is there, making none:
-
-```typescript
-const results = await gom.patchAll(embedded, { only: ['embedding', 'embeddingModel'] });
-const rewritten = results.filter((it) => it.found).length;
-```
-
-There is one `PatchResult` for each object, in order. `only` or `except` is required: to write every field, save.
-Under `NullPolicy.IGNORE` a named field that is null is left as the store has it.
-
-#### Saves and Transactions
-
-- A save joins the transaction it runs in, a `@Transactional()` method's or `runInTransaction`'s. Outside one it is its
-  own.
-- `StaleObjectException` leaving a `@Transactional()` method rolls the transaction back. A refused save has written
-  nothing; what the transaction wrote before it is undone only if the transaction rolls back.
-- A statement the engine turns away because another writer was changing the same node is run again, after a pause,
-  outside a transaction. Inside one it fails, and the transaction's owner decides.
-
-### @NodeStamp: refusing a save when the node changed
-
-Strongly recommended on any class that is loaded, changed and saved. It plays the part of JPA's `@Version`: optimistic
-locking, with a random value in place of a counter.
-
-```typescript
-@NodeFragment({ labels: ['Person'] })
-export class Person {
-    @NodeId() id: string;
-    name: string;
-    @NodeStamp() stamp?: string;
-}
-```
-
-The field is an optional `string` on a `@NodeFragment`, one to a fragment. A stamp is a node's, so it is refused on a
-view and on a relationship fragment.
-
-#### The Stamp
-
-The stamp is two random tokens of 64 bits each, stored on the node under `__drivine.stamp` as
-`3fa9c1d27b40e8a6:91d0f4b2c7ee5a13`, whatever the field is called. Loading fills the field. Treat it as opaque.
-
-- The **data token**, the first, speaks for the node's properties and labels.
-- The **relationship token**, the second, speaks for its relationships, of every type, in both directions.
-- To **mark** a node is to replace one of its tokens. A save marks what it changes, and so must Cypher of your own.
-
-Every node a save writes is given a stamp if it has none, whether or not its class declares a `@NodeStamp` field.
-
-#### When a Save Is Refused
-
-A save is refused when what it would overwrite changed since the object was loaded. Every save of an object that
-carries a stamp compares the data token. A save with `replace` compares the relationship token too. A refused save
-writes nothing and throws `StaleObjectException`.
-
-| Since the object was loaded, another writer… | `save` | `save` with `replace` | `update` |
-|---|---|---|---|
-| changed a property or a label of the root | refused | refused | loads again and re-applies the change |
-| added or removed a relationship of the root, or changed one's properties | applied | refused | applied |
-| changed a related node | applied: the related node is written over the change | the same | applied |
-| deleted the root | refused, `deleted` is true | refused, `deleted` is true | returns undefined |
-| changed anything with Cypher that doesn't mark it | not noticed | not noticed | not noticed |
-
-An object whose stamp is undefined isn't checked, unless it is saved with `from`: it makes the node or overwrites it.
-The save is one statement that takes the node's write lock before it compares, so of several writers holding the same
-stamp exactly one succeeds.
-
-**On Neo4j a load can be handed a stamp newer than its data.** Neo4j reads under read committed, without a snapshot, so
-a load that runs while another writer commits can find that writer's stamp and the data from before its write. `update`
-therefore compares each field of the root as it loaded it too, under the node's lock, and loads again if one differs: a
-field's value (a `@JsonPacked` field's as the text the node held), a `@PropertyBag`'s keys and their values, and the
-labels a `@NodeLabels` field reads. A field the object doesn't hold and its class doesn't initialize isn't compared. A
-`save` checks the same when you give it the object as loaded, as [`from`](#saving-data). A `@JsonPacked` field of a
-`from` that a load made is compared as the text the node held; of one that no load made, such as a copy, as a save
-packs it, so JSON another writer packed with other spacing has the save refused, though nothing changed. Without
-`from` a save has only the stamp to go on, and in that moment it can write over the other writer's change: hold on to
-what you loaded and pass it, or change the node with `update`. Where only the stamp makes the round trip, as through a
-web form, the stamp is all there is. Memgraph reads from a snapshot, FalkorDB runs no read beside a write, and Oracle
-and Postgres read a statement whole, so on them the stamp is what was read.
-
-```typescript
-try {
-    await gom.save(edited);
-} catch (e) {
-    if (e instanceof StaleObjectException && !e.deleted) {
-        // another writer got there first: e.foundStamp is what the node carries now
-        await gom.update(Person, edited.id, (it) => { it.name = edited.name; });
-    } else {
-        throw e;
-    }
-}
-```
-
-#### Existing Data
-
-A node written before stamps has none, and loads with the field undefined. The first save of it isn't checked and gives
-it a stamp. To stamp every node of a label at once:
-
-```typescript
-await pm.execute(
-    new QuerySpecification(`MATCH (n:Person) WHERE n.\`__drivine.stamp\` IS NULL SET ${Stamps.setClause('n')}`)
-);
-```
-
-#### Cypher You Write Yourself
-
-Cypher should mark what it changes: **a write that doesn't is not noticed**, and a checked save of an object loaded
-before it is applied over it. `Stamps.setClause` marks a node whose properties or labels you change, and
-`Stamps.linksClause` each end of a relationship you add, remove or change:
-
-```typescript
-`MATCH (p:Person {id: $id}) SET p.name = $name, ${Stamps.setClause('p')}`;
-
-`MATCH (a:Person {id: $a}), (b:Person {id: $b})
- CREATE (a)-[:KNOWS]->(b)
- SET ${Stamps.linksClause('a')}, ${Stamps.linksClause('b')}`;
-```
-
-The property's name holds a dot, so Cypher that names it quotes it: `` n.`__drivine.stamp` ``. Cypher that replaces
-every property (`SET n = $props`) removes the stamp, and the next checked save of an object loaded before is refused.
-
-#### What a Stamp Doesn't Cover
-
-- A related node isn't checked: `save` writes it whole. `update` writes only what the change altered.
-- An object with no stamp, saved without `from`, isn't checked, nor is a fragment in a `saveAll`.
-- One relationship token covers every relationship: a `replace` of one list is refused when a relationship of another
-  type was added.
-- Deleting a node removes its relationships without marking the nodes at their other ends.
-
-### @ReadOnly: Loaded and Never Written
-
-```typescript
-@GraphView()
-export class IssueOverview {
-    @Root() issue: Issue;
-    @GraphRelationship({ type: 'ASSIGNED_TO', target: () => Person }) assignedTo: Person[];                // written
-    @ReadOnly() @GraphRelationship({ type: 'REVIEWED_BY', target: () => Person }) reviewers: Person[];     // loaded only
-}
-```
-
-Every save skips a `@ReadOnly()` field. Naming it in `replace` is an error, and `replace: 'all'` leaves it alone. A
-cascading delete doesn't follow it either, so it leaves the reviewers.
-
-### Deleting Data
-
-```typescript
-await gom.delete(Person, uuid);                                                  // returns how many: 1 or 0
-await gom.delete(Issue, uuid, { where: (q) => q.state.eq('closed') });           // only if it meets the condition
-await gom.deleteAll(Issue, (q) => ({ where: q.state.eq('closed') }));            // what a load with the filter finds
-await gom.deleteAll(RaisedAndAssignedIssue, (q) => ({ where: q.assignedTo.name.eq('Former Employee') }));
-await gom.deleteAll(Issue, 'n.locked = true');                                   // a predicate of your own, over n
-```
+On Oracle, `DATABASE_NAME` is the service (`FREEPDB1`, say), and `DATABASE_DEFAULT_GRAPH_PATH` names the graph,
+`drivine` by default. A graph is drivine4j's tables, `<graph>_node`, `<graph>_edge` and `<graph>_schema`, and a SQL
+property graph over them, made on the first connection when they aren't there, so one store serves the JVM, Node and
+Python. `<graph>_schema` records the indexes and constraints Drivine made as drivine4j records them, so each library
+sees and drops the indexes the others made, and makes none beside them. A range index is two indexes, as drivine4j
+makes it: one over the property whatever the label, and one over the label's nodes alone, which a filter is read
+through. A uniqueness constraint comes with a range index over its properties, which stays when the constraint is
+dropped. The object manager writes SQL for it, and the query DSL, grouped reads, search and schema management work as on
+the graph engines. A raw `where` is SQL over the node's row, `n`: its `labels`, `props` (a JSON object keyed by stored
+name) and `stamp`, say `JSON_VALUE(n.props, '$.name') = $name`. Your own statements are SQL too. `matches` takes a
+regular expression in Oracle's POSIX dialect, matched against the whole value. A leading `(?i)` ignores case; what Java
+adds, such as `(?:…)`, a look-around or `\b`, is not read. A backreference names the group the expression numbers it by,
+`\1` to `\8`; `\9` is refused, as the group that anchors the expression would make it the tenth, which POSIX does not
+have.
 
-A delete removes the root and its relationships. The nodes they led to stay, unless the delete cascades. Deleting a view
-by id can also delete the nodes it reaches:
+On Postgres, `DATABASE_NAME` is the database, and `DATABASE_DEFAULT_GRAPH_PATH` names the graph, `drivine` by default:
+see [Postgres](#postgres).
 
-```typescript
-await gom.delete(SessionView, sessionId);                                          // NONE: the root only
-await gom.delete(SessionView, sessionId, { cascade: CascadeType.DELETE_ORPHAN });  // and each node nothing outside it needs
-await gom.delete(SessionView, sessionId, { cascade: CascadeType.DELETE_ALL });     // and every node in the view
-```
-
-The cascade follows the relationships a save of the view writes, through nested views; a node outside the view is never
-deleted. So it leaves what a read-only field loads (a `@ReadOnly()` field, a `@GraphPath`, and a list of fragments read
-over several hops): other code writes those nodes. A view that contains itself is not read-only, so each of its levels
-is deleted. `DELETE_ALL` deletes nodes others may still point at, so use it for nodes the root owns. `DELETE_ORPHAN`
-keeps a node in the view that a node outside it still refers to, at any level, together with everything the view holds
-below it: a bookmarked message keeps its attachments, and a pinned sub-session keeps its messages and its own
-sub-sessions. The rest of the view is deleted, including the session that held a kept message. `DELETE_ORPHAN` isn't
-available on Memgraph.
-
-A view that contains itself (`parts: SessionTree[]`, with a `maxDepth`) deletes what a load of it reads: the nodes at
-every level, and what each level holds through the view's other relationships a save writes. A cascade never stops
-short: if the relationship reaches below its `maxDepth`, the delete throws a `DrivineError` before anything is written,
-saying how deep the view reads. Raise the `maxDepth` to cover the deepest level.
-
-### Polymorphism
-
-A relationship can lead to nodes of several classes, told apart by their labels. Declare an abstract fragment and its
-subclasses. A subclass carries its own labels and its superclass's:
-
-```typescript
-@NodeFragment({ labels: ['WebUser'] })
-export abstract class WebUser {
-    @NodeId() uuid: string;
-    displayName: string;
-}
-
-@NodeFragment({ labels: ['Anonymous'] })
-export class AnonymousWebUser extends WebUser {   // stored as (:WebUser:Anonymous)
-    anonymousToken: string;
-}
-
-@NodeFragment({ labels: ['Registered'] })
-export class RegisteredWebUser extends WebUser {  // stored as (:WebUser:Registered)
-    email: string;
-}
-
-@GraphView()
-export class GuideUserWithPolymorphicWebUser {
-    @Root() core: GuideUser;
-    @GraphRelationship({ type: 'IS_WEB_USER', target: () => WebUser }) webUser?: WebUser;
-}
-```
-
-A node loads as the subclass its labels say, so `instanceof` tells them apart:
-
-```typescript
-for (const guide of await gom.loadAll(GuideUserWithPolymorphicWebUser)) {
-    if (guide.webUser instanceof AnonymousWebUser) {
-        console.log(guide.webUser.anonymousToken);
-    }
-}
-```
-
-A subclass is known once its module has been loaded, so import every subclass before the first load. A save writes
-the labels of the object's own class.
-
-**Filtering by subclass.** Either declare a view over the subclass, which loads only the roots related to one:
-
-```typescript
-@GraphView()
-export class AnonymousGuideUser {
-    @Root() core: GuideUser;
-    @GraphRelationship({ type: 'IS_WEB_USER', target: () => AnonymousWebUser, required: true }) webUser: AnonymousWebUser;
-}
-```
-
-or keep the polymorphic view and filter at query time:
-
-```typescript
-await gom.loadAll(GuideUserWithPolymorphicWebUser, (q) => ({ where: q.webUser.instanceOf(AnonymousWebUser) }));
-await gom.loadAll(GuideUserWithPolymorphicWebUser, (q) => ({
-    where: anyOf(q.webUser.instanceOf(AnonymousWebUser), q.webUser.instanceOf(RegisteredWebUser))
-}));
-```
-
-#### Required Relationships
-
-TypeScript erases `?:`, so a view says which relationships it requires:
-
-| Declaration | Loads |
-|---|---|
-| `@GraphRelationship({ type: 'IS_WEB_USER' }) webUser?: WebUser` | every root; `webUser` is undefined where there is none |
-| `@GraphRelationship({ type: 'IS_WEB_USER', required: true }) webUser: WebUser` | only the roots that have one |
-| `@GraphRelationship({ type: 'IS_WEB_USER', target: () => WebUser }) webUsers: WebUser[]` | every root; `[]` where there are none |
-
-### Mapping Decorators
-
-#### @GraphProperty
-
-Stores a field under another name. The field is `containerSectionId` in your code and in queries, and
-`container_section_id` in the graph, on save, load, query and index:
-
-```typescript
-@GraphProperty('container_section_id') containerSectionId?: string;
-```
-
-#### @JsonPacked
-
-Stores a value as a JSON string, for what an engine can't store as a property: a map, a list of maps, or a list on an
-engine without list properties. Packed on write and unpacked on load:
-
-```typescript
-@JsonPacked() tags?: string[];
-```
-
-#### @PropertyBag
-
-Maps an open object to a set of flat, prefixed node properties. Unlike `@JsonPacked`, each entry is a real property:
-visible, filterable and indexable.
-
-```typescript
-@NodeFragment({ labels: ['Proposition'] })
-export class PropositionNode {
-    @NodeId() id: string;
-    text: string;
-    @PropertyBag() metadata: Record<string, any> = {};   // stored as metadata.<key>
-}
-
-await gom.loadAll(PropositionNode, (q) => ({ where: q.metadata.source.eq('wiki') }));
-```
-
-`{ source: 'wiki', score: 3 }` is stored as `metadata.source` and `metadata.score`. `prefix` decouples the stored
-namespace from the field's name, and `delimiter` changes the separator. A value is a primitive or a list of them; a
-nested object is refused. Under `NullPolicy.CLEAR` a save removes the keys the map no longer has; `IGNORE` leaves them.
-
-A **flat** bag, `@PropertyBag({ flat: true })`, has no prefix: each entry is stored under its own key, and the bag reads
-back every property that no declared field accounts for. A fragment may have one.
-
-#### @NodeLabels
-
-Maps a field to the node's labels, beyond the fragment's own. It is filled from the labels on load and written as labels
-on save, so `MATCH (n:Admin)` finds a node whose field holds `Admin`:
-
-```typescript
-enum Role { Admin = 'Admin', Reviewer = 'Reviewer' }
-
-@NodeFragment({ labels: ['Person'] })
-export class PersonNode {
-    @NodeId() id: string;
-    @NodeLabels(Role) roles: Role[];          // a closed set: only these labels are the field's
-}
-
-@NodeFragment({ labels: ['Thing'] })
-export class ThingNode {
-    @NodeId() id: string;
-    @NodeLabels() labels: string[];           // an open set: any label
-}
-```
-
-Under `IGNORE` (the default) a save adds the field's labels. Under `CLEAR` it also removes the field's labels that the
-field no longer holds. A closed field's labels are its members. An open field's are those it wrote itself, which it
-records on the node under `__drivine.labels.<field>`. A label that isn't the field's, such as the fragment's own, is
-never removed.
+Or in code:
 
-#### @GraphTransient
-
-A field that is neither stored nor loaded.
-
-### Relationships of a Runtime Type
-
-A view declares its relationships, types included. When the type is data, use `gom.edges`:
-
-```typescript
-const lyre = nodeRef(ThingNode, 'lyre');
-const ada = nodeRef(PersonNode, 'ada', 'Author');   // must also carry the label Author
-
-await gom.edges.relate(lyre, ada, 'OWNED_BY', { since: 1990 });
-await gom.edges.relate(lyre, ada, 'PLAYED_BY', {}, RelateMode.CREATE);
-const owners = await gom.edges.loadRelated(lyre, 'OWNED_BY', Direction.OUTGOING, PersonNode);
-await gom.edges.unrelate(lyre, ada, 'PLAYED_BY');         // every PLAYED_BY from lyre to ada
-await gom.edges.unrelateAll(lyre, 'OWNED_BY');            // every OWNED_BY that leaves lyre
-```
-
-- Both ends are matched, never made. If either is missing, or lacks a label the reference names, nothing is written and
-  `relate` returns false.
-- `RelateMode.MERGE`, the default, keeps at most one relationship of the type between the two nodes in that direction,
-  and sets its properties. `CREATE` makes another each time.
-- `unrelate` and `unrelateAll` return how many relationships they removed. No node is deleted.
-- Each marks the relationship token of both ends when it changes something.
-
-## PersistenceManager
-
-The low-level API: you write the statement, Drivine runs it, maps the rows and manages the transaction.
-
-```typescript
-const people = await pm.query(new QuerySpecification<Person>('MATCH (p:Person) RETURN properties(p)').transform(Person));
-const person = await pm.getOne(spec);         // exactly one, or it throws
-const maybe = await pm.maybeGetOne(spec);     // one or undefined
-await pm.execute(spec);                       // no results
-```
-
-### QuerySpecification
-
-```typescript
-new QuerySpecification<Person>()
-    .withStatement('MATCH (p:Person {city: $city}) RETURN properties(p)')
-    .bind({ city: 'Sydney' })   // named parameters, or a list for $1, $2, …
-    .transform(Person)          // map each row to a class
-    .filter((it) => it.age >= 18)
-    .map((it) => it.firstName)
-    .skip(10)
-    .limit(10);
-```
-
-### Transactions
-
-```typescript
-@Injectable()
-export class UserService {
-    @Transactional()   // join the current transaction, or start one; commit on success, roll back on a throw
-    async register(person: Person): Promise<void> {
-        await this.people.create(person);
-        await this.audit.record(person);
-    }
-}
-```
-
-A transaction spans every database the method touches. A method called outside a request (a job, `onModuleInit`, a
-script) starts its own. To run a block in one transaction without a decorator, use
-`inDrivineContext().withTransaction().run(async () => …)`; `withTransaction({ rollback: true })` rolls it back
-at the end, as tests do.
-
-### Cursors
-
-Stream a large result without holding it in memory:
-
-```typescript
-const cursor = await pm.openCursor(new CursorSpecification<Route>().withStatement(statement).batchSize(100).transform(Route));
-for await (const route of cursor) {
-    // …
-}
-cursor.asStream().pipe(destination);   // or as a Node stream
-```
-
-### Statements in Files
-
-Keep statements in files beside your code, and inject them (Nest), or read them with `cypherStatement(readFileSync(path, 'utf8'))`:
-
-```typescript
-constructor(
-    @InjectCypher(__dirname, 'routesBetween') readonly routesBetween: CypherStatement,
-    @InjectSql(__dirname, 'report') readonly report: SqlStatement
-) {}
-```
-
-## Supported Engines
-
-The same models, queries and DSL run on each graph store. Switch the engine with `DATABASE_TYPE`.
-
-| Engine | Type | Object manager | Transactions | Search |
-|---|---|---|---|---|
-| Neo4j 5 | `NEO4J` | yes | full | vector, full-text |
-| Memgraph | `MEMGRAPH` | yes | full | vector, text |
-| FalkorDB | `FALKORDB` | yes | each statement commits by itself | vector, full-text |
-| Oracle 23ai / 26ai | `ORACLE` | yes | full | vector, Oracle Text |
-| Amazon Neptune | `NEPTUNE` | no: `PersistenceManager` only | full | no |
-| Postgres 14 or later | `POSTGRES` | yes | full | vector (pgvector), full-text |
-
-### Neo4j
-
-The default. Port 7687. `DATABASE_NAME` selects the database, `neo4j` unless given.
-
-### Memgraph
-
-Bolt-compatible, so Drivine runs it on the Neo4j driver; only the Cypher differs. Port 7687, and empty credentials by
-default. `CascadeType.DELETE_ORPHAN` isn't available: Memgraph can't use `EXISTS` inside `WITH`.
-`removedTargets: DELETE_UNREFERENCED` works.
-
-### FalkorDB
-
-An in-memory graph database on Redis. Port 6379; `DATABASE_NAME` is the graph, `graph` unless given.
-
-**Transactions.** FalkorDB commits each statement by itself. A save is one statement, so it is still atomic, and so is a
-`saveAll` of fragments that fits in one. `@Transactional()` methods run, each statement committing as it goes.
-`DATABASE_TRANSACTION_MODE` says what to do about that:
-
-- `WARN`, the default: a rollback logs a warning, and so does the first batch of more than one statement, which runs
-  statement by statement.
-- `STRICT`: starting a transaction throws, so a `@Transactional()` method fails at its first statement, and a batch of more than one statement is refused with `NonAtomicBatchException`
-  before any of it runs.
-
-**Map keys.** The FalkorDB client writes parameters into the statement text, and FalkorDB accepts no quoted map key. So
-Drivine refuses a parameter map key that isn't a plain identifier, such as a stored name with a `$`, rather than risk
-injection.
-
-### Oracle
-
-Oracle Database 23ai or later, through `oracledb` in thin mode. Oracle doesn't speak Cypher: Drivine reads the graph
-with SQL/PGQ (`GRAPH_TABLE`) and writes it as rows. Models, the DSL and the object manager are the same as on the graph
-engines.
-
-```bash
-DATABASE_TYPE=ORACLE
-DATABASE_HOST=localhost
-DATABASE_PORT=1521          # the default
-DATABASE_NAME=FREEPDB1      # the service: required
-DATABASE_USER=app
-DATABASE_PASSWORD=secret
-DATABASE_DEFAULT_GRAPH_PATH=drivine   # names the property graph and its tables; this is the default
+```python
+registry.builder().database_type(DatabaseType.MEMGRAPH).host("localhost").register("graph")
 ```
-
-The graph's name names tables, so it is letters, digits and underscores, begins with a letter, and is at most 114
-characters. In code, it is `defaultGraphPath` on the connection's properties, or on the builder:
-`DatabaseRegistry.getInstance().builder().withProperties(properties).defaultGraphPath('tenant_a').register('TENANT_A')`.
-Two databases over one Oracle service, each naming its own graph, keep apart: each manager reads, writes and indexes
-its own graph's tables alone.
-
-**How a graph is stored.** Two tables and a property graph over them, made when a manager first speaks to the graph:
-`<graph>_node (nid, labels, props, stamp)` and `<graph>_edge (eid, src, dst, type, props)`, with `labels` and `props`
-as JSON. Labels, property names and relationship types are data, so `@NodeLabels`, `@PropertyBag` and `edges` work as
-they do elsewhere. A node's stamp is the `stamp` column. A third table, `<graph>_schema`, records the indexes and
-constraints Drivine made, as drivine4j records them. The layout is drivine4j's, so the JVM, Node and Python read one
-store, and each sees and drops the indexes the others made, and makes none beside them.
-
-Notes:
-
-- A statement you write yourself is SQL. Parameters are named `$name`, as in Cypher. A statement that writes and returns
-  rows is a PL/SQL block that hands them back with `DBMS_SQL.RETURN_RESULT`.
-- A predicate you write yourself, for a load or a delete, is SQL over the root's row: its `props`, `labels` and `stamp`.
-- A save is one block and checks the stamp, as on the graph engines. A save turned away by a deadlock (`ORA-00060`) or
-  a serialization failure (`ORA-08177`) is run again. Another writer that changes a node in SQL should give it a new
-  stamp: the first sixteen characters of `stamp` for its properties or labels, the last sixteen for its relationships.
-- Index the id of each class you save: `uniquenessConstraint('Person', 'id')` makes the unique index a node is found
-  by. Without one, a save reads the table.
-- A range index is two indexes, as drivine4j makes it: one over the property whatever the label, and one over the
-  label's nodes alone, which a filter is read through. A uniqueness constraint comes with a range index over its
-  properties, which stays when the constraint is dropped.
-- Oracle reads an empty string as null, so a comparison with `''` in the DSL is written to find a property stored empty.
-- `matches` takes a regular expression in Oracle's POSIX dialect, matched against the whole value. A leading `(?i)`
-  ignores case; what Java adds, such as `(?:…)`, a look-around or `\b`, is not read. A backreference names the group the
-  expression numbers it by, `\1` to `\8`; `\9` is refused, as the group that anchors the expression would make it the
-  tenth, which POSIX does not have.
-- A vector index is a table of embeddings beside the nodes, kept in step by a trigger, with an Oracle vector index over
-  it by neighbour partitions; `loadNearest` is approximate through it. With no index made, it measures every node of the
-  label and is exact.
-- A full-text index is a table of the indexed text beside the nodes, with an Oracle Text index over it. `loadMatching`
-  reads words, a `"phrase"`, `+must`, `-not` and a `prefix*`. The index holds what has been committed, so a search
-  doesn't see its own transaction's writes. Oracle Text is in the regular Free image, not the slim one; without it, or
-  with no index made, a search counts the words in the text of every node of the label.
-
-### Amazon Neptune
-
-Neptune connects over Bolt, on `PersistenceManager`: write the statements yourself. Neptune has no `date()` and no list
-properties, so store dates as text and annotate lists with `@JsonPacked`.
 
 ### Postgres
 
-Postgres 14 or later (tested on 16), as drivine4j states. Postgres keeps a graph in two tables, as Oracle does, read
-with joins and written through a function the store keeps.
-No extension is needed but pgvector, for vector search, which Drivine makes where the server has it, and pg_trgm,
-which a full-text index is made with (it ships with Postgres's contrib modules). Models, the DSL
-and the object manager are the same as on the graph engines; `PersistenceManager` runs plain SQL, with cursors and
-transactions, as it always has.
+Postgres 14 or later (tested on 16), as drivine4j states, keeps a graph in two tables, as Oracle does, read with joins
+and written through a function the store keeps. No extension is needed but pgvector, for vector search, which Drivine
+makes where the server has it. Models, the query DSL and the object manager are the same as on the graph engines; the
+persistence manager runs plain SQL, with cursors and transactions.
 
-```bash
+```
 DATABASE_TYPE=POSTGRES
 DATABASE_HOST=localhost
 DATABASE_PORT=5432
 DATABASE_NAME=app
 DATABASE_USER=app
-DATABASE_PASSWORD=secret
+DATABASE_PASSWORD=…
 DATABASE_DEFAULT_GRAPH_PATH=drivine   # names the graph's tables; this is the default
 ```
 
 The graph's name names tables, so it is letters, digits and underscores, begins with a letter, and is at most 49
 characters; Postgres folds it to lower case. The tables are made when an object manager first runs a statement.
 Postgres is a graph store like the others, so a schema catalog that names no database applies to it too, and makes its
-tables at startup: to keep a database you use only for plain SQL as it is, narrow the catalog with `.forDatabase(...)`.
+tables at startup: to keep a database you use only for plain SQL as it is, narrow the catalog with `.for_database(...)`.
 
 **How a graph is stored.** drivine4j's store, byte for byte, so the JVM, Node and Python read and write one graph:
 `<graph>_node (nid, labels, props, stamp)` and `<graph>_edge (eid, src, dst, type, props)`, with `labels` and `props`
@@ -1538,12 +188,10 @@ as `jsonb` and a GIN index over the labels, so a node carries any number of them
 constraints Drivine made; and `<graph>_write`, the function a save's steps are carried out by, as one statement that is
 applied whole or not at all.
 
-Notes:
-
 - A statement you write yourself is SQL. Parameters are named `$name`, as in Cypher, and a statement is bound only the
-  ones it names.
-- A predicate you write yourself, for a load or a delete, is SQL over the root's row: its `props`, `labels` and `stamp`,
-  e.g. `(n.props ->> 'name') = $name`.
+  ones it names. A row comes back as a dict of its columns, a `jsonb` column as Python values.
+- A raw `where`, for a load or a delete, is SQL over the root's row: its `props`, `labels` and `stamp`, say
+  `(n.props ->> 'name') = $name`.
 - A number is compared as a number only where one is stored: `'7'` is not `7`, as on the graph engines.
 - Text is ordered by the database's collation, so a page of mixed-case text may not be in the order Neo4j gives
   (`a, b, B` rather than `B, a, b`). The range indexes are made in that collation, so an order and a seek are read
@@ -1553,342 +201,545 @@ Notes:
 - Index the id of each class you save: a range index or a uniqueness constraint is a partial index over the label's
   nodes, which finds a node by its id.
 - `matches` takes a Postgres regular expression, matched against the whole value.
-- A vector index is a pgvector HNSW index over the embeddings of the label's nodes of its size; `loadNearest` is
+- A vector index is a pgvector HNSW index over the embeddings of the label's nodes of its size; `load_nearest` is
   approximate through it, and exact with no index made. A full-text index is a trigram index over the text a search
-  reads, which narrows the search; `loadMatching` scores the same with it and without it, and reads words, a
+  reads, which narrows the search; `load_matching` scores the same with it and without it, and reads words, a
   `"phrase"`, `+must`, `-not` and a `prefix*`.
 
-## Schema Management (Indexes & Constraints)
+Drivine reads `os.environ`, and doesn't load `.env` files itself: use python-dotenv, pydantic-settings, or your
+platform's way.
 
-Drivine manages range indexes, uniqueness constraints, vector indexes and full-text indexes on Neo4j, Memgraph,
-FalkorDB, Oracle and Postgres. `ensure` is idempotent and drift-aware, and the engines' differences (DDL, introspection,
-FalkorDB's constraint commands) are handled for you. Declare nothing, and pay nothing.
+## Statements
 
-### Imperative
+The `PersistenceManager` runs your statements and maps their results:
 
-```typescript
-await gom.indexes.ensure(vectorIndex('Proposition', 'embedding', 1536));
-await gom.indexes.ensure(rangeIndex('Proposition', 'contextId'));
-await gom.indexes.ensure(rangeIndex('Message', ['sessionId', 'createdAt']));   // composite
-await gom.indexes.ensure(fullTextIndex('Chunk', 'text'));
-await gom.indexes.ensure(fullTextIndex('Entity', ['name', 'description']));
-await gom.constraints.ensure(uniquenessConstraint('ChatSession', 'sessionId'));
+```python
+from drivine import QuerySpecification
+
+spec = (QuerySpecification[Person]()
+    .with_statement("MATCH (p:Person {city: $city}) RETURN properties(p)")
+    .bind({"city": "Sydney"})    # named parameters, or a list for $1, $2, …
+    .transform(Person)           # validated with Pydantic: a model, dataclass, TypedDict…
+    .filter(lambda it: it.age >= 18)
+    .limit(10))
+
+people = await pm.query(spec)
+person = await pm.get_one(spec)          # exactly one, or it raises
+maybe = await pm.maybe_get_one(spec)     # one or None
+await pm.execute(spec)                   # no results
 ```
 
-Schema statements run outside any transaction. `ensure` returns a result whose `status` is:
+- A node or relationship comes back as its properties, and Neo4j's dates and times as the standard library's.
+- A row of one column is its value, and a row of several is a list.
+- A failed statement raises `DrivineError`, which holds the specification, and the database's error as its cause.
 
-| Status | Meaning |
-|---|---|
-| `CREATED` | Nothing existed, and the item was made. |
-| `ALREADY_MATCHING` | A matching item exists; nothing changed. |
-| `DRIFT` | An item exists with a different shape, such as other vector dimensions. Nothing changed: `recreate(spec)` replaces it. |
-| `VIOLATION` | Constraints only: the data breaks it. A sample of the values held more than once is included. |
-| `RECREATED` | From `recreate(spec)`: the old item dropped and the new one made. |
+### Cursors
 
-**Pinning a vector index.** Only the dimensions and similarity are always sent; the rest is the engine's choice, and
-engine defaults change between versions. Pin the HNSW shape portably, and anything engine-specific as an engine option:
+A cursor streams a large result, reading it from the driver `batch_size` rows at a time:
 
-```typescript
-@VectorIndex({ similarity: 'COSINE', hnswM: 32, hnswEfConstruction: 200 }) embedding?: number[];
-
-vectorIndex('Proposition', 'embedding', 1536, 'COSINE', {
-    engineOptions: [neo4jVectorOptions({ quantizationEnabled: false }), falkorDbVectorOptions({ efRuntime: 20 })]
-});
+```python
+spec = CursorSpecification[Route]("MATCH (r:Route) RETURN properties(r)").batch_size(500).transform(Route)
+async with await pm.open_cursor(spec) as cursor:
+    async for route in cursor:
+        ...
 ```
 
-An unpinned parameter is never reported as drift; a pinned one the engine contradicts is.
+It works in a transaction or outside one, where it has a connection of its own until it is closed.
 
-### Declarative: Decorators
+### Statements in files
 
-```typescript
-@NodeFragment({ labels: ['Proposition'] })
-export class PropositionNode {
-    @NodeId() @RangeIndex() @Unique() id: string;
-    @RangeIndex() contextId: string;
-    @VectorIndex({ similarity: 'COSINE' }) embedding?: number[];
-    @FullTextIndex() body: string;   // also what loadMatching searches
-}
+```python
+from drivine import cypher_file
 
-// composite declarations go on the class
-@NodeFragment({ labels: ['Message'] })
-@RangeIndex({ properties: ['sessionId', 'createdAt'] })
-@Unique({ properties: ['sessionId', 'sequence'] })
-@FullTextIndex({ properties: ['subject', 'body'] })
-export class MessageNode { /* … */ }
+routes_between = cypher_file(__package__, "routes_between.cypher")
 ```
 
-### Declarative: Catalogs, Enforced at Startup
+Read with `importlib.resources`, so it works from an installed wheel as well as a source tree.
 
-Give the module a schema, and it is enforced before the application starts, indexes before constraints:
+## Transactions
 
-```typescript
-DrivineModule.withOptions({
-    connectionProviders: [DatabaseRegistry.buildOrResolveFromEnv()],
-    schema: {
-        catalogs: [
-            // vector dimensions come from your embedding model, at run time
-            SchemaCatalog.fromFragments(() => embeddings.dimensions, PropositionNode, MessageNode),
-            SchemaCatalog.of(rangeIndex('Session', 'lastActivityAt'), uniquenessConstraint('Session', 'id'))
-        ]
-    }
-});
+```python
+from drivine import transactional
+
+
+class IssueService:
+    def __init__(self, issues: IssueRepository, audit: AuditLog):
+        self.issues = issues
+        self.audit = audit
+
+    @transactional()           # join the current transaction, or start one
+    async def raise_issue(self, issue: Issue) -> Issue:
+        saved = await self.issues.save(issue)
+        await self.audit.record(saved)   # same transaction
+        return saved
 ```
 
-Without Nest, enforce the schema yourself before the application serves:
+Or for a block:
 
-```typescript
-await new SchemaManager(graphObjectManagers, { catalogs: [/* … */] }).enforce();
+```python
+from drivine import transaction
+
+async with transaction():
+    await pm.execute(first)
+    await pm.execute(second)
+
+async with transaction(rollback=True):   # a test that leaves nothing behind
+    ...
 ```
 
-Catalogs merge, identical declarations count once, and conflicting ones for the same kind, label and properties fail
-startup. A catalog applies to every database that supports schema, unless you narrow it:
-`.forDefaultDatabase()`, `.forDatabase('users')` or `.forDatabases('a', 'b')`. A named target is strict: an unknown
-database, or one without schema support, fails startup.
+- **The outermost call or block owns the transaction.** It commits when it ends, and rolls back when an exception
+  leaves it. Inner ones join it.
+- **A failure anywhere rolls the whole transaction back.** An exception that leaves any `@transactional` call, even
+  one the caller catches, marks the transaction rollback-only. It then rolls back, and its end raises
+  `TransactionRolledBackError` rather than committing what the inner call half did. `no_rollback_for=(NotFound,)`
+  exempts an exception.
+- **One transaction spans every database it touches.** It opens a connection to each, and begins its transaction,
+  the first time it runs a statement there. Commits are one after another, not two-phase.
+- **A `@transactional` method that never reaches Drivine costs nothing**: no connection is opened. Code with fakes in
+  its tests, or with Drivine taken out, runs as written.
+- **Outside a transaction**, each statement runs on its own and commits. Drivine never starts a transaction you didn't
+  ask for.
+- **It works on calls to `self`**, since it wraps the function itself, not a proxy.
 
-| Option | Meaning |
-|---|---|
-| `mode` | `FAIL_FAST` (the default) throws on drift or a violation; `WARN` logs it and carries on. |
-| `recreateOnDrift` | Destructive: replace an item whose shape drifted. |
-| `recreateOnStartup` | Destructive: drop and make every declared item on every startup. |
-| `violationSampleSize` | How many values held more than once a violation reports; 0 skips the check. Defaults to 10. |
-| `enabled` | `false` skips the startup run; `SchemaManager` can still be injected. |
+### FalkorDB
 
-`SchemaManager` is injectable, to change the schema as the application runs: `enforce()` is safe to call again, and
-`recreateAll()` drops and remakes every declared item.
+FalkorDB has no multi-statement transactions: each statement commits as it runs. With `DATABASE_TRANSACTION_MODE=WARN`,
+the default, a transaction runs statement by statement and a rollback logs that nothing was rolled back; a `save_all`
+of several statements does the same. With `STRICT`, a transaction is refused at its first statement, and such a batch
+raises `NonAtomicBatchError`, so no code path can rely on atomicity it doesn't have.
 
-The manager reads its catalogs once, when it is built: a catalog made later isn't seen, and a later `enforce()` applies
-the same list. Schema known later is given to `ensure` (below). With nothing to apply, in its catalogs or given to
-`ensure`, it says so at info level: `Schema management found no SchemaCatalog` when it was given none, or
-`found 2 SchemaCatalog(s), all empty: 'dice', unnamed` when every one came out empty. So a missing index can be traced
-to a catalog that never arrived.
+### Tasks share their transaction, one statement at a time
 
-### Schema Known Only at Runtime
+The current transaction lives in a context variable, so asyncio carries it across every `await` and into the tasks
+started inside it:
 
-Some schema can't be in a catalog, because it isn't known when the catalogs are read: a vector index whose dimensions
-arrive with an embedding model configured after startup, or an index for each label a tenant declares. Give it to
-`ensure`, under the owner it belongs to:
-
-```typescript
-await schemaManager.ensure('dice', vectorIndex('Proposition', 'embedding', model.dimensions));
+```python
+@transactional()
+async def import_all(self, people: list[Person]) -> None:
+    async with asyncio.TaskGroup() as tasks:
+        for person in people:
+            tasks.create_task(self.people.add(person))   # all in this transaction
 ```
 
-With Nest, inject `SchemaManager`. The module provides one only when given `schema`, so an application whose schema is
-all known at runtime gives it `schema: { catalogs: [] }`.
+A database transaction runs one statement at a time, so Drivine queues them, in the order they were issued. A
+cursor takes its turn for each row it reads, so other statements run between its rows. A statement that fails dooms
+the transaction, and the statements after it raise `TransactionRolledBackError` at once.
 
-The items join what that owner's catalogs declared, for the life of the manager, and are applied as `enforce` applies
-the owner's:
+The queue keeps concurrency correct, not parallel. For a parallel import, give each task its own transaction.
 
-- **Under the same options.** `mode`, `recreateOnDrift` and `violationSampleSize` apply. Only the items given are
-  applied, and the results come back by database. `ensure` leaves a change of the owner's version to `enforce`, and
-  `recreateOnStartup` doesn't apply to it.
-- **In the owner's inventory.** The owner's `_DrivineSchema` marker records them as ensured at runtime. A later
-  `enforce()` applies them with the rest, and `recreateAll()` recreates them. An `enforce` by a manager built later (the
-  next process, before the item is ensured again) keeps them in the inventory and doesn't report them as orphans.
-- **Recreated with the owner.** When that later manager recreates the owner's items (its version changed,
-  `recreateOnStartup`, or `recreateAll`), it has no spec for a runtime item, so it marks it, and the next `ensure` of
-  the item recreates it.
-- **Checked against other owners.** A declaration that conflicts with another owner's, or with the owner's own, fails
-  naming both, and nothing is kept or applied on any database. One identical to another owner's is co-owned.
+## Fragments and views
 
-Ensuring an item again with the same kind, label and properties replaces it: of another shape, it's drift. To target
-databases, give a catalog: `ensure(SchemaCatalog.of(spec).named('dice').forDatabase('users'))`. A runtime catalog
-can't carry a version, since the owner's version is its startup catalogs'. The marker is drivine4j's: either library
-keeps what the other ensured at runtime.
+Map a node with a `NodeFragment`, and compose fragments and relationships into a `GraphView`, which loads in one
+statement:
 
-### Version-Triggered Rebuild
+```python
+from typing import Annotated
 
-Drift detection sees only what introspection shows. Swapping an embedding model for another with the same dimensions
-leaves stale vectors behind. Tag the catalog with a version, and a new version recreates its items once:
+from drivine import GraphView, NodeFragment, NodeId, Relationship, RelationshipFragment, Root, TargetNode
 
-```typescript
-SchemaCatalog.of(vectorIndex('Chunk', 'embedding', embeddings.dimensions)).withVersion(embeddings.modelId);
+
+class Person(NodeFragment, labels=["Person"]):
+    uuid: Annotated[str, NodeId()]
+    name: str
+    bio: str | None = None
+
+
+class Organization(NodeFragment, labels=["Organization"]):
+    uuid: Annotated[str, NodeId()]
+    name: str
+
+
+class WorkHistory(RelationshipFragment):     # a relationship's properties, and the node it leads to
+    start_date: str
+    role: str
+    target: Annotated[Organization, TargetNode()]
+
+
+class PersonCareer(GraphView):
+    person: Annotated[Person, Root()]
+    employment_history: Annotated[list[WorkHistory], Relationship("WORKS_FOR")] = []
 ```
 
-The applied version and the items are recorded in a `_DrivineSchema` node for each catalog, in drivine4j's shape. A
-first version is adopted without recreating anything. An item recorded but no longer declared is reported, not dropped,
-and an item two catalogs declare is never recreated by one of them alone.
+```python
+gom = drivine.graph_object_manager()        # from DrivineAssembly, or StatelessGraphObjectManager(pm)
 
-> Recreating a vector index rebuilds it from the stored embeddings: it doesn't re-embed. After a model swap, re-embed
-> the nodes, then enforce.
-
-### Per-Engine Notes
-
-| | Neo4j | Memgraph | FalkorDB | Oracle | Postgres |
-|---|---|---|---|---|---|
-| Vector | `CREATE VECTOR INDEX` | `WITH CONFIG`, uSearch metrics | `OPTIONS`, unnamed | A `VECTOR` table beside the nodes, kept by a trigger, with a neighbour-partition vector index | A pgvector HNSW index over the label's embeddings of its size |
-| Full-text | `CREATE FULLTEXT INDEX` | `CREATE TEXT INDEX` | per property, unnamed | A text table beside the nodes, with an Oracle Text index | A trigram index over the text a search reads |
-| Range | named, composite | label-property | per label | an index over the JSON property | a partial index over the label's nodes |
-| Uniqueness | `REQUIRE … IS UNIQUE` | `ASSERT … IS UNIQUE` | `GRAPH.CONSTRAINT`, with its backing index, polled while it builds | a unique index for the label's nodes | a unique partial index over the label's nodes |
-
-Neptune has no schema management.
-
-## Multi-Database Support
-
-Register several connections, and inject each by name:
-
-```typescript
-DrivineModule.withOptions({
-    connectionProviders: [
-        DatabaseRegistry.buildOrResolveFromEnv(),            // DATABASE_*
-        DatabaseRegistry.buildOrResolveFromEnv('ANALYTICS')  // ANALYTICS_DATABASE_*
-    ]
-});
-
-@Injectable()
-export class AnalyticsRepository {
-    constructor(
-        @InjectPersistenceManager('ANALYTICS') readonly pm: PersistenceManager,
-        @InjectGraphObjectManager('ANALYTICS') readonly gom: StatelessGraphObjectManager
-    ) {}
-}
+career = await gom.load(PersonCareer, uuid)
+leads = await gom.load_all(PersonCareer, "n.bio CONTAINS $text", {"text": "Lead"})   # Cypher over the root, n
+total = await gom.count(Person)
 ```
 
-Without Nest, register each with `DatabaseRegistry.buildOrResolveFromEnv('ANALYTICS')`, and take its managers by name:
-`persistenceManagers.get('ANALYTICS')`, `graphObjectManagers.get('ANALYTICS')`.
+### Queries
 
-One `@Transactional()` method can span several databases.
+A query is built from a class's **references**, which mirror its fields:
 
-## Security
+```python
+from drivine import any_of, not_, refs
 
-Values travel as bind parameters: filter values, saved properties, ids, search vectors and text. Names are written into
-the query text, quoted for it: labels, relationship types and property names, which may come from data (a property
-bag's keys, open `@NodeLabels`, a property named at runtime, `edges.relate`'s type). A backtick in a name is doubled in
-either spelling: Neo4j reads `\u0060` as a backtick even between backticks, so that escape is doubled too. On Oracle
-names are escaped for the JSON path and the SQL literal around it, and a graph's name must be letters, digits and
-underscores. A raw `QuerySpecification`'s `skip` and `limit` must be whole numbers. Rows are never copied onto an
-object under `__proto__`, `constructor` or `prototype`.
+q = refs(PersonCareer)
+leads = await gom.load_all(
+    PersonCareer,
+    where=q.person.bio.contains("Lead"),
+    order_by=q.person.name.asc(),
+    limit=20,
+)
 
-What stays yours to guard:
+await gom.load_all(PersonCareer, where=[                                 # a list: all must hold
+    q.employment_history.target.name.eq("Acme"),                         # across a relationship
+    any_of(q.person.name.eq("Ada"), q.person.name.eq("Grace")),
+    not_(q.person.bio.is_null()),
+])
 
-- **A `where` string** (raw Cypher or SQL) is written as it is. Put values in its parameters.
-- **`loadMatching` on Neo4j** reads its text as Lucene, which takes wildcards and fuzzy terms that can be slow over a
-  large index. Limit what users can send.
-- **`matches()`** takes a regular expression: a user's value changes what it matches. Escape it for a literal match.
-- **Transport security** is the connection's: on Neo4j and Memgraph use the protocol `bolt+s` or `neo4j+s`
-  (`DATABASE_PROTOCOL`). FalkorDB's and Postgres's providers take no TLS options yet.
+# one relationship that meets both, rather than each met by any
+q.employment_history.any(lambda it: [it.role.eq("Engineer"), it.target.name.eq("Acme")])
+q.employment_history.none(lambda it: it.role.eq("Lead"))
+```
+
+- **Operators:** `eq`, `neq`, `gt`, `gte`, `lt`, `lte`, `in_`, `not_in`, `contains`, `starts_with`, `ends_with`,
+  `matches`, `contains_ignore_case`, `eq_ignore_case`, `has_item`, `is_null`, `is_not_null`. On a node:
+  `instance_of(Type)`, `has_any_label(...)`, and `property(name)` or `predicate(name, operator, value)` for a property
+  named at run time by its stored name.
+- **Fields go by their Python names**, `q.start_date`, and Drivine writes the stored names. A field the class doesn't
+  have fails as the query is written, naming it and the class. `q.x == 1` raises: write `q.x.eq(1)`.
+- **Order and pages:** `order_by` takes terms, `asc()` or `desc()`, then `nulls_first()` or `nulls_last()`; `limit`
+  and `skip` apply in the database. An order on a list relationship's property sorts that list in each object.
+- **Keyset pages:** `seek=[q.released.after(last.released), q.uuid.after(last.uuid)]`, one value for each term of
+  `order_by`, ending with a unique key.
+- **An order by an expression:** `plus`, `minus`, `times`, `div`, `negate`, `exp`, `floor`, `coalesce`, `case_of`
+  with `above`, `below`, `at_least`, `at_most`, `equal_to`, `has_value` and the rest, all computed in the database.
+- `count`, `delete`, `delete_all` and `patch` take conditions too.
+
+### Typed references
+
+`refs` is untyped: Python can't derive a reference type for each field from a class, as TypeScript does. A
+misspelt field still fails, but when the query is written. To have pyright or mypy check each query, and an editor
+complete its fields, write typed references for your models:
+
+```
+python -m drivine.stubs myapp.models                 # writes myapp/models_refs.py and models_refs.pyi
+python -m drivine.stubs myapp.models --check         # in CI: fails when the models changed since
+```
+
+Then import `refs` from the module written:
+
+```python
+from myapp.models_refs import refs
+
+q = refs(PersonCareer)                  # PersonCareerRefs
+q.person.bio.contains("Lead")           # StringRef
+q.person.born.gt("1815")                # error: born is ComparableRef[int]
+q.person.nmae                           # error: PersonNodes has no attribute nmae
+```
+
+Each field's reference follows from its type: text is a `StringRef`; numbers, dates and times are a
+`ComparableRef`; booleans and enums a `ValueRef`; lists and sets a `ListRef`; a property bag gives any entry; and a
+relationship leads to the fields of the nodes it reaches, with `any` and `none`. At run time the module is drivine's
+`refs`, so nothing changes but what the checker knows. Several modules can share one: `python -m drivine.stubs
+myapp.models myapp.billing --out myapp/query_refs.py`.
+
+### Grouped reads
+
+Group a fragment's nodes by keys, with numbers about each group, in one statement:
+
+```python
+from drivine import avg, count, hop, key, path_key, refs
+
+q = refs(Review)
+top = await gom.groups.load(
+    Review,
+    keys={"page": key(q.page)},                                  # or path_key(Page, [hop("REVIEWS")]): the node
+    aggregates={"votes": count(q.helpful.eq(True)), "rating": avg(q.rating)},
+    where=q.published.is_not_null(),
+    having=[("votes", "gte", 3)],
+    order_by=[("votes", "desc")],
+    limit=10,
+)
+# [{"page": "/pricing", "votes": 12, "rating": 4.5}, ...]
+
+await gom.groups.count_by(Review, "page")                       # {"/pricing": 14, ...}
+```
+
+Aggregates are `count`, `sum_`, `avg`, `min_` and `max_`, each with an optional filter. Ties in an order are broken by
+the keys, so a page of groups is the same every time.
+
+- **Models are Pydantic.** A loaded fragment is validated, so a bad value fails at the load.
+- **The annotation says what a relationship holds**: a fragment, a relationship fragment or a view, one or a list. A
+  single relationship typed without `None` is required, so only roots that have it load; `Person | None` is
+  optional. A list is required with `Relationship(..., required=True)`.
+- **Properties are stored in camel case**, as TypeScript and JVM models store them: `start_date` as `startDate`.
+  `GraphProperty("name")` names one, and `property_names="as_written"` keeps a class's fields as they are written.
+- **A subclass is loaded as itself.** A fragment's labels are inherited, and a node loads as the most specific
+  subclass whose labels it carries.
+- **Recursion:** `Relationship("HAS_LOCATION", max_depth=3)` on a list of the view's own class expands three levels;
+  `depth={"sub_locations": 5}` overrides it for one load.
+- **More markers:** `GraphPath([hop(...), ...])` for the nodes at the end of several hops, `Count` and `Aggregate`
+  computed in the query, `SortedBy`, `ReadOnly`, `Transient`, `NodeStamp`, `NodeLabels`, `PropertyBag`,
+  `JsonPacked`, `NullAsDefault` and `EmptyWhenAbsent`, as in TypeScript's Drivine.
+- **A flat `PropertyBag(flat=True)`** stores each entry under its bare key and loads every property no field or other
+  bag is stored under. A save refuses, before it writes anything, an entry whose key a field (the id among them) is
+  stored under, one under another bag's prefix, or one beginning `__drivine.`, Drivine's own, such as the stamp.
+
+The statements are TypeScript's, character for character: the tests check them against those TypeScript's Drivine
+writes for the same models.
+
+### Saving
+
+```python
+saved = await gom.save(career)                                       # fields that aren't None; relationships added
+await gom.save(career, replace=["employment_history"])               # this list is the whole list
+await gom.save(person, only=["name"])                                # or except_=["embedding"]
+await gom.save(person, null_policy=NullPolicy.CLEAR)                 # a field assigned None clears its property
+await gom.save(edited, from_=loaded)                                 # checked against the object as it was loaded
+created = await gom.create(person)                                   # only if absent; None when it was there
+updated = await gom.update(Person, uuid, lambda it: it.model_copy(update={"name": "Ada"}))
+await gom.delete(PersonCareer, uuid, cascade=CascadeType.DELETE_ORPHAN)
+await gom.delete_all(Person, "n.name = $name", {"name": "Ada"})
+
+await gom.save_all(chunks)                                           # fragments in one statement per 1,000
+result = await gom.patch(Session, session_id, set={"last_activity_at": now},
+                         where="n.lastActivityAt IS NULL OR n.lastActivityAt < $now", bindings={"now": now})
+results = await gom.patch_all(chunks, only=["embedding"])            # named fields, where each node is there
+
+await gom.edges.relate(node_ref(Issue, a), node_ref(Person, b), "ASSIGNED_TO")
+await gom.edges.unrelate(node_ref(Issue, a), node_ref(Person, b), "ASSIGNED_TO")
+people = await gom.edges.load_related(node_ref(Issue, a), "ASSIGNED_TO", Person)
+```
+
+- **A save is one statement**, applied whole or not at all: the root, the relationships it drops, each related node
+  and the relationship to it.
+- **A save adds and removes nothing**, unless a field is named in `replace`. `removed_targets=DELETE_UNREFERENCED`
+  also deletes a removed node that nothing else refers to.
+- **Stamps refuse a stale save.** On a class with a `NodeStamp` field, a save of an object loaded before another
+  writer changed the node raises `StaleObjectError` and writes nothing. Use the object a save returns: it carries the
+  new stamp. `update` loads, applies your change and saves what it altered, again if the node changed meanwhile.
+- **On Neo4j a load can be handed a stamp newer than its data.** Neo4j reads under read committed, without a snapshot,
+  so a load that runs while another writer commits can find that writer's stamp and the data from before its write.
+  `update` therefore compares each field of the root as it loaded it too, under the node's lock, and loads again if one
+  differs: a field's value (a `JsonPacked` field's as the text the node held), a `PropertyBag`'s keys and their values,
+  and the labels a `NodeLabels` field reads. A `save` checks the same when you give it the object as loaded, as `from_`.
+  Without `from_` it has only the stamp to go on, and in that moment it can write over the other writer's change: hold
+  on to what you loaded and pass it, or change the node with `update`. Where only the stamp makes the round trip, as
+  through a web form, the stamp is all there is. Memgraph reads from a snapshot, FalkorDB runs no read beside a write,
+  and Oracle and Postgres read a statement whole, so on them the stamp is what was read.
+- **`from_` is the object as you loaded it**, when what you save is a changed copy of it. The save is then checked
+  against the stamp `from_` carries, whatever stamp the copy carries, as `update` checks against what it loaded, and on
+  Neo4j against each field of `from_`'s root too. A `JsonPacked` field is compared as a save packs it: `from_` holds the
+  value, not the text the node held, so where another writer packed the same value with other spacing the save is
+  refused, and `update`, which compares the text, is the way to change the node. A `from_` of another class, with
+  another id, or with no stamp is refused before anything is written, and so is the object saved itself. A copy may
+  share an unchanged root with `from_`, as a view copied to change only a relationship does; change the root through a
+  copy (`model_copy`), not in place.
+
+  ```python
+  loaded = await gom.load(Person, uuid)
+  # ... later, from what the user changed:
+  await gom.save(loaded.model_copy(update={"email": form.email}), from_=loaded)
+  ```
+- **`save_all`** runs its statements in one transaction, or in yours, so a failure leaves nothing written. It writes
+  the fragments' classes in the order of their names and the fragments of each in the order of their ids, so two
+  batches over the same nodes take their locks in the same order. The objects come back in the order given.
+- **`patch`** writes named fields of one node by id, if it meets a condition, without loading it, and says whether it
+  found the node, applied the patch and changed anything. It never makes a node.
+- **Edges** relate and unrelate stored nodes by id, marking both ends' stamps.
+- **A cascading delete** of a view follows the relationships a save of it writes, through nested views. It leaves what
+  a read-only field loads (a `ReadOnly()` field, a `GraphPath`, and a list of fragments read over several hops): other
+  code writes those nodes. `DELETE_ALL` deletes every node the view reaches, and `DELETE_ORPHAN` each one that nothing
+  outside the view still needs. That keeps a node something outside the view refers to, at any level, with everything
+  the view holds below it: a bookmarked message keeps its attachments, and a pinned sub-session its messages and
+  sub-sessions. The rest goes, the session that held a kept message among it. `DELETE_ORPHAN` isn't available on
+  Memgraph. A view that contains itself (`parts: list["SessionTree"]`, with a `max_depth`) deletes what a load of it
+  reads, every level and what each holds through the relationships a save writes; one that reaches below its
+  `max_depth` is refused with a `DrivineError` before anything is written, saying how deep the view reads: raise the
+  `max_depth` to cover the deepest level.
+- **Outside a transaction**, a save the engine turns away because another writer held the node is run again after a
+  pause. Inside one, it joins the transaction, and fails for its owner to decide.
+- A save that lost its connection, or whose authorization expired, is not run again, though the Neo4j driver calls that
+  retryable: it may have been applied, and a second run would find its own stamp and report a save that was applied as
+  refused.
+
+The store format, stamps included, is TypeScript's and drivine4j's, so the three can share a store.
+
+## Schema
+
+Declare indexes and constraints on the fragments, and hold them on every database at start-up:
+
+```python
+class Chunk(NodeFragment, labels=["Chunk"], schema=[RangeIndex(["section_id", "position"])]):
+    uuid: Annotated[str, NodeId(), Unique()]
+    section_id: str
+    position: int
+    text: Annotated[str, FullTextIndex()]
+    embedding: Annotated[list[float] | None, VectorIndex(similarity="COSINE")] = None
+
+
+class AppDrivine(DrivineAssembly):
+    def schema_options(self) -> SchemaOptions:
+        return SchemaOptions([SchemaCatalog.from_fragments(Chunk, dimensions=lambda label, prop: 1536)])
+
+await AssemblyHolder.shared(AppDrivine).start()      # makes what is missing; idempotent
+```
+
+Without pi-pilgrim, enforce it yourself: `await SchemaManager(registry, factory, options).enforce()`.
+
+- **`ensure` is idempotent.** An item that is there is left; one there with another shape (a vector index's dimensions,
+  say) is reported as DRIFT and left, unless `recreate_on_drift`. A uniqueness constraint the data already breaks is a
+  VIOLATION, with a sample of the values. `mode="FAIL_FAST"`, the default, raises on either; `"WARN"` logs.
+- **Versions.** `catalog.with_version("2")` recreates the catalog's items once, the first time it is enforced. Items an
+  owner applied before and no longer declares are reported, never dropped. Each owner's version and inventory are kept
+  in a `_DrivineSchema` node, as drivine4j and TypeScript keep them.
+- **Schema known only at runtime**, a vector index whose dimensions come with the embedding model or an index for each
+  label a tenant declares, is given to the manager under an owner: `await schema_manager.ensure("dice",
+  vector_index("Proposition", "embedding", 1536))`, or `ensure_catalog(catalog)` for a catalog naming its owner and
+  databases. The items join what the owner declared, for the life of the manager, and are applied under the same
+  options; a later `enforce` or `recreate_all` applies them with the rest. A declaration that conflicts with another
+  owner's, or the owner's own, raises, and nothing is kept or applied. The marker records them as ensured at runtime
+  (`runtime:` before the key, as drivine4j writes it), so the next process's `enforce` keeps them rather than calling
+  them orphans; when it recreates the owner (on a version change, under `recreate_on_startup`, or by `recreate_all`), it
+  marks them (`runtime-stale:`), and the next `ensure` recreates them.
+  A version change is left to `enforce`.
+- **Catalogs are read once**, from the options the manager is built with; a catalog made later isn't seen, and schema
+  known later is given to `ensure`. With nothing to apply, no catalog or only empty ones and nothing ensured, the
+  manager says so at INFO: that it found no `SchemaCatalog`, or that all it found are empty, naming their owners. So a
+  missing catalog, and one left empty until an embedding model exists, can be told from an application with no schema.
+- **By hand:** `gom.indexes.ensure(range_index("Session", ["lastActivityAt", "sessionId"]))`, `gom.indexes.recreate`,
+  `gom.indexes.drop`, `gom.constraints.ensure(uniqueness_constraint("Person", "email"))`, and `list`.
+- **Each engine's DDL** is written for it: named items on Neo4j, Memgraph's text and vector indexes, FalkorDB's index per
+  property and its constraint commands, Oracle's tables beside the nodes, and Postgres's partial indexes over a label's
+  nodes, recorded in the graph's catalog as drivine4j records them (a pgvector HNSW index for a vector index, a trigram
+  index for a full-text one). Neptune has no schema management. Vector index tuning (`hnsw_m`, `hnsw_ef_construction`, and an engine's own
+  options) is passed where the engine takes it, and reported where it doesn't.
+
+### Search
+
+A fragment's `VectorIndex` field drives `load_nearest`, and its `FullTextIndex` drives `load_matching`. Either takes a
+fragment or a view, searched by its root, and gives each hit with its score, best first:
+
+```python
+hits = await gom.load_nearest(Chunk, embedding, top_k=5, where=refs(Chunk).section_id.eq(section))
+for hit in hits:
+    print(hit.score, hit.value.text)
+
+found = await gom.load_matching(Chunk, "graph AND database", top_k=10, threshold=0.5)
+```
+
+- **One scale on every engine.** A nearest score is a similarity, higher nearer: (1 + cos) / 2 for cosine, 1 / (1 + d²)
+  for euclidean. A matching score is scaled so that the best hit is 1.
+- **Filters apply after the search:** `threshold`, `where`, and a view's required relationships. So a search can return
+  fewer than `top_k`; `search_k` asks the index for more, and `top_k` trims after the filter.
+- `property` names the field to search when a fragment declares more than one index; `partition_label` searches the
+  vector index of another label. Full-text text is the engine's own query language, passed as it is.
+
+### Index advice
+
+An ordered query with no range index over exactly its ordered properties scans and sorts. Drivine says so, once for
+each label and properties, naming the index to make. `gom.index_advice = IndexAdvicePolicy.FAIL` raises instead, for
+development and CI (or override `index_advice()` on the assembly); `OFF` says nothing. The index list is read once:
+`gom.index_advisor.refresh()` after making indexes as the application runs.
+
+### Store identity
+
+`await gom.store_identity()` gives the store's stable id, minted in the store on first sight: two connections see the
+same id when, and only when, they look at the same data.
+
+## Sync
+
+`drivine.sync` is the same API without `async` and `await`, for scripts, notebooks, Django and Flask:
+
+```python
+from drivine.sync import DatabaseRegistry, PersistenceManagerFactory, StatelessGraphObjectManager, transactional
+
+registry = DatabaseRegistry()
+registry.build_or_resolve_from_env()
+gom = StatelessGraphObjectManager(PersistenceManagerFactory(registry).get())
+
+
+@transactional
+def promote(uuid: str) -> None:
+    person = gom.load(Person, uuid)
+    gom.save(person.model_copy(update={"bio": "Lead"}))
+```
+
+- **Each driver's own sync client**, not an event loop behind the scenes: it costs nothing extra, and works where a loop
+  is already running, as in Jupyter.
+- **The same models, query DSL and backends.** A class is one class in both APIs; only what does I/O is sync.
+- **Each thread has its own transaction**, as asyncio gives each task's context its own.
+- `@transactional` from `drivine.sync` takes a plain function, and drivine's takes an async one.
+
+It is written from the async source by `scripts/unasync.py`, as the Neo4j driver writes its sync API, and tested by the
+same tests, written alike.
+
+## With pi-pilgrim
+
+`DrivineAssembly` is a [pi-pilgrim](https://github.com/liberation-data/pi-pilgrim) assembly holding the registry
+and the managers, for your own assembly to use. It needs `pip install "drivine[pilgrim]"`:
+
+```python
+from pipilgrim import AssemblyHolder, PilgrimAssembly
+from drivine.drivine_assembly import DrivineAssembly      # drivine.sync.drivine_assembly for the sync API
+
+
+class AppAssembly(PilgrimAssembly):
+    def __init__(self):
+        self.drivine = AssemblyHolder.shared(DrivineAssembly)
+        super().__init__()
+
+    def route_repository(self) -> RouteRepository:
+        return self.shared(lambda: RouteRepository(self.drivine.persistence_manager()))
+
+    def report_repository(self) -> ReportRepository:
+        return self.shared(lambda: ReportRepository(self.drivine.persistence_manager("analytics")))
+```
+
+- It registers the database the environment describes. To register yours in code, subclass it and override
+  `register_databases(registry)`.
+- `Assembled` injects a manager into a class something else makes:
+  `pm: PersistenceManager = Assembled(assembly=DrivineAssembly)`.
+- Call `await assembly.drivine.close()` when the application stops, in FastAPI's lifespan, say.
+
+Nothing else needs pi-pilgrim: `import drivine` doesn't load it, and the managers are plain classes.
+
+## The sample app
+
+[`sample/`](sample) is the port of drivine4j's sample, as TypeScript's Drivine has it: an issue tracker and a guide's
+users, with fragments, views, relationship fragments, polymorphic users, property bags, stamps and search, and its
+tests on every engine. It is a Poetry project of its own, whose build writes its typed references.
 
 ## Testing
 
-`RunWithDrivine` runs each test of a file in its own transaction, rolled back at its end, so tests leave nothing behind:
+`pip install "drivine[testing]"` adds a pytest plugin. With
 
-```typescript
-RunWithDrivine({ rollback: true });
-
-describe('RouteRepository', () => {
-    it('finds the fastest route', async () => {
-        // …
-    });
-});
+```toml
+[tool.pytest.ini_options]
+drivine_test_containers = true
 ```
 
-FalkorDB has no transactions to roll back: clear what a test wrote yourself.
+it starts a container for each datasource the environment configures, Neo4j, Memgraph, FalkorDB, Postgres (pgvector's
+image, with user `drivine`, password `drivine-test` and database `drivine`) or Oracle, before the tests run, and points
+the datasource at it. Datasources of one type share a container. `USE_LOCAL_NEO4J=true` (or `_MEMGRAPH`, `_FALKORDB`,
+`_POSTGRES`, `_ORACLE`) leaves that type's datasources as they are, to test against your own instance, and
+`NEO4J_TEST_IMAGE` picks another image.
 
-### Test Containers, or a Local Instance
+Drivine's own tests run on Oracle only with `ORACLE_TESTS=true`: its image is large, and the database wants two
+gigabytes.
 
-`@liberation-data/drivine/testing` starts a [Testcontainer](https://node.testcontainers.org) for each datasource your
-test environment configures, and points the datasource at it: Neo4j, Memgraph, FalkorDB, Postgres and Oracle. While you
-iterate, `USE_LOCAL_<TYPE>=true` uses an instance of your own in that type's place, so nothing starts and you can look at
-what a test left behind. It is drivine4j's `@EnableDrivineTestConfig`. Add `testcontainers` to your dev dependencies, and
-make it Jest's global setup and teardown:
+## Logging
 
-```typescript
-// test/global-setup.ts
-import { drivineGlobalSetup } from '@liberation-data/drivine/testing';
-require('dotenv').config({ path: '.env.test' });
-export default drivineGlobalSetup;
+Drivine logs through the standard `logging` module: `drivine.statements` logs each statement at DEBUG, with its
+session and how long it took. `DRIVINE_LOG_LEVEL`, as TypeScript's Drivine reads it, sets the level of the `drivine`
+logger when the application hasn't.
 
-// test/global-teardown.ts
-export { drivineGlobalTeardown as default } from '@liberation-data/drivine/testing';
+## Building
+
+```
+uv sync
+uv run pytest            # starts Neo4j, Memgraph, FalkorDB and Postgres in Docker
+uv run ruff check . && uv run pyright
 ```
 
-```bash
-npm test                          # a container for each datasource
-USE_LOCAL_NEO4J=true npm test     # Neo4j at DATABASE_HOST:DATABASE_PORT, the others in containers
-```
-
-Datasources of one type share a container. `<TYPE>_TEST_IMAGE` picks another image. See
-[TEST_CONTAINERS.md](TEST_CONTAINERS.md), which also covers running Drivine's own suite.
-
-## The Sample App
-
-[`sample/`](sample) is the port of drivine4j's sample: an issue tracker and a guide's users, with fragments, views,
-relationship fragments, polymorphic users, property bags, stamps and search. `SampleAppModule.forDatabase(name)` wires
-Drivine as an application would, and `sample/test` runs drivine4j's sample tests on every store: the DSL, grouped reads,
-patches, label polymorphism, required relationships, deletes and search.
-
-## Example Applications
-
-If you use Drivine and your code is public, feel free to make a [PR](https://github.com/liberation-data/drivine/pulls)
-and add yourself to the list.
-
-### Quick Start Template
-
-Clone the **[sample app](https://github.com/liberation-data/drivine-inspiration)** and start hacking. It has endpoints
-for traffic routing, movies and other typical use cases: choose the one closest to yours, and modify it.
-
-### SlackMap
-
-The new version of [slackmap.com](https://slackmap.com) is a full rewrite: `OrientDB` was replaced with `Neo4j`, through
-Drivine, in a full-stack JavaScript app using Angular, Nest and an Nx monorepo.
-Repository: [github.com/SlackMap/slackmap](https://github.com/SlackMap/slackmap)
-
-## Documentation
-
-[drivine.org](https://drivine.org/ts/) has this guide a page per section, beside drivine-python's and drivine4j's.
-
-## Tutorials
-
-New to graph databases? Read some tutorials.
-
-* [Rock &amp; Roll Traffic Routing, with Neo4j](https://medium.com/neo4j/rock-n-roll-traffic-routing-with-neo4j-3a4b863c6030)
-* [Rock &amp; Roll Traffic Routing, with Neo4j, Chapter Two](https://medium.com/neo4j/rock-n-roll-traffic-routing-with-neo4j-part-2-f2a74fe7d7f)
-
-Have a tutorial you'd like to share? [Get in touch](https://twitter.com/doctor_cerulean).
-
-## Feedback
-
-#### I'm not sure how to do [xyz]
-
-> If you can't find what you need here or in the User Guide, please
-> [post a question on StackOverflow](https://stackoverflow.com/questions/tagged/drivine?sort=newest&pageSize=15), using
-> the Drivine tag.
-
-#### I've found a bug, or have a feature request
-
-> Please raise a <a href="https://github.com/liberation-data/drivine/issues">GitHub</a> issue.
-
-### Have you seen the light?
-
-Drivine is a non-profit, community-driven project. If you've found it useful, star us on GitHub or send a tweet
-mentioning us (<a href="https://twitter.com/@doctor_cerulean">@doctor_cerulean</a>). If you've written a Drivine blog or
-tutorial, or published a Drivine-powered app, we'd be happy to hear about that too.
-
-Drivine is led by <a href="https://www.linkedin.com/in/jasper-blues-7781638/">Jasper Blues</a> and sponsored by Jasper
-Blues, creator of <a href="https://github.com/appsquickly/typhoon">Typhoon</a>, and
-<a href="https://en.wikipedia.org/wiki/Rod_Johnson_(programmer)">Rod Johnson</a>, creator of the Spring Framework and of
-<a href="https://hub.embabel.com">Embabel</a>, the AI agent framework for the JVM, which uses Drivine, through drivine4j,
-as its graph database client. Contributions come from
-<a href="https://github.com/liberation-data/Drivine/graphs/contributors">around the world</a>.
-
-## Building from Source
-
-```bash
-npm install
-npm run build
-npm test         # starts a test container for each engine, needs Docker, and runs the suites in stages
-```
-
-The tests' datasources are in `.env.test`. Put overrides in `.env.test.local`, which git ignores: `USE_LOCAL_NEO4J=true`
-(or `_MEMGRAPH`, `_FALKORDB`, `_POSTGRES`, `_ORACLE`) to use an instance of your own while you iterate, and
-`ORACLE_TESTS=true` to run the Oracle suites too. See [TEST_CONTAINERS.md](TEST_CONTAINERS.md).
+`drivine/sync` and `tests/sync_integration` are written from the async source: change that, and run
+`uv run python scripts/unasync.py`. A unit test fails while they are out of date. `drivine/sync/concurrency.py`, the
+counterpart of `drivine/concurrency.py`, is the one sync module written by hand, and a test marked `async_only` (one
+that runs tasks concurrently) is left out of the sync tests.
 
 ## License
 
-Copyright (c) 2022 Jasper Blues
-
-Drivine is free software: you can redistribute it and/or modify it under the terms of the APACHE LICENSE, VERSION 2.0
-as published by the Apache Software Foundation, either version 2 of the License, or (at your option) any later version.
-This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied
-warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the Apache Software License, Version 2.0 for more details.
-You should have received a copy of the Apache Software License along with this program.
-If not, see <http://www.apache.org/licenses/>.
+Apache 2.0.

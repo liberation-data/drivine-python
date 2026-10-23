@@ -590,6 +590,16 @@ Without pi-pilgrim, enforce it yourself: `await SchemaManager(registry, factory,
   to apply, the manager says so at INFO: that it found no `SchemaCatalog`, or that all it found are empty, naming
   their owners. So a missing catalog, and one left empty until an embedding model exists, can be told from an
   application with no schema.
+- **Schema known only at runtime**, a vector index whose dimensions come with the embedding model or an index for each
+  label a tenant declares, is given to the manager under an owner: `await schema_manager.ensure("dice",
+  vector_index("Proposition", "embedding", 1536))`, or `ensure_catalog(catalog)` for a catalog naming its owner and
+  databases. The items join what the owner declared, for the life of the manager, and are applied under the same
+  options; a later `enforce` or `recreate_all` applies them with the rest. A declaration that conflicts with another
+  owner's, or the owner's own, raises, and nothing is kept or applied. The marker records them as ensured at runtime
+  (`runtime:` before the key, as drivine4j writes it), so the next process's `enforce` keeps them rather than calling
+  them orphans; when it recreates the owner (on a version change, under `recreate_on_startup`, or by `recreate_all`), it
+  marks them (`runtime-stale:`), and the next `ensure` recreates them.
+  A version change is left to `enforce`.
 - **By hand:** `gom.indexes.ensure(range_index("Session", ["lastActivityAt", "sessionId"]))`, `gom.indexes.recreate`,
   `gom.indexes.drop`, `gom.constraints.ensure(uniqueness_constraint("Person", "email"))`, and `list`.
 - **Each engine's DDL** is written for it: named items on Neo4j, Memgraph's text and vector indexes, FalkorDB's index per

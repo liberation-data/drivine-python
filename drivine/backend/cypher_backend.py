@@ -347,7 +347,7 @@ class CypherBackend:
 
     @staticmethod
     def marker_items(stored: str | None) -> list[str] | None:
-        """The inventory keys a marker's stored `items` holds; None for none recorded."""
+        """The entries a marker's stored `items` holds (inventory keys, marked if ensured at runtime); None for none."""
         return None if stored is None else [] if stored == "" else stored.split("\n")
 
     def record_schema_marker(self) -> GraphStatement:

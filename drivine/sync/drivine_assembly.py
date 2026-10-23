@@ -103,9 +103,12 @@ class DrivineAssembly(PilgrimAssembly):
         )
 
     def start(self) -> None:
-        """Enforces the schema catalogs, if there are any. Call it once, when the application starts."""
-        if self.schema_options().catalogs:
-            self.schema_manager().enforce()
+        """
+        Enforces the schema catalogs. Call it once, when the application starts. With none, or only empty ones, the
+        manager says so, and nothing is applied. The databases are registered here, catalogs or not, as drivine4j
+        registers them at start-up: so a missing `DATABASE_TYPE` raises `DrivineError` from `start`, not on first use.
+        """
+        self.schema_manager().enforce()
 
     def close(self) -> None:
         """

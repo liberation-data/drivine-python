@@ -64,6 +64,14 @@ class Thread(GraphView):
     replies: Annotated[list["Thread"], Relationship("REPLIES_TO", Direction.INCOMING)] = []
 
 
+class Library(GraphView):
+    """A view that holds two views nested in themselves, of different classes."""
+
+    doc: Annotated[Doc, Root()]
+    trees: Annotated[list[Tree], Relationship("SHELVES")] = []
+    threads: Annotated[list[Thread], Relationship("HOSTS")] = []
+
+
 class Plain(GraphView):
     doc: Annotated[Doc, Root()]
     notes: Annotated[list[Note], Relationship("HAS")] = []
@@ -135,6 +143,15 @@ def test_leaves_the_levels_of_a_view_nested_in_itself_through_a_field_marked_rea
     assert "HAS" in text
     assert "PART_OF" not in text
     assert backend.cascade_depth_checks(registry.view(ReadOnlyTree)) == []
+
+
+@pytest.mark.parametrize("backend", BACKENDS, ids=["cypher", "oracle", "postgres"])
+def test_reads_for_each_view_nested_in_itself_only_that_views_levels(backend: GraphBackend):
+    [tree, thread] = backend.cascade_depth_checks(registry.view(Library))
+    assert [tree.view, thread.view] == ["Tree", "Thread"]
+    # A level of one view is never a node one level past the other's max_depth.
+    assert "REPLIES_TO" not in tree.statement.text
+    assert "PART_OF" not in thread.statement.text
 
 
 def test_reads_the_nodes_past_the_depth_through_the_shelf_and_counts_those_not_a_level_of_the_view():

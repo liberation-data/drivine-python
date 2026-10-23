@@ -81,6 +81,14 @@ class StoreIdentityResolver:
                 self.persistence_manager.database,
             )
             return False
+        if result.status == "BLOCKED_BY_INDEX":
+            logger.warning(
+                "The index %s on DrivineStore(key) on %s is in the way of its uniqueness constraint. Identity is "
+                "best-effort until it is dropped.",
+                result.index.name if result.index else None,
+                self.persistence_manager.database,
+            )
+            return False
         return True
 
     async def _assign_if_absent(self, guarded: bool) -> None:

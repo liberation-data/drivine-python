@@ -1,6 +1,7 @@
 """A plain index in the way of a uniqueness constraint, as Neo4j reports it: drivine4j's ConstraintManagerTest."""
 
 import dataclasses
+import logging
 from collections.abc import Mapping
 from typing import Any
 
@@ -9,6 +10,7 @@ from neo4j.exceptions import Neo4jError
 
 from drivine import DrivineError, uniqueness_constraint
 from drivine.schema.constraint_manager import ConstraintManager
+from drivine.schema.ensure_result import EnsureResult
 from drivine.schema.native_operation import NativeOperation
 from drivine.schema.schema_grammar import (
     FALKORDB_SCHEMA,
@@ -18,6 +20,7 @@ from drivine.schema.schema_grammar import (
 )
 from drivine.schema.schema_item import SchemaItem
 from drivine.schema.schema_listing import SchemaListing
+from drivine.store.store_identity_resolver import StoreIdentityResolver
 
 GRAMMAR = dataclasses.replace(
     NEO4J_SCHEMA,
@@ -173,3 +176,45 @@ def test_no_other_engine_reports_an_index_in_the_way():
     for grammar in (MEMGRAPH_SCHEMA, FALKORDB_SCHEMA):
         assert not grammar.blocked_by_index(bolt(INDEX_ALREADY_EXISTS))
         assert grammar.drop_named_range("hand_made") == []
+
+
+async def test_an_index_the_engine_does_not_name_is_not_dropped_and_the_refusal_is_raised():
+    store = Neo4jLike(SchemaItem("Q", ("e", "f")))
+
+    with pytest.raises(DrivineError) as raised:
+        await manager(store).ensure(SPEC, replace_blocking_index=True)
+
+    assert raised.value is store.refusal and store.dropped == []
+
+
+async def test_a_constraint_refused_once_the_index_is_dropped_raises_and_leaves_neither():
+    class RefusedAgain(Neo4jLike):
+        async def run(self, statement: str | NativeOperation, bindings: Mapping[str, Any] | None = None) -> list[Any]:
+            if isinstance(statement, str) and statement.startswith("CREATE CONSTRAINT") and not self.ranges:
+                raise DrivineError("refused again")
+            return await super().run(statement, bindings)
+
+    store = RefusedAgain(HAND_MADE)
+
+    with pytest.raises(DrivineError, match="refused again"):
+        await manager(store).ensure(SPEC, replace_blocking_index=True)
+
+    assert store.dropped == ["DROP INDEX hand_made IF EXISTS"]
+    assert store.ranges == [] and store.uniques == [], "as drivine4j leaves it: the index is not made again"
+
+
+async def test_the_store_key_with_an_index_in_the_way_is_not_in_force_and_warned_of(caplog):
+    class Blocked:
+        async def ensure(self, spec: Any, sample_size: int = 10, replace_blocking_index: bool = False) -> Any:
+            return EnsureResult("BLOCKED_BY_INDEX", spec, index=HAND_MADE)
+
+    class Pm:
+        database = "neo4j"
+
+    resolver = StoreIdentityResolver(Pm(), None, Blocked())  # pyright: ignore[reportArgumentType]
+
+    with caplog.at_level(logging.WARNING, "drivine.store"):
+        guarded = await resolver._ensure_unique_key()  # pyright: ignore[reportPrivateUsage]
+
+    assert guarded is False, "as drivine4j's StoreIdentityResolver: best-effort until the index is dropped"
+    assert "hand_made" in caplog.text and "in the way" in caplog.text

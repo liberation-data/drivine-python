@@ -91,9 +91,10 @@ class SqlViews(ABC):
     def cascade(self, model: GraphViewModel, roots: str) -> SqlCascade:
         """
         What a cascade from the roots the predicate `roots` selects of the node row `n` reaches: queries of the ids of
-        the nodes a load of the view reaches, as far as each relationship's max_depth, and only into nested views whose
-        requirements a node meets, as a load would; each relationship followed; and for a relationship to views of the
-        same class, the query of the nodes one level below its max_depth.
+        the nodes a load of the view reaches through the relationships a save writes, as far as each relationship's
+        max_depth, and only into nested views whose requirements a node meets, as a load would; each relationship
+        followed; and for a relationship to views of the same class, the query of the nodes one level below its
+        max_depth.
         """
         cascade = SqlCascade()
         self._reached_from(model, "n", [], [f"FROM {self.graph.nodes} n"], [roots], cascade)
@@ -108,20 +109,11 @@ class SqlViews(ABC):
         wheres: list[str],
         cascade: SqlCascade,
     ) -> None:
-        for rel in model.relationships:
+        # A read-only field (marked so, or a list of fragments read over several hops) is not the view's to delete. A
+        # view nested in itself is not one: each level is one relationship from the level above.
+        for rel in (it for it in model.relationships if not it.read_only):
             depth = self.depth.get(rel.field, rel.max_depth)
             into = target(rel)
-            if isinstance(rel.related, FragmentModel) and depth > 1:
-                x = self.next_alias("x")
-                r = self.next_alias("r")
-                reached = self.reached(rel.type, rel.direction, from_, depth)
-                tests = [*wheres, self.has_labels(x, labels_of(into))]
-                cascade.followed.append(rel)
-                cascade.reached.append(
-                    f"{self._select(by_id(x))}{x}.nid {' '.join(froms)} CROSS JOIN LATERAL ({reached}) {r} "
-                    f"JOIN {self.graph.nodes} {x} ON {x}.nid = {r}.nid WHERE {' AND '.join(tests)}"
-                )
-                continue
             deep = sum(1 for it in path if it is rel) >= depth
             if deep and not (isinstance(into, GraphViewModel) and into.type is model.type):
                 continue

@@ -15,14 +15,17 @@ from drivine import (
     DatabaseType,
     Direction,
     DrivineError,
+    GraphPath,
     GraphView,
     NodeFragment,
     NodeId,
     PersistenceManager,
     QuerySpecification,
+    ReadOnly,
     Relationship,
     Root,
     StatelessGraphObjectManager,
+    hop,
 )
 from tests.integration.stores import create, equals, is_oracle, is_postgres, node_ids, nodes, relate
 
@@ -324,6 +327,110 @@ async def test_a_tree_deeper_than_max_depth_is_refused(pm: PersistenceManager):
     assert await node_ids(pm) == seeded
     # Without a cascade the delete takes the root alone, as it always has.
     assert await gom.delete(DeletableSessionTree, "rc-s0") == 1
+
+
+# ----- drivine4j's StatelessSaveSoundnessContract: a cascade follows only the relationships a save writes -----
+
+
+class User(NodeFragment, labels=["User"]):
+    id: Annotated[str, NodeId()]
+
+
+class ReviewedSessionTree(GraphView):
+    """DeletableSessionTree with reviewers it only reads, at every level: a cascade deletes the levels, not those."""
+
+    session: Annotated[TreeSession, Root()]
+    messages: Annotated[list[Message], Relationship("HAS_MESSAGE")] = []
+    reviewers: Annotated[list[User], Relationship("REVIEWED_BY"), ReadOnly()] = []
+    parts: Annotated[list["ReviewedSessionTree"], Relationship("PART_OF", Direction.INCOMING, max_depth=3)] = []
+
+
+class SessionDescendants(GraphView):
+    """The sessions below a session, a flat list read over several hops: read-only, as no one relationship holds it."""
+
+    session: Annotated[TreeSession, Root()]
+    below: Annotated[list[TreeSession], Relationship("PART_OF", Direction.INCOMING, max_depth=3)] = []
+
+
+class SessionAuthors(GraphView):
+    """The users who wrote a session's messages, read over a path of two hops."""
+
+    session: Annotated[TreeSession, Root()]
+    authors: Annotated[
+        list[User], GraphPath([hop("HAS_MESSAGE", Direction.OUTGOING, "Message"), hop("AUTHORED_BY")])
+    ] = []
+
+
+CASCADES = pytest.mark.parametrize("cascade", [CascadeType.DELETE_ALL, CascadeType.DELETE_ORPHAN])
+
+
+def cascades_on(pm: PersistenceManager, cascade: CascadeType) -> None:
+    if cascade is CascadeType.DELETE_ORPHAN:
+        orphans_on(pm)
+
+
+@CASCADES
+async def test_a_cascade_leaves_the_nodes_of_a_read_only_field(pm: PersistenceManager, cascade: CascadeType):
+    cascades_on(pm, cascade)
+    gom = StatelessGraphObjectManager(pm)
+    reviewed: Graph = (
+        [("User", "rc-reviewer")],
+        [("rc-root", "REVIEWED_BY", "rc-reviewer"), ("rc-grand", "REVIEWED_BY", "rc-reviewer")],
+    )
+    await seed(pm, plus(TREE, reviewed))
+    loaded = await gom.load(ReviewedSessionTree, "rc-root")
+    assert loaded is not None
+    assert [it.id for it in loaded.reviewers] == ["rc-reviewer"]
+    assert [it.id for it in loaded.parts[0].parts[0].reviewers] == ["rc-reviewer"]
+
+    removed, _ = await removed_by(pm, lambda: gom.delete(ReviewedSessionTree, "rc-root", cascade=cascade))
+
+    # A view nested in itself is not read-only: each of its levels is deleted.
+    if cascade is CascadeType.DELETE_ALL:
+        assert removed == {"rc-root", "rc-m0", "rc-child", "rc-m1", "rc-grand", "rc-m2"}
+    else:
+        # The reviewer is outside the cascade, so it keeps rc-grand, with its message; rc-user keeps rc-m1.
+        assert removed == {"rc-root", "rc-m0", "rc-child"}
+    assert "rc-reviewer" in await node_ids(pm)
+
+
+@CASCADES
+async def test_a_cascade_leaves_the_nodes_of_a_list_read_over_several_hops(
+    pm: PersistenceManager, cascade: CascadeType
+):
+    cascades_on(pm, cascade)
+    gom = StatelessGraphObjectManager(pm)
+    await seed(pm, chain(2))
+    loaded = await gom.load(SessionDescendants, "rc-s0")
+    assert loaded is not None
+    assert {it.id for it in loaded.below} == {"rc-s1", "rc-s2"}
+
+    removed, _ = await removed_by(pm, lambda: gom.delete(SessionDescendants, "rc-s0", cascade=cascade))
+
+    assert removed == {"rc-s0"}
+
+
+@CASCADES
+async def test_a_cascade_does_not_follow_a_path_field_as_one_relationship(pm: PersistenceManager, cascade: CascadeType):
+    cascades_on(pm, cascade)
+    gom = StatelessGraphObjectManager(pm)
+    # The path's first hop leads straight to a user here: taken as one relationship, the user would go.
+    authored: Graph = (
+        [("Session", "rc-root"), ("Message", "rc-m0"), ("User", "rc-user"), ("User", "rc-author")],
+        [
+            ("rc-root", "HAS_MESSAGE", "rc-user"),
+            ("rc-root", "HAS_MESSAGE", "rc-m0"),
+            ("rc-m0", "AUTHORED_BY", "rc-author"),
+        ],
+    )
+    await seed(pm, authored)
+    loaded = await gom.load(SessionAuthors, "rc-root")
+    assert loaded is not None
+    assert [it.id for it in loaded.authors] == ["rc-author"]
+
+    removed, _ = await removed_by(pm, lambda: gom.delete(SessionAuthors, "rc-root", cascade=cascade))
+
+    assert removed == {"rc-root"}
 
 
 async def test_delete_orphan_keeps_a_nested_node_referred_to_from_outside(pm: PersistenceManager):

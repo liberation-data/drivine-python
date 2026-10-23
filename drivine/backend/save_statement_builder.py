@@ -249,11 +249,12 @@ class SaveStatementBuilder:
 
     def _still_as_loaded(self, model: FragmentModel, loaded: Any) -> list[str]:
         """
-        What the checked save of `loaded`, the root as `update` loaded it, requires of the node besides the stamp. A
-        load that ran while another writer committed can hold that writer's stamp with the data from before its write.
-        Each field is compared as it was loaded too, under the lock, so the save of such an object is refused, as a
-        stale one is: a field its value, a bag the keys it owns and their values, the labels field the labels it reads.
-        A comparison that can't tell (a list holding a None) is not a difference: the stamp still speaks for the field.
+        What the checked save of `loaded`, the root as `update` loaded it or `save`'s `from_`, requires of the node
+        besides the stamp. A load that ran while another writer committed can hold that writer's stamp with the data
+        from before its write. Each field is compared as it was loaded too, under the lock, so the save of such an
+        object is refused, as a stale one is: a field its value, a bag the keys it owns and their values, the labels
+        field the labels it reads. A comparison that can't tell (a list holding a None) is not a difference: the stamp
+        still speaks for the field.
         """
 
         def bind(name: str, value: Any) -> str:
@@ -324,8 +325,8 @@ class SaveStatementBuilder:
         """
         A JsonPacked field's value as the node held it: the text the load read, so that text another writer packed with
         other spacing or escaping isn't taken for a change, and a value held as other than text, which a load hands as
-        it is, as it was held. A value the node held none for (one a load gives an absent property) is packed as a save
-        packs it.
+        it is, as it was held. A value the node held none for (one a load gives an absent property), and each value of
+        a save given `from_`, which has only the object to go on, is packed as a save packs it.
         """
         held = self._options.loaded_properties.get(name)
         if held is None:

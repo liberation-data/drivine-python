@@ -539,6 +539,135 @@ class TestUpdateOfATornLoad:
         )
 
 
+class TestSaveFromTheObjectAsLoaded:
+    @pytest.mark.usefixtures("reads_without_snapshot")
+    async def test_is_refused_when_a_field_changed_under_the_same_stamp_and_a_save_without_it_is_not(self, pm, gom):
+        await gom.save(Finding(id="f1", sources=["first"]))
+        loaded = await gom.load(Finding, "f1")
+        assert loaded is not None
+        # As a load sees the node when it is handed another writer's stamp with the data from before its write.
+        await pm.execute(QuerySpecification("MATCH (n:Finding {id: 'f1'}) SET n.sources = n.sources + 'theirs'"))
+
+        with pytest.raises(StaleObjectError, match="a field is not as it was loaded"):
+            await gom.save(loaded.model_copy(update={"sources": [*loaded.sources, "mine"]}), from_=loaded)
+        assert sorted(await stored(pm, "Finding", "sources")) == ["first", "theirs"], "the other writer's change stands"
+
+        # The stamp alone can't tell: a save without from_ writes over the other writer's change.
+        await gom.save(loaded.model_copy(update={"sources": [*loaded.sources, "mine"]}))
+        assert sorted(await stored(pm, "Finding", "sources")) == ["first", "mine"]
+
+    async def test_is_applied_when_the_node_is_as_loaded_and_hands_back_the_new_stamp(self, gom):
+        await gom.save(Finding(id="f1", sources=["first"]))
+        loaded = await gom.load(Finding, "f1")
+        assert loaded is not None
+
+        saved = await gom.save(loaded.model_copy(update={"sources": [*loaded.sources, "mine"]}), from_=loaded)
+
+        again = await gom.load(Finding, "f1")
+        assert again is not None and sorted(again.sources) == ["first", "mine"]
+        assert saved.stamp != loaded.stamp, "the save changed the node"
+        assert saved.stamp == again.stamp
+
+    async def test_is_checked_against_the_stamp_it_was_loaded_with_whatever_the_copy_carries(self, pm, gom):
+        await gom.save(Finding(id="f1", sources=["first"]))
+        loaded = await gom.load(Finding, "f1")
+        theirs = await gom.load(Finding, "f1")
+        assert loaded is not None and theirs is not None
+        theirs.sources = ["theirs"]
+        await gom.save(theirs)
+
+        # Built anew, without the stamp: it is checked as what it was loaded from.
+        with pytest.raises(StaleObjectError):
+            await gom.save(Finding(id="f1", sources=["mine"]), from_=loaded)
+
+        assert await stored(pm, "Finding", "sources") == ["theirs"]
+
+    async def test_from_another_object_than_the_one_loaded_is_refused_before_anything_is_written(self, pm, gom):
+        await gom.save(Finding(id="f1", sources=["first"]))
+        await gom.save(Finding(id="f2", sources=["second"]))
+        loaded, other = await gom.load(Finding, "f1"), await gom.load(Finding, "f2")
+        assert loaded is not None and other is not None
+        mine = loaded.model_copy(update={"sources": ["mine"]})
+
+        with pytest.raises(DrivineError, match="from_ is the Finding 'f2', and the object saved 'f1'"):
+            await gom.save(mine, from_=other)
+        with pytest.raises(DrivineError, match="carries no stamp"):
+            await gom.save(mine, from_=loaded.model_copy(update={"stamp": None}))
+        with pytest.raises(DrivineError, match="from_ is a Tagged, and the object saved a Finding"):
+            await gom.save(mine, from_=Tagged(id="f1", text="one", stamp=loaded.stamp))  # pyright: ignore
+        with pytest.raises(DrivineError, match="from_ is the object saved itself"):
+            await gom.save(mine, from_=mine)
+
+        assert sorted(it["sources"][0] for it in await nodes(pm, "Finding")) == ["first", "second"], "nothing written"
+
+    async def test_of_a_view_copied_to_change_a_relationship_alone_is_applied(self, gom):
+        await gom.save(PersonCareer(person=Person(uuid="p1", name="Ada")))
+        loaded = await gom.load(PersonCareer, "p1")
+        assert loaded is not None
+
+        # The copy shares the root, unchanged, with what was loaded.
+        joined = [WorkHistory(start_date="2020", role="Lead", target=acme())]
+        await gom.save(loaded.model_copy(update={"employment_history": joined}), from_=loaded)
+
+        again = await gom.load(PersonCareer, "p1")
+        assert again is not None and [it.role for it in again.employment_history] == ["Lead"]
+
+    @pytest.mark.usefixtures("reads_without_snapshot")
+    async def test_of_a_view_copied_to_change_a_relationship_is_refused_when_its_root_changed_under_the_stamp(
+        self, pm, gom
+    ):
+        await gom.save(PersonCareer(person=Person(uuid="p1", name="Ada")))
+        loaded = await gom.load(PersonCareer, "p1")
+        assert loaded is not None
+        await pm.execute(QuerySpecification("MATCH (n:Person {uuid: 'p1'}) SET n.name = 'Theirs'"))
+
+        joined = [WorkHistory(start_date="2020", role="Lead", target=acme())]
+        with pytest.raises(StaleObjectError, match="a field is not as it was loaded"):
+            await gom.save(loaded.model_copy(update={"employment_history": joined}), from_=loaded)
+
+        assert await stored(pm, "Person", "name") == "Theirs", "the other writer's change stands"
+        assert await gom.count(Organization) == 0, "nothing was written"
+
+    @pytest.mark.usefixtures("reads_without_snapshot")
+    async def test_compares_a_packed_field_as_a_save_packs_it(self, pm, gom):
+        await gom.save(Packed(id="k1", text="one", prefs={"a": 1}))
+        loaded = await gom.load(Packed, "k1")
+        assert loaded is not None
+        saved = await gom.save(loaded.model_copy(update={"text": "two"}), from_=loaded)
+
+        # The same value, packed as TypeScript's Drivine or a migration packs it: from_ holds the value, not the text,
+        # so the save can't tell this from a change and is refused.
+        await pm.execute(QuerySpecification("""MATCH (n:Packed {id: 'k1'}) SET n.prefs = '{"a":1}'"""))
+        with pytest.raises(StaleObjectError, match="a field is not as it was loaded"):
+            await gom.save(saved.model_copy(update={"text": "three"}), from_=saved)
+        assert await stored(pm, "Packed", "text") == "two"
+
+    @pytest.mark.async_only
+    async def test_saves_by_many_writers_at_once_keep_every_writers_change(self, gom):
+        writers, each = 8, 25
+        await gom.save(Finding(id="f1"))
+
+        async def writer(w: int) -> None:
+            for k in range(each):
+                # Load, change and save from what was loaded; again when another writer got there first.
+                while True:
+                    loaded = await gom.load(Finding, "f1")
+                    assert loaded is not None
+                    try:
+                        await gom.save(
+                            loaded.model_copy(update={"sources": [*loaded.sources, f"w{w}-{k}"]}), from_=loaded
+                        )
+                        break
+                    except StaleObjectError:
+                        pass
+
+        await asyncio.wait_for(asyncio.gather(*(writer(w) for w in range(writers))), timeout=300)
+        loaded = await gom.load(Finding, "f1")
+        assert loaded is not None
+        kept = set(loaded.sources)
+        assert [it for it in (f"w{w}-{k}" for w in range(writers) for k in range(each)) if it not in kept] == []
+
+
 class TestDelete:
     async def test_deletes_by_id_and_all(self, pm, gom):
         for it in range(3):

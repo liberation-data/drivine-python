@@ -519,6 +519,108 @@ class TestUpdateOfATornLoad:
         )
 
 
+class TestSaveFromTheObjectAsLoaded:
+    @pytest.mark.usefixtures("reads_without_snapshot")
+    def test_is_refused_when_a_field_changed_under_the_same_stamp_and_a_save_without_it_is_not(self, pm, gom):
+        gom.save(Finding(id="f1", sources=["first"]))
+        loaded = gom.load(Finding, "f1")
+        assert loaded is not None
+        # As a load sees the node when it is handed another writer's stamp with the data from before its write.
+        pm.execute(QuerySpecification("MATCH (n:Finding {id: 'f1'}) SET n.sources = n.sources + 'theirs'"))
+
+        with pytest.raises(StaleObjectError, match="a field is not as it was loaded"):
+            gom.save(loaded.model_copy(update={"sources": [*loaded.sources, "mine"]}), from_=loaded)
+        assert sorted(stored(pm, "Finding", "sources")) == ["first", "theirs"], "the other writer's change stands"
+
+        # The stamp alone can't tell: a save without from_ writes over the other writer's change.
+        gom.save(loaded.model_copy(update={"sources": [*loaded.sources, "mine"]}))
+        assert sorted(stored(pm, "Finding", "sources")) == ["first", "mine"]
+
+    def test_is_applied_when_the_node_is_as_loaded_and_hands_back_the_new_stamp(self, gom):
+        gom.save(Finding(id="f1", sources=["first"]))
+        loaded = gom.load(Finding, "f1")
+        assert loaded is not None
+
+        saved = gom.save(loaded.model_copy(update={"sources": [*loaded.sources, "mine"]}), from_=loaded)
+
+        again = gom.load(Finding, "f1")
+        assert again is not None and sorted(again.sources) == ["first", "mine"]
+        assert saved.stamp != loaded.stamp, "the save changed the node"
+        assert saved.stamp == again.stamp
+
+    def test_is_checked_against_the_stamp_it_was_loaded_with_whatever_the_copy_carries(self, pm, gom):
+        gom.save(Finding(id="f1", sources=["first"]))
+        loaded = gom.load(Finding, "f1")
+        theirs = gom.load(Finding, "f1")
+        assert loaded is not None and theirs is not None
+        theirs.sources = ["theirs"]
+        gom.save(theirs)
+
+        # Built anew, without the stamp: it is checked as what it was loaded from.
+        with pytest.raises(StaleObjectError):
+            gom.save(Finding(id="f1", sources=["mine"]), from_=loaded)
+
+        assert stored(pm, "Finding", "sources") == ["theirs"]
+
+    def test_from_another_object_than_the_one_loaded_is_refused_before_anything_is_written(self, pm, gom):
+        gom.save(Finding(id="f1", sources=["first"]))
+        gom.save(Finding(id="f2", sources=["second"]))
+        loaded, other = gom.load(Finding, "f1"), gom.load(Finding, "f2")
+        assert loaded is not None and other is not None
+        mine = loaded.model_copy(update={"sources": ["mine"]})
+
+        with pytest.raises(DrivineError, match="from_ is the Finding 'f2', and the object saved 'f1'"):
+            gom.save(mine, from_=other)
+        with pytest.raises(DrivineError, match="carries no stamp"):
+            gom.save(mine, from_=loaded.model_copy(update={"stamp": None}))
+        with pytest.raises(DrivineError, match="from_ is a Tagged, and the object saved a Finding"):
+            gom.save(mine, from_=Tagged(id="f1", text="one", stamp=loaded.stamp))  # pyright: ignore
+        with pytest.raises(DrivineError, match="from_ is the object saved itself"):
+            gom.save(mine, from_=mine)
+
+        assert sorted(it["sources"][0] for it in nodes(pm, "Finding")) == ["first", "second"], "nothing written"
+
+    def test_of_a_view_copied_to_change_a_relationship_alone_is_applied(self, gom):
+        gom.save(PersonCareer(person=Person(uuid="p1", name="Ada")))
+        loaded = gom.load(PersonCareer, "p1")
+        assert loaded is not None
+
+        # The copy shares the root, unchanged, with what was loaded.
+        joined = [WorkHistory(start_date="2020", role="Lead", target=acme())]
+        gom.save(loaded.model_copy(update={"employment_history": joined}), from_=loaded)
+
+        again = gom.load(PersonCareer, "p1")
+        assert again is not None and [it.role for it in again.employment_history] == ["Lead"]
+
+    @pytest.mark.usefixtures("reads_without_snapshot")
+    def test_of_a_view_copied_to_change_a_relationship_is_refused_when_its_root_changed_under_the_stamp(self, pm, gom):
+        gom.save(PersonCareer(person=Person(uuid="p1", name="Ada")))
+        loaded = gom.load(PersonCareer, "p1")
+        assert loaded is not None
+        pm.execute(QuerySpecification("MATCH (n:Person {uuid: 'p1'}) SET n.name = 'Theirs'"))
+
+        joined = [WorkHistory(start_date="2020", role="Lead", target=acme())]
+        with pytest.raises(StaleObjectError, match="a field is not as it was loaded"):
+            gom.save(loaded.model_copy(update={"employment_history": joined}), from_=loaded)
+
+        assert stored(pm, "Person", "name") == "Theirs", "the other writer's change stands"
+        assert gom.count(Organization) == 0, "nothing was written"
+
+    @pytest.mark.usefixtures("reads_without_snapshot")
+    def test_compares_a_packed_field_as_a_save_packs_it(self, pm, gom):
+        gom.save(Packed(id="k1", text="one", prefs={"a": 1}))
+        loaded = gom.load(Packed, "k1")
+        assert loaded is not None
+        saved = gom.save(loaded.model_copy(update={"text": "two"}), from_=loaded)
+
+        # The same value, packed as TypeScript's Drivine or a migration packs it: from_ holds the value, not the text,
+        # so the save can't tell this from a change and is refused.
+        pm.execute(QuerySpecification("""MATCH (n:Packed {id: 'k1'}) SET n.prefs = '{"a":1}'"""))
+        with pytest.raises(StaleObjectError, match="a field is not as it was loaded"):
+            gom.save(saved.model_copy(update={"text": "three"}), from_=saved)
+        assert stored(pm, "Packed", "text") == "two"
+
+
 class TestDelete:
     def test_deletes_by_id_and_all(self, pm, gom):
         for it in range(3):

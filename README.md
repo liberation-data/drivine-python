@@ -772,7 +772,8 @@ the datasource at it. Datasources of one type share a container. `USE_LOCAL_NEO4
 `NEO4J_TEST_IMAGE` picks another image.
 
 Drivine's own tests run on Oracle only with `ORACLE_TESTS=true`: its image is large, and the database wants two
-gigabytes. They run on a current Neo4j, as the Cypher spec is written for one, where the plugin's own default is 5.26.
+gigabytes. They run on `neo4j:latest`, as the Cypher spec is written for a current Neo4j, where the plugin's own
+default is 5.26.
 
 ## Logging
 

@@ -33,6 +33,6 @@ def test_refusals(case: Case, store: str) -> None:
 def test_a_date_written_as_a_text_that_is_no_date_is_refused_with_what_the_parser_says(
     compiler: type[SqlCypherCompiler],
 ) -> None:
-    # Not in the spec: the message ends with Python's own text.
-    with pytest.raises(DrivineError, match=r"^'2024-02-30' is no date: day is out of range for month$"):
+    # Not in the spec: the message ends with Python's own text, which changes from one version to the next.
+    with pytest.raises(DrivineError, match=r"^'2024-02-30' is no date: .+"):
         compiler("g").compile("RETURN date('2024-02-30')")

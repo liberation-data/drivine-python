@@ -129,7 +129,20 @@ class QueryRenderer:
         )
 
     def where(self, condition: Condition, scope: Scope, alias: str) -> str:
-        return self._condition(condition, scope, _Aliases(alias))
+        """
+        The condition as a whole `WHERE`. Its outermost `AND`, and any `all_of` directly in it, stand without
+        parentheses, on every engine: what a statement joins to a `WHERE` it joins by `AND`, and FalkorDB 6 reads a
+        condition in parentheses it does not need by scanning the label, where it would have used an index
+        (FalkorDB/FalkorDB#3331). An `any_of` or a `not_` in it keeps its own.
+        """
+        aliases = _Aliases(alias)
+
+        def conjuncts(it: Condition) -> list[Condition]:
+            if isinstance(it, CompositeCondition) and it.kind == "AND" and it.conditions:
+                return [part for each in it.conditions for part in conjuncts(each)]
+            return [it]
+
+        return " AND ".join(self._condition(it, scope, aliases) for it in conjuncts(condition))
 
     def _keyset(self, keys: list[RootKey], seek: list[SeekValue], query: Query, alias: str) -> str:
         """

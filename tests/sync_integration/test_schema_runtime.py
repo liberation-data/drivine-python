@@ -354,6 +354,30 @@ def test_ensuring_an_item_again_with_the_same_identity_replaces_it_in_the_owners
     assert schema.dimensions() == 4
 
 
+def test_two_items_of_one_identity_given_at_once_that_differ_raise_and_nothing_is_kept(schema):
+    manager = schema.manager(schema.dice())
+
+    with pytest.raises(DrivineError, match="Two schema catalogs of 'dice' declare"):
+        manager.ensure_catalog(schema.runtime("dice", schema.vector(3), schema.vector(4)))
+
+    assert schema.dimensions() is None
+    assert schema.record("dice") is None
+    manager.enforce()  # would apply one of them, were it kept
+    assert schema.dimensions() is None
+    assert schema.record("dice") == RecordedInventory((inventory_key(schema.startup),))
+
+
+def test_an_untuned_and_a_tuned_item_of_one_identity_given_at_once_keep_the_tuned_one(schema):
+    plain = schema.vector(3)
+    tuned = dataclasses.replace(plain, engine_options=(EngineVectorOptions("Neo4j", hnsw_m=16),))
+    manager = schema.manager(schema.dice())
+
+    report = manager.ensure_catalog(schema.runtime("dice", tuned, plain))
+
+    assert [it.spec for it in report[schema.db]] == [tuned]
+    assert [it.spec for it in (manager.enforce())[schema.db] if it.spec.kind == "VECTOR"] == [tuned]
+
+
 def test_recreate_all_rebuilds_the_runtime_items_too(schema):
     manager = schema.manager(schema.dice())
     manager.enforce()

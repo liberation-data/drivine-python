@@ -101,9 +101,10 @@ class SchemaManager:
         The items join what the owner declared, for the life of this manager, and are applied as `enforce` applies the
         owner's: under the options' `mode`, `recreate_on_drift` and `violation_sample_size`, and recorded in the
         owner's marker. Only the items given are applied. Ensuring an item again with the same identity (kind, label,
-        properties) replaces it. A later `enforce` or `recreate_all` applies them with the rest, and they count as the
-        owner's when another owner declares one too. Every database is planned first: a declaration that conflicts with
-        another owner's, or with the owner's own, raises, and nothing is kept or applied.
+        properties) replaces it; two of one identity given at once are merged as a catalog's are. A later `enforce` or
+        `recreate_all` applies them with the rest, and they count as the owner's when another owner declares one too.
+        Every database is planned first: a declaration that conflicts with another owner's, with the owner's own, or
+        with another given at once, raises, and nothing is kept or applied.
 
         The marker records them as ensured at runtime, so an `enforce` by a manager made later (the next process) keeps
         them in the inventory, not as orphans, until they are ensured again. When that manager recreates the owner (a
@@ -120,13 +121,19 @@ class SchemaManager:
             logger.info("Nothing to ensure for owner '%s': no items given", catalog.name)
             return {}
         with self._lock:
-            candidate = self._with_runtime(catalog)
+            targets = self._targets(catalog)
+            # The items given are merged as a catalog's are, before one can replace another of its identity: two that
+            # differ raise, one with engine options wins over one without, and identical ones are kept once.
+            items = catalog.items
+            for database in targets:
+                items = tuple(self._merged(database, [catalog]).values())
+            candidate = self._with_runtime(catalog, items)
             declared = self._catalogs_by_database(self.options.catalogs)
             ensured = self._catalogs_by_database(_runtime_catalogs(candidate))
             # Every database is planned before anything is kept or applied, so a conflict leaves all as they were.
             plans = {
                 database: self._plan(database, declared.get(database, []), ensured.get(database, []))
-                for database in self._targets(catalog)
+                for database in targets
             }
             self._runtime = candidate
             given = {inventory_key(it) for it in catalog.items}
@@ -145,13 +152,18 @@ class SchemaManager:
                 report[database] = self._apply_plan(database, plan, recreate, None, None)
             return report
 
-    def _with_runtime(self, catalog: SchemaCatalog) -> dict[tuple[str, tuple[str, ...] | None], dict[str, SchemaSpec]]:
-        """The runtime items with the catalog's added, each replacing the item of its identity, owner and databases."""
+    def _with_runtime(
+        self, catalog: SchemaCatalog, items: Sequence[SchemaSpec]
+    ) -> dict[tuple[str, tuple[str, ...] | None], dict[str, SchemaSpec]]:
+        """
+        The runtime items with the catalog's merged `items` added, each replacing the item of its identity, owner and
+        databases.
+        """
         copy = {key: dict(specs) for key, specs in self._runtime.items()}
         # The databases as a set, as drivine4j keeps a catalog's: the order they are named in is no part of the key.
         databases = None if catalog.databases is None else tuple(sorted(set(catalog.databases)))
         specs = copy.setdefault((catalog.name, databases), {})
-        for spec in catalog.items:
+        for spec in items:
             specs[_key_of(spec)] = spec
         return copy
 

@@ -18,15 +18,15 @@ from drivine.sync.schema.schema_executor import SchemaExecutor
 logger = logging.getLogger("drivine.schema")
 
 VIOLATION_SAMPLE = 10
-"""How many conflicting values a constraint violation reports."""
+"""How many keys held more than once a constraint violation reports, and how many of the nodes that hold each."""
 
 
 class ConstraintManager:
     """
     Uniqueness constraints, made idempotently. Before making one, the data is checked: if two nodes already hold the
-    same values, nothing is made and the result is a VIOLATION with a sample of the values. On Neo4j a plain range index
-    over the same label and properties is in the way of one: the result is then BLOCKED_BY_INDEX, naming it, unless
-    the index is to be replaced.
+    same values, nothing is made and the result is a VIOLATION with a sample of the keys, each naming the nodes that
+    hold it. On Neo4j a plain range index over the same label and properties is in the way of one: the result is then
+    BLOCKED_BY_INDEX, naming it, unless the index is to be replaced.
     """
 
     def __init__(
@@ -44,14 +44,15 @@ class ConstraintManager:
         self, spec: UniquenessConstraintSpec, sample_size: int = VIOLATION_SAMPLE, replace_blocking_index: bool = False
     ) -> EnsureResult[UniquenessConstraintSpec]:
         """
-        Makes the constraint unless it is there. The data is checked first, and up to `sample_size` values held more
-        than once are reported; 0 skips the check, leaving the engine to refuse a constraint the data breaks.
+        Makes the constraint unless it is there. The data is checked first, and up to `sample_size` keys held more than
+        once are reported, each with up to `sample_size` of the nodes that hold it; 0 skips the check, leaving the
+        engine to refuse a constraint the data breaks.
 
         A plain range index over the label and properties, in their order, that the engine says is in the way of the
         constraint (Neo4j) is reported as BLOCKED_BY_INDEX, and nothing is changed. With `replace_blocking_index`, the
         index is dropped and the constraint made, its own index taking the plain one's place. The data is read first,
-        however `sample_size` is set: a value held more than once keeps the index and is a VIOLATION, and data that
-        can't be read keeps the index and raises the engine's refusal.
+        however `sample_size` is set: a key held more than once keeps the index and is a VIOLATION, with an empty sample
+        when `sample_size` is 0, and data that can't be read keeps the index and raises the engine's refusal.
         """
         if self._exists(spec):
             return EnsureResult("ALREADY_MATCHING", spec)
@@ -76,7 +77,7 @@ class ConstraintManager:
                 )
                 return EnsureResult("BLOCKED_BY_INDEX", spec, index=index)
             if sample_size <= 0:
-                # The engine refuses for the index before it reads the data, so a value held twice would refuse the
+                # The engine refuses for the index before it reads the data, so a key held twice would refuse the
                 # constraint once the index is gone: look first, and keep the index, as when the data can't be read.
                 try:
                     repeated = self.executor.run(self.grammar.conflicts(spec, 1))

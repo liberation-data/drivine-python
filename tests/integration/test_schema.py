@@ -84,8 +84,46 @@ class TestConstraints:
     async def test_reports_data_that_breaks_it(self, gom, label):
         await create(gom.persistence_manager, label, {"code": "dup"}, {"code": "dup"}, {"code": "u"})
         result = await gom.constraints.ensure(uniqueness_constraint(label, "code"))
-        assert result.status == "VIOLATION" and result.sample == ("dup",)
+        assert result.status == "VIOLATION" and result.sample is not None
+        [held] = result.sample
+        assert held["properties"] == {"code": "dup"} and held["count"] == 2 and len(held["nodes"]) == 2
         assert not [it for it in await gom.constraints.list() if it.label == label]
+
+    async def test_a_violations_sample_names_the_conflicting_nodes(self, gom, label):
+        await create(gom.persistence_manager, label, {"code": "dup", "name": "a"}, {"code": "dup", "name": "b"})
+        await create(gom.persistence_manager, label, {"code": "u", "name": "c"})
+
+        result = await gom.constraints.ensure(uniqueness_constraint(label, "code", node_id_property="name"))
+
+        assert result.status == "VIOLATION" and result.sample is not None
+        [held] = result.sample
+        assert held["properties"] == {"code": "dup"} and held["count"] == 2
+        assert len({it["elementId"] for it in held["nodes"]}) == 2, "two distinct ids"
+        assert sorted(it["name"] for it in held["nodes"]) == ["a", "b"]
+
+    async def test_a_violations_sample_names_as_many_keys_and_as_many_of_each_ones_nodes_as_its_size(self, gom, label):
+        codes = ["a", "a", "a", "b", "b", "b", "c", "c", "c"]
+        await create(gom.persistence_manager, label, *({"code": it, "name": f"k{i}"} for i, it in enumerate(codes)))
+
+        result = await gom.constraints.ensure(uniqueness_constraint(label, "code", node_id_property="name"), 2)
+
+        assert result.status == "VIOLATION" and result.sample is not None
+        assert len(result.sample) == 2
+        for held in result.sample:
+            assert held["count"] == 3 and len(held["nodes"]) == 2
+            holders = {f"k{i}" for i, it in enumerate(codes) if it == held["properties"]["code"]}
+            assert {it["name"] for it in held["nodes"]} <= holders
+
+    async def test_a_violations_sample_names_many_nodes_of_a_key_when_its_size_asks_for_them(self, gom, label):
+        # 150 nodes of one key, each named by an id of 13 characters, pass the 4000 bytes Oracle aggregates text into.
+        names = [f"node-key-{i:04d}" for i in range(150)]
+        await create(gom.persistence_manager, label, *({"code": "a", "name": it} for it in names))
+
+        result = await gom.constraints.ensure(uniqueness_constraint(label, "code", node_id_property="name"), 200)
+
+        assert result.status == "VIOLATION" and result.sample is not None
+        assert [(it["count"], len(it["nodes"])) for it in result.sample] == [(150, 150)]
+        assert sorted(it["name"] for it in result.sample[0]["nodes"]) == names
 
 
 class TestSchemaManager:
@@ -152,6 +190,31 @@ class TestSchemaManager:
         with caplog.at_level(logging.WARNING):
             await SchemaManager(factory.registry, managers, SchemaOptions([catalog], mode="WARN")).enforce()
         assert '"dup"' in caplog.text
+
+    async def test_a_constraint_one_owner_reads_from_a_fragment_and_another_declares_by_hand_is_one(
+        self, factory, pm, label
+    ):
+        fragment = type(
+            "Member",
+            (NodeFragment,),
+            {
+                "__annotations__": {"uuid": Annotated[str, NodeId()], "email": Annotated[str, Unique()]},
+                "__module__": __name__,
+            },
+            labels=[label],
+        )
+        scanned = SchemaCatalog.from_fragments(fragment).named(f"{label}-lib").for_database(pm.database)
+        by_hand = (
+            SchemaCatalog.of(uniqueness_constraint(label, "email")).named(f"{label}-app").for_database(pm.database)
+        )
+        assert scanned.items == (uniqueness_constraint(label, "email", node_id_property="uuid"),)
+
+        results = await SchemaManager(
+            factory.registry, GraphObjectManagerFactory(factory), SchemaOptions([scanned, by_hand])
+        ).enforce()
+
+        assert [it.status for it in results[pm.database]] == ["CREATED", "ALREADY_MATCHING"]
+        await StatelessGraphObjectManager(pm).constraints.drop(uniqueness_constraint(label, "email"))
 
 
 async def test_store_identity_is_stable(factory, pm):

@@ -77,7 +77,9 @@ async def test_makes_range_indexes_once_lists_them_and_drops_them(gom: Stateless
 async def test_refuses_a_constraint_the_data_breaks_then_makes_and_enforces_it(gom: StatelessGraphObjectManager):
     await gom.save_all([Account(id="a1", email="x@y"), Account(id="a2", email="x@y")])
     refused = await gom.constraints.ensure(UNIQUE_EMAIL)
-    assert refused.status == "VIOLATION" and refused.sample == ("x@y",)
+    assert refused.status == "VIOLATION" and refused.sample is not None
+    [held] = refused.sample
+    assert held["properties"] == {"email": "x@y"} and held["count"] == 2 and len(held["nodes"]) == 2
     await gom.delete(Account, "a2")
     assert (await gom.constraints.ensure(UNIQUE_EMAIL)).status == "CREATED"
     assert (await gom.constraints.ensure(UNIQUE_EMAIL)).status == "ALREADY_MATCHING"

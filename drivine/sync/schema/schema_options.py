@@ -20,7 +20,10 @@ class SchemaOptions:
     recreate_on_startup: bool = False
     """Destructive: drop and make every declared item on every enforce."""
     violation_sample_size: int = VIOLATION_SAMPLE
-    """How many values held more than once a constraint violation reports; 0 skips the check."""
+    """
+    How many keys held more than once a constraint violation reports, and how many of the nodes that hold each it names;
+    0 skips the check.
+    """
     replace_blocking_index: bool = False
     """
     Drop a plain range index in the way of a uniqueness constraint and make the constraint, whose own index takes its

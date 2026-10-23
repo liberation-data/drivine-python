@@ -248,7 +248,9 @@ async def test_reports_the_values_a_uniqueness_constraint_would_refuse_and_refus
     spec = uniqueness_constraint("Ticket", "title")
     refused = await gom.constraints.ensure(spec)
     assert refused.status == "VIOLATION"
-    assert refused.sample == ("same",)
+    assert refused.sample is not None
+    [held] = refused.sample
+    assert held["properties"] == {"title": "same"} and held["count"] == 2 and len(held["nodes"]) == 2
     await gom.delete(Ticket, "u2")
     assert (await gom.constraints.ensure(spec)).status == "CREATED"
     with pytest.raises(DrivineError):

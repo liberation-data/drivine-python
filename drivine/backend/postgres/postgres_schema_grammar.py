@@ -11,7 +11,7 @@ from drivine.backend.sql.sql_catalog import CATALOG_KINDS, CatalogKind, catalog_
 from drivine.backend.sql.sql_graph import sql_text
 from drivine.schema.full_text_index_spec import FullTextIndexSpec
 from drivine.schema.range_index_spec import RangeIndexSpec
-from drivine.schema.schema_grammar import SchemaGrammar, portable_pins
+from drivine.schema.schema_grammar import SchemaGrammar, portable_pins, sampled_node_id
 from drivine.schema.schema_item import SchemaItem
 from drivine.schema.schema_listing import SchemaListing
 from drivine.schema.schema_specs import item_name
@@ -104,11 +104,17 @@ class _PostgresSchema:
         ]
 
     def conflicts(self, spec: UniquenessConstraintSpec, limit: int) -> str:
+        """A node's own id is its `nid`; `limit` of a key's nodes at most are named, the first made first."""
         values = [text_of("n", it) for it in spec.properties]
-        # One property's value as it is, several as a list, as the graph engines give them.
-        key = values[0] if len(values) == 1 else f"jsonb_build_array({', '.join(values)})"
+        properties = ", ".join(f"{sql_text(it)}, {values[k]}" for k, it in enumerate(spec.properties))
+        node_id = sampled_node_id(spec)
+        node = ", ".join(
+            ["'elementId', n.nid", *([f"{sql_text(node_id)}, {text_of('n', node_id)}"] if node_id else [])]
+        )
         return (
-            f'SELECT {key} AS "value" FROM {self.graph.nodes} n '
+            f"SELECT jsonb_build_object('properties', jsonb_build_object({properties}), 'count', COUNT(*), 'nodes', "
+            f'to_jsonb((array_agg(jsonb_build_object({node}) ORDER BY n.nid))[1:{limit}])) AS "value" '
+            f"FROM {self.graph.nodes} n "
             f"WHERE {has_labels('n', [spec.label])} AND {' AND '.join(f'{it} IS NOT NULL' for it in values)} "
             f"GROUP BY {', '.join(values)} HAVING COUNT(*) > 1 LIMIT {limit}"
         )

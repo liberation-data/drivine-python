@@ -100,7 +100,7 @@ from drivine.query.query_specification import QuerySpecification
 from drivine.query.statement import Statement, cypher_file, cypher_statement, sql_file, sql_statement
 from drivine.schema.constraint_manager import ConstraintManager
 from drivine.schema.engine_vector_options import EngineVectorOptions
-from drivine.schema.ensure_result import EnsureResult
+from drivine.schema.ensure_result import EnsureResult, ViolatingKey
 from drivine.schema.index_manager import IndexManager
 from drivine.schema.schema_catalog import SchemaCatalog
 from drivine.schema.schema_manager import SchemaManager
@@ -240,5 +240,6 @@ __all__ = [
     "ValueRef",
     "vector_index",
     "VectorIndex",
+    "ViolatingKey",
     "Where",
 ]

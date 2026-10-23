@@ -499,6 +499,7 @@ def schema(grammar: SchemaGrammar) -> dict[str, str]:
     span = range_index("Session", ["lastActivityAt", "sessionId"])
     unique = uniqueness_constraint("Person", "uuid")
     pair = uniqueness_constraint("Person", ["email", "tenant"])
+    identified = uniqueness_constraint("Person", ["email", "tenant"], node_id_property="uuid")
     vector = vector_index(
         "Chunk",
         "embedding",
@@ -543,6 +544,7 @@ def schema(grammar: SchemaGrammar) -> dict[str, str]:
         "schema.dropFullText": shown(grammar.drop_full_text(text, None)),
         "schema.dropFullText.named": shown(grammar.drop_full_text(text, "given_name")),
         "schema.conflicts": grammar.conflicts(pair, 10),
+        "schema.conflicts.nodeId": grammar.conflicts(identified, 10),
     }
 
 

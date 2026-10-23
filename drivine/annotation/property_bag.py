@@ -8,7 +8,8 @@ class PropertyBag:
     real properties, visible and indexable. `prefix` defaults to the field's stored name and `delimiter` to `.`.
 
     A flat bag has no prefix: each entry is stored under its bare key, and the bag reads back every property no field
-    or other bag accounts for. One to a fragment.
+    or other bag accounts for. One to a fragment. A save refuses an entry whose key a field, the id, another bag or
+    the stamp is stored under.
     """
 
     prefix: str | None = None

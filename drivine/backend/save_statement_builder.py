@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass, field
 from datetime import date, datetime, time
 from enum import Enum
 from typing import Any
@@ -188,9 +188,7 @@ class SaveStatementBuilder:
 
         clear = self._options.null_policy is NullPolicy.CLEAR
         held = self._options.held_properties
-        entries = bag_entries(
-            replace(model, property_bags=[it for it in model.property_bags if keep(it.field)]), obj, list(held), clear
-        )
+        entries = bag_entries(model, obj, list(held), clear, keep)
         bag_sets, bag_changes = self._bag_sets("n", "rootBag", entries)
         if model.node_labels and keep(model.node_labels.field):
             label_sets, label_changes = self._label_clauses(model, obj, "n", clear, held)
@@ -623,13 +621,20 @@ def props_of(
     return props
 
 
-def bag_entries(model: FragmentModel, obj: Any, held: Sequence[str] = (), clear: bool = False) -> dict[str, Any]:
+def bag_entries(
+    model: FragmentModel,
+    obj: Any,
+    held: Sequence[str] = (),
+    clear: bool = False,
+    keep: Callable[[str], bool] = lambda _: True,
+) -> dict[str, Any]:
     """
     The node properties a fragment's property bags write: each entry under its bag's namespace, and, given the keys the
-    node holds and `clear`, null for each held key of a bag that the bag no longer has.
+    node holds and `clear`, null for each held key of a bag that the bag no longer has. Only the bags whose fields
+    `keep` takes are written; a flat bag's entries are checked against the others all the same.
     """
     entries: dict[str, Any] = {}
-    for bag in model.property_bags:
+    for bag in [it for it in model.property_bags if keep(it.field)]:
         values = getattr(obj, bag.field, None)
         if values is not None and not isinstance(values, Mapping):
             raise DrivineError(f"The PropertyBag {model.type.__name__}.{bag.field} must hold a dict of entries.")
@@ -639,6 +644,12 @@ def bag_entries(model: FragmentModel, obj: Any, held: Sequence[str] = (), clear:
                     f"The entry {key!r} of {model.type.__name__}.{bag.field} can't be stored as a property: a bag "
                     f"holds strings, numbers, booleans, dates, or lists of them."
                 )
+            if value is not None and bag.flat and not _flat_bag_owns(model, f"{key}"):
+                raise DrivineError(
+                    f"The flat PropertyBag {model.type.__name__}.{bag.field} has an entry {key!r}, which is the "
+                    f"property of a declared field or of another bag. Both would write the same node property; remove "
+                    f"the entry or rename the field's property."
+                )
             if value is not None:
                 entries[f"{bag.namespace}{key}"] = stored(value)
         if clear and not bag.flat:
@@ -646,6 +657,18 @@ def bag_entries(model: FragmentModel, obj: Any, held: Sequence[str] = (), clear:
                 if it.startswith(bag.namespace) and it not in entries:
                     entries[it] = None
     return entries
+
+
+def _flat_bag_owns(model: FragmentModel, key: str) -> bool:
+    """
+    Whether a flat bag owns a node property: whether no field, the id among them, is stored under it, no other bag's
+    namespace holds it, and it isn't Drivine's own, such as the stamp. A load hands each of those to its field.
+    """
+    return (
+        key not in model.graph_properties.values()
+        and not key.startswith(RESERVED_PREFIX)
+        and not any(key.startswith(it.namespace) for it in model.property_bags if not it.flat)
+    )
 
 
 def stored(value: Any) -> Any:

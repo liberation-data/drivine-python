@@ -470,6 +470,9 @@ the keys, so a page of groups is the same every time.
 - **More markers:** `GraphPath([hop(...), ...])` for the nodes at the end of several hops, `Count` and `Aggregate`
   computed in the query, `SortedBy`, `ReadOnly`, `Transient`, `NodeStamp`, `NodeLabels`, `PropertyBag`,
   `JsonPacked`, `NullAsDefault` and `EmptyWhenAbsent`, as in TypeScript's Drivine.
+- **A flat `PropertyBag(flat=True)`** stores each entry under its bare key and loads every property no field or other
+  bag is stored under. A save refuses, before it writes anything, an entry whose key a field (the id among them) is
+  stored under, one under another bag's prefix, or one beginning `__drivine.`, Drivine's own, such as the stamp.
 
 The statements are TypeScript's, character for character: the tests check them against those TypeScript's Drivine
 writes for the same models.

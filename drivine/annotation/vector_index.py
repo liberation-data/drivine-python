@@ -8,7 +8,8 @@ from typing import Literal
 class VectorIndex:
     """
     A vector index over the field. Its dimensions come from the catalog's dimension provider when the catalog is built
-    (they belong to the embedding model, known at run time), unless given here. Drives `load_nearest`.
+    (they belong to the embedding model, known at run time), unless given here. Drives `load_nearest`, and is how
+    Drivine knows the field is an embedding: a catalog's vector index over a fragment field without it is refused.
     """
 
     similarity: Literal["COSINE", "EUCLIDEAN"] = "COSINE"

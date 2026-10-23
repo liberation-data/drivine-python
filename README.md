@@ -602,6 +602,12 @@ raises `DrivineError` there rather than on first use. Without pi-pilgrim, enforc
   known later is given to `ensure`. With nothing to apply, no catalog or only empty ones and nothing ensured, the
   manager says so at INFO: that it found no `SchemaCatalog`, or that all it found are empty, naming their owners. So a
   missing catalog, and one left empty until an embedding model exists, can be told from an application with no schema.
+- **A vector field needs its `VectorIndex`.** Drivine knows a field is an embedding from the marker alone: without it
+  the field is saved as a plain list, not as a vector FalkorDB's index serves, and `load_nearest` can't find the
+  index. So a catalog's `vector_index` over a fragment's field without one is refused with a `DrivineError` naming
+  the class, the field and the spec, whether the catalog is enforced first or the fragment's model is built first.
+  One given to `ensure` is refused the same way, before it is kept or applied.
+  A spec beside the marker is allowed (it tunes the index), as is one on a label no fragment maps.
 - **By hand:** `gom.indexes.ensure(range_index("Session", ["lastActivityAt", "sessionId"]))`, `gom.indexes.recreate`,
   `gom.indexes.drop`, `gom.constraints.ensure(uniqueness_constraint("Person", "email"))`, and `list`.
 - **Each engine's DDL** is written for it: named items on Neo4j, Memgraph's text and vector indexes, FalkorDB's index per

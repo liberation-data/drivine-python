@@ -44,6 +44,7 @@ from drivine.model.relationship_model import RelationshipModel
 from drivine.model.schema_declaration import SchemaDeclaration
 from drivine.model.target_model import RelatedModel, TargetModel
 from drivine.model.vector_field import VectorField
+from drivine.schema import vector_annotation_check
 
 ClassKind = Literal["NODE_FRAGMENT", "RELATIONSHIP_FRAGMENT", "GRAPH_VIEW"]
 
@@ -219,7 +220,7 @@ class ModelRegistry:
         mapping = self._field_mapping(type_, {k: v for k, v in fields.items() if k not in apart}, naming)
         id_field = ids[0] if ids else None
         schema = self._schema(type_, fields, mapping.graph_properties)
-        return FragmentModel(
+        model = FragmentModel(
             graph_properties=mapping.graph_properties,
             transient_fields=mapping.transient_fields,
             json_packed=mapping.json_packed,
@@ -239,6 +240,10 @@ class ModelRegistry:
             full_text_indexes=[it.properties for it in schema if it.kind == "FULLTEXT"],
             schema=schema,
         )
+        # A catalog's vector index over a field without VectorIndex is refused here as well as when the catalog is
+        # applied, since either may come first.
+        vector_annotation_check.admit(model)
+        return model
 
     def _build_relationship_fragment(self, type_: type) -> RelationshipFragmentModel:
         self._assert_kind(type_, "RELATIONSHIP_FRAGMENT", "RelationshipFragment")

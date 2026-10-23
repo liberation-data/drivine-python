@@ -14,6 +14,7 @@ from drivine.connection.database_type import DatabaseType
 from drivine.drivine_error import DrivineError
 from drivine.manager.graph_object_manager_factory import GraphObjectManagerFactory
 from drivine.manager.stateless_graph_object_manager import StatelessGraphObjectManager
+from drivine.schema import vector_annotation_check
 from drivine.schema.ensure_result import EnsureResult
 from drivine.schema.recorded_inventory import RecordedInventory, inventory_entries, read_inventory
 from drivine.schema.schema_catalog import DEFAULT_SCOPE, SchemaCatalog
@@ -66,6 +67,9 @@ class SchemaManager:
     The catalogs are read once, from the options the manager is built with. Schema known only later is given to
     `ensure`, under an owner, and joins what that owner declared. With nothing to apply, no catalog or only empty ones
     and nothing ensured, it says so at INFO, naming the empty ones.
+    Before anything is applied or kept, by `enforce`, `recreate_all` or `ensure`, a vector index over a fragment's
+    field that has no `VectorIndex` is refused, naming the class, the field and the spec; a fragment whose model is
+    built later is checked against the specs applied here.
     """
 
     def __init__(self, registry: DatabaseRegistry, factory: GraphObjectManagerFactory, options: SchemaOptions) -> None:
@@ -104,7 +108,8 @@ class SchemaManager:
         properties) replaces it; two of one identity given at once are merged as a catalog's are. A later `enforce` or
         `recreate_all` applies them with the rest, and they count as the owner's when another owner declares one too.
         Every database is planned first: a declaration that conflicts with another owner's, with the owner's own, or
-        with another given at once, raises, and nothing is kept or applied.
+        with another given at once, raises, and nothing is kept or applied. So does a vector index over a fragment's
+        field that has no `VectorIndex`, as in a catalog.
 
         The marker records them as ensured at runtime, so an `enforce` by a manager made later (the next process) keeps
         them in the inventory, not as orphans, until they are ensured again. When that manager recreates the owner (a
@@ -135,6 +140,9 @@ class SchemaManager:
                 database: self._plan(database, declared.get(database, []), ensured.get(database, []))
                 for database in targets
             }
+            # After planning, before anything is kept: a vector index over a fragment's field without VectorIndex is
+            # refused, as drivine4j does.
+            vector_annotation_check.register(catalog.items)
             self._runtime = candidate
             given = {inventory_key(it) for it in catalog.items}
             report: dict[str, list[EnsureResult[Any]]] = {}
@@ -149,6 +157,8 @@ class SchemaManager:
             if not any(it.items for it in [*self.options.catalogs, *runtime]):
                 self._log_nothing_to_apply()
                 return {}
+            # Before anything is applied: a vector index over a fragment's field without VectorIndex is refused.
+            vector_annotation_check.register(spec for it in [*self.options.catalogs, *runtime] for spec in it.items)
             declared = self._catalogs_by_database(self.options.catalogs)
             ensured = self._catalogs_by_database(runtime)
             report: dict[str, list[EnsureResult[Any]]] = {}

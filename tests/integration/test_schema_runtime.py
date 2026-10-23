@@ -7,7 +7,7 @@ import dataclasses
 import logging
 import uuid
 from collections.abc import AsyncIterator, Sequence
-from typing import Any
+from typing import Annotated, Any
 
 import pytest
 
@@ -16,6 +16,8 @@ from drivine import (
     DatabaseRegistry,
     DrivineError,
     EngineVectorOptions,
+    NodeFragment,
+    NodeId,
     PersistenceManager,
     PersistenceManagerFactory,
     QuerySpecification,
@@ -29,6 +31,7 @@ from drivine import (
     vector_index,
 )
 from drivine.manager.graph_object_manager_factory import GraphObjectManagerFactory
+from drivine.model.model_registry import ModelRegistry
 from drivine.schema.recorded_inventory import RecordedInventory, inventory_entries, read_inventory
 from drivine.schema.schema_catalog import DEFAULT_SCOPE
 from drivine.schema.schema_manager import inventory_key
@@ -583,6 +586,33 @@ async def test_a_tuned_item_given_before_an_untuned_one_keeps_its_options_with_n
     finally:
         await _drop_labelled(StatelessGraphObjectManager(factory.get("default")), label)
         await own.close()
+
+
+async def test_a_vector_index_ensured_over_a_fragments_field_without_vector_index_is_refused_and_not_kept(factory):
+    # drivine4j's VectorAnnotationCheckTest: the check sees the spec before the manager keeps it. What the check sees
+    # lasts for the process, so the fragment has a label of its own.
+    label = f"R{uuid.uuid4().hex[:10]}"
+
+    class EnsuredWithoutVectorIndex(NodeFragment, labels=[label]):
+        id: Annotated[str, NodeId()]
+        embedding: list[float] | None = None
+
+    ModelRegistry().fragment(EnsuredWithoutVectorIndex)
+    manager = SchemaManager(factory.registry, GraphObjectManagerFactory(factory), SchemaOptions())
+    gom = StatelessGraphObjectManager(factory.get("default"))
+    try:
+        with pytest.raises(DrivineError) as refused:
+            await manager.ensure("rag", vector_index(label, "embedding", 4))
+        assert str(refused.value) == (
+            f"`EnsuredWithoutVectorIndex.embedding` is covered by the vector index on `{label}.embedding` but has no "
+            "`VectorIndex`. Add it: without it the field is not written as a vector on FalkorDB, and `load_nearest` "
+            "cannot find its index."
+        )
+        assert [it for it in await gom.indexes.list("VECTOR") if it.label == label] == []
+        # Refused before it was kept, so the manager has nothing to apply.
+        assert await manager.enforce() == {}
+    finally:
+        await _drop_labelled(gom, label)
 
 
 async def test_ensure_by_owner_applies_on_every_graph_database():

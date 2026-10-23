@@ -323,11 +323,14 @@ class SaveStatementBuilder:
     def _packed_as_loaded(self, name: str, value: Any) -> Any:
         """
         A JsonPacked field's value as the node held it: the text the load read, so that text another writer packed with
-        other spacing or escaping isn't taken for a change. A value the node held no text for (one a load gives an
-        absent property) is packed as a save packs it.
+        other spacing or escaping isn't taken for a change, and a value held as other than text, which a load hands as
+        it is, as it was held. A value the node held none for (one a load gives an absent property) is packed as a save
+        packs it.
         """
-        text = self._options.loaded_properties.get(name)
-        return text if isinstance(text, str) else json.dumps(to_jsonable_python(value))
+        held = self._options.loaded_properties.get(name)
+        if held is None:
+            return json.dumps(to_jsonable_python(value))
+        return held if isinstance(held, str) else _as_compared(held)
 
     def _removals(
         self, view: GraphViewModel, obj: Any, replaced: list[str], removed_targets: RemovedTargets

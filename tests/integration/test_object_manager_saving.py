@@ -81,6 +81,7 @@ class Packed(NodeFragment, labels=["Packed"]):
     id: Annotated[str, NodeId()]
     text: str | None = None
     prefs: Annotated[dict[str, Any], JsonPacked()] = {}
+    tags: Annotated[list[str], JsonPacked()] = []
     stamp: Annotated[str | None, NodeStamp()] = None
 
 
@@ -347,6 +348,20 @@ class TestUpdate:
 
         updated = await gom.load(Packed, "k1")
         assert updated is not None and (updated.text, updated.prefs) == ("two", {"a": 1})
+
+    async def test_updates_a_node_that_holds_a_packed_field_as_a_list_another_writer_wrote_at_the_first_attempt(
+        self, pm, gom
+    ):
+        if pm.type in (DatabaseType.ORACLE, DatabaseType.POSTGRES):
+            pytest.skip("the list is written in Cypher")
+        await gom.save(Packed(id="k2", text="one", tags=["x"]))
+        # Held as a list, not as text: a load hands it as it is.
+        await pm.execute(QuerySpecification("MATCH (n:Packed {id: 'k2'}) SET n.tags = ['x']"))
+
+        await gom.update(Packed, "k2", lambda it: setattr(it, "text", "two"), attempts=1)
+
+        updated = await gom.load(Packed, "k2")
+        assert updated is not None and (updated.text, updated.tags) == ("two", ["x"])
 
     async def test_replaces_a_list_that_lost_an_item(self, gom):
         await gom.save(

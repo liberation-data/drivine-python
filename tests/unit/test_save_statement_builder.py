@@ -228,3 +228,4 @@ def test_compares_a_packed_field_as_the_text_the_load_read_and_packs_one_the_nod
 
     assert packed({"id": "n1", "extra": '{"a":1}'}) == ['{"a":1}'], "as another writer packed it"
     assert packed({"id": "n1"}) == ['{"a": 1}']
+    assert packed({"id": "n1", "extra": ["a"]}) == [["a"]], "held as other than text"

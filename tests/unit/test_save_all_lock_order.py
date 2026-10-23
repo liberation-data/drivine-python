@@ -82,6 +82,14 @@ async def test_writes_the_rows_of_each_class_of_one_statement_in_the_order_of_th
     assert parameters["ids0"] == ["h1", "h2", "h3"]
 
 
+async def test_sorts_the_rows_before_splitting_them_into_statements_so_each_holds_the_next_ids_in_order():
+    pm = Recording()
+    ids = [f"l{it:04}" for it in range(1001)]
+    await StatelessGraphObjectManager(pm).save_all([Ledger(id=it) for it in reversed(ids)])
+
+    assert [parameters["ids0"] for _, parameters in pm.ran] == [ids[:1000], ids[1000:]]
+
+
 async def test_keeps_the_rows_of_one_id_in_the_order_they_were_given_in():
     pm = Recording()
     await StatelessGraphObjectManager(pm).save_all([Ledger(id="l2"), Ledger(id="l1"), Ledger(id="l1", total=2)])

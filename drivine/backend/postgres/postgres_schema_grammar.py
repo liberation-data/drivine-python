@@ -104,23 +104,19 @@ class _PostgresSchema:
         ]
 
     def conflicts(self, spec: UniquenessConstraintSpec, limit: int) -> str:
-        """drivine4j's statement, line for line: `array_agg` of a key's nodes, sliced to the limit."""
-        keys = [text_of("n", it) for it in spec.properties]
-        entries = ", ".join(f"{sql_text(prop)}, {key}" for prop, key in zip(spec.properties, keys, strict=True))
+        """A node's own id is its `nid`; `limit` of a key's nodes at most are named, the first made first."""
+        values = [text_of("n", it) for it in spec.properties]
+        properties = ", ".join(f"{sql_text(it)}, {values[k]}" for k, it in enumerate(spec.properties))
         node_id = sampled_node_id(spec)
         node = ", ".join(
             ["'elementId', n.nid", *([f"{sql_text(node_id)}, {text_of('n', node_id)}"] if node_id else [])]
         )
-        return "\n".join(
-            [
-                f"SELECT jsonb_build_object('properties', jsonb_build_object({entries}), 'count', COUNT(*),",
-                f"{' ' * 26}'nodes', to_jsonb((array_agg(jsonb_build_object({node}) ORDER BY n.nid))[1:{limit}]))",
-                f"FROM {self.graph.nodes} n",
-                f"WHERE {has_labels('n', [spec.label])} AND {' AND '.join(f'{it} IS NOT NULL' for it in keys)}",
-                f"GROUP BY {', '.join(keys)}",
-                "HAVING COUNT(*) > 1",
-                f"LIMIT {limit}",
-            ]
+        return (
+            f"SELECT jsonb_build_object('properties', jsonb_build_object({properties}), 'count', COUNT(*), 'nodes', "
+            f'to_jsonb((array_agg(jsonb_build_object({node}) ORDER BY n.nid))[1:{limit}])) AS "value" '
+            f"FROM {self.graph.nodes} n "
+            f"WHERE {has_labels('n', [spec.label])} AND {' AND '.join(f'{it} IS NOT NULL' for it in values)} "
+            f"GROUP BY {', '.join(values)} HAVING COUNT(*) > 1 LIMIT {limit}"
         )
 
     def _over(self, label: str, properties: Sequence[str]) -> str:

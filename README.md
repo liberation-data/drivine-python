@@ -578,7 +578,9 @@ class AppDrivine(DrivineAssembly):
 await AssemblyHolder.shared(AppDrivine).start()      # makes what is missing; idempotent
 ```
 
-Without pi-pilgrim, enforce it yourself: `await SchemaManager(registry, factory, options).enforce()`.
+`start()` registers the databases whether or not there are catalogs, as drivine4j does, so a missing `DATABASE_TYPE`
+raises `DrivineError` there rather than on first use. Without pi-pilgrim, enforce it yourself:
+`await SchemaManager(registry, factory, options).enforce()`.
 
 - **`ensure` is idempotent.** An item that is there is left; one there with another shape (a vector index's dimensions,
   say) is reported as DRIFT and left, unless `recreate_on_drift`. A uniqueness constraint the data already breaks is a
@@ -589,6 +591,33 @@ Without pi-pilgrim, enforce it yourself: `await SchemaManager(registry, factory,
 - **Versions.** `catalog.with_version("2")` recreates the catalog's items once, the first time it is enforced. Items an
   owner applied before and no longer declares are reported, never dropped. Each owner's version and inventory are kept
   in a `_DrivineSchema` node, as drivine4j and TypeScript keep them.
+- **Schema known only at runtime**, a vector index whose dimensions come with the embedding model or an index for each
+  label a tenant declares, is given to the manager under an owner: `await schema_manager.ensure("dice",
+  vector_index("Proposition", "embedding", 1536))`, or `ensure_catalog(catalog)` for a catalog naming its owner and
+  databases. The items join what the owner declared, for the life of the manager, and are applied under the same
+  options; a later `enforce` or `recreate_all` applies them with the rest. A declaration that conflicts with another
+  owner's, or the owner's own, raises, and nothing is kept or applied. The marker records them as ensured at runtime
+  (`runtime:` before the key, as drivine4j writes it), so the next process's `enforce` keeps them rather than calling
+  them orphans; when it recreates the owner (on a version change, under `recreate_on_startup`, or by `recreate_all`), it
+  marks them (`runtime-stale:`), and the next `ensure` recreates them.
+  A version change is left to `enforce`.
+- **Catalogs are read once**, from the options the manager is built with; a catalog made later isn't seen, and schema
+  known later is given to `ensure`. With nothing to apply, no catalog or only empty ones and nothing ensured, the
+  manager says so at INFO: that it found no `SchemaCatalog`, or that all it found are empty, naming their owners. So a
+  missing catalog, and one left empty until an embedding model exists, can be told from an application with no schema.
+- **A vector field needs its `VectorIndex`.** Drivine knows a field is an embedding from the marker alone: without it
+  the field is saved as a plain list, not as a vector FalkorDB's index serves, and `load_nearest` can't find the
+  index. So a catalog's `vector_index` over a fragment's field without one is refused with a `DrivineError` naming
+  the class, the field and the spec, whether the catalog is enforced first or the fragment's model is built first.
+  One given to `ensure` is refused the same way, before it is kept or applied.
+  A spec beside the marker is allowed (it tunes the index), as is one on a label no fragment maps.
+- **An index in the way.** Neo4j refuses a uniqueness constraint while a plain range index covers the same label and
+  properties. `ensure` reports that as BLOCKED_BY_INDEX, naming the index, and changes nothing: `FAIL_FAST` raises,
+  `WARN` logs. With `replace_blocking_index=True` (on `gom.constraints.ensure`, or in `SchemaOptions`) the data is
+  read, and unless a value repeats the index is dropped and the constraint made, its own index taking the plain one's
+  place. A constraint given to `schema_manager.ensure` is reported and replaced the same way. Drivine's own keys (the
+  schema marker's, the store's) always replace one. On FalkorDB the constraint needs the range index, and Memgraph,
+  Oracle and Postgres make it beside one, so none is ever reported in the way there.
 - **By hand:** `gom.indexes.ensure(range_index("Session", ["lastActivityAt", "sessionId"]))`, `gom.indexes.recreate`,
   `gom.indexes.drop`, `gom.constraints.ensure(uniqueness_constraint("Person", "email"))`, and `list`.
 - **Each engine's DDL** is written for it: named items on Neo4j, Memgraph's text and vector indexes, FalkorDB's index per

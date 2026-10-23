@@ -499,6 +499,7 @@ def schema(grammar: SchemaGrammar) -> dict[str, str]:
     span = range_index("Session", ["lastActivityAt", "sessionId"])
     unique = uniqueness_constraint("Person", "uuid")
     pair = uniqueness_constraint("Person", ["email", "tenant"])
+    identified = uniqueness_constraint("Person", ["email", "tenant"], node_id_property="uuid")
     vector = vector_index(
         "Chunk",
         "embedding",
@@ -543,6 +544,7 @@ def schema(grammar: SchemaGrammar) -> dict[str, str]:
         "schema.dropFullText": shown(grammar.drop_full_text(text, None)),
         "schema.dropFullText.named": shown(grammar.drop_full_text(text, "given_name")),
         "schema.conflicts": grammar.conflicts(pair, 10),
+        "schema.conflicts.nodeId": grammar.conflicts(identified, 10),
     }
 
 
@@ -568,22 +570,11 @@ def test_writes_what_typescript_writes_for_postgres():
     )
 
 
-AWAITING_TWIN = {"schema.conflicts"}
+AWAITING_TWIN: set[str] = set()
 """
-Statements Python writes as drivine4j does ahead of TypeScript, whose golden text is copied from the TS twin once it
-lands (liberation-data/drivine4j#128: a violation's sample names its nodes). test_conflict_sample checks them against
-drivine4j's text meanwhile. Remove a key once the golden file holds what Python writes.
+Statements Python writes ahead of TypeScript, skipped until the golden file copied from the TS twin holds them. Remove a
+key once it does.
 """
-
-
-def test_the_statements_awaiting_typescript_are_not_yet_in_its_golden_file():
-    """Fails once the golden file is copied from the TS twin: then empty AWAITING_TWIN, and the goldens hold again."""
-    ours = {
-        **schema(NEO4J_SCHEMA),
-        **{f"oracle.{k}": v for k, v in schema(schema_grammar_for(DatabaseType.ORACLE)).items()},
-    }
-    assert any(ours[name] != GOLDEN["NEO4J"][name] for name in AWAITING_TWIN)
-    assert any(ours[f"oracle.{name}"] != GOLDEN["ORACLE"][name] for name in AWAITING_TWIN)
 
 
 def expect_golden(engine: str, statements: dict[str, str]) -> None:

@@ -71,7 +71,8 @@ class StoreIdentityResolver:
         if self.constraints is None:
             return False
         try:
-            result = self.constraints.ensure(_KEY_CONSTRAINT)
+            # The label is Drivine's, so a plain index on the key (Neo4j) is replaced by the constraint.
+            result = self.constraints.ensure(_KEY_CONSTRAINT, replace_blocking_index=True)
         except Exception as error:
             logger.warning("Could not ensure the DrivineStore key constraint: %s. Identity is best-effort.", error)
             return False
@@ -79,6 +80,14 @@ class StoreIdentityResolver:
             logger.warning(
                 "%s already holds duplicate DrivineStore stamps, so their uniqueness can't be enforced. Identity is "
                 "best-effort until they are removed.",
+                self.persistence_manager.database,
+            )
+            return False
+        if result.status == "BLOCKED_BY_INDEX":
+            logger.warning(
+                "The index %s on DrivineStore(key) on %s is in the way of its uniqueness constraint. Identity is "
+                "best-effort until it is dropped.",
+                result.index.name if result.index else None,
                 self.persistence_manager.database,
             )
             return False

@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from drivine.backend.oracle.oracle_graph import OracleGraph, _escaped, has_labels, json_key, labelled_value, sql_text
+from drivine.backend.oracle.oracle_graph import OracleGraph, has_labels, json_key, labelled_value, sql_text
 from drivine.backend.oracle.oracle_side_table import OracleSideTable
 from drivine.backend.sql.sql_catalog import CATALOG_KINDS, CatalogKind, catalog_properties, catalog_record
 from drivine.schema.full_text_index_spec import FullTextIndexSpec
@@ -247,36 +247,31 @@ END;"""
 
     def conflicts(self, spec: UniquenessConstraintSpec, limit: int) -> str:
         """
-        drivine4j's statement, line for line: each node numbered within its key by `ROW_NUMBER()`, so that a key gives
-        up to `limit` of its nodes, and the paths and the label written as drivine4j writes them.
+        Each node of a key that repeats is numbered within its key, and counted with it, so that a row names `limit` of
+        its nodes at most however many hold the key. A node's own id is its `nid`. The nodes are aggregated as JSON,
+        since as text they would be held to 4000 bytes, and a large sample overflows that (ORA-40478).
         """
-        keys = [f"JSON_VALUE(n.props, '$.{_drivine4j_step(it)}')" for it in spec.properties]
-        aliases = [f"k{i}" for i in range(len(keys))]
-        entries = ", ".join(
-            f"{sql_text(prop)} VALUE {alias}" for prop, alias in zip(spec.properties, aliases, strict=True)
-        )
+
+        def value(prop: str) -> str:
+            return f"JSON_VALUE(n.props, '${json_key(prop)}')"
+
+        values = [value(it) for it in spec.properties]
+        properties = ", ".join(f"{sql_text(it)} VALUE k{k}" for k, it in enumerate(spec.properties))
         node_id = sampled_node_id(spec)
         node = ", ".join(["'elementId' VALUE nid", *([f"{sql_text(node_id)} VALUE i"] if node_id else [])])
         selected = ", ".join(
-            [
-                *(f"{key} AS {alias}" for key, alias in zip(keys, aliases, strict=True)),
-                *([f"JSON_VALUE(n.props, '$.{_drivine4j_step(node_id)}') AS i"] if node_id else []),
-            ]
+            [*(f"{it} AS k{k}" for k, it in enumerate(values)), *([f"{value(node_id)} AS i"] if node_id else [])]
         )
-        partition = ", ".join(keys)
-        labelled = f"JSON_EXISTS(n.labels, '$[*]?(@ == \"{_escaped(spec.label)}\")')"
-        return "\n".join(
-            [
-                f"SELECT JSON_OBJECT('properties' VALUE JSON_OBJECT({entries}), 'count' VALUE MAX(c),",
-                f"{' ' * 19}'nodes' VALUE JSON_ARRAYAGG(JSON_OBJECT({node}) ORDER BY nid) RETURNING JSON)",
-                f"FROM (SELECT n.nid, {selected}, COUNT(*) OVER (PARTITION BY {partition}) AS c, ROW_NUMBER() OVER "
-                f"(PARTITION BY {partition} ORDER BY n.nid) AS r",
-                f"{' ' * 6}FROM {self.graph.nodes} n",
-                f"{' ' * 6}WHERE {labelled} AND {' AND '.join(f'{it} IS NOT NULL' for it in keys)})",
-                f"WHERE c > 1 AND r <= {limit}",
-                f"GROUP BY {', '.join(aliases)}",
-                f"FETCH FIRST {limit} ROWS ONLY",
-            ]
+        partition = ", ".join(values)
+        return (
+            f"SELECT JSON_OBJECT('properties' VALUE JSON_OBJECT({properties}), 'count' VALUE MAX(c), 'nodes' VALUE "
+            f'JSON_ARRAYAGG(JSON_OBJECT({node}) ORDER BY nid RETURNING JSON) RETURNING JSON) AS "value" '
+            f"FROM (SELECT n.nid, {selected}, COUNT(*) OVER (PARTITION BY {partition}) AS c, "
+            f"ROW_NUMBER() OVER (PARTITION BY {partition} ORDER BY n.nid) AS r "
+            f"FROM {self.graph.nodes} n "
+            f"WHERE {has_labels('n', [spec.label])} AND {' AND '.join(f'{it} IS NOT NULL' for it in values)}) "
+            f"WHERE c > 1 AND r <= {limit} GROUP BY {', '.join(f'k{k}' for k in range(len(values)))} "
+            f"FETCH FIRST {limit} ROWS ONLY"
         )
 
     def _shared_index(self, spec: RangeIndexSpec) -> tuple[str, str]:

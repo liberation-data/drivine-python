@@ -121,10 +121,10 @@ class SchemaManager:
         async with self._lock:
             targets = self._targets(catalog)
             # The items given are merged as a catalog's are, before one can replace another of its identity: two that
-            # differ raise, one with engine options wins over one without, and identical ones are kept once.
-            items = catalog.items
-            for database in targets:
-                items = tuple(self._merged(database, [catalog]).values())
+            # differ raise, one with engine options wins over one without, and identical ones are kept once. Their
+            # merge is the same on every database, or with none registered, as drivine4j builds a catalog: a conflict
+            # names no database.
+            items = tuple(self._merged(None, [catalog]).values())
             candidate = self._with_runtime(catalog, items)
             declared = self._catalogs_by_database(self.options.catalogs)
             ensured = self._catalogs_by_database(_runtime_catalogs(candidate))
@@ -346,9 +346,10 @@ class SchemaManager:
                 raise DrivineError(f"A schema catalog names {name}, which is not a registered graph database.")
         return list(catalog.databases)
 
-    def _merged(self, database: str, catalogs: list[SchemaCatalog]) -> dict[str, SchemaSpec]:
+    def _merged(self, database: str | None, catalogs: list[SchemaCatalog]) -> dict[str, SchemaSpec]:
         """
-        The items of a database's catalogs, each once. Two declarations of one item must agree on everything portable;
+        The items of a database's catalogs, each once; with no database (catalogs merged before any is applied), a
+        conflict names none. Two declarations of one item must agree on everything portable;
         where one of them carries engine options it wins whole, and two that carry different engine options conflict.
         """
         items: dict[str, SchemaSpec] = {}
@@ -367,7 +368,7 @@ class SchemaManager:
         return items
 
     @staticmethod
-    def _reconciled(database: str, held: SchemaSpec, spec: SchemaSpec, held_by: str, owner: str) -> SchemaSpec:
+    def _reconciled(database: str | None, held: SchemaSpec, spec: SchemaSpec, held_by: str, owner: str) -> SchemaSpec:
         def options_of(it: SchemaSpec) -> tuple[Any, ...]:
             return it.engine_options if isinstance(it, VectorIndexSpec) else ()
 
@@ -383,8 +384,9 @@ class SchemaManager:
         by = (
             f"Two schema catalogs of '{owner}'" if held_by == owner else f"Schema catalogs of '{held_by}' and '{owner}'"
         )
+        on = "" if database is None else f" on {database}"
         raise DrivineError(
-            f"{by} declare the {spec.kind} on {spec.label}({', '.join(spec.properties)}) on {database} differently: "
+            f"{by} declare the {spec.kind} on {spec.label}({', '.join(spec.properties)}){on} differently: "
             f"{held} and {spec}."
         )
 

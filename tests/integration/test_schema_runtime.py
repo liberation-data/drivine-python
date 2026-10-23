@@ -361,7 +361,9 @@ async def test_ensuring_an_item_again_with_the_same_identity_replaces_it_in_the_
 async def test_two_items_of_one_identity_given_at_once_that_differ_raise_and_nothing_is_kept(schema):
     manager = schema.manager(schema.dice())
 
-    with pytest.raises(DrivineError, match="Two schema catalogs of 'dice' declare"):
+    with pytest.raises(
+        DrivineError, match=r"Two schema catalogs of 'dice' declare the VECTOR on \w+\(embedding\) differently"
+    ):
         await manager.ensure_catalog(schema.runtime("dice", schema.vector(3), schema.vector(4)))
 
     assert await schema.dimensions() is None
@@ -538,6 +540,35 @@ async def test_an_item_ensured_again_on_the_same_databases_named_in_another_orde
     finally:
         for gom in goms:
             await _drop_labelled(gom, label)
+
+
+async def test_two_differing_items_of_one_identity_given_at_once_raise_with_no_graph_database_registered():
+    # drivine4j refuses them when it builds the catalog, whatever databases are registered.
+    own = DatabaseRegistry()
+    manager = SchemaManager(own, GraphObjectManagerFactory(PersistenceManagerFactory(own)), SchemaOptions())
+    label = f"R{uuid.uuid4().hex[:10]}"
+
+    with pytest.raises(DrivineError, match=r"declare the VECTOR on \w+\(embedding\) differently"):
+        await manager.ensure("dice", vector_index(label, "embedding", 3), vector_index(label, "embedding", 4))
+
+
+async def test_a_tuned_item_given_before_an_untuned_one_keeps_its_options_with_no_graph_database_registered():
+    own = DatabaseRegistry()
+    factory = PersistenceManagerFactory(own)
+    manager = SchemaManager(own, GraphObjectManagerFactory(factory), SchemaOptions())
+    label = f"R{uuid.uuid4().hex[:10]}"
+    plain = vector_index(label, "embedding", 3)
+    tuned = dataclasses.replace(plain, engine_options=(EngineVectorOptions("Neo4j", hnsw_m=16),))
+    try:
+        assert await manager.ensure("dice", tuned, plain) == {}
+        own.build_or_resolve_from_env(None)  # a graph registered after the items were ensured
+
+        report = await manager.enforce()
+
+        assert [it.spec for it in report["default"]] == [tuned]
+    finally:
+        await _drop_labelled(StatelessGraphObjectManager(factory.get("default")), label)
+        await own.close()
 
 
 async def test_ensure_by_owner_applies_on_every_graph_database():

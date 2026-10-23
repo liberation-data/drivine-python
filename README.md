@@ -586,6 +586,10 @@ Without pi-pilgrim, enforce it yourself: `await SchemaManager(registry, factory,
 - **Versions.** `catalog.with_version("2")` recreates the catalog's items once, the first time it is enforced. Items an
   owner applied before and no longer declares are reported, never dropped. Each owner's version and inventory are kept
   in a `_DrivineSchema` node, as drivine4j and TypeScript keep them.
+- **Catalogs are read once**, from the options the manager is built with; a catalog made later isn't seen. With nothing
+  to apply, the manager says so at INFO: that it found no `SchemaCatalog`, or that all it found are empty, naming
+  their owners. So a missing catalog, and one left empty until an embedding model exists, can be told from an
+  application with no schema.
 - **By hand:** `gom.indexes.ensure(range_index("Session", ["lastActivityAt", "sessionId"]))`, `gom.indexes.recreate`,
   `gom.indexes.drop`, `gom.constraints.ensure(uniqueness_constraint("Person", "email"))`, and `list`.
 - **Each engine's DDL** is written for it: named items on Neo4j, Memgraph's text and vector indexes, FalkorDB's index per

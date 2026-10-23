@@ -15,13 +15,14 @@ from drivine.schema.native_operation import NativeOperation
 from drivine.sync.connection.connection_provider import ConnectionProvider
 from drivine.sync.manager.contention import when_not_contended
 
-_ORACLE_CONTENDED = re.compile(r"ORA-(00060|08177)\b")
+_ORACLE_CONTENDED = re.compile(r"ORA-(00060|08177|00054|04020)\b")
 
 
 def _contended(failure: BaseException) -> bool:
     """
-    A transient error over Bolt, FalkorDB turning a write away while another is in progress, or an Oracle deadlock or
-    serialization failure.
+    A transient error over Bolt, FalkorDB turning a write away while another is in progress, an Oracle deadlock or
+    serialization failure, or Oracle refusing DDL on a table another session's DDL holds: busy (ORA-00054), or each
+    waiting on the other (ORA-04020), as when managers that start together each make the indexes of the store's key.
     """
     cause: BaseException | None = failure
     for _ in range(10):

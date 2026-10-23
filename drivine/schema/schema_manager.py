@@ -6,6 +6,7 @@ import logging
 from collections.abc import Mapping
 from typing import Any
 
+from drivine.backend.sql.sql_catalog import CATALOG_KINDS
 from drivine.connection.database_registry import DatabaseRegistry
 from drivine.connection.database_type import DatabaseType
 from drivine.drivine_error import DrivineError
@@ -31,13 +32,6 @@ GRAPH_TYPES = (
 MARKER_LABEL = "_DrivineSchema"
 """The label of the schema markers: drivine4j's and TypeScript's, so all read one."""
 
-_KINDS = {
-    "RANGE": "RANGE_INDEX",
-    "UNIQUE": "UNIQUENESS_CONSTRAINT",
-    "VECTOR": "VECTOR_INDEX",
-    "FULLTEXT": "FULLTEXT_INDEX",
-}
-
 
 def _key_of(spec: SchemaSpec) -> str:
     return f"{spec.kind}:{spec.label}:{','.join(sorted(spec.properties))}"
@@ -48,7 +42,7 @@ def inventory_key(spec: SchemaSpec) -> str:
     An item's identity in an owner's inventory, drivine4j's `inventoryKey`: kind, label, properties and name, so a
     renamed item shows as an orphan rather than coexisting unattributed.
     """
-    return f"{_KINDS[spec.kind]}:{spec.label}:{','.join(spec.properties)}:{item_name(spec)}"
+    return f"{CATALOG_KINDS[spec.kind]}:{spec.label}:{','.join(spec.properties)}:{item_name(spec)}"
 
 
 class SchemaManager:

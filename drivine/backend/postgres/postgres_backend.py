@@ -21,8 +21,8 @@ from drivine.backend.postgres.postgres_views import PostgresViews
 from drivine.backend.postgres.postgres_writes import PostgresWrites
 from drivine.backend.save_statement import SaveStatement
 from drivine.backend.sql.sql_cascade import beyond_count, kept_targets
+from drivine.backend.sql.sql_catalog import CATALOG_KINDS, catalog_properties
 from drivine.backend.sql.sql_graph import sql_text
-from drivine.backend.sql.sql_json import to_json
 from drivine.drivine_error import DrivineError
 from drivine.dsl.query import Query
 from drivine.dsl.rendered_query import RenderedQuery
@@ -226,7 +226,7 @@ class PostgresBackend:
             f'SELECT {made} AS "table" FROM {self.graph.catalog} WHERE kind = CAST($kind AS text) '
             "AND label = CAST($label AS text) AND properties = CAST($properties AS text) "
             "AND object_name IS NOT NULL AND to_regclass(object_name) IS NOT NULL",
-            {"kind": f"{kind}_INDEX", "label": label, "properties": to_json(list(properties))},
+            {"kind": CATALOG_KINDS[kind], "label": label, "properties": catalog_properties(properties)},
         )
 
     def nearest(self, target: TargetModel, search: NearestSearch) -> GraphStatement:

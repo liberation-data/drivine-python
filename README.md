@@ -139,7 +139,11 @@ On FalkorDB, `DATABASE_NAME` names the graph, `graph` by default.
 On Oracle, `DATABASE_NAME` is the service (`FREEPDB1`, say), and `DATABASE_DEFAULT_GRAPH_PATH` names the graph,
 `drivine` by default. A graph is drivine4j's tables, `<graph>_node`, `<graph>_edge` and `<graph>_schema`, and a SQL
 property graph over them, made on the first connection when they aren't there, so one store serves the JVM, Node and
-Python. The object manager writes SQL for it, and the query DSL, grouped reads, search and schema management work as on
+Python. `<graph>_schema` records the indexes and constraints Drivine made as drivine4j records them, so each library
+sees and drops the indexes the others made, and makes none beside them. A range index is two indexes, as drivine4j
+makes it: one over the property whatever the label, and one over the label's nodes alone, which a filter is read
+through. A uniqueness constraint comes with a range index over its properties, which stays when the constraint is
+dropped. The object manager writes SQL for it, and the query DSL, grouped reads, search and schema management work as on
 the graph engines. A raw `where` is SQL over the node's row, `n`: its `labels`, `props` (a JSON object keyed by stored
 name) and `stamp`, say `JSON_VALUE(n.props, '$.name') = $name`. Your own statements are SQL too. `matches` takes a
 regular expression in Oracle's POSIX dialect, matched against the whole value. A leading `(?i)` ignores case; what Java

@@ -6,7 +6,9 @@ check and then has nowhere to apply.
 What the check sees lasts for the process, so every fragment here has a label of its own.
 """
 
-from typing import Annotated
+import gc
+import weakref
+from typing import Annotated, Any, cast
 
 import pytest
 
@@ -70,6 +72,11 @@ class CheckBase(NodeFragment, labels=["CheckBase"]):
 
 class CheckDerived(CheckBase, labels=["CheckDerived"]):
     pass
+
+
+class CheckUnreached(NodeFragment, labels=["CheckUnreached"]):
+    id: Annotated[str, NodeId()]
+    embedding: list[float] | None = None
 
 
 class CheckTwoFields(NodeFragment, labels=["CheckTwoFields"]):
@@ -203,3 +210,58 @@ async def test_every_uncovered_field_is_reported_once_however_many_specs_cover_i
         + "\n"
         + message("CheckTwoFields.summary", "CheckTwoFields.summary")
     )
+
+
+class _Unreachable:
+    """A factory that fails if a database is asked for: the check must refuse before any is spoken to."""
+
+    def get(self, database: str) -> Any:
+        raise AssertionError(f"No database is spoken to, but {database} was asked for.")
+
+
+async def test_the_check_refuses_before_any_database_is_reached_by_enforce_or_ensure():
+    build(CheckUnreached)
+    registry = DatabaseRegistry()
+    registry.build_or_resolve_from_env(env={"DATABASE_TYPE": "MEMGRAPH", "DATABASE_HOST": "localhost"})
+    spec = vector_index("CheckUnreached", "embedding", 4)
+    expected = message("CheckUnreached.embedding", "CheckUnreached.embedding")
+    catalog = SchemaOptions([SchemaCatalog.of(spec)])
+    managers = [
+        SchemaManager(registry, cast(GraphObjectManagerFactory, _Unreachable()), catalog),
+        SchemaManager(registry, cast(GraphObjectManagerFactory, _Unreachable()), SchemaOptions()),
+    ]
+    sync_managers = [
+        SyncSchemaManager(registry, cast(SyncGraphObjectManagerFactory, _Unreachable()), catalog),
+        SyncSchemaManager(registry, cast(SyncGraphObjectManagerFactory, _Unreachable()), SchemaOptions()),
+    ]
+
+    with pytest.raises(DrivineError) as refused:
+        await managers[0].enforce()
+    assert str(refused.value) == expected
+    with pytest.raises(DrivineError) as refused:
+        await managers[1].ensure("rag", spec)
+    assert str(refused.value) == expected
+    # Refused before it was kept, so there is nothing to apply and still no database is asked for.
+    assert await managers[1].enforce() == {}
+    with pytest.raises(DrivineError) as refused:
+        sync_managers[0].enforce()
+    assert str(refused.value) == expected
+    with pytest.raises(DrivineError) as refused:
+        sync_managers[1].ensure("rag", spec)
+    assert str(refused.value) == expected
+    assert sync_managers[1].enforce() == {}
+
+
+def test_a_class_once_admitted_can_still_be_collected():
+    def admitted() -> weakref.ref[type]:
+        class CheckCollected(NodeFragment, labels=["CheckCollected"]):
+            id: Annotated[str, NodeId()]
+            embedding: list[float] | None = None
+
+        build(CheckCollected)
+        return weakref.ref(CheckCollected)
+
+    collected = admitted()
+    gc.collect()
+
+    assert collected() is None

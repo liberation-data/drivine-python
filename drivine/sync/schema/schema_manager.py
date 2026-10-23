@@ -5,17 +5,20 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 from drivine.backend.sql.sql_catalog import CATALOG_KINDS
 from drivine.connection.database_type import DatabaseType
 from drivine.drivine_error import DrivineError
 from drivine.schema.ensure_result import EnsureResult
+from drivine.schema.recorded_inventory import RecordedInventory, inventory_entries, read_inventory
 from drivine.schema.schema_catalog import SchemaCatalog
 from drivine.schema.schema_specs import SchemaSpec, item_name, uniqueness_constraint
 from drivine.schema.uniqueness_constraint_spec import UniquenessConstraintSpec
 from drivine.schema.vector_index_spec import VectorIndexSpec
+from drivine.sync import concurrency
 from drivine.sync.connection.database_registry import DatabaseRegistry
 from drivine.sync.manager.graph_object_manager_factory import GraphObjectManagerFactory
 from drivine.sync.manager.stateless_graph_object_manager import StatelessGraphObjectManager
@@ -47,39 +50,158 @@ def inventory_key(spec: SchemaSpec) -> str:
     return f"{CATALOG_KINDS[spec.kind]}:{spec.label}:{','.join(spec.properties)}:{item_name(spec)}"
 
 
+@dataclass(frozen=True)
+class _Plan:
+    """What one database is to be given: each owner's catalogs, their items merged, and which are co-owned."""
+
+    items: Mapping[str, SchemaSpec]
+    owners: Mapping[str, list[SchemaCatalog]]
+    co_owned: set[str]
+    runtime_only: Mapping[str, set[str]]
+    """By owner, the inventory keys of the items only `ensure` gave it, not one of its catalogs."""
+
+
 class SchemaManager:
     """
     Holds catalogs of indexes and constraints on the databases they apply to. `enforce` is idempotent: it makes what is
     missing, and recreates a catalog's items when its version changed. `recreate_all` drops and makes everything.
+    Schema known only later is given to `ensure`, under an owner, and joins what that owner declared.
     """
 
     def __init__(self, registry: DatabaseRegistry, factory: GraphObjectManagerFactory, options: SchemaOptions) -> None:
         self.registry = registry
         self.factory = factory
         self.options = options
+        self._runtime: dict[tuple[str, tuple[str, ...] | None], dict[str, SchemaSpec]] = {}
+        """What `ensure` was given, by owner and databases, each item by its identity: a later one replaces it."""
+        self._lock = concurrency.Lock()
+        """Serializes `enforce`, `recreate_all` and `ensure`, which read and write the runtime items and the markers."""
 
     def enforce(self) -> dict[str, list[EnsureResult[Any]]]:
         """Ensures every catalog on its databases: indexes before constraints. Returns the results, by database."""
         return self._apply(False)
 
     def recreate_all(self) -> dict[str, list[EnsureResult[Any]]]:
-        """Drops and makes every declared item. Destructive."""
+        """Drops and makes every declared item, and every item given to `ensure`. Destructive."""
         return self._apply(True)
 
+    def ensure(self, owner: str, *specs: SchemaSpec) -> dict[str, list[EnsureResult[Any]]]:
+        """
+        Ensures schema known only at runtime under `owner` (DEFAULT_SCOPE is the unnamed catalogs' owner), on every
+        graph database. See `ensure_catalog`.
+        """
+        return self.ensure_catalog(SchemaCatalog(tuple(specs), name=owner))
+
+    def ensure_catalog(self, catalog: SchemaCatalog) -> dict[str, list[EnsureResult[Any]]]:
+        """
+        Ensures schema known only at runtime, a vector index whose dimensions come with the embedding model or an index
+        for each label a tenant declares, under the catalog's owner and on its databases. Returns the results of the
+        items given, by database.
+
+        The items join what the owner declared, for the life of this manager, and are applied as `enforce` applies the
+        owner's: under the options' `mode`, `recreate_on_drift` and `violation_sample_size`, and recorded in the
+        owner's marker. Only the items given are applied. Ensuring an item again with the same identity (kind, label,
+        properties) replaces it; two of one identity given at once are merged as a catalog's are. A later `enforce` or
+        `recreate_all` applies them with the rest, and they count as the owner's when another owner declares one too.
+        Every database is planned first: a declaration that conflicts with another owner's, with the owner's own, or
+        with another given at once, raises, and nothing is kept or applied.
+
+        The marker records them as ensured at runtime, so an `enforce` by a manager made later (the next process) keeps
+        them in the inventory, not as orphans, until they are ensured again. When that manager recreates the owner (a
+        version change, `recreate_on_startup` or `recreate_all`), it marks them, and the next `ensure` of one recreates
+        it. A version change is left to `enforce`, and `recreate_on_startup` doesn't apply; the catalog can't carry a
+        version.
+        """
+        if catalog.version is not None:
+            raise DrivineError(
+                f"Schema ensured at runtime cannot carry a version ({catalog.version}): an owner's version is declared "
+                "by its catalogs, with SchemaCatalog.with_version."
+            )
+        if not catalog.items:
+            logger.info("Nothing to ensure for owner '%s': no items given", catalog.name)
+            return {}
+        with self._lock:
+            targets = self._targets(catalog)
+            # The items given are merged as a catalog's are, before one can replace another of its identity: two that
+            # differ raise, one with engine options wins over one without, and identical ones are kept once. Their
+            # merge is the same on every database, or with none registered, as drivine4j builds a catalog: a conflict
+            # names no database.
+            items = tuple(self._merged(None, [catalog]).values())
+            candidate = self._with_runtime(catalog, items)
+            declared = self._catalogs_by_database(self.options.catalogs)
+            ensured = self._catalogs_by_database(_runtime_catalogs(candidate))
+            # Every database is planned before anything is kept or applied, so a conflict leaves all as they were.
+            plans = {
+                database: self._plan(database, declared.get(database, []), ensured.get(database, []))
+                for database in targets
+            }
+            self._runtime = candidate
+            given = {inventory_key(it) for it in catalog.items}
+            report: dict[str, list[EnsureResult[Any]]] = {}
+            for database, plan in plans.items():
+                report[database] = self._apply_plan(database, plan, False, catalog.name, given)
+            return report
+
     def _apply(self, recreate: bool) -> dict[str, list[EnsureResult[Any]]]:
-        report: dict[str, list[EnsureResult[Any]]] = {}
-        for database, catalogs in self._catalogs_by_database().items():
-            gom = self.factory.get(database)
-            items = self._merged(database, catalogs)
-            owners: dict[str, list[SchemaCatalog]] = {}
-            for it in catalogs:
-                owners.setdefault(it.name, []).append(it)
-            co_owned = _co_owned_keys(owners)
-            results: list[EnsureResult[Any]] = []
-            for owner, own in owners.items():
-                results.extend(self._apply_owner(gom, database, owner, own, items, co_owned, recreate))
-            report[database] = results
-        return report
+        with self._lock:
+            declared = self._catalogs_by_database(self.options.catalogs)
+            ensured = self._catalogs_by_database(_runtime_catalogs(self._runtime))
+            report: dict[str, list[EnsureResult[Any]]] = {}
+            for database in dict.fromkeys([*declared, *ensured]):
+                plan = self._plan(database, declared.get(database, []), ensured.get(database, []))
+                report[database] = self._apply_plan(database, plan, recreate, None, None)
+            return report
+
+    def _with_runtime(
+        self, catalog: SchemaCatalog, items: Sequence[SchemaSpec]
+    ) -> dict[tuple[str, tuple[str, ...] | None], dict[str, SchemaSpec]]:
+        """
+        The runtime items with the catalog's merged `items` added, each replacing the item of its identity, owner and
+        databases.
+        """
+        copy = {key: dict(specs) for key, specs in self._runtime.items()}
+        # The databases as a set, as drivine4j keeps a catalog's: the order they are named in is no part of the key.
+        databases = None if catalog.databases is None else tuple(sorted(set(catalog.databases)))
+        specs = copy.setdefault((catalog.name, databases), {})
+        for spec in items:
+            specs[_key_of(spec)] = spec
+        return copy
+
+    def _plan(self, database: str, declared: list[SchemaCatalog], ensured: list[SchemaCatalog]) -> _Plan:
+        """Merges what each owner declares on the database, at start and at runtime alike; raises on a conflict."""
+        catalogs = [*declared, *ensured]
+        owners: dict[str, list[SchemaCatalog]] = {}
+        for it in catalogs:
+            owners.setdefault(it.name, []).append(it)
+        runtime_only: dict[str, set[str]] = {}
+        for it in ensured:
+            runtime_only.setdefault(it.name, set()).update(inventory_key(spec) for spec in it.items)
+        for owner, keys in runtime_only.items():
+            keys -= {inventory_key(spec) for it in declared if it.name == owner for spec in it.items}
+        return _Plan(self._merged(database, catalogs), owners, _co_owned_keys(owners), runtime_only)
+
+    def _apply_plan(
+        self, database: str, plan: _Plan, recreate: bool, owner: str | None, only: set[str] | None
+    ) -> list[EnsureResult[Any]]:
+        """Applies the plan's owners, or only `owner`; with `only`, just the items of those inventory keys."""
+        gom = self.factory.get(database)
+        results: list[EnsureResult[Any]] = []
+        for name, own in plan.owners.items():
+            if owner is not None and name != owner:
+                continue
+            others = {
+                inventory_key(spec)
+                for other, cats in plan.owners.items()
+                if other != name
+                for c in cats
+                for spec in c.items
+            }
+            results.extend(
+                self._apply_owner(
+                    gom, database, name, own, plan, plan.runtime_only.get(name, set()), others, recreate, only
+                )
+            )
+        return results
 
     def _apply_owner(
         self,
@@ -87,9 +209,11 @@ class SchemaManager:
         database: str,
         owner: str,
         catalogs: list[SchemaCatalog],
-        items: Mapping[str, SchemaSpec],
-        co_owned: set[str],
+        plan: _Plan,
+        runtime_only: set[str],
+        declared_by_others: set[str],
         forced: bool,
+        only: set[str] | None,
     ) -> list[EnsureResult[Any]]:
         """
         Applies one owner's items: recreated when forced, when `recreate_on_startup`, or when the owner's version
@@ -97,30 +221,61 @@ class SchemaManager:
         never recreated by one owner's version. Items the owner applied before and no longer declares (orphans) are
         reported, never dropped. The owner's version and inventory are recorded only when the apply succeeds, so a
         failed one is tried again on the next enforce.
+
+        `only`, from `ensure`, is the keys of the items given: just those are applied, the version stays as recorded,
+        and `recreate_on_startup` doesn't apply. Runtime items an earlier manager recorded and this one hasn't been
+        given are carried in the inventory, and marked stale when the owner is recreated without them.
         """
+        ensuring = only is not None
         versions = sorted({it.version for it in catalogs if it.version is not None})
         version = "|".join(versions) if versions else None
         pm = gom.persistence_manager
         if version is not None:
             self._ensure_singleton(gom, owner)
+        # ensure records the version it finds, so a change it doesn't act on is left to enforce.
         stored = (
             pm.maybe_get_one(gom.backend.schema_marker("version").spec({"scope": owner}))
-            if version is not None
+            if version is not None or ensuring
             else None
         )
-        version_changed = version is not None and stored is not None and stored != version
-        own = [items[key] for key in dict.fromkeys(_key_of(spec) for it in catalogs for spec in it.items)]
+        version_changed = not ensuring and version is not None and stored is not None and stored != version
+        recreate_owner = version_changed or (not ensuring and self.options.recreate_on_startup)
+        own = [plan.items[key] for key in dict.fromkeys(_key_of(spec) for it in catalogs for spec in it.items)]
         declared = [inventory_key(it) for it in own]
-        self._report_orphans(gom, database, owner, declared, co_owned)
-        ordered = [*(it for it in own if it.kind != "UNIQUE"), *(it for it in own if it.kind == "UNIQUE")]
+        recorded = read_inventory(
+            gom.backend.marker_items(pm.maybe_get_one(gom.backend.schema_marker("items").spec({"scope": owner})))
+        )
+        # Runtime items an earlier manager ensured and this one hasn't been given: kept, not orphans, unless an item
+        # declared now has the same identity under another name (a rename), which makes the recorded one an orphan.
+        identities = [inventory_key(it).removesuffix(item_name(it)) for it in own]
+        carried = [
+            key
+            for key in (recorded.runtime if recorded is not None else ())
+            if key not in declared and not any(key.startswith(it) for it in identities)
+        ]
+        stale: set[str] = set(recorded.stale) if recorded is not None else set()
+        self._report_orphans(database, owner, recorded, {*declared, *carried}, plan.co_owned)
+        applied = own if only is None else [it for it in own if inventory_key(it) in only]
+        ordered = [*(it for it in applied if it.kind != "UNIQUE"), *(it for it in applied if it.kind == "UNIQUE")]
         results: list[EnsureResult[Any]] = []
         for spec in ordered:
-            recreate = forced or (
-                (self.options.recreate_on_startup or version_changed) and inventory_key(spec) not in co_owned
-            )
+            # A runtime item marked stale missed its owner's recreate, and is recreated now.
+            key = inventory_key(spec)
+            recreate = forced or ((recreate_owner or key in stale) and key not in plan.co_owned)
             results.append(self._ensure(gom, spec, recreate))
+        # A carried item has no spec here to be recreated from: it is marked, and recreated when next ensured. A
+        # version change spares one another owner declares, as it spares a co-owned item. A runtime item not applied
+        # this time keeps its mark.
+        keys = {inventory_key(it) for it in applied}
+        stale_after = [
+            *(it for it in stale if it in runtime_only and it not in keys),
+            *(it for it in carried if it in stale or forced or (recreate_owner and it not in declared_by_others)),
+        ]
+        items = inventory_entries([*declared, *carried], {*runtime_only, *carried}, stale_after)
         pm.execute(
-            gom.backend.record_schema_marker().spec({"scope": owner, "version": version, "items": "\n".join(declared)})
+            gom.backend.record_schema_marker().spec(
+                {"scope": owner, "version": stored if ensuring else version, "items": items}
+            )
         )
         return results
 
@@ -132,15 +287,13 @@ class SchemaManager:
         gom.persistence_manager.execute(gom.backend.prune_schema_markers().spec({"scope": owner}))
         gom.constraints.ensure(uniqueness_constraint(MARKER_LABEL, "scope"))
 
+    @staticmethod
     def _report_orphans(
-        self, gom: StatelessGraphObjectManager, database: str, owner: str, declared: list[str], co_owned: set[str]
+        database: str, owner: str, recorded: RecordedInventory | None, kept: set[str], co_owned: set[str]
     ) -> None:
-        stored = gom.backend.marker_items(
-            gom.persistence_manager.maybe_get_one(gom.backend.schema_marker("items").spec({"scope": owner}))
-        )
-        if stored is None:
+        if recorded is None:
             return
-        orphans = [it for it in stored if it not in declared and it not in co_owned]
+        orphans = [it for it in recorded.keys if it not in kept and it not in co_owned]
         if orphans:
             logger.warning(
                 "Owner '%s' on %s applied %s item(s) it no longer declares: %s. They are left in place; drop them, or "
@@ -177,37 +330,47 @@ class SchemaManager:
                 raise DrivineError(message)
         return result
 
-    def _catalogs_by_database(self) -> dict[str, list[SchemaCatalog]]:
+    def _catalogs_by_database(self, catalogs: Sequence[SchemaCatalog]) -> dict[str, list[SchemaCatalog]]:
         """The catalogs that apply to each graph database. A named database that is unknown or not a graph fails."""
-        graphs = [it.name for it in self.registry.providers if it.type in GRAPH_TYPES]
         result: dict[str, list[SchemaCatalog]] = {}
-        for catalog in self.options.catalogs:
-            targets: list[str] = graphs
-            if catalog.databases is not None:
-                targets = []
-                for name in catalog.databases:
-                    provider = self.registry.connection_provider(name)
-                    if provider is None or provider.type not in GRAPH_TYPES:
-                        raise DrivineError(f"A schema catalog names {name}, which is not a registered graph database.")
-                    targets.append(name)
-            for name in targets:
+        for catalog in catalogs:
+            for name in self._targets(catalog):
                 result.setdefault(name, []).append(catalog)
         return result
 
-    def _merged(self, database: str, catalogs: list[SchemaCatalog]) -> dict[str, SchemaSpec]:
+    def _targets(self, catalog: SchemaCatalog) -> list[str]:
+        """The databases a catalog applies to: those it names, each a registered graph, or every graph."""
+        if catalog.databases is None:
+            return [it.name for it in self.registry.providers if it.type in GRAPH_TYPES]
+        for name in catalog.databases:
+            provider = self.registry.connection_provider(name)
+            if provider is None or provider.type not in GRAPH_TYPES:
+                raise DrivineError(f"A schema catalog names {name}, which is not a registered graph database.")
+        return list(catalog.databases)
+
+    def _merged(self, database: str | None, catalogs: list[SchemaCatalog]) -> dict[str, SchemaSpec]:
         """
-        The items of a database's catalogs, each once. Two declarations of one item must agree on everything portable;
+        The items of a database's catalogs, each once; with no database (catalogs merged before any is applied), a
+        conflict names none. Two declarations of one item must agree on everything portable;
         where one of them carries engine options it wins whole, and two that carry different engine options conflict.
         """
         items: dict[str, SchemaSpec] = {}
+        owners: dict[str, str] = {}
         for catalog in catalogs:
             for spec in catalog.items:
-                held = items.get(_key_of(spec))
-                items[_key_of(spec)] = self._reconciled(database, held, spec) if held is not None else spec
+                key = _key_of(spec)
+                held = items.get(key)
+                if held is None:
+                    items[key] = spec
+                    owners[key] = catalog.name
+                else:
+                    items[key] = self._reconciled(database, held, spec, owners[key], catalog.name)
+                    if items[key] is not held:  # its engine options won: a later conflict is with this one
+                        owners[key] = catalog.name
         return items
 
     @staticmethod
-    def _reconciled(database: str, held: SchemaSpec, spec: SchemaSpec) -> SchemaSpec:
+    def _reconciled(database: str | None, held: SchemaSpec, spec: SchemaSpec, held_by: str, owner: str) -> SchemaSpec:
         def options_of(it: SchemaSpec) -> tuple[Any, ...]:
             return it.engine_options if isinstance(it, VectorIndexSpec) else ()
 
@@ -220,10 +383,24 @@ class SchemaManager:
                 return held
             if not a:
                 return spec
-        raise DrivineError(
-            f"Two schema catalogs declare the {spec.kind} on {spec.label}({', '.join(spec.properties)}) on {database} "
-            f"differently."
+        by = (
+            f"Two schema catalogs of '{owner}'" if held_by == owner else f"Schema catalogs of '{held_by}' and '{owner}'"
         )
+        on = "" if database is None else f" on {database}"
+        raise DrivineError(
+            f"{by} declare the {spec.kind} on {spec.label}({', '.join(spec.properties)}){on} differently: "
+            f"{held} and {spec}."
+        )
+
+
+def _runtime_catalogs(
+    runtime: Mapping[tuple[str, tuple[str, ...] | None], Mapping[str, SchemaSpec]],
+) -> list[SchemaCatalog]:
+    """What `ensure` was given, as a catalog for each owner and databases."""
+    return [
+        SchemaCatalog(tuple(specs.values()), databases=databases, name=owner)
+        for (owner, databases), specs in runtime.items()
+    ]
 
 
 def _co_owned_keys(owners: Mapping[str, list[SchemaCatalog]]) -> set[str]:

@@ -12,6 +12,7 @@ from datetime import UTC, date, datetime, time, timedelta, timezone
 from typing import Any
 
 import pytest
+from pydantic import BaseModel
 
 from drivine.backend.oracle.oracle_graph import OracleGraph
 from drivine.backend.postgres.postgres_graph import PostgresGraph
@@ -70,6 +71,12 @@ def test_a_statement_of_hundreds_of_creates_each_naming_nodes_made_before_it_mak
     cypher_pm.query(spec("\n".join(clauses)))
     counted = "MATCH (n:CyWrite) OPTIONAL MATCH (n)-[r:NEXT]->() RETURN [count(DISTINCT n), count(r)]"
     assert cypher_pm.query(spec(counted)) == [[300, 299]]
+
+
+def test_a_write_whose_text_holds_the_quote_its_function_is_made_in_runs(cypher_pm: PersistenceManager):
+    # On Postgres a write is a function, its body quoted with dollars: a text in it of that quote must not end it.
+    clear(cypher_pm)
+    assert cypher_pm.query(spec("CREATE (n:CyWrite {name: 'a$cy$b'}) RETURN n.name")) == ["a$cy$b"]
 
 
 def test_drivines_stamp_is_written_as_a_nodes_property_is_and_read_back_as_one(cypher_pm: PersistenceManager):
@@ -184,6 +191,29 @@ def test_a_parameter_whose_json_is_longer_than_a_varchar2_is_read_and_written(cy
     assert cypher_pm.query(spec("MATCH (n:CyWrite) RETURN size(n.ids)")) == [5000]
 
 
+class Person(BaseModel):
+    name: str
+    born: date
+    tags: list[str]
+
+
+def test_a_cypher_statements_rows_are_transformed_and_mapped_as_a_graph_engines_are(
+    cypher_pm: PersistenceManager,
+):
+    clear(cypher_pm)
+    cypher_pm.query(spec("CREATE (:CyWrite {name: 'Ada', born: date('1815-12-10'), tags: ['maths', 'engines']})"))
+    ada = Person(name="Ada", born=date(1815, 12, 10), tags=["maths", "engines"])
+    # A node is its properties, a temporal value its ISO text on a SQL store, which the model reads as a date.
+    assert cypher_pm.query(spec("MATCH (n:CyWrite) RETURN n").transform(Person)) == [ada]
+    mapped = spec("MATCH (n:CyWrite) RETURN n.name, n.tags, {born: n.born}").map(
+        lambda row: Person(name=row[0], tags=row[1], born=row[2]["born"])
+    )
+    assert cypher_pm.query(mapped) == [ada]
+    cursor_spec = CursorSpecification[Any](cypher_statement("MATCH (n:CyWrite) RETURN n")).transform(Person)
+    with cypher_pm.open_cursor(cursor_spec) as cursor:
+        assert [it for it in cursor] == [ada]
+
+
 def test_a_cypher_statement_takes_named_parameters_on_a_sql_store(cypher_pm: PersistenceManager):
     positional = QuerySpecification[Any](cypher_statement("RETURN $1")).bind([1])
     if cypher_pm.type is DatabaseType.NEO4J:
@@ -193,17 +223,17 @@ def test_a_cypher_statement_takes_named_parameters_on_a_sql_store(cypher_pm: Per
         cypher_pm.query(positional)
 
 
-@pytest.mark.skipif(not POSTGRES, reason="Postgres isn't configured.")
+@pytest.mark.parametrize("store", [it for it in SQL_STORES if {"postgres": POSTGRES, "oracle": ORACLE}[it]])
 def test_a_write_in_a_transaction_rolled_back_leaves_nothing_and_runs_again_after(
-    factory: PersistenceManagerFactory,
+    store: str, factory: PersistenceManagerFactory
 ):
-    pm = factory.get("postgres")
+    pm = factory.get(store)
     clear(pm)
     with transaction(rollback=True):
         pm.query(spec("CREATE (:CyWrite {name: 'Ada'})"))
         assert pm.query(spec("MATCH (n:CyWrite) RETURN n.name")) == ["Ada"]
     assert pm.query(spec("MATCH (n:CyWrite) RETURN count(n)")) == [0]
-    # The function the write was compiled to went with the transaction, and is made again.
+    # On Postgres the function the write was compiled to went with the transaction, and is made again.
     pm.query(spec("CREATE (:CyWrite {name: 'Ada'})"))
     assert pm.query(spec("MATCH (n:CyWrite) RETURN count(n)")) == [1]
 

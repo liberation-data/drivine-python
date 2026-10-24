@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, time
 from decimal import ROUND_DOWN, Decimal, InvalidOperation, localcontext
 
+from drivine.backend.sql.sql_graph import sql_text
 from drivine.cypher.sql.temporal import DURATION_PARTS, INSTANTS, OFFSET, Temporal
 from drivine.cypher.sql.temporal_sql import Shared, TemporalSql
 
@@ -78,7 +79,7 @@ class Temporals:
 
     def is_kind(self, text: str, kind: Temporal) -> str:
         """Whether the text is of the kind."""
-        return self.sql.matches(text, _literal(kind.pattern))
+        return self.sql.matches(text, sql_text(kind.pattern))
 
     def by_kind(self, text: str, body: _Body, kinds: tuple[Temporal, ...] = INSTANTS) -> str:
         """The body of the kind among `kinds` that the text is, as its shape tells, and of the text, written once: null
@@ -133,7 +134,7 @@ class Temporals:
         where it is none, however written (`+00:00`, `-0000`), so a value at UTC is equal to another however each
         writes it.
         """
-        utc = self.sql.replace(self.sql.group(text, _literal(OFFSET), 1), "'^[+-]00:?00$'", "'Z'")
+        utc = self.sql.replace(self.sql.group(text, sql_text(OFFSET), 1), "'^[+-]00:?00$'", "'Z'")
         return self.sql.replace(utc, "'^([+-][0-9]{2})([0-9]{2})$'", "'\\1:\\2'")
 
     def _offset_of(self, text: str, from_: Temporal, to: Temporal) -> str | None:
@@ -363,7 +364,7 @@ class Temporals:
 
         def part(name: str) -> str:
             pattern, group = DURATION_PARTS[name]
-            return f"COALESCE({self.sql.number(self.sql.group(text, _literal(pattern), group))}, 0)"
+            return f"COALESCE({self.sql.number(self.sql.group(text, sql_text(pattern), group))}, 0)"
 
         sign = f"CASE WHEN SUBSTR({text}, 1, 1) = '-' THEN -1 WHEN {text} IS NOT NULL THEN 1 END"
         return Parts(
@@ -522,10 +523,6 @@ def _number(value: str) -> str:
     """A number as Neo4j writes one in a duration: no zeros after the point, nor the point where there is no
     fraction."""
     return f"RTRIM(to_char({value}, 'FM9999999999990.999999999'), '.')"
-
-
-def _literal(text: str) -> str:
-    return "'" + text.replace("'", "''") + "'"
 
 
 def canonical(text: str, kind: Temporal) -> str | None:

@@ -392,9 +392,13 @@ class PostgresCypherCompiler(SqlCypherCompiler):
         text = "\n".join([*declared, "BEGIN", indent("\n".join(body)), "END"])
         digest = hashlib.sha256(text.encode()).hexdigest()
         function = f"pg_temp.drivine_cypher_{digest[:24]}"
+        # The body is quoted with dollars, by a tag no text in it holds: a text of `$cy$` would end it.
+        quote = "$cy$"
+        while quote in text:
+            quote = f"{quote[:-1]}_$"
         prelude = (
             f"CREATE OR REPLACE FUNCTION {function}({PARAMS} jsonb) RETURNS SETOF json LANGUAGE plpgsql "
-            f"AS $cy$\n{text}\n$cy$"
+            f"AS {quote}\n{text}\n{quote}"
         )
         return CompiledCypher(
             f"SELECT cy.result FROM {function}(CAST(${OBJECT} AS jsonb)) AS cy (result)", parameters, prelude

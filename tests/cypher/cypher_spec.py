@@ -27,12 +27,16 @@ class _Loader(yaml.SafeLoader):
     """
     YAML 1.2's core schema: `true` and `false` alone are booleans, and a number is written as JSON writes one, so a
     whole number stays an int and one with a fraction a float (2 is not 2.0). PyYAML reads YAML 1.1, where `yes`, `no`,
-    `on` and `off` are booleans and `10:30` is a number.
+    `on` and `off` are booleans, `10:30` is a number and `2024-01-01` a date, where drivine4j reads text.
     """
 
 
 _Loader.yaml_implicit_resolvers = {
-    key: [(tag, regexp) for tag, regexp in resolvers if tag.rsplit(":", 1)[-1] not in ("bool", "int", "float")]
+    key: [
+        (tag, regexp)
+        for tag, regexp in resolvers
+        if tag.rsplit(":", 1)[-1] not in ("bool", "int", "float", "timestamp")
+    ]
     for key, resolvers in yaml.SafeLoader.yaml_implicit_resolvers.items()
 }
 _Loader.add_implicit_resolver("tag:yaml.org,2002:bool", re.compile(r"^(?:true|false)$"), list("tf"))

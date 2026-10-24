@@ -170,6 +170,10 @@ def test_cypher_the_compiler_does_not_take_is_refused_by_name_and_what_is_not_cy
     with pytest.raises(DrivineError) as refused:
         read_cypher("CALL db.labels()")
     assert str(refused.value) == "A procedure call (CALL) is Cypher, and is not compiled to SQL yet."
+    # One among a query's reading clauses is refused alike.
+    with pytest.raises(DrivineError) as refused:
+        read_cypher("MATCH (n) CALL db.labels() YIELD label RETURN label")
+    assert str(refused.value) == "A procedure call (CALL) is Cypher, and is not compiled to SQL yet."
     with pytest.raises(DrivineError, match=r"^The statement is not Cypher, at line 1, column \d+: "):
         read_cypher("MATCH (n RETURN n")
 

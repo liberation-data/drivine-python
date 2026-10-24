@@ -41,11 +41,15 @@ def main() -> int:
         members = {
             Path(it.name).relative_to(Path(it.name).parts[0]).as_posix(): it for it in tar.getmembers() if it.isfile()
         }
+        # Every file read before any is written, so a tag without one leaves tests/cypher as it was.
+        contents: dict[str, bytes] = {}
         for name in FILES:
-            content = tar.extractfile(members[name])
+            content = tar.extractfile(members[name]) if name in members else None
             if content is None:
                 raise SystemExit(f"{name} is not a file in {REPOSITORY}@{args.tag}.")
-            (SPEC / name).write_bytes(content.read())
+            contents[name] = content.read()
+        for name, content in contents.items():
+            (SPEC / name).write_bytes(content)
     (SPEC / "VERSION").write_text(f"{args.tag}\n")
     print(f"tests/cypher is now {REPOSITORY}@{args.tag}.")
     return 0

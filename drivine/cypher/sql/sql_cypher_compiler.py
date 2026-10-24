@@ -10,6 +10,7 @@ from enum import Enum
 from functools import cached_property
 from typing import Any, NoReturn, TypeVar, cast
 
+from drivine.backend.sql.sql_graph import sql_text as literal
 from drivine.cypher.ast.clause import (
     Call,
     Clause,
@@ -2947,10 +2948,6 @@ class SqlCypherCompiler(ABC):
 
 
 # ----- What a statement holds -----
-
-
-def literal(text: str) -> str:
-    return "'" + text.replace("'", "''") + "'"
 
 
 def indent(text: str) -> str:

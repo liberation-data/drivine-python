@@ -22,6 +22,7 @@ from drivine.schema.schema_grammar import (
 from drivine.schema.schema_item import SchemaItem
 from drivine.schema.schema_listing import SchemaListing
 from drivine.store.store_identity_resolver import StoreIdentityResolver
+from drivine.sync.schema.constraint_manager import ConstraintManager as SyncConstraintManager
 
 GRAMMAR = dataclasses.replace(
     NEO4J_SCHEMA,
@@ -177,6 +178,9 @@ class FalkorDbLike:
         self.listings = 0
 
     async def run(self, statement: str | NativeOperation, bindings: Mapping[str, Any] | None = None) -> list[Any]:
+        return self.answer(statement)
+
+    def answer(self, statement: str | NativeOperation) -> list[Any]:
         if isinstance(statement, NativeOperation) and statement.native == "CONSTRAINT_CREATE":
             self.made = True
             return []
@@ -186,6 +190,13 @@ class FalkorDbLike:
                 return []
             return [{"label": "Person", "properties": ["email"], "status": self.status}]
         return []
+
+
+class SyncFalkorDbLike(FalkorDbLike):
+    """The same FalkorDB, for the sync API's executor."""
+
+    def run(self, statement: str | NativeOperation, bindings: Mapping[str, Any] | None = None) -> list[Any]:  # pyright: ignore[reportIncompatibleMethodOverride]
+        return self.answer(statement)
 
 
 PERSON_EMAIL = uniqueness_constraint("Person", "email")
@@ -205,6 +216,27 @@ async def test_on_falkordb_a_failed_build_raises_at_once_not_after_waiting_out_e
 
     with pytest.raises(DrivineError) as raised:
         await ConstraintManager(store, FALKORDB_SCHEMA).ensure(PERSON_EMAIL, 0)  # pyright: ignore[reportArgumentType]
+
+    assert str(raised.value) == (
+        "FalkorDB could not build the uniqueness constraint on Person(email): nodes may hold the same values."
+    )
+    assert time.monotonic() - started < 1
+
+
+def test_on_falkordb_the_sync_api_waits_for_a_constraint_built_in_the_background():
+    store = SyncFalkorDbLike("OPERATED", pending=2)
+
+    result = SyncConstraintManager(store, FALKORDB_SCHEMA).ensure(PERSON_EMAIL, 0)  # pyright: ignore[reportArgumentType]
+
+    assert result == EnsureResult("CREATED", PERSON_EMAIL)
+
+
+def test_on_falkordb_the_sync_api_raises_at_once_on_a_failed_build():
+    store = SyncFalkorDbLike("FAILED")
+    started = time.monotonic()
+
+    with pytest.raises(DrivineError) as raised:
+        SyncConstraintManager(store, FALKORDB_SCHEMA).ensure(PERSON_EMAIL, 0)  # pyright: ignore[reportArgumentType]
 
     assert str(raised.value) == (
         "FalkorDB could not build the uniqueness constraint on Person(email): nodes may hold the same values."

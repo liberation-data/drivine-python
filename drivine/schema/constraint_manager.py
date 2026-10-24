@@ -44,7 +44,8 @@ class ConstraintManager:
         """
         Makes the constraint unless it is there. The data is checked first, and up to `sample_size` keys held more than
         once are reported, each with up to `sample_size` of the nodes that hold it; 0 skips the check, leaving the
-        engine to refuse a constraint the data breaks.
+        engine to refuse a constraint the data breaks. FalkorDB builds the constraint in the background, and lists the
+        build as failed: that raises DrivineError as soon as it is listed.
 
         A plain range index over the label and properties, in their order, that the engine says is in the way of the
         constraint (Neo4j) is reported as BLOCKED_BY_INDEX, and nothing is changed. With `replace_blocking_index`, the

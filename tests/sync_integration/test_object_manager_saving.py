@@ -23,6 +23,7 @@ from drivine.sync import (
     RemovedTargets,
     StaleObjectError,
     StatelessGraphObjectManager,
+    cypher_statement,
     stamps,
     transaction,
 )
@@ -352,11 +353,10 @@ class TestUpdate:
     def test_updates_a_node_whose_packed_text_another_writer_wrote_with_other_spacing_at_the_first_attempt(
         self, pm, gom
     ):
-        if pm.type in (DatabaseType.ORACLE, DatabaseType.POSTGRES):
-            pytest.skip("the text is written in Cypher")
         gom.save(Packed(id="k1", text="one", prefs={"a": 1}))
         # As TypeScript's Drivine, or a migration, packs it: not as json.dumps would.
-        pm.execute(QuerySpecification("""MATCH (n:Packed {id: 'k1'}) SET n.prefs = '{"a":1}'"""))
+        packed = """MATCH (n:Packed {id: 'k1'}) SET n.prefs = '{"a":1}'"""
+        pm.execute(QuerySpecification(cypher_statement(packed)))
 
         gom.update(Packed, "k1", lambda it: setattr(it, "text", "two"), attempts=1)
 
@@ -366,11 +366,9 @@ class TestUpdate:
     def test_updates_a_node_that_holds_a_packed_field_as_a_list_another_writer_wrote_at_the_first_attempt(
         self, pm, gom
     ):
-        if pm.type in (DatabaseType.ORACLE, DatabaseType.POSTGRES):
-            pytest.skip("the list is written in Cypher")
         gom.save(Packed(id="k2", text="one", tags=["x"]))
         # Held as a list, not as text: a load hands it as it is.
-        pm.execute(QuerySpecification("MATCH (n:Packed {id: 'k2'}) SET n.tags = ['x']"))
+        pm.execute(QuerySpecification(cypher_statement("MATCH (n:Packed {id: 'k2'}) SET n.tags = ['x']")))
 
         gom.update(Packed, "k2", lambda it: setattr(it, "text", "two"), attempts=1)
 

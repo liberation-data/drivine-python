@@ -12,8 +12,8 @@ from drivine import (
     transactional,
 )
 
-# Statements written in Cypher; Oracle's are in tests/integration/oracle.
-pytestmark = pytest.mark.graph_engines
+# Written in Cypher, which Postgres and Oracle compile to their SQL.
+pytestmark = pytest.mark.written_in_cypher
 
 
 def create(name: str) -> QuerySpecification[None]:

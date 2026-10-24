@@ -70,7 +70,9 @@ testpaths = ["tests"]
 drivine_test_containers = true
 markers = [
     "rolls_back: needs multi-statement transactions, which FalkorDB lacks",
-    "graph_engines: written in Cypher, which Postgres and Oracle don't take",
+    "written_in_cypher: seeds and reads back in Cypher, which Postgres and Oracle compile to their SQL",
+    "graph_engine_only(reason): runs what Postgres and Oracle don't take, as the reason says",
+    "fails_on_sql_stores(reason): fails on Postgres and Oracle for the issue the reason names; xfail there, strictly",
     "async_only: runs tasks concurrently; left out of the sync tests scripts/unasync.py writes",
 ]
 

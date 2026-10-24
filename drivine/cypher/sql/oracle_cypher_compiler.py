@@ -4,6 +4,7 @@ import re
 from collections.abc import Callable, Sequence
 from typing import Any, cast
 
+from drivine.backend.oracle.oracle_graph import holds_label
 from drivine.cypher.sql.compiled_cypher import CompiledCypher
 from drivine.cypher.sql.oracle_temporal_sql import OracleTemporalSql
 from drivine.cypher.sql.parameters import OBJECT, cypher_json, json_text, jsonable
@@ -207,7 +208,7 @@ class OracleCypherCompiler(SqlCypherCompiler):
         labels are answered by that index, Oracle (23.26) finds no node the open transaction has written and not yet
         committed.
         """
-        rest = [f"INSTR(JSON_SERIALIZE({labels}), {literal(_quoted(it))}) > 0" for it in all_[1:]]
+        rest = [holds_label(labels, it) for it in all_[1:]]
         return " AND ".join([self.has_label(labels, all_[0]), *rest])
 
     def elements(self, json: str, alias: str) -> str:

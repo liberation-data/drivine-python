@@ -100,18 +100,52 @@ def has_labels(alias: str, labels: Sequence[str]) -> str:
     """
     A predicate that holds when the node row `alias` carries every one of the labels. A label may come from data (a
     NodeLabels filter's value, a search's partition label): it is escaped as `json_key` escapes a name, the backslash
-    first, for the JSON string the path or the labels' text holds it in, and then the SQL literal around it.
+    first, for the JSON string the path holds it in, and then the SQL literal around it; a label after the first is
+    looked for by its text (`holds_label`).
 
     The first label is tested so the multivalue index over labels can answer it, and the rest by the labels' text,
     which that index can't: when two tests of the labels are answered by the index, Oracle (23.26) finds no node the
     open transaction has written and not yet committed (drivine#221). drivine4j's `OracleSql.hasLabels` writes the same.
     """
     return " AND ".join(
-        f"JSON_EXISTS({alias}.labels, '$?(@ == \"{_escaped(it)}\")')"
-        if i == 0
-        else f"INSTR(JSON_SERIALIZE({alias}.labels), '\"{_escaped(it)}\"') > 0"
+        f"JSON_EXISTS({alias}.labels, '$?(@ == \"{_escaped(it)}\")')" if i == 0 else holds_label(f"{alias}.labels", it)
         for i, it in enumerate(labels)
     )
+
+
+def holds_label(labels: str, label: str) -> str:
+    """
+    A predicate that holds when the JSON array of labels `labels` holds `label`, told by its text. `JSON_SERIALIZE`
+    writes the array compactly, `["A","B"]`; with its brackets made commas and `,"` put after it, `,"A","B","`, each
+    label is `,"label","`, and the label is looked for as that. The trims take one bracket at each end, since a label's
+    quote stands beside each, and no labels at all leave `,,"`, which holds no label. Matched there, the needle is a
+    whole label. Its first quote follows a comma, so isn't escaped: it opens a label or closes one. If it opens one, the
+    label's text runs to the first unescaped quote, which is the one that closes the needle's label. If it closes one, a
+    comma and an opening quote follow, which the needle has only when the label is `,`, and then the quote after that
+    closes a label `,`. The label is written as `JSON_SERIALIZE` writes it (`serialized_label`), so one holding a
+    control character is found, and one holding `","` is not taken for two. drivine4j's `OracleSql.holdsLabel` writes
+    the same.
+    """
+    needle = sql_text(f',{serialized_label(label)},"')
+    return f"INSTR(',' || LTRIM(RTRIM(JSON_SERIALIZE({labels}), ']'), '[') || ',\"', {needle}) > 0"
+
+
+_SHORT_ESCAPES = {'"': '\\"', "\\": "\\\\", "\b": "\\b", "\t": "\\t", "\n": "\\n", "\f": "\\f", "\r": "\\r"}
+"""The characters `JSON_SERIALIZE` writes with a short escape."""
+
+
+def serialized_label(text: str) -> str:
+    """
+    `text` as Oracle's `JSON_SERIALIZE` writes a string, checked on Oracle Free 23 for every character: `"` and `\\`
+    escaped; backspace, tab, newline, form feed and carriage return as `\\b`, `\\t`, `\\n`, `\\f` and `\\r`; every
+    other character below U+0020, and U+007F, as `\\u00XX` in upper case; U+2028 and U+2029 as `\\u2028` and `\\u2029`;
+    and every other character as it is.
+    """
+    escaped = "".join(
+        _SHORT_ESCAPES.get(c) or (f"\\u{ord(c):04X}" if ord(c) < 0x20 or ord(c) in (0x7F, 0x2028, 0x2029) else c)
+        for c in text
+    )
+    return f'"{escaped}"'
 
 
 def labelled_value(alias: str, label: str, property: str) -> str:

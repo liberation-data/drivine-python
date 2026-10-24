@@ -115,10 +115,23 @@ class ConstraintManager:
         # Order means nothing to uniqueness, and engines reorder the properties.
         return any(it.label == spec.label and set(it.properties) == set(spec.properties) for it in await self.list())
 
+    async def _failed(self, spec: UniquenessConstraintSpec) -> bool:
+        """Whether the engine reports that its build of the constraint failed."""
+        listing = self.grammar.list_failed_uniques
+        if listing is None:
+            return False
+        held = listing.read(await self.executor.run(listing.statement))
+        return any(it.label == spec.label and set(it.properties) == set(spec.properties) for it in held)
+
     async def _await_built(self, spec: UniquenessConstraintSpec) -> None:
         """FalkorDB builds a constraint in the background; wait until it reports it, or says it failed."""
         for attempt in range(50):
             if await self._exists(spec):
                 return
+            if await self._failed(spec):
+                raise DrivineError(
+                    f"{self.grammar.engine} could not build the uniqueness constraint on "
+                    f"{spec.label}({', '.join(spec.properties)}): nodes may hold the same values."
+                )
             await concurrency.sleep(0.02 * (attempt + 1))
         raise DrivineError(f"The uniqueness constraint on {spec.label}({', '.join(spec.properties)}) was not built.")

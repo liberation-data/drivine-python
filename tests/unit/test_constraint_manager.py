@@ -2,6 +2,7 @@
 
 import dataclasses
 import logging
+import time
 from collections.abc import Mapping
 from typing import Any
 
@@ -161,6 +162,67 @@ async def test_another_refusal_is_raised_as_it_is():
         await manager(store).ensure(SPEC, replace_blocking_index=True)
 
     assert raised.value is store.refusal and store.dropped == []
+
+
+class FalkorDbLike:
+    """
+    An executor over a FalkorDB, which builds a constraint in the background: once made, the constraint is missing
+    from the first `pending` listings, and then listed with `status`.
+    """
+
+    def __init__(self, status: str, pending: int = 1) -> None:
+        self.status = status
+        self.pending = pending
+        self.made = False
+        self.listings = 0
+
+    async def run(self, statement: str | NativeOperation, bindings: Mapping[str, Any] | None = None) -> list[Any]:
+        if isinstance(statement, NativeOperation) and statement.native == "CONSTRAINT_CREATE":
+            self.made = True
+            return []
+        if statement == FALKORDB_SCHEMA.list_uniques.statement and self.made:
+            self.listings += 1
+            if self.listings <= self.pending:
+                return []
+            return [{"label": "Person", "properties": ["email"], "status": self.status}]
+        return []
+
+
+PERSON_EMAIL = uniqueness_constraint("Person", "email")
+
+
+async def test_on_falkordb_a_constraint_built_in_the_background_is_waited_for():
+    store = FalkorDbLike("OPERATED", pending=2)
+
+    result = await ConstraintManager(store, FALKORDB_SCHEMA).ensure(PERSON_EMAIL, 0)  # pyright: ignore[reportArgumentType]
+
+    assert result == EnsureResult("CREATED", PERSON_EMAIL)
+
+
+async def test_on_falkordb_a_failed_build_raises_at_once_not_after_waiting_out_every_attempt():
+    store = FalkorDbLike("FAILED")
+    started = time.monotonic()
+
+    with pytest.raises(DrivineError) as raised:
+        await ConstraintManager(store, FALKORDB_SCHEMA).ensure(PERSON_EMAIL, 0)  # pyright: ignore[reportArgumentType]
+
+    assert str(raised.value) == (
+        "FalkorDB could not build the uniqueness constraint on Person(email): nodes may hold the same values."
+    )
+    assert time.monotonic() - started < 1
+
+
+def test_only_falkordb_lists_the_constraints_it_failed_to_build():
+    assert FALKORDB_SCHEMA.list_failed_uniques is not None
+    assert FALKORDB_SCHEMA.list_failed_uniques.statement == FALKORDB_SCHEMA.list_uniques.statement
+    rows = [
+        {"label": "Person", "properties": ["email"], "status": "FAILED"},
+        {"label": "Person", "properties": ["name"], "status": "OPERATIONAL"},
+        {"label": "Person", "properties": ["uuid"], "status": "UNDER CONSTRUCTION"},
+    ]
+    assert FALKORDB_SCHEMA.list_failed_uniques.read(rows) == [SchemaItem("Person", ("email",))]
+    assert [it.properties for it in FALKORDB_SCHEMA.list_uniques.read(rows)] == [("name",), ("uuid",)]
+    assert NEO4J_SCHEMA.list_failed_uniques is None and MEMGRAPH_SCHEMA.list_failed_uniques is None
 
 
 def test_neo4j_knows_an_index_in_the_way_by_its_code_not_by_a_name_clash_or_by_prose():

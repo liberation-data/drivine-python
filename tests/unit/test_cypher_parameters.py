@@ -4,7 +4,7 @@ from datetime import timedelta
 
 import pytest
 
-from drivine.cypher.sql.parameters import cypher_json
+from drivine.cypher.sql.parameters import Parameters, cypher_json
 
 
 @pytest.mark.parametrize(
@@ -19,3 +19,26 @@ from drivine.cypher.sql.parameters import cypher_json
 )
 def test_a_timedelta_is_its_days_and_its_time_as_the_neo4j_driver_sends_it(duration: timedelta, text: str):
     assert cypher_json(duration) == f'"{text}"'
+
+
+@pytest.mark.parametrize(
+    ("value", "text"),
+    [
+        ({3}, "[3]"),
+        (frozenset({3}), "[3]"),
+        ((1, 2), "[1,2]"),
+        (iter([1, 2]), "[1,2]"),
+        ((it for it in [1, 2]), "[1,2]"),
+        (b"\x00\xffdrivine", '"AP9kcml2aW5l"'),
+        (bytearray(b"\x00\xff"), '"AP8="'),
+    ],
+)
+def test_a_collection_is_a_list_and_bytes_their_base64_as_drivine4j_writes_them(value: object, text: str):
+    assert cypher_json(value) == text
+
+
+def test_an_iterator_named_twice_is_read_once():
+    parameters = Parameters({"ids": (it for it in [1, 2])}, lambda marker: marker, lambda marker: marker)
+    parameters.json("ids")
+    parameters.json("ids")
+    assert parameters.values == {"_cy_ids": "[1,2]"}

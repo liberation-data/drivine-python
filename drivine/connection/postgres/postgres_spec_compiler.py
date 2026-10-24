@@ -8,7 +8,7 @@ from drivine.drivine_error import DrivineError
 from drivine.query.query_specification import QuerySpecification
 from drivine.query.query_specification_compiler import QuerySpecificationCompiler
 
-_NAMED = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)")
+_NAMED = re.compile(r"\$([^\W\d]\w*)")
 _POSITIONAL = re.compile(r"\$(\d+)(?![0-9])")
 
 

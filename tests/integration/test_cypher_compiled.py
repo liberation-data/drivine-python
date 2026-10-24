@@ -104,6 +104,14 @@ async def test_datetimes_epoch_milliseconds_and_timestamp_are_the_moment_the_sta
     assert before <= millis <= after and before <= stamp <= after, (millis, stamp)
 
 
+async def test_a_parameter_named_with_a_letter_past_ascii_is_bound(cypher_pm: PersistenceManager):
+    # Cypher names a parameter with any letter; a SQL store binds the compiled statement's marker of it by that name.
+    await clear(cypher_pm)
+    assert await cypher_pm.query(spec("RETURN $größe", {"größe": 3})) == [3]
+    written = spec("CREATE (n:CyWrite {größe: $größe}) RETURN n.größe", {"größe": 4})
+    assert await cypher_pm.query(written) == [4]
+
+
 async def test_a_parameter_of_a_date_or_a_zoned_datetime_is_a_temporal_value_of_its_kind(cypher_pm: PersistenceManager):
     found = await cypher_pm.get_one(
         spec(
@@ -196,6 +204,42 @@ async def test_a_parameter_of_fewer_characters_than_a_varchar2_takes_and_more_by
     # 37,351 bytes.
     texts = ["\U0001f600" * 20] * 450
     assert await cypher_pm.query(spec("UNWIND $texts AS text RETURN count(text)", {"texts": texts})) == [450]
+
+
+async def test_one_parameter_of_forty_thousand_characters_is_read_and_written(cypher_pm: PersistenceManager):
+    # One text past 32,767 bytes: on Oracle a CLOB, read and written alike. (Oracle won't compare a JSON value so long,
+    # ORA-40180, nor read a text of more than 4,000 bytes out of JSON, as the README says: it is handed back whole.)
+    await clear(cypher_pm)
+    text = "x" * 40_000
+    assert await cypher_pm.query(spec("RETURN $text", {"text": text})) == [text]
+    await cypher_pm.query(spec("CREATE (n:CyWrite {text: $text})", {"text": text}))
+    assert await cypher_pm.query(spec("MATCH (n:CyWrite) RETURN n.text")) == [text]
+
+
+async def test_a_set_or_an_iterator_is_bound_as_a_list_and_an_iterator_named_twice_is_read_once(
+    cypher_pm: PersistenceManager,
+):
+    await clear(cypher_pm)
+    await cypher_pm.query(spec("UNWIND [1, 2, 3] AS i CREATE (:CyWrite {id: i})"))
+    # The Neo4j driver takes a list or a tuple, and no set or iterator.
+    neo4j = cypher_pm.type is DatabaseType.NEO4J
+    for ids in ((1, 2),) if neo4j else ({1, 2}, frozenset({1, 2}), (1, 2)):
+        found = await cypher_pm.query(
+            spec("MATCH (n:CyWrite) WHERE n.id IN $ids RETURN n.id ORDER BY n.id", {"ids": ids})
+        )
+        assert found == [1, 2]
+    if neo4j:
+        return
+    twice = spec("MATCH (n:CyWrite) WHERE n.id IN $ids RETURN [n.id, size($ids)]", {"ids": (it for it in [3])})
+    assert await cypher_pm.query(twice) == [[3, 1]]
+
+
+async def test_bytes_are_bound_as_their_base64_text_as_drivine4j_writes_a_byte_array(cypher_pm: PersistenceManager):
+    if cypher_pm.type is DatabaseType.NEO4J:
+        pytest.skip("A graph engine keeps bytes as bytes; a SQL store's JSON has none, and drivine4j writes base64.")
+    assert await cypher_pm.query(spec("RETURN [$b, $a]", {"b": b"\x00\xffdrivine", "a": bytearray(b"\x00\xff")})) == [
+        ["AP9kcml2aW5l", "AP8="]
+    ]
 
 
 class Person(BaseModel):

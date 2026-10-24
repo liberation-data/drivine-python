@@ -10,7 +10,7 @@ from drivine.drivine_error import DrivineError
 from drivine.query.query_specification import QuerySpecification
 from drivine.query.query_specification_compiler import QuerySpecificationCompiler
 
-_PARAMETER = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)")
+_PARAMETER = re.compile(r"\$([^\W\d]\w*)")
 
 
 class OracleSpecCompiler(QuerySpecificationCompiler):
@@ -45,7 +45,7 @@ class OracleSpecCompiler(QuerySpecificationCompiler):
         parameters: dict[str, Any] = {}
         for index, (name, value) in enumerate(self._named().items()):
             # Oracle refuses a bind the statement doesn't name.
-            if re.search(rf"\${re.escape(name)}(?![A-Za-z0-9_])", text):
+            if re.search(rf"\${re.escape(name)}(?!\w)", text):
                 parameters[f"b{index}"] = _bindable(value)
         return parameters
 

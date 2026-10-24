@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import base64
 import json
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from enum import Enum
-from typing import Any
+from typing import Any, cast
 
 from drivine.drivine_error import DrivineError
 
@@ -36,7 +37,10 @@ class Parameters:
         `as_count` the bound whole number at a marker, or with `in_object` the parameter of a name, as the store's
         number.
         """
-        self._given = given
+        # An iterator is read once, here: a statement may name its parameter more than once.
+        self._given: dict[str, Any] = {
+            name: list(cast(Iterator[Any], it)) if isinstance(it, Iterator) else it for name, it in given.items()
+        }
         self._as_json = as_json
         self._as_count = as_count
         self._in_object = in_object
@@ -75,7 +79,8 @@ class Parameters:
 def cypher_json(value: Any) -> str:
     """
     The value as JSON text, as drivine4j writes a parameter: compact, a date, a time or a moment as its ISO 8601 text, a
-    zoned one with its offset, and a timedelta as an ISO 8601 duration, as the Neo4j driver sends each.
+    zoned one with its offset, and a timedelta as an ISO 8601 duration, as the Neo4j driver sends each. A set, a tuple
+    or an iterator is a list, and bytes are their base64 text, as drivine4j writes a byte array.
     """
     return json.dumps(_jsonable(value), separators=(",", ":"), ensure_ascii=False)
 
@@ -91,7 +96,9 @@ def _jsonable(value: Any) -> Any:
         return int(value) if value == value.to_integral_value() else float(value)
     if isinstance(value, Mapping):
         return {str(key): _jsonable(it) for key, it in value.items()}  # pyright: ignore[reportUnknownVariableType, reportUnknownArgumentType]
-    if isinstance(value, (list, tuple, set, frozenset)):
+    if isinstance(value, (bytes, bytearray)):
+        return base64.b64encode(value).decode("ascii")
+    if isinstance(value, (list, tuple, set, frozenset, Iterator)):
         return [_jsonable(it) for it in value]  # pyright: ignore[reportUnknownVariableType]
     return value
 

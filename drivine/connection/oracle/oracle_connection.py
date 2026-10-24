@@ -98,7 +98,8 @@ class OracleConnection(Connection):
 
         bindable = dict(parameters)
         for name, value in parameters.items():
-            if isinstance(value, str) and len(value) * 3 > _MAX_TEXT and len(value.encode()) > _MAX_TEXT:
+            # A character is at most four bytes of UTF-8, so a text of fewer than a quarter of _MAX_TEXT fits.
+            if isinstance(value, str) and len(value) * 4 > _MAX_TEXT and len(value.encode()) > _MAX_TEXT:
                 clob: Any = oracledb.DB_TYPE_CLOB  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
                 bindable[name] = await self.connection.createlob(clob, value)
         return bindable

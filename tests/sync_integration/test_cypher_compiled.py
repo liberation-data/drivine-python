@@ -191,6 +191,15 @@ def test_a_parameter_whose_json_is_longer_than_a_varchar2_is_read_and_written(cy
     assert cypher_pm.query(spec("MATCH (n:CyWrite) RETURN size(n.ids)")) == [5000]
 
 
+def test_a_parameter_of_fewer_characters_than_a_varchar2_takes_and_more_bytes_is_read(
+    cypher_pm: PersistenceManager,
+):
+    # A character past the Basic Multilingual Plane is four bytes of UTF-8: this list's JSON is 10,351 characters, and
+    # 37,351 bytes.
+    texts = ["\U0001f600" * 20] * 450
+    assert cypher_pm.query(spec("UNWIND $texts AS text RETURN count(text)", {"texts": texts})) == [450]
+
+
 class Person(BaseModel):
     name: str
     born: date

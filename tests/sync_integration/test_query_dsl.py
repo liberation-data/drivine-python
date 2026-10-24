@@ -115,6 +115,14 @@ class TestConditions:
         q = refs(Movie)
         assert titles(gom.load_all(Movie, where=q.title.matches(".*(e)\\1.*"))) == ["Speed"]
 
+    def test_matches_the_whole_value_a_line_break_that_ends_it_included(self, pm, gom, movies):
+        if pm.type is DatabaseType.FALKORDB:
+            pytest.skip("FalkorDB's =~ finds the expression anywhere in the text: FalkorDB/FalkorDB#2603.")
+        gom.save(Movie(uuid="m5", title="Speed\n", released=1994))
+        q = refs(Movie)
+        assert titles(gom.load_all(Movie, where=q.title.matches("Speed"))) == ["Speed"]
+        assert titles(gom.load_all(Movie, where=q.title.matches("Speed$"))) == ["Speed"]
+
     def test_logic(self, gom, movies):
         q = refs(Movie)
         either = any_of(q.released.eq(1994), q.title.eq("John Wick"))

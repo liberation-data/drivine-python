@@ -342,9 +342,12 @@ class PostgresCypherCompiler(SqlCypherCompiler):
     def matches(self, text: str, pattern: str) -> str:
         """
         Flags the pattern opens with, `(?i)`, are put before the anchors, where Postgres reads them, after `p`: a dot
-        matches no line break, as Java's does, unless the pattern says `(?s)`.
+        matches no line break, as Java's does, unless the pattern says `(?s)`. The anchors are `\\A` and `\\Z`, the
+        text's start and end, which `(?m)` leaves as they are: it lets the pattern's own `^` and `$` match at a line
+        break. Postgres keeps only the last of its `s` and `m`, so flags with both get a `w` after them, which is both.
         """
-        return f"({text} ~ regexp_replace({pattern}, '^(\\(\\?([a-z]+)\\))?(.*)$', '(?p\\2)^(\\3)$'))"
+        both = f"regexp_replace({pattern}, '^\\(\\?([a-z]*(s[a-z]*m|m[a-z]*s)[a-z]*)\\)', '(?\\1w)')"
+        return f"({text} ~ regexp_replace({both}, '^(\\(\\?([a-z]+)\\))?(.*)$', '(?p\\2)\\\\A(\\3)\\\\Z'))"
 
     def split(self, text: str, separator: str) -> str:
         """

@@ -165,3 +165,8 @@ class Badge(NodeFragment, labels=["Badge"]):
     extras: Annotated[dict[str, Any], PropertyBag(flat=True)] = {}
     kinds: Annotated[list[str], NodeLabels()] = []
     stamp: Annotated[str | None, NodeStamp()] = None
+
+
+class Flag(NodeFragment, labels=["Flag"]):
+    uuid: Annotated[str, NodeId()]
+    locked: bool

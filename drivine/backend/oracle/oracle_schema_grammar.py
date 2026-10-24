@@ -2,10 +2,16 @@
 # pyright: reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnknownArgumentType=false
 from __future__ import annotations
 
-import re
 from typing import Any
 
-from drivine.backend.oracle.oracle_graph import OracleGraph, has_labels, json_key, labelled_value, sql_text
+from drivine.backend.oracle.oracle_graph import (
+    OracleGraph,
+    drivine4j_step,
+    has_labels,
+    json_key,
+    labelled_value,
+    sql_text,
+)
 from drivine.backend.oracle.oracle_side_table import OracleSideTable
 from drivine.backend.sql.sql_catalog import CATALOG_KINDS, CatalogKind, catalog_properties, catalog_record
 from drivine.schema.full_text_index_spec import FullTextIndexSpec
@@ -44,16 +50,6 @@ _UNIQUE_THERE = (
 """
 Whether the catalog's record `u` is of a uniqueness constraint whose index is there, which stands for a labelled one.
 """
-
-_PLAIN_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-
-
-def _drivine4j_step(key: str) -> str:
-    """
-    The step of a JSON path naming `key` as drivine4j writes it: bare where SQL would take it for an identifier, else
-    quoted as `json_key` quotes it, for the SQL literal it is written in.
-    """
-    return key if _PLAIN_KEY.match(key) and key not in ("true", "false", "null") else json_key(key)[1:]
 
 
 def _made(ddl: str) -> str:
@@ -282,7 +278,7 @@ END;"""
         the labelled index's expression, which it then no longer matches to the labelled index, and reads every node.
         """
         name = self.graph.object_name("ix", spec.properties)
-        columns = ", ".join(f"JSON_VALUE(props, '$.{_drivine4j_step(it)}')" for it in spec.properties)
+        columns = ", ".join(f"JSON_VALUE(props, '$.{drivine4j_step(it)}')" for it in spec.properties)
         return name, _made(f"CREATE INDEX IF NOT EXISTS {name} ON {self.graph.nodes} ({columns})")
 
     def listing(self, kind: CatalogKind) -> SchemaListing:

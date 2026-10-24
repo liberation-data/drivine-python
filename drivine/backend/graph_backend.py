@@ -54,6 +54,13 @@ class GraphBackend(Protocol):
         self, where: Any, target: TargetModel, labels_of_class: Callable[[type], list[str]]
     ) -> tuple[str, dict[str, Any]]: ...
 
+    def written(self, predicate: str) -> str:
+        """
+        A predicate the caller wrote, as the store reads it. A SQL store reads each property of the root written as
+        Cypher writes it, `n.name`, as that property (see CypherShorthand); a graph engine reads it as it is.
+        """
+        ...
+
     def load_all_fragments(
         self, model: FragmentModel, where: str | None = None, page: Page | None = None, tested: Sequence[str] = ()
     ) -> GraphStatement:

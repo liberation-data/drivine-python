@@ -2,7 +2,7 @@
 # change that, and run the script again.
 import pytest
 
-from drivine.sync import PersistenceManager, QuerySpecification, StatelessGraphObjectManager
+from drivine.sync import PersistenceManager, QuerySpecification, StatelessGraphObjectManager, count, key
 from tests.models import (
     ActorStats,
     ActorWithLatestMovie,
@@ -11,6 +11,7 @@ from tests.models import (
     AsWritten,
     Customer,
     Dog,
+    Flag,
     LocationAncestors,
     LocationHierarchy,
     Organization,
@@ -55,7 +56,6 @@ class TestFragments:
         found = gom.load_all(Person, "n.name IN $names", {"names": ["n2", "n4"]})
         assert sorted(it.uuid for it in found) == ["p2", "p4"]
 
-    @pytest.mark.fails_on_sql_stores("#96: a raw where doesn't read a root property written as Cypher writes it")
     def test_filters_and_counts_with_a_predicate_of_a_property(self, pm, gom):
         run(pm, "UNWIND range(1, 5) AS i CREATE (:Person {uuid: 'p' + toString(i), name: 'n' + toString(i)})")
         found = gom.load_all(Person, "n.name = $a OR n.name = $b", {"a": "n2", "b": "n4"})
@@ -63,6 +63,27 @@ class TestFragments:
         assert gom.count(Person, "n.name = $name", {"name": "n3"}) == 1
         careers = gom.load_all(PersonCareer, "n.name = $name", {"name": "n3"})
         assert len(careers) == 1 and careers[0].employment_history == []
+
+    def test_reads_a_root_property_written_as_cypher_writes_it_wherever_a_where_is_written(self, pm, gom):
+        run(
+            pm,
+            "CREATE (:Person {uuid: 'p1', name: 'Crash'}), "
+            "(:Person {uuid: 'p2', name: 'Outage'}), (:Person {uuid: 'p3', name: 'n.name'})",
+        )
+        assert gom.count(Person, "n.name = 'Crash' OR n.`name` = 'Outage'") == 2
+        assert gom.count(Person, "n.name = 'n.name'") == 1
+        patched = gom.patch(Person, "p2", set={"bio": "b"}, where="n.name = $name", bindings={"name": "Outage"})
+        assert patched.applied
+        assert gom.delete(Person, "p1", "n.name = 'y'") == 0
+        assert gom.delete(Person, "p1", "n.name = 'Crash'") == 1
+        assert gom.delete_all(Person, "n.name = 'n.name'") == 1
+        rows = gom.groups.load(
+            Person, keys={"name": key("name")}, aggregates={"b": count("n.bio = 'b'")}, where="n.name = 'Outage'"
+        )
+        assert rows == [{"name": "Outage", "b": 1}]
+        gom.save_all([Flag(uuid="f1", locked=True), Flag(uuid="f2", locked=False)])
+        assert [it.uuid for it in gom.load_all(Flag, "n.locked = true")] == ["f1"]
+        assert [it.uuid for it in gom.load_all(Flag, "n.locked <> TRUE")] == ["f2"]
 
     def test_maps_stored_names_bags_labels_and_defaults(self, pm, gom):
         run(

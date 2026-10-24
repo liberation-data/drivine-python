@@ -660,7 +660,9 @@ the `PersistenceManager`, untested: there is no container for it. Index advice m
 database's indexes. The golden statements are in drivine's `test/1.Unit/golden`, copied to `tests/golden`; Oracle's are
 checked there too, and Postgres's, its write plans among them. The object-manager suites run on Postgres, and on Oracle
 with `ORACLE_TESTS=true`, beside the suites both run in `tests/integration/sql` and each one's own in
-`tests/integration/postgres` and `tests/integration/oracle`; tests written in Cypher are marked `graph_engines`.
+`tests/integration/postgres` and `tests/integration/oracle`. The `PersistenceManager`, transaction and loading suites,
+written in Cypher and marked `written_in_cypher`, run on Postgres and Oracle too, their statements compiled to SQL; what
+neither takes is marked `graph_engine_only` with the reason.
 
 1. **Connections and `PersistenceManager` on Neo4j.**
    - The registry and environment configuration, query specifications, mapping and cursors.

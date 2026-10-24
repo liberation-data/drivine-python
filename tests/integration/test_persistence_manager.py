@@ -5,8 +5,8 @@ from pydantic import BaseModel
 
 from drivine import CursorSpecification, DrivineError, PersistenceManager, QuerySpecification, transaction
 
-# Statements written in Cypher; Oracle's are in tests/integration/oracle.
-pytestmark = pytest.mark.graph_engines
+# Written in Cypher, which Postgres and Oracle compile to their SQL.
+pytestmark = pytest.mark.written_in_cypher
 
 
 class Person(BaseModel):
@@ -32,8 +32,12 @@ async def test_a_row_of_several_columns_is_a_list(pm: PersistenceManager):
     assert await pm.query(QuerySpecification("RETURN 1, 'two', [3]")) == [[1, "two", [3]]]
 
 
-async def test_binds_named_and_positional_parameters(pm: PersistenceManager):
+async def test_binds_named_parameters(pm: PersistenceManager):
     assert await pm.get_one(QuerySpecification("RETURN $a + $b").bind({"a": 1, "b": 2})) == 3
+
+
+@pytest.mark.graph_engine_only("a Cypher statement compiled for a SQL store takes named parameters, not a list of them")
+async def test_binds_positional_parameters(pm: PersistenceManager):
     assert await pm.get_one(QuerySpecification("RETURN $1 + $2").bind([1, 2])) == 3
 
 
@@ -47,6 +51,9 @@ async def test_transforms_to_a_model(pm: PersistenceManager):
     assert await pm.query(spec) == [Person(name="p2", age=2), Person(name="p3", age=3)]
 
 
+@pytest.mark.graph_engine_only(
+    "a SQL store gives a temporal value as its ISO 8601 text, which test_cypher_compiled.py checks"
+)
 async def test_temporal_values_are_the_standard_librarys(pm: PersistenceManager):
     value = await pm.get_one(QuerySpecification("RETURN date('2024-02-29')"))
     assert value == date(2024, 2, 29)

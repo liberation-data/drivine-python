@@ -19,8 +19,8 @@ from tests.models import (
     Puppy,
 )
 
-# Seeded in Cypher; Oracle's loads are in tests/integration/oracle.
-pytestmark = pytest.mark.graph_engines
+# Seeded in Cypher, which Postgres and Oracle compile to their SQL.
+pytestmark = pytest.mark.written_in_cypher
 
 
 @pytest.fixture
@@ -45,12 +45,24 @@ class TestFragments:
         everyone = gom.load_all(Person)
         assert sorted(it.name for it in everyone) == ["Ada", "Grace"]
 
-    def test_filters_with_a_predicate_and_counts(self, pm, gom):
+    def test_counts(self, pm, gom):
+        run(pm, "UNWIND range(1, 5) AS i CREATE (:Person {uuid: 'p' + toString(i), name: 'n' + toString(i)})")
+        assert gom.count(Person) == 5
+
+    @pytest.mark.graph_engine_only("a raw where is SQL on a SQL store, where `IN` takes no list parameter")
+    def test_filters_with_a_predicate_of_a_list(self, pm, gom):
         run(pm, "UNWIND range(1, 5) AS i CREATE (:Person {uuid: 'p' + toString(i), name: 'n' + toString(i)})")
         found = gom.load_all(Person, "n.name IN $names", {"names": ["n2", "n4"]})
         assert sorted(it.uuid for it in found) == ["p2", "p4"]
-        assert gom.count(Person) == 5
+
+    @pytest.mark.fails_on_sql_stores("#96: a raw where doesn't read a root property written as Cypher writes it")
+    def test_filters_and_counts_with_a_predicate_of_a_property(self, pm, gom):
+        run(pm, "UNWIND range(1, 5) AS i CREATE (:Person {uuid: 'p' + toString(i), name: 'n' + toString(i)})")
+        found = gom.load_all(Person, "n.name = $a OR n.name = $b", {"a": "n2", "b": "n4"})
+        assert sorted(it.uuid for it in found) == ["p2", "p4"]
         assert gom.count(Person, "n.name = $name", {"name": "n3"}) == 1
+        careers = gom.load_all(PersonCareer, "n.name = $name", {"name": "n3"})
+        assert len(careers) == 1 and careers[0].employment_history == []
 
     def test_maps_stored_names_bags_labels_and_defaults(self, pm, gom):
         run(
@@ -107,8 +119,8 @@ class TestViews:
             ("2020", "Lead", "Acme"),
         ]
         assert isinstance(career.employment_history[0].target, Organization)
-        careers = gom.load_all(PersonCareer, "n.name = $name", {"name": "Grace"})
-        assert len(careers) == 1 and careers[0].employment_history == []
+        grace = gom.load(PersonCareer, "p2")
+        assert grace is not None and grace.employment_history == []
 
     def test_recursion_to_max_depth_and_its_override(self, pm, gom):
         run(

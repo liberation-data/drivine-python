@@ -804,6 +804,12 @@ uv run ruff check . && uv run pyright
 counterpart of `drivine/concurrency.py`, is the one sync module written by hand, and a test marked `async_only` (one
 that runs tasks concurrently) is left out of the sync tests.
 
+The integration tests run on Neo4j, Memgraph, FalkorDB, Postgres and Oracle. A test marked `written_in_cypher` seeds
+and reads back in Cypher with statements of no language, and on Postgres and Oracle those are sent as Cypher, which is
+compiled to SQL (`tests/integration/sql_cypher_fixtures.py`, as drivine4j's `SqlCypherFixtures`). A test marked
+`graph_engine_only` runs only on the graph engines, for the reason it gives, and one marked `fails_on_sql_stores` is
+expected to fail on Postgres and Oracle until the issue it names is fixed.
+
 ## License
 
 Apache 2.0.

@@ -119,7 +119,8 @@ class _Reader:
         clauses: list[Clause] = []
         multi = single.oC_MultiPartQuery()
         if multi is not None:
-            # Its children in order: the reading clauses and updates of each part, then the part's WITH.
+            # Its children in order: the reading clauses and updates of each part, in the order written, then the part's
+            # WITH.
             for child in multi.children:
                 if isinstance(child, self.p.OC_ReadingClauseContext):
                     clauses.append(self.reading(child))
@@ -134,11 +135,14 @@ class _Reader:
                         )
                     )
         last = single.oC_SinglePartQuery() if multi is None else multi.oC_SinglePartQuery()
-        clauses += [self.reading(it) for it in last.oC_ReadingClause()]
-        clauses += [self.updating(it) for it in last.oC_UpdatingClause()]
-        returned = last.oC_Return()
-        if returned is not None:
-            clauses.append(Return(self.projection(returned.oC_ProjectionBody())))
+        # Reading clauses and updates in the order written: a reading clause may follow an update.
+        for child in last.children:
+            if isinstance(child, self.p.OC_ReadingClauseContext):
+                clauses.append(self.reading(child))
+            elif isinstance(child, self.p.OC_UpdatingClauseContext):
+                clauses.append(self.updating(child))
+            elif isinstance(child, self.p.OC_ReturnContext):
+                clauses.append(Return(self.projection(child.oC_ProjectionBody())))
         return tuple(clauses)
 
     def updating(self, context: Context) -> Clause:
@@ -336,7 +340,10 @@ class _Reader:
         return dataclasses.replace(relationship, range=self.quantifier_range(quantifier))
 
     def quantifier_range(self, context: Context) -> Range:
-        """`+` is one or more, `*` any, `{n}` exactly n, and `{m,n}` from m to n, either bound left out."""
+        """
+        `+` is one or more, `*` any, `{n}` exactly n, and `{m,n}` from m to n, either bound left out. As in Neo4j,
+        braces with no bound in them, `{}`, and a least bound above the greatest, `{3,1}`, are refused.
+        """
         text = context.getText()
         if text == "+":
             return Range(1, None)
@@ -346,10 +353,16 @@ class _Reader:
         children = list(context.children)
         comma = next((i for i, it in enumerate(children) if it.getText() == ","), -1)
         if comma < 0:
-            bound = _integer(_single(integers))
+            if len(integers) != 1:
+                raise DrivineError("A quantifier in braces has a bound in them, as in {2} or {1,3}.")
+            bound = _integer(integers[0])
             return Range(bound, bound)
         before = next((_integer(it) for it in integers if children.index(it) < comma), None)
         after = next((_integer(it) for it in integers if children.index(it) > comma), None)
+        if before is not None and after is not None and before > after:
+            raise DrivineError(
+                f"A quantifier's least bound is at most its greatest, and {before} is more than {after}."
+            )
         return Range(before if before is not None else 0, after)
 
     def node(self, context: Context) -> NodePattern:
@@ -480,8 +493,21 @@ class _Reader:
         return _fold([self.unary(it) for it in context.oC_UnaryAddOrSubtractExpression()], BinaryOperator.POWER)
 
     def unary(self, context: Context) -> Expression:
-        operand = self.non_arithmetic(context.oC_NonArithmeticOperatorExpression())
-        return Unary(UnaryOperator.NEGATE, operand) if context.children[0].getText() == "-" else operand
+        negated = context.children[0].getText() == "-"
+        written = context.oC_NonArithmeticOperatorExpression()
+        # The least whole number, -9223372036854775808, is written negated: its digits alone are past the greatest.
+        if negated and written.getChildCount() == 1:
+            literal = written.oC_Atom().oC_Literal()
+            number = literal.oC_NumberLiteral() if literal is not None else None
+            integer = number.oC_IntegerLiteral() if number is not None else None
+            if integer is not None:
+                magnitude = _magnitude(integer)
+                if magnitude == _LONG_MIN_MAGNITUDE:
+                    return Literal(-_LONG_MIN_MAGNITUDE)
+                if magnitude > _LONG_MIN_MAGNITUDE:
+                    raise _out_of_range(f"-{integer.getText()}")
+        operand = self.non_arithmetic(written)
+        return Unary(UnaryOperator.NEGATE, operand) if negated else operand
 
     def non_arithmetic(self, context: Context) -> Expression:
         """An atom, then its property lookups and list operators in the order written, then a label test."""
@@ -681,18 +707,23 @@ def _fold(operands: list[Expression], operator: BinaryOperator) -> Expression:
     return functools.reduce(lambda a, b: Binary(operator, a, b), operands)
 
 
-def _single(items: list[Context]) -> Context:
-    if len(items) != 1:
-        raise ValueError("Expected one item.")
-    return items[0]
-
-
 def _symbolic(context: Context) -> str:
     text: str = context.getText()
     return text[1:-1].replace("``", "`") if text.startswith("`") else text
 
 
 def _integer(context: Context) -> int:
+    """The whole number an integer literal writes, refused past the greatest 64-bit integer."""
+    magnitude = _magnitude(context)
+    if magnitude > _LONG_MAX_MAGNITUDE:
+        raise _out_of_range(context.getText())
+    return magnitude
+
+
+def _magnitude(context: Context) -> int:
+    """
+    The number an integer literal writes, decimal, hexadecimal (`0x`) or octal (`0o`, or a leading 0), however large.
+    """
     text: str = context.getText()
     if text.startswith("0x"):
         return int(text[2:], 16)
@@ -702,6 +733,15 @@ def _integer(context: Context) -> int:
         return int(text[1:], 8)
     return int(text)
 
+
+def _out_of_range(written: str) -> DrivineError:
+    return DrivineError(
+        f"{written} is past the range of a whole number, from -9223372036854775808 to 9223372036854775807."
+    )
+
+
+_LONG_MAX_MAGNITUDE = 2**63 - 1
+_LONG_MIN_MAGNITUDE = 2**63
 
 _ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "b": "\b", "f": "\f"}
 

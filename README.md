@@ -634,6 +634,11 @@ raises `DrivineError` there rather than on first use. Without pi-pilgrim, enforc
   `nodes`, up to the sample size of them, each named by the engine's id (`elementId`) and, for a constraint read from
   a fragment, its `NodeId` (`uniqueness_constraint(..., node_id_property="uuid")` by hand). This is a breaking change
   from 0.1, where each entry was the repeated value itself: it is now a `ViolatingKey`, the value in its `properties`.
+  A sample size of 0 skips reading the data first, and the engine's refusal of a constraint the data breaks is raised.
+  FalkorDB doesn't refuse one: it builds it in the background and lists the build as FAILED. Drivine then drops the
+  failed constraint, which enforces nothing, and reads the data: a key held more than once is a VIOLATION, as in
+  drivine4j, with an empty sample at sample size 0, and a build that fails with no key held more than once raises.
+  Once the data is clean, `ensure` makes the constraint. `drop` also removes a constraint FalkorDB failed to build.
   `mode="FAIL_FAST"`, the default, raises on either; `"WARN"` logs.
 - **Versions.** `catalog.with_version("2")` recreates the catalog's items once, the first time it is enforced. Items an
   owner applied before and no longer declares are reported, never dropped. Each owner's version and inventory are kept

@@ -1,12 +1,12 @@
 # Written by scripts/unasync.py from tests/integration/test_schema.py:
 # change that, and run the script again.
 import logging
-import re
 import uuid
 from typing import Annotated, Any
 
 import pytest
 
+from drivine.schema.ensure_result import EnsureResult
 from drivine.schema.schema_item import SchemaItem
 from drivine.sync import (
     DatabaseType,
@@ -114,17 +114,28 @@ class TestConstraints:
         assert not [it for it in gom.constraints.list() if it.label == label]
 
     def test_with_no_sample_asked_the_engine_refuses_data_that_breaks_it(self, gom, pm, label):
+        if pm.type is DatabaseType.FALKORDB:
+            pytest.skip("FalkorDB doesn't refuse the constraint: it fails to build it, which is a VIOLATION")
         create(gom.persistence_manager, label, {"code": "dup"}, {"code": "dup"})
-        # FalkorDB builds the constraint in the background, and reports at once that the build failed.
-        message = (
-            re.escape(
-                f"FalkorDB could not build the uniqueness constraint on {label}(code): nodes may hold the same values."
-            )
-            if pm.type is DatabaseType.FALKORDB
-            else None
-        )
-        with pytest.raises(Exception, match=message):
+        with pytest.raises(Exception, match=None):  # each engine words its refusal its own way
             gom.constraints.ensure(uniqueness_constraint(label, "code"), 0)
+
+    def test_on_falkordb_a_failed_build_is_dropped_and_a_violation_then_made_once_the_data_is_clean(
+        self, gom, pm, label
+    ):
+        if pm.type is not DatabaseType.FALKORDB:
+            pytest.skip("only FalkorDB builds a constraint in the background")
+        spec = uniqueness_constraint(label, "code")
+        create(gom.persistence_manager, label, {"code": "dup"}, {"code": "dup"})
+
+        # With no sample asked, the data is read once the build has failed, to confirm the violation, as drivine4j does.
+        assert gom.constraints.ensure(spec, 0) == EnsureResult("VIOLATION", spec, sample=())
+        listed = QuerySpecification[Any](f"CALL db.constraints() YIELD label WHERE label = '{label}' RETURN label")
+        assert pm.query(listed) == [], "the failed constraint was dropped"
+
+        pm.execute(QuerySpecification[Any](f"MATCH (n:{label}) DELETE n"))
+        assert (gom.constraints.ensure(spec)).status == "CREATED"
+        gom.constraints.drop(spec)
 
     def test_a_violations_sample_names_the_conflicting_nodes(self, gom, label):
         create(gom.persistence_manager, label, {"code": "dup", "name": "a"}, {"code": "dup", "name": "b"})

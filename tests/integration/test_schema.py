@@ -1,4 +1,5 @@
 import logging
+import re
 import uuid
 from typing import Annotated, Any
 
@@ -236,6 +237,19 @@ class TestSchemaManager:
         with caplog.at_level(logging.WARNING):
             await SchemaManager(factory.registry, managers, SchemaOptions([catalog], mode="WARN")).enforce()
         assert '"dup"' in caplog.text
+        # With no sample asked, the engine refuses the constraint, and its refusal is raised. FalkorDB fails to build
+        # it instead: the failed constraint is dropped, and the data read to confirm a VIOLATION, as in drivine4j.
+        violation = f"VIOLATION for the UNIQUE on {label}(code)"
+        unsampled = SchemaOptions([catalog], violation_sample_size=0)
+        with pytest.raises(Exception, match=re.escape(violation) if pm.type is DatabaseType.FALKORDB else None):
+            await SchemaManager(factory.registry, managers, unsampled).enforce()
+        if pm.type is DatabaseType.FALKORDB:
+            caplog.clear()
+            with caplog.at_level(logging.WARNING):
+                await SchemaManager(
+                    factory.registry, managers, SchemaOptions([catalog], mode="WARN", violation_sample_size=0)
+                ).enforce()
+            assert violation in caplog.text
 
     async def test_a_constraint_one_owner_reads_from_a_fragment_and_another_declares_by_hand_is_one(
         self, factory, pm, label

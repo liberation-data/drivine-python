@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from typing import Any
 
 from drivine.drivine_error import DrivineError
 from drivine.schema.ensure_result import EnsureResult
 from drivine.schema.schema_grammar import SchemaGrammar
 from drivine.schema.schema_item import SchemaItem
+from drivine.schema.schema_listing import SchemaListing
 from drivine.schema.schema_specs import range_index
 from drivine.schema.uniqueness_constraint_spec import UniquenessConstraintSpec
 from drivine.sync import concurrency
@@ -122,10 +124,19 @@ class ConstraintManager:
 
     def _failed(self, spec: UniquenessConstraintSpec) -> bool:
         """Whether the engine reports that its build of the constraint failed."""
-        listing = self.grammar.list_failed_uniques
+        return self._listed_by(self.grammar.list_failed_uniques, spec)
+
+    def _listed_by(
+        self, listing: SchemaListing | None, spec: UniquenessConstraintSpec, rows: dict[str, list[Any]] | None = None
+    ) -> bool:
+        """Whether `listing` lists the constraint; a statement already in `rows` is read from there, not run again."""
         if listing is None:
             return False
-        held = listing.read(self.executor.run(listing.statement))
+        if rows is None:
+            rows = {}
+        if listing.statement not in rows:
+            rows[listing.statement] = self.executor.run(listing.statement)
+        held = listing.read(rows[listing.statement])
         return any(it.label == spec.label and set(it.properties) == set(spec.properties) for it in held)
 
     def _await_built(self, spec: UniquenessConstraintSpec, sample_size: int) -> EnsureResult[UniquenessConstraintSpec]:
@@ -134,11 +145,16 @@ class ConstraintManager:
         lists as FAILED gives what `_build_failed` gives.
         """
         for attempt in range(50):
-            if self._exists(spec):
+            # One reading per attempt, so that a build marked FAILED between two readings isn't taken for built.
+            rows: dict[str, list[Any]] = {}
+            if self._listed_by(self.grammar.list_failed_uniques, spec, rows):
+                return self._build_failed(spec, sample_size)
+            # FalkorDB lists the constraint UNDER CONSTRUCTION as it builds it, and may yet mark it FAILED.
+            if self._listed_by(self.grammar.list_uniques, spec, rows) and not self._listed_by(
+                self.grammar.list_building_uniques, spec, rows
+            ):
                 self.changed()
                 return EnsureResult("CREATED", spec)
-            if self._failed(spec):
-                return self._build_failed(spec, sample_size)
             concurrency.sleep(0.02 * (attempt + 1))
         raise DrivineError(f"The uniqueness constraint on {spec.label}({', '.join(spec.properties)}) was not built.")
 

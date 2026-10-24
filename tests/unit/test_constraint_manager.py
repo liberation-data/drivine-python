@@ -168,13 +168,15 @@ async def test_another_refusal_is_raised_as_it_is():
 class FalkorDbLike:
     """
     An executor over a FalkorDB, which builds a constraint in the background: once made, the constraint is missing
-    from the first `pending` listings, and then listed with `status` until it is dropped. It answers the query for keys
+    from the first `pending` listings, then listed UNDER CONSTRUCTION for `building` more, and then listed with
+    `status` until it is dropped. It answers the query for keys
     held more than once with `conflicts` in turn, the last one from then on, or raises it when that is an error.
     """
 
-    def __init__(self, status: str, pending: int = 1, *conflicts: list[Any] | Exception) -> None:
+    def __init__(self, status: str, pending: int = 1, *conflicts: list[Any] | Exception, building: int = 0) -> None:
         self.status = status
         self.pending = pending
+        self.building = building
         self.conflicts = conflicts or ([],)
         self.made = False
         self.listings = 0
@@ -193,7 +195,8 @@ class FalkorDbLike:
             self.listings += 1
             if self.listings <= self.pending:
                 return []
-            return [{"label": "Person", "properties": ["email"], "status": self.status}]
+            status = "UNDER CONSTRUCTION" if self.listings <= self.pending + self.building else self.status
+            return [{"label": "Person", "properties": ["email"], "status": status}]
         if "holders > 1" in statement:
             answer = self.conflicts[min(len(self.read), len(self.conflicts) - 1)]
             self.read.append(statement)
@@ -221,6 +224,26 @@ async def test_on_falkordb_a_constraint_built_in_the_background_is_waited_for():
     result = await ConstraintManager(store, FALKORDB_SCHEMA).ensure(PERSON_EMAIL, 0)  # pyright: ignore[reportArgumentType]
 
     assert result == EnsureResult("CREATED", PERSON_EMAIL)
+
+
+async def test_on_falkordb_a_constraint_listed_under_construction_is_not_taken_for_built_as_its_build_may_fail():
+    store = FalkorDbLike("FAILED", 1, [REPEATED], building=2)
+
+    result = await ConstraintManager(store, FALKORDB_SCHEMA).ensure(PERSON_EMAIL, 0)  # pyright: ignore[reportArgumentType]
+
+    assert result == EnsureResult("VIOLATION", PERSON_EMAIL, sample=())
+    assert store.dropped
+
+
+async def test_on_falkordb_an_attempt_reads_the_statuses_from_one_listing_so_a_build_failing_between_is_not_built():
+    # UNDER CONSTRUCTION in the first two listings, FAILED from the third.
+    store = FalkorDbLike("FAILED", 0, [REPEATED], building=2)
+
+    result = await ConstraintManager(store, FALKORDB_SCHEMA).ensure(PERSON_EMAIL, 0)  # pyright: ignore[reportArgumentType]
+
+    assert result == EnsureResult("VIOLATION", PERSON_EMAIL, sample=())
+    # One listing per attempt: two UNDER CONSTRUCTION, one FAILED.
+    assert store.listings == 3
 
 
 async def test_on_falkordb_a_failed_build_is_dropped_and_a_violation_with_an_empty_sample_at_sample_size_0():
@@ -294,6 +317,24 @@ def test_on_falkordb_the_sync_api_waits_for_a_constraint_built_in_the_background
     assert result == EnsureResult("CREATED", PERSON_EMAIL)
 
 
+def test_on_falkordb_the_sync_api_does_not_take_a_constraint_listed_under_construction_for_built():
+    store = SyncFalkorDbLike("FAILED", 1, [REPEATED], building=2)
+
+    result = SyncConstraintManager(store, FALKORDB_SCHEMA).ensure(PERSON_EMAIL, 0)  # pyright: ignore[reportArgumentType]
+
+    assert result == EnsureResult("VIOLATION", PERSON_EMAIL, sample=())
+    assert store.dropped
+
+
+def test_on_falkordb_the_sync_api_reads_an_attempts_statuses_from_one_listing():
+    store = SyncFalkorDbLike("FAILED", 0, [REPEATED], building=2)
+
+    result = SyncConstraintManager(store, FALKORDB_SCHEMA).ensure(PERSON_EMAIL, 0)  # pyright: ignore[reportArgumentType]
+
+    assert result == EnsureResult("VIOLATION", PERSON_EMAIL, sample=())
+    assert store.listings == 3
+
+
 def test_on_falkordb_the_sync_api_drops_a_failed_build_and_gives_a_violation():
     store = SyncFalkorDbLike("FAILED", 1, [REPEATED])
     started = time.monotonic()
@@ -315,7 +356,10 @@ def test_only_falkordb_lists_the_constraints_it_failed_to_build():
     ]
     assert FALKORDB_SCHEMA.list_failed_uniques.read(rows) == [SchemaItem("Person", ("email",))]
     assert [it.properties for it in FALKORDB_SCHEMA.list_uniques.read(rows)] == [("name",), ("uuid",)]
+    assert FALKORDB_SCHEMA.list_building_uniques is not None
+    assert FALKORDB_SCHEMA.list_building_uniques.read(rows) == [SchemaItem("Person", ("uuid",))]
     assert NEO4J_SCHEMA.list_failed_uniques is None and MEMGRAPH_SCHEMA.list_failed_uniques is None
+    assert NEO4J_SCHEMA.list_building_uniques is None and MEMGRAPH_SCHEMA.list_building_uniques is None
 
 
 def test_neo4j_knows_an_index_in_the_way_by_its_code_not_by_a_name_clash_or_by_prose():

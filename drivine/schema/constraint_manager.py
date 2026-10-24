@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from typing import Any
 
 from drivine import concurrency
 from drivine.drivine_error import DrivineError
@@ -10,6 +11,7 @@ from drivine.schema.index_manager import IndexManager
 from drivine.schema.schema_executor import SchemaExecutor
 from drivine.schema.schema_grammar import SchemaGrammar
 from drivine.schema.schema_item import SchemaItem
+from drivine.schema.schema_listing import SchemaListing
 from drivine.schema.schema_specs import range_index
 from drivine.schema.uniqueness_constraint_spec import UniquenessConstraintSpec
 
@@ -44,8 +46,10 @@ class ConstraintManager:
         """
         Makes the constraint unless it is there. The data is checked first, and up to `sample_size` keys held more than
         once are reported, each with up to `sample_size` of the nodes that hold it; 0 skips the check, leaving the
-        engine to refuse a constraint the data breaks. FalkorDB builds the constraint in the background, and lists the
-        build as failed: that raises DrivineError as soon as it is listed.
+        engine to refuse a constraint the data breaks. FalkorDB doesn't refuse one: it builds it in the background and
+        lists the build as FAILED. The failed constraint is then dropped, and the result is a VIOLATION when the data
+        shows a key held more than once, with up to `sample_size` of them (none at 0, though the data is still read to
+        confirm it), as drivine4j gives. A build that fails with no key held more than once raises DrivineError.
 
         A plain range index over the label and properties, in their order, that the engine says is in the way of the
         constraint (Neo4j) is reported as BLOCKED_BY_INDEX, and nothing is changed. With `replace_blocking_index`, the
@@ -97,15 +101,17 @@ class ConstraintManager:
                 ", ".join(spec.properties),
             )
             return await self.ensure(spec, sample_size)
-        await self._await_built(spec)
-        self.changed()
-        return EnsureResult("CREATED", spec)
+        return await self._await_built(spec, sample_size)
 
     async def drop(self, spec: UniquenessConstraintSpec) -> None:
-        if await self._exists(spec):
-            for statement in self.grammar.drop_unique(spec):
-                await self.executor.run(statement)
+        """Drops the constraint, or one whose build FalkorDB listed as FAILED, which `list` leaves out."""
+        if await self._exists(spec) or await self._failed(spec):
+            await self._drop_unique(spec)
             self.changed()
+
+    async def _drop_unique(self, spec: UniquenessConstraintSpec) -> None:
+        for statement in self.grammar.drop_unique(spec):
+            await self.executor.run(statement)
 
     async def _blocking_index(self, spec: UniquenessConstraintSpec) -> SchemaItem | None:
         """The plain range index over the constraint's label and properties, in its order; None when there is none."""
@@ -118,21 +124,61 @@ class ConstraintManager:
 
     async def _failed(self, spec: UniquenessConstraintSpec) -> bool:
         """Whether the engine reports that its build of the constraint failed."""
-        listing = self.grammar.list_failed_uniques
+        return await self._listed_by(self.grammar.list_failed_uniques, spec)
+
+    async def _listed_by(
+        self, listing: SchemaListing | None, spec: UniquenessConstraintSpec, rows: dict[str, list[Any]] | None = None
+    ) -> bool:
+        """Whether `listing` lists the constraint; a statement already in `rows` is read from there, not run again."""
         if listing is None:
             return False
-        held = listing.read(await self.executor.run(listing.statement))
+        if rows is None:
+            rows = {}
+        if listing.statement not in rows:
+            rows[listing.statement] = await self.executor.run(listing.statement)
+        held = listing.read(rows[listing.statement])
         return any(it.label == spec.label and set(it.properties) == set(spec.properties) for it in held)
 
-    async def _await_built(self, spec: UniquenessConstraintSpec) -> None:
-        """FalkorDB builds a constraint in the background; wait until it reports it, or says it failed."""
+    async def _await_built(
+        self, spec: UniquenessConstraintSpec, sample_size: int
+    ) -> EnsureResult[UniquenessConstraintSpec]:
+        """
+        CREATED once the engine reports the constraint built, which FalkorDB does in the background. A build FalkorDB
+        lists as FAILED gives what `_build_failed` gives.
+        """
         for attempt in range(50):
-            if await self._exists(spec):
-                return
-            if await self._failed(spec):
-                raise DrivineError(
-                    f"{self.grammar.engine} could not build the uniqueness constraint on "
-                    f"{spec.label}({', '.join(spec.properties)}): nodes may hold the same values."
-                )
+            # One reading per attempt, so that a build marked FAILED between two readings isn't taken for built.
+            rows: dict[str, list[Any]] = {}
+            if await self._listed_by(self.grammar.list_failed_uniques, spec, rows):
+                return await self._build_failed(spec, sample_size)
+            # FalkorDB lists the constraint UNDER CONSTRUCTION as it builds it, and may yet mark it FAILED.
+            if await self._listed_by(self.grammar.list_uniques, spec, rows) and not await self._listed_by(
+                self.grammar.list_building_uniques, spec, rows
+            ):
+                self.changed()
+                return EnsureResult("CREATED", spec)
             await concurrency.sleep(0.02 * (attempt + 1))
         raise DrivineError(f"The uniqueness constraint on {spec.label}({', '.join(spec.properties)}) was not built.")
+
+    async def _build_failed(
+        self, spec: UniquenessConstraintSpec, sample_size: int
+    ) -> EnsureResult[UniquenessConstraintSpec]:
+        """
+        A constraint whose build FalkorDB listed as FAILED is dropped: it enforces nothing, yet stays listed, and
+        drivine4j and TypeScript's Drivine, reading the same store, would take it for the constraint. It is then a
+        VIOLATION, as in drivine4j, when a key is held more than once, with up to `sample_size` of them (none at 0,
+        though the data is read to confirm it). A build that fails with no key held more than once, or data that can't
+        be read, raises DrivineError.
+        """
+        await self._drop_unique(spec)
+        failed = (
+            f"{self.grammar.engine} could not build the uniqueness constraint on "
+            f"{spec.label}({', '.join(spec.properties)})"
+        )
+        try:
+            sample = await self.executor.run(self.grammar.conflicts(spec, max(sample_size, 1)))
+        except Exception as unreadable:
+            raise DrivineError(f"{failed}, and the data could not be read to see why.") from unreadable
+        if not sample:
+            raise DrivineError(f"{failed}, but no key it covers is held more than once.")
+        return EnsureResult("VIOLATION", spec, sample=tuple(sample[: max(sample_size, 0)]))

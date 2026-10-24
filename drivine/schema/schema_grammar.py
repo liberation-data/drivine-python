@@ -65,6 +65,9 @@ class SchemaGrammar:
     failed, as when two nodes hold the same values, and how to read its rows.
     """
 
+    list_building_uniques: SchemaListing | None = None
+    """Where a uniqueness constraint is built in the background (FalkorDB), the ones listed while still being built."""
+
     blocked_by_index: Callable[[BaseException], bool] = field(default=lambda failure: False)
     """
     Whether a failure making a uniqueness constraint says a plain range index over the same label and properties is in
@@ -400,6 +403,15 @@ FALKORDB_SCHEMA = SchemaGrammar(
     list_failed_uniques=SchemaListing(
         _FALKORDB_UNIQUES,
         lambda rows: [SchemaItem(it["label"], tuple(it["properties"])) for it in rows if it.get("status") == "FAILED"],
+    ),
+    # UNDER CONSTRUCTION until it is OPERATIONAL or FAILED.
+    list_building_uniques=SchemaListing(
+        _FALKORDB_UNIQUES,
+        lambda rows: [
+            SchemaItem(it["label"], tuple(it["properties"]))
+            for it in rows
+            if it.get("status") and it.get("status") not in ("OPERATIONAL", "FAILED")
+        ],
     ),
     list_vectors=SchemaListing(_FALKORDB_VECTOR_INDEXES, _falkordb_vectors),
     # One full-text index per label, over the properties that have one.

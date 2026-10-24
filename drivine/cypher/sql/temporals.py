@@ -545,6 +545,9 @@ def canonical(text: str, kind: Temporal) -> str | None:
     offset = None
     if written is not None:
         offset = re.sub("^([+-][0-9]{2})([0-9]{2})$", r"\1:\2", re.sub("^[+-]00:?00$", "Z", written))
+    # Python reads a fraction of a second of any length; Java, as drivine4j does, and Neo4j read nine digits at most.
+    if re.search(r"[.,][0-9]{10,}$", local):
+        raise ValueError("a second's fraction has at most nine digits")
     if from_ is Temporal.DATE:
         clock = datetime.combine(date.fromisoformat(local), time())
     elif from_ in (Temporal.LOCAL_DATE_TIME, Temporal.DATE_TIME):

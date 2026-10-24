@@ -139,6 +139,31 @@ async def test_a_cursor_reads_a_cypher_statements_rows(cypher_pm: PersistenceMan
         assert [it async for it in cursor] == [{"i": i} for i in range(1, 6)]
 
 
+async def test_a_cursor_reads_the_rows_of_a_cypher_statement_that_writes_and_its_writes_are_kept(
+    cypher_pm: PersistenceManager,
+):
+    if cypher_pm.type is DatabaseType.ORACLE:
+        pytest.skip("On Oracle a write is a block, not read through a cursor: see the test of that below.")
+    await clear(cypher_pm)
+    # On Postgres the function the write is compiled to is made before the cursor is opened over it.
+    writes = "UNWIND range(1, 3) AS i CREATE (n:CyWrite {i: i}) RETURN n.i"
+    async with await cypher_pm.open_cursor(CursorSpecification[Any](cypher_statement(writes)).batch_size(2)) as cursor:
+        assert [it async for it in cursor] == [1, 2, 3]
+    assert await cypher_pm.query(spec("MATCH (n:CyWrite) RETURN count(n)")) == [3]
+
+
+async def test_a_parameter_whose_json_is_longer_than_a_varchar2_is_read_and_written(cypher_pm: PersistenceManager):
+    # Bound as its JSON text: on Oracle a CLOB past 32,767 bytes, which a query takes where a VARCHAR2 is refused.
+    await clear(cypher_pm)
+    ids = [f"id-{i:08d}" for i in range(5000)]
+    assert await cypher_pm.query(spec("UNWIND $ids AS id RETURN count(id)", {"ids": ids})) == [5000]
+    cursor_spec = CursorSpecification[Any](cypher_statement("UNWIND $ids AS id RETURN count(id)")).bind({"ids": ids})
+    async with await cypher_pm.open_cursor(cursor_spec) as cursor:
+        assert [it async for it in cursor] == [5000]
+    await cypher_pm.query(spec("CREATE (n:CyWrite {ids: $ids})", {"ids": ids}))
+    assert await cypher_pm.query(spec("MATCH (n:CyWrite) RETURN size(n.ids)")) == [5000]
+
+
 async def test_a_cypher_statement_takes_named_parameters_on_a_sql_store(cypher_pm: PersistenceManager):
     positional = QuerySpecification[Any](cypher_statement("RETURN $1")).bind([1])
     if cypher_pm.type is DatabaseType.NEO4J:

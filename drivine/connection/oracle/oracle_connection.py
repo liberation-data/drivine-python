@@ -42,14 +42,17 @@ class OracleConnection(Connection):
 
     async def query(self, spec: QuerySpecification[T]) -> list[T]:
         finalized = spec.finalized_copy("SQL")
-        compiled = OracleSpecCompiler(cypher_compiled(finalized, "ORACLE", self.graph)[0]).compile()
+        sql = cypher_compiled(finalized, "ORACLE", self.graph)[0]
+        compiled = OracleSpecCompiler(sql).compile()
         start = time.perf_counter()
         self.connection.autocommit = not self._in_transaction
         cursor: Any = self.connection.cursor()
         rows: list[Any] = []
         columns: list[str] = []
         try:
-            await cursor.execute(compiled.statement, compiled.parameters, fetch_lobs=False)
+            await cursor.execute(
+                compiled.statement, await self._bindable(sql, finalized, compiled.parameters), fetch_lobs=False
+            )
             if cursor.description is None and _BLOCK.match(compiled.statement):
                 implicit = _implicit_results(cursor)
                 cursor.close()
@@ -76,8 +79,29 @@ class OracleConnection(Connection):
         self.connection.autocommit = not self._in_transaction
         cursor = self.connection.cursor()
         cursor.arraysize = spec.batch
-        await cursor.execute(compiled.statement, compiled.parameters, fetch_lobs=False)
+        await cursor.execute(
+            compiled.statement, await self._bindable(sql, finalized, compiled.parameters), fetch_lobs=False
+        )
         return OracleCursor(finalized, cursor, self.result_mapper)
+
+    async def _bindable(
+        self, sql: QuerySpecification[Any], finalized: QuerySpecification[Any], parameters: dict[str, Any]
+    ) -> dict[str, Any]:
+        """
+        The parameters, with each text of a compiled Cypher statement of more than _MAX_TEXT bytes as a CLOB, as
+        drivine4j binds one: a Cypher parameter is bound as its JSON text, which for a long list is more than a query
+        takes as a VARCHAR2 (ORA-01460).
+        """
+        if sql is finalized:
+            return parameters
+        import oracledb
+
+        bindable = dict(parameters)
+        for name, value in parameters.items():
+            if isinstance(value, str) and len(value) * 3 > _MAX_TEXT and len(value.encode()) > _MAX_TEXT:
+                clob: Any = oracledb.DB_TYPE_CLOB  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+                bindable[name] = await self.connection.createlob(clob, value)
+        return bindable
 
     async def start_transaction(self) -> None:
         # Oracle begins a transaction with the first statement that writes; until commit, none commits itself.
@@ -100,6 +124,10 @@ class OracleConnection(Connection):
                 await self.connection.rollback()
         finally:
             await self._release(self.connection)
+
+
+_MAX_TEXT = 32_767
+"""The most bytes of text Oracle binds as a VARCHAR2; past it a compiled statement's text is bound as a CLOB."""
 
 
 def _implicit_results(cursor: Any) -> list[Any]:

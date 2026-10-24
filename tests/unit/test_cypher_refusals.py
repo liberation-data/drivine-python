@@ -36,3 +36,21 @@ def test_a_date_written_as_a_text_that_is_no_date_is_refused_with_what_the_parse
     # Not in the spec: the message ends with Python's own text, which changes from one version to the next.
     with pytest.raises(DrivineError, match=r"^'2024-02-30' is no date: .+"):
         compiler("g").compile("RETURN date('2024-02-30')")
+
+
+@pytest.mark.parametrize("compiler", COMPILERS.values(), ids=COMPILERS.keys())
+@pytest.mark.parametrize(
+    "written",
+    [
+        "localtime('10:00:00.1234567891')",
+        "localdatetime('2024-01-01T10:00:00.1234567891')",
+        "datetime('2024-01-01T10:00:00.1234567891Z')",
+        "time('10:00:00.1234567891+01:00')",
+    ],
+)
+def test_a_time_written_to_more_than_a_nanosecond_is_refused_as_on_a_graph_engine(
+    compiler: type[SqlCypherCompiler], written: str
+) -> None:
+    # Python reads a fraction of any length, to the microsecond; Java, as drivine4j and Neo4j, to nine digits at most.
+    with pytest.raises(DrivineError, match=r"^'[^']+' is no \w+: .+"):
+        compiler("g").compile(f"RETURN {written}")

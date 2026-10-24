@@ -249,7 +249,9 @@ people = await pm.query(spec.bind({"city": "Sydney"}))
 ```
 
 - A read is a query. A write (`CREATE`, `MERGE`, `SET`, `REMOVE`, `DELETE`) is an anonymous PL/SQL block on Oracle, and
-  a function made for the statement in `pg_temp` on Postgres: one statement, applied whole or not at all.
+  a function made for the statement in `pg_temp` on Postgres: one statement, applied whole or not at all. A block hands
+  its rows back whole, so on Oracle a write is run with `query`, and a cursor over one is refused.
+- Parameters are named, `$name`: a statement bound to a list of them is refused.
 - A row of one item is its value, and a row of several a list of them. A node is its properties.
 - A value is compared as JSON, so `'7'` is not `7`, and a missing property is null. A map keeps its keys in the order
   written.

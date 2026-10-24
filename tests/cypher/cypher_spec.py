@@ -83,7 +83,10 @@ class Case:
 class CypherSpec:
     cases: list[Case]
     label: str | None = None
-    """The label every node the spec writes carries, so a graph engine's are cleared by it."""
+    """
+    The label every node the spec writes carries. A runner empties the whole graph before each case all the same, as
+    the statements match plain labels (`:Person`), where a node another test left would show up.
+    """
     graph: str | None = None
     """The Cypher that writes the graph each case starts from."""
 

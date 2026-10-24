@@ -4,6 +4,8 @@ than once, to test its kind and then its value, is bound once where it is long. 
 compiled to 650 KB on Oracle. drivine4j's CompiledSizeTest, ported.
 """
 
+import re
+
 import pytest
 
 from drivine.cypher.sql.oracle_cypher_compiler import OracleCypherCompiler
@@ -36,6 +38,38 @@ def test_a_duration_added_to_a_value_read_from_the_store_grows_with_each_additio
     # read through here (python-oracledb#622) is a few more.
     assert one < 21_000, one
     assert four < 3 * two, (two, four)
+
+
+@COMPILERS
+def test_a_with_sorted_by_a_duration_added_to_a_stored_value_none_of_its_items_grows_with_each_addition(
+    compiler: type[SqlCypherCompiler],
+) -> None:
+    def added(times: int) -> str:
+        term = "(" * times + "c.day" + " + duration('P1D'))" * times
+        return f"MATCH (c:Claim) WITH c ORDER BY {term} RETURN c.id"
+
+    # With no walk beside it, the term shares: unshared, as one beside a walk is (drivine4j#192), it grew exponentially.
+    one, two, four = (len(compiler("g").compile(added(it)).sql) for it in (1, 2, 4))
+    assert one < 40_000, one
+    assert four < 3 * two, (two, four)
+
+
+@pytest.mark.parametrize(
+    "match",
+    [
+        "MATCH (:Person {name: 'Laurence'})-[*]->(b) WITH b",
+        "MATCH (:Person {name: 'Laurence'})-[*]->(b) WITH b WITH b",
+        "MATCH (:Person {name: 'Laurence'}) ((x)-[:KNOWS]->(y))+ (b) WITH b",
+    ],
+    ids=["walk", "walk-read-through-a-with", "quantified-path-pattern"],
+)
+def test_a_term_a_with_beside_a_walk_sorts_by_that_is_none_of_its_items_is_bound_in_no_subquery(match: str) -> None:
+    # Bound in one, carried out of the WITH's query, it closed Oracle's session (drivine4j#192). With no walk, it is.
+    def compiled(match: str) -> str:
+        return OracleCypherCompiler("g").compile(f"{match} ORDER BY toString(coalesce(b.name, b.title)) RETURN b").sql
+
+    assert re.search(r"\) sh\d+\)", compiled("MATCH (b:Person) WITH b"))
+    assert not re.search(r"\) sh\d+\)", compiled(match))
 
 
 @COMPILERS

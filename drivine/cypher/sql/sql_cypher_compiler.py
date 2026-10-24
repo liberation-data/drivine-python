@@ -261,6 +261,9 @@ class _Select:
         self.bound: dict[str, Value] = {}
         self.order: list[tuple[str, bool]] = []
         """The order its rows are read in, where it has one: each term, and whether it descends."""
+        self.walks = False
+        """Whether a variable-length walk is among its sources, or among those of a `WITH` it reads: a term it sorts by
+        is then bound in no subquery (see `_project`)."""
 
     @property
     def scope(self) -> dict[str, Value]:
@@ -356,7 +359,8 @@ class SqlCypherCompiler(ABC):
         """How many values `shared` has bound, to name each subquery it binds one in."""
         self._sharing = True
         """Whether `shared` binds a long value: not in an expression that aggregates, whose aggregate a subquery would
-        take from its group."""
+        take from its group, nor in a term a projection beside a variable-length walk sorts by that is none of its items
+        (see `_project`)."""
         self._begin(Parameters({}, self.parameter_json, self.parameter_count, text=self.parameter_text))
 
     def declare(self, function: str) -> None:
@@ -897,6 +901,7 @@ class SqlCypherCompiler(ABC):
         projected = self._project(select, with_.projection, final=False)
         name = self._alias("w")
         next_ = _Select(outer or {})
+        next_.walks = select.walks
         next_.source(f"(\n{indent(projected.sql)}\n) {name}")
         for variable, value in projected.scope.items():
             next_.bind(variable, _columns_of(value, name))
@@ -1318,6 +1323,7 @@ class SqlCypherCompiler(ABC):
             )
         )
         select.source(walked.source)
+        select.walks = True
         select.where.append(walked.condition)
         # A variable on it is the list of its relationships.
         if relationship.variable is not None:
@@ -1427,6 +1433,7 @@ class SqlCypherCompiler(ABC):
             )
         )
         select.source(walked.source)
+        select.walks = True
         select.where.append(walked.condition)
         # The step's nodes and relationships, k of each a repetition, in turn: each variable is every k-th of them.
         k = len(inner.relationships)
@@ -2153,10 +2160,20 @@ class SqlCypherCompiler(ABC):
                 after[column] = self._sortable(self._expression(sort.expression, item_columns))
             else:
                 # One that aggregates reads the rows it aggregates, as an item does; so does one that reads an aggregate
-                # _distinct_first worked out first, which no item is.
+                # _distinct_first worked out first, which no item is. Beside a variable-length walk it binds no value in
+                # a subquery: carried out of a WITH's query, one so bound closes Oracle's (23.26) session (DPY-4011), as
+                # `WITH b ORDER BY toString(coalesce(b.name, b.title))` did, its argument long enough to be bound.
+                # Elsewhere it does, so operations nested in it compile to a statement that grows with them, not
+                # exponentially.
                 scope = {**select.scope, **dict(compiled)}
                 term = sort.expression
-                carried(column, lambda term=term, scope=scope: self._expression(term, scope), term)
+                carry = functools.partial(
+                    carried, column, lambda term=term, scope=scope: self._expression(term, scope), term
+                )
+                if select.walks:
+                    self._unshared(carry)
+                else:
+                    carry()
             sorts.append((column, sort.descending))
         if not sorts and not compared:
             for i, (term, descending) in enumerate(select.order):
@@ -2387,8 +2404,10 @@ class SqlCypherCompiler(ABC):
 
     def _aggregating(self, expression: Expression, work: Callable[[], T]) -> T:
         """The work, with no value bound in a subquery where the expression aggregates: see `_sharing`."""
-        if not contains(expression, is_aggregate):
-            return work()
+        return self._unshared(work) if contains(expression, is_aggregate) else work()
+
+    def _unshared(self, work: Callable[[], T]) -> T:
+        """The work, with no value bound in a subquery: see `_sharing`."""
         was = self._sharing
         self._sharing = False
         try:

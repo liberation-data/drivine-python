@@ -327,16 +327,19 @@ class OracleCypherCompiler(SqlCypherCompiler):
             *walk.conditions,
         ]
         seeded = f" WHERE {walk.seed(n)}" if walk.seed is not None else ""
+        # Oracle adapts a step's plan as the statement runs, and a second session that runs the statement then finds
+        # no rows where a walk either way goes around a cycle (writes.yaml's "Walks around a cycle"): no plan adapts.
+        select = "SELECT /*+ NO_ADAPTIVE_PLAN */"
         # Walked backwards, each node it leaves goes first, so its nodes end with the one it started from.
         if walk.backwards:
             step = (
-                f"    SELECT {w}.src, {reached[0]}, {w}.depth + 1, ',' || {w}.nid || {w}.nids, "
+                f"    {select} {w}.src, {reached[0]}, {w}.depth + 1, ',' || {w}.nid || {w}.nids, "
                 f"',' || {eids[0]} || {w}.eids"
             )
         else:
             nids = "".join(f" || {it} || ','" for it in reached)
             appended = "".join(f" || {it} || ','" for it in eids)
-            step = f"    SELECT {w}.src, {reached[-1]}, {w}.depth + 1, {w}.nids{nids}, {w}.eids{appended}"
+            step = f"    {select} {w}.src, {reached[-1]}, {w}.depth + 1, {w}.nids{nids}, {w}.eids{appended}"
         text = "\n".join(
             [
                 f"WITH {w} (src, nid, depth, nids, eids) AS (",

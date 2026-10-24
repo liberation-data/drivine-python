@@ -1,9 +1,11 @@
+import json
 from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
 
 from drivine import CursorSpecification, DatabaseRegistry, PersistenceManager, QuerySpecification
+from drivine.backend.oracle.oracle_graph import OracleGraph, has_labels
 from tests.integration.oracle.oracle_seed import ON_ORACLE
 
 pytestmark = ON_ORACLE
@@ -80,6 +82,68 @@ async def test_commits_outside_a_transaction_and_keeps_one_until_commit_or_rollb
         QuerySpecification[Any]("SELECT id AS \"id\" FROM drivine_conn_test WHERE id IN ('rolled', 'kept')")
     )
     assert ids == ["kept"]
+
+
+async def _drop(pm: PersistenceManager, graph: OracleGraph) -> None:
+    for statement in (
+        f"DROP PROPERTY GRAPH IF EXISTS {graph.name}",
+        f"DROP TABLE IF EXISTS {graph.edges} PURGE",
+        f"DROP TABLE IF EXISTS {graph.nodes} PURGE",
+    ):
+        await pm.execute(QuerySpecification[Any](statement))
+
+
+async def test_finds_a_node_of_several_labels_a_transaction_has_written_and_not_committed_by_a_test_of_them_all(
+    pm, registry: DatabaseRegistry
+):
+    graph = OracleGraph("drivine_labels_test")
+    await _drop(pm, graph)
+    await pm.execute(QuerySpecification[Any](graph.ensuring))
+    provider = registry.connection_provider("oracle")
+    assert provider is not None
+    connection = await provider.connect()
+    try:
+        await connection.start_transaction()
+        await connection.query(
+            QuerySpecification[Any](
+                f"""INSERT INTO {graph.nodes} (labels, props) VALUES (JSON('["Dog", "Animal"]'), JSON('{{}}'))"""
+            )
+        )
+        found = await connection.query(
+            QuerySpecification[Any](
+                f'SELECT COUNT(*) AS "n" FROM {graph.nodes} n WHERE {has_labels("n", ["Dog", "Animal"])}'
+            )
+        )
+        assert found == [1]
+    finally:
+        await connection.rollback_transaction()
+        await connection.release()
+        await _drop(pm, graph)
+
+
+async def test_finds_a_label_after_the_first_by_its_whole_text_as_the_labels_json_writes_it(pm):
+    graph = OracleGraph("drivine_labels_text_test")
+    await _drop(pm, graph)
+    try:
+        await pm.execute(QuerySpecification[Any](graph.ensuring))
+        for labels in (["Pet", "Dogs"], ["Pet", "Dog", 'it\'s "q"', "c\\d", "Ünïcødé"]):
+            await pm.execute(
+                QuerySpecification[Any](
+                    f"INSERT INTO {graph.nodes} (labels, props) VALUES (JSON($labels), JSON('{{}}'))"
+                ).bind({"labels": json.dumps(labels, ensure_ascii=False)})
+            )
+
+        async def count(labels: list[str]) -> int:
+            rows = await pm.query(
+                QuerySpecification[Any](f'SELECT COUNT(*) AS "n" FROM {graph.nodes} n WHERE {has_labels("n", labels)}')
+            )
+            return rows[0]
+
+        assert await count(["Pet", "Dog"]) == 1
+        assert await count(["Pet", "og"]) == 0
+        assert await count(["Pet", 'it\'s "q"', "c\\d", "Ünïcødé"]) == 1
+    finally:
+        await _drop(pm, graph)
 
 
 async def test_reads_a_cursor_in_batches(registry: DatabaseRegistry):

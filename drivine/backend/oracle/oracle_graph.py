@@ -75,7 +75,7 @@ END;"""
 
 def json_key(name: str) -> str:
     """A JSON path step naming a key, quoted: `."metadata.source"`."""
-    return '."' + name.replace("\\", "\\\\").replace('"', '\\"').replace("'", "''") + '"'
+    return '."' + _escaped(name) + '"'
 
 
 def holding(alias: str, property: str) -> str:
@@ -100,9 +100,18 @@ def has_labels(alias: str, labels: Sequence[str]) -> str:
     """
     A predicate that holds when the node row `alias` carries every one of the labels. A label may come from data (a
     NodeLabels filter's value, a search's partition label): it is escaped as `json_key` escapes a name, the backslash
-    first, for the JSON path's string and then the SQL literal around it.
+    first, for the JSON string the path or the labels' text holds it in, and then the SQL literal around it.
+
+    The first label is tested so the multivalue index over labels can answer it, and the rest by the labels' text,
+    which that index can't: when two tests of the labels are answered by the index, Oracle (23.26) finds no node the
+    open transaction has written and not yet committed (drivine#221). drivine4j's `OracleSql.hasLabels` writes the same.
     """
-    return " AND ".join(f"JSON_EXISTS({alias}.labels, '$?(@ == \"{_escaped(it)}\")')" for it in labels)
+    return " AND ".join(
+        f"JSON_EXISTS({alias}.labels, '$?(@ == \"{_escaped(it)}\")')"
+        if i == 0
+        else f"INSTR(JSON_SERIALIZE({alias}.labels), '\"{_escaped(it)}\"') > 0"
+        for i, it in enumerate(labels)
+    )
 
 
 def labelled_value(alias: str, label: str, property: str) -> str:
@@ -118,7 +127,10 @@ def labelled_value(alias: str, label: str, property: str) -> str:
 
 
 def _escaped(text: str) -> str:
-    """Text for a JSON path string inside an SQL literal: backslashes and quotes escaped, then single quotes doubled."""
+    """
+    Text as JSON writes it inside a string, in an SQL literal: backslashes and quotes escaped, then single quotes
+    doubled. A label or a key is held so in a JSON path's string and in the labels' text alike.
+    """
     return text.replace("\\", "\\\\").replace('"', '\\"').replace("'", "''")
 
 

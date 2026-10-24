@@ -1,7 +1,15 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from drivine.cypher.sql.temporal import Temporal
-from drivine.cypher.sql.temporal_sql import TemporalSql
+from drivine.cypher.sql.temporal_sql import Shared, TemporalSql
+
+CLOCK = "CAST(SYS_EXTRACT_UTC(SYSTIMESTAMP) AS TIMESTAMP)"
+"""The clock as the query that reads it starts, in UTC."""
+
+NOW = "cy_now"
+"""The variable a block reads CLOCK into as it starts."""
 
 _FORMATS = {"year": "YYYY", "quarter": "Q", "month": "MM", "week": "IW", "day": "DD", "hour": "HH24", "minute": "MI"}
 
@@ -13,6 +21,11 @@ class OracleTemporalSql(TemporalSql):
     `ADD_MONTHS` and `MONTHS_BETWEEN` take the last day of a month to the last day of another, where Cypher keeps the
     day of the month, so months are added and counted from the first of the month.
     """
+
+    def __init__(self, shared: Shared, procedural: Callable[[], bool]) -> None:
+        super().__init__(shared)
+        self._procedural = procedural
+        """Whether the statement is a block, which reads the clock into NOW as it starts."""
 
     def local(self, text: str, kind: Temporal) -> str:
         if kind is Temporal.DATE:
@@ -37,7 +50,11 @@ class OracleTemporalSql(TemporalSql):
 
     @property
     def now(self) -> str:
-        return "CAST(SYS_EXTRACT_UTC(SYSTIMESTAMP) AS TIMESTAMP)"
+        """
+        The clock as a query starts. A block reads it once, into its variable NOW, where each statement of the block
+        would read it as that statement starts, and a statement's clock is one in Cypher.
+        """
+        return NOW if self._procedural() else CLOCK
 
     def matches(self, text: str, pattern: str) -> str:
         return f"REGEXP_LIKE({text}, {pattern})"

@@ -5,7 +5,7 @@ from collections.abc import Callable, Sequence
 from typing import Any, cast
 
 from drivine.cypher.sql.compiled_cypher import CompiledCypher
-from drivine.cypher.sql.oracle_temporal_sql import OracleTemporalSql
+from drivine.cypher.sql.oracle_temporal_sql import CLOCK, NOW, OracleTemporalSql
 from drivine.cypher.sql.parameters import OBJECT, cypher_json, json_text, jsonable
 from drivine.cypher.sql.sql_cypher_compiler import (
     CALLER,
@@ -485,7 +485,7 @@ class OracleCypherCompiler(SqlCypherCompiler):
 
     @property
     def temporal_sql(self) -> TemporalSql:
-        return OracleTemporalSql(self.shared)
+        return OracleTemporalSql(self.shared, lambda: self.procedural)
 
     def bound_select(self, columns: str) -> str:
         """
@@ -510,12 +510,16 @@ class OracleCypherCompiler(SqlCypherCompiler):
         return f"SELECT /*+ NO_MERGE */ * FROM (\n{indent(query)}\n)"
 
     def matches(self, text: str, pattern: str) -> str:
-        """Flags the pattern opens with, `(?i)`, are Oracle's match parameter, Java's `s` its `n`."""
+        """
+        Flags the pattern opens with, `(?i)`, are Oracle's match parameter, Java's `s` its `n`. The whole of the text
+        matches, as `=~` asks: it ends at `\\z`, the text's end, as Oracle's `$` also matches before a line break that
+        ends it.
+        """
 
         def matched(p: str) -> str:
             flags = f"REGEXP_SUBSTR({p}, '^\\(\\?([a-z]+)\\)', 1, 1, NULL, 1)"
             return (
-                f"REGEXP_LIKE({text}, '^(' || REGEXP_REPLACE({p}, '^\\(\\?[a-z]+\\)', '') || ')$', "
+                f"REGEXP_LIKE({text}, '^(' || REGEXP_REPLACE({p}, '^\\(\\?[a-z]+\\)', '') || ')\\z', "
                 f"NVL(REPLACE({flags}, 's', 'n'), 'c'))"
             )
 
@@ -580,10 +584,13 @@ class OracleCypherCompiler(SqlCypherCompiler):
             f"    {FOUND} BOOLEAN;",
             f"    {DOOMED} JSON;",
             f"    {CURSOR} SYS_REFCURSOR;",
+            f"    {NOW} TIMESTAMP;",
         ]
         for depth in range(1, NESTING + 1):
             declared += [f"    {SAVED}{depth} JSON;", f"    {GATHERED}{depth} JSON;", f"    {CALLER}{depth} JSON;"]
-        return CompiledCypher("\n".join([*declared, "BEGIN", indent("\n".join(body)), "END;"]), parameters)
+        # The clock is read once, by a query: see OracleTemporalSql.now.
+        clock = f"SELECT {CLOCK} INTO {NOW} FROM DUAL;"
+        return CompiledCypher("\n".join([*declared, "BEGIN", indent("\n".join([clock, *body])), "END;"]), parameters)
 
     def return_rows(self, query: str) -> list[str]:
         return [f"OPEN {CURSOR} FOR\n{indent(query)};", f"DBMS_SQL.RETURN_RESULT({CURSOR});"]

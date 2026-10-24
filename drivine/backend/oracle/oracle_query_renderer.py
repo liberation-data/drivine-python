@@ -207,11 +207,13 @@ class OracleQueryRenderer(SqlQueryRenderer):
 
         The expression is anchored in a group of its own, which POSIX can only write as one that captures: so each group
         the caller wrote is one further on, and a backreference to it is renumbered to match (see `_renumbered`).
+        It ends at `\\z`, the value's end, as Oracle's `$` also matches before a line break that ends it.
         """
         ignore_case = pattern.startswith("(?i)")
         body = _renumbered(pattern[4:] if ignore_case else pattern)
         flags = ", 'i'" if ignore_case else ""
-        return f"REGEXP_LIKE({text}, {self._bind(f'^({body})$')}{flags})"
+        anchored = f"^({body})\\z"
+        return f"REGEXP_LIKE({text}, {self._bind(anchored)}{flags})"
 
 
 def _renumbered(body: str) -> str:

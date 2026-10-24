@@ -59,6 +59,12 @@ class SchemaGrammar:
     gives the backend's render_query the ones there are.
     """
 
+    list_failed_uniques: SchemaListing | None = None
+    """
+    Where a uniqueness constraint is built in the background (FalkorDB), a statement listing the ones whose build
+    failed, as when two nodes hold the same values, and how to read its rows.
+    """
+
     blocked_by_index: Callable[[BaseException], bool] = field(default=lambda failure: False)
     """
     Whether a failure making a uniqueness constraint says a plain range index over the same label and properties is in
@@ -373,6 +379,10 @@ _FALKORDB_VECTOR_INDEXES = (
     "CALL db.indexes() YIELD label, properties, types, options, entitytype WHERE entitytype = 'NODE' "
     "RETURN {label: label, properties: properties, types: types, options: options}"
 )
+_FALKORDB_UNIQUES = (
+    "CALL db.constraints() YIELD type, label, properties, entitytype, status WHERE type = 'UNIQUE' AND "
+    "entitytype = 'NODE' RETURN {label: label, properties: properties, status: status}"
+)
 
 FALKORDB_SCHEMA = SchemaGrammar(
     engine="FalkorDB",
@@ -384,9 +394,12 @@ FALKORDB_SCHEMA = SchemaGrammar(
         lambda rows: [SchemaItem(it["label"], (prop,)) for it, prop in _falkordb_by_type(rows, "RANGE")],
     ),
     list_uniques=SchemaListing(
-        "CALL db.constraints() YIELD type, label, properties, entitytype, status WHERE type = 'UNIQUE' AND "
-        "entitytype = 'NODE' RETURN {label: label, properties: properties, status: status}",
+        _FALKORDB_UNIQUES,
         lambda rows: [SchemaItem(it["label"], tuple(it["properties"])) for it in rows if it.get("status") != "FAILED"],
+    ),
+    list_failed_uniques=SchemaListing(
+        _FALKORDB_UNIQUES,
+        lambda rows: [SchemaItem(it["label"], tuple(it["properties"])) for it in rows if it.get("status") == "FAILED"],
     ),
     list_vectors=SchemaListing(_FALKORDB_VECTOR_INDEXES, _falkordb_vectors),
     # One full-text index per label, over the properties that have one.

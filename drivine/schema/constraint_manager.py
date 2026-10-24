@@ -44,7 +44,8 @@ class ConstraintManager:
         """
         Makes the constraint unless it is there. The data is checked first, and up to `sample_size` keys held more than
         once are reported, each with up to `sample_size` of the nodes that hold it; 0 skips the check, leaving the
-        engine to refuse a constraint the data breaks.
+        engine to refuse a constraint the data breaks. FalkorDB builds the constraint in the background, and lists the
+        build as failed: that raises DrivineError as soon as it is listed.
 
         A plain range index over the label and properties, in their order, that the engine says is in the way of the
         constraint (Neo4j) is reported as BLOCKED_BY_INDEX, and nothing is changed. With `replace_blocking_index`, the
@@ -115,10 +116,23 @@ class ConstraintManager:
         # Order means nothing to uniqueness, and engines reorder the properties.
         return any(it.label == spec.label and set(it.properties) == set(spec.properties) for it in await self.list())
 
+    async def _failed(self, spec: UniquenessConstraintSpec) -> bool:
+        """Whether the engine reports that its build of the constraint failed."""
+        listing = self.grammar.list_failed_uniques
+        if listing is None:
+            return False
+        held = listing.read(await self.executor.run(listing.statement))
+        return any(it.label == spec.label and set(it.properties) == set(spec.properties) for it in held)
+
     async def _await_built(self, spec: UniquenessConstraintSpec) -> None:
         """FalkorDB builds a constraint in the background; wait until it reports it, or says it failed."""
         for attempt in range(50):
             if await self._exists(spec):
                 return
+            if await self._failed(spec):
+                raise DrivineError(
+                    f"{self.grammar.engine} could not build the uniqueness constraint on "
+                    f"{spec.label}({', '.join(spec.properties)}): nodes may hold the same values."
+                )
             await concurrency.sleep(0.02 * (attempt + 1))
         raise DrivineError(f"The uniqueness constraint on {spec.label}({', '.join(spec.properties)}) was not built.")

@@ -1,4 +1,5 @@
 import logging
+import re
 import uuid
 from typing import Annotated, Any
 
@@ -109,6 +110,19 @@ class TestConstraints:
         [held] = result.sample
         assert held["properties"] == {"code": "dup"} and held["count"] == 2 and len(held["nodes"]) == 2
         assert not [it for it in await gom.constraints.list() if it.label == label]
+
+    async def test_with_no_sample_asked_the_engine_refuses_data_that_breaks_it(self, gom, pm, label):
+        await create(gom.persistence_manager, label, {"code": "dup"}, {"code": "dup"})
+        # FalkorDB builds the constraint in the background, and reports at once that the build failed.
+        message = (
+            re.escape(
+                f"FalkorDB could not build the uniqueness constraint on {label}(code): nodes may hold the same values."
+            )
+            if pm.type is DatabaseType.FALKORDB
+            else None
+        )
+        with pytest.raises(Exception, match=message):
+            await gom.constraints.ensure(uniqueness_constraint(label, "code"), 0)
 
     async def test_a_violations_sample_names_the_conflicting_nodes(self, gom, label):
         await create(gom.persistence_manager, label, {"code": "dup", "name": "a"}, {"code": "dup", "name": "b"})

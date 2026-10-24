@@ -393,7 +393,8 @@ class SqlCypherCompiler(ABC):
             )
         )
         body = self._procedure(query)
-        # The parameters' text first: the procedure reads it as the store's JSON reads that text.
+        # The parameters' text is written before the procedure is: on Oracle, writing it is what says whether the
+        # procedure reads it as extended JSON.
         values = self._parameters.values
         return self.procedure(body, values)
 

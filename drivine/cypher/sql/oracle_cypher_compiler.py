@@ -47,10 +47,10 @@ class OracleCypherCompiler(SqlCypherCompiler):
     Compiles a Cypher statement to SQL over a graph's tables on Oracle: see SqlCypherCompiler.
 
     A value is Oracle's `JSON`, which compares, groups and orders as JSON and keeps a map's keys in the order written.
-    Oracle keeps a number as a number, so a stored `2.0` reads as `2`; a floating-point number the statement writes is
-    a `BINARY_DOUBLE`, and stays one. A text Oracle reads out of JSON is at most 4,000 bytes, and an empty one is null,
-    as Oracle's empty text is. `reduce` is a function the query declares, and does not run in a statement that writes,
-    in the step of a `reduce`, or where its step reads a path.
+    Oracle keeps a number as a number, so a stored `2.0` reads as `2`; a floating-point number the statement writes, or
+    a parameter's that is a whole number, is a `BINARY_DOUBLE`, and stays one. A text Oracle reads out of JSON is at
+    most 4,000 bytes, and an empty one is null, as Oracle's empty text is. `reduce` is a function the query declares,
+    and does not run in a statement that writes, in the step of a `reduce`, or where its step reads a path.
 
     A list of ids is text, each id between commas (`,1,2,`): Oracle has no array, and a recursive query takes no `JSON`
     that changes from row to row. A recursive query reads no row outside it, so a walk starts from every node that
@@ -84,23 +84,30 @@ class OracleCypherCompiler(SqlCypherCompiler):
         """
         A float that is a whole number, `2.0`, written as Oracle's extended JSON writes a double,
         `{"$numberDouble": "2.0"}`, which `JSON(… EXTENDED)` reads as one: Oracle reads JSON's `2.0` as the number 2, a
-        whole number, as it reads `2`.
+        whole number, as it reads `2`. Not in a value that holds a map with a key as extended JSON's are,
+        `{"$numberLong": "5"}`, which `JSON(… EXTENDED)` would read as the value it writes: such a value is written as
+        JSON is, its floats that are whole numbers read as whole numbers. A statement that writes reads all its
+        parameters as one value.
         """
+        tree = jsonable(value)
+        if _keyed_as_extended(tree):
+            return json_text(tree)
         doubled = False
 
         def doubles(it: Any) -> Any:
-            # A Decimal is no float: cypher_json writes a whole one as the whole number it is.
+            # A Decimal is no float: cypher_json writes a whole one as the whole number it is. A float of a subclass is
+            # written as json writes its number, not as its own repr.
             nonlocal doubled
             if isinstance(it, float) and it.is_integer():
                 doubled = True
-                return {_DOUBLE: repr(it)}
+                return {_DOUBLE: float.__repr__(it)}
             if isinstance(it, dict):
                 return {key: doubles(item) for key, item in cast(dict[str, Any], it).items()}
             if isinstance(it, list):
                 return [doubles(item) for item in cast(list[Any], it)]
             return it
 
-        text = json_text(doubles(jsonable(value)))
+        text = json_text(doubles(tree))
         if doubled:
             self._extended[id(text)] = text
         return text
@@ -223,11 +230,15 @@ class OracleCypherCompiler(SqlCypherCompiler):
         return f"COALESCE(JSON_ARRAYAGG({value}{ordered} RETURNING JSON), JSON('[]'))"
 
     def distinct_items(self, list_: str) -> str:
-        """Oracle groups no `JSON`: each item is grouped by its text, and read back from it."""
+        """
+        Each item where it is first among those equal to it as `JSON` compares them, kept as it is: not by its text,
+        which is at most 4,000 bytes and keeps a map's keys in the order written, and not read back from it, which would
+        read a float that is a whole number, `2.0`, as the number 2.
+        """
         return (
-            "(SELECT COALESCE(JSON_ARRAYAGG(JSON(d.item) ORDER BY d.first RETURNING JSON), JSON('[]')) "
-            f"FROM (SELECT MIN(e.item_no) AS first, JSON_SERIALIZE(e.item) AS item FROM {self.elements(list_, 'e')} "
-            "GROUP BY JSON_SERIALIZE(e.item)) d)"
+            "(SELECT COALESCE(JSON_ARRAYAGG(d.item ORDER BY d.item_no RETURNING JSON), JSON('[]')) "
+            "FROM (SELECT e.item_no, e.item, ROW_NUMBER() OVER (PARTITION BY e.item ORDER BY e.item_no) AS n "
+            f"FROM {self.elements(list_, 'e')}) d WHERE d.n = 1)"
         )
 
     def extreme(self, value: str, min_: bool) -> str:
@@ -602,6 +613,18 @@ def _to_string(x: str) -> str:
         f"CASE WHEN {_kind(x)} = 'double' AND ABS({n}) < 1e15 AND JSON_VALUE({x}, '$' RETURNING BINARY_DOUBLE) = "
         f"TRUNC({n}) THEN JSON_SCALAR(TO_CHAR(TRUNC({n})) || '.0') ELSE JSON_SCALAR(JSON_VALUE({x}, '$')) END"
     )
+
+
+def _keyed_as_extended(value: Any) -> bool:
+    """
+    Whether the value, of JSON's own kinds, holds a map with a key that starts with `$`, as extended JSON's keys do.
+    """
+    if isinstance(value, dict):
+        entries = cast(dict[str, Any], value)
+        return any(key.startswith("$") for key in entries) or any(_keyed_as_extended(it) for it in entries.values())
+    if isinstance(value, list):
+        return any(_keyed_as_extended(it) for it in cast(list[Any], value))
+    return False
 
 
 _DOUBLE = "$numberDouble"

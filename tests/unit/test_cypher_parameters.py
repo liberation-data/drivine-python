@@ -64,3 +64,24 @@ def test_on_oracle_a_procedure_reads_its_parameters_extended_only_where_they_hol
     assert "EXTENDED" in OracleCypherCompiler("g").compile("CREATE (n:T {f: $f})", {"f": 2.0}).sql
     assert "EXTENDED" not in OracleCypherCompiler("g").compile("CREATE (n:T {f: $f})", {"f": 2.5}).sql
     assert "EXTENDED" not in PostgresCypherCompiler("g").compile("RETURN $f", {"f": 2.0}).sql
+
+
+def test_on_oracle_a_whole_float_of_a_float_subclass_is_written_as_json_writes_its_number():
+    # As numpy's float64 is: its repr, np.float64(2.0), is no number Oracle reads.
+    class Float(float):
+        def __repr__(self) -> str:
+            return f"Float({float(self)})"
+
+    compiled = OracleCypherCompiler("g").compile("RETURN $f", {"f": Float(2.0)})
+    assert compiled.parameters["_cy_f"] == '{"$numberDouble":"2.0"}'
+
+
+def test_on_oracle_a_value_holding_a_map_keyed_as_extended_json_is_written_as_plain_json():
+    # `JSON(… EXTENDED)` would read {"$numberLong": "5"} as 5: such a value is written as JSON is, its whole floats too.
+    compiled = OracleCypherCompiler("g").compile("RETURN $p", {"p": {"a": 2.0, "m": [{"$numberLong": "5"}]}})
+    assert compiled.parameters["_cy_p"] == '{"a":2.0,"m":[{"$numberLong":"5"}]}'
+    assert "EXTENDED" not in compiled.sql
+    # In a write every parameter is read from one object, so one such map keeps them all plain.
+    assert (
+        "EXTENDED" not in OracleCypherCompiler("g").compile("CREATE (n {f: $f, l: $l})", {"f": 2.0, "l": {"$x": 1}}).sql
+    )

@@ -561,6 +561,41 @@ def test_calls_that_write_nested_give_each_row_its_own_variables_with_the_nodes_
     ) == [[2020, 3]]
 
 
+def test_a_foreach_in_calls_that_write_nested_three_deep_leaves_each_callers_row_as_it_was(
+    cypher_pm: PersistenceManager,
+):
+    # Not in the spec yet: the FOREACH loops over rows of its own at the deepest depth, between the caller rows above it
+    # being read and the rows the CALLs give.
+    clear(cypher_pm)
+    assert cypher_pm.query(
+        spec(
+            "UNWIND [1, 2] AS x CALL { WITH x CREATE (a:CyWrite {x: x}) WITH a, x "
+            "CALL { WITH a, x FOREACH (i IN [1, 2] | CREATE (:CyWrite {i: i * x})) CREATE (b:CyWrite {y: x * 10}) "
+            "RETURN b } RETURN a, b } RETURN [x, a.x, b.y]"
+        )
+    ) == [[1, 1, 10], [2, 2, 20]]
+    assert cypher_pm.query(spec("MATCH (n:CyWrite) WHERE n.i IS NOT NULL RETURN [count(n), sum(n.i)]")) == [[4, 9]]
+
+
+def test_collect_distinct_beside_a_key_that_holds_a_parameter_or_a_subquery(cypher_pm: PersistenceManager):
+    # Not in the spec yet: _held_first works such a key out first in the grouping WITH _distinct_first makes, as Oracle
+    # groups by no subquery, and binds a parameter as a marker of its own each time it is named.
+    seeded(cypher_pm)
+    assert cypher_pm.query(
+        spec(
+            "MATCH (p:Person)-[:ACTED_IN]->(m) RETURN p.name + $s AS k, size(collect(DISTINCT m.title + $s)) "
+            "ORDER BY k",
+            {"s": "!"},
+        )
+    ) == [["Carrie!", 2], ["Keanu!", 3], ["Laurence!", 1]]
+    assert cypher_pm.query(
+        spec(
+            "MATCH (p:Person)-[:ACTED_IN]->(m) RETURN COUNT { (p)-[:KNOWS]->() } AS k, "
+            "size(collect(DISTINCT m.title)) AS c ORDER BY k, c"
+        )
+    ) == [[0, 2], [1, 3]]
+
+
 def test_a_float_parameter_that_is_a_whole_number_stays_a_float_nested_in_maps_and_lists_and_past_1e15(
     cypher_pm: PersistenceManager,
 ):
@@ -646,3 +681,63 @@ def test_to_string_of_a_float_that_is_a_whole_number_written_and_read_back_keeps
     clear(cypher_pm)
     assert cypher_pm.query(spec("CREATE (n:CyWrite {g: 3.0}) RETURN toString(n.g)")) == ["3.0"]
     assert cypher_pm.query(spec("MATCH (n:CyWrite) RETURN toString(n.g)")) == ["3.0"]
+
+
+def test_a_float_that_is_a_whole_number_collected_once_each_stays_a_float(cypher_pm: PersistenceManager):
+    # Not in the spec yet: what _distinct_first keeps of a collection is the items collect gathered, not their text
+    # read back.
+    rows = cypher_pm.query(spec("UNWIND [1.0, 2.5, 1.0] AS x RETURN collect(DISTINCT x)"))
+    assert kinds(rows) == kinds([[1.0, 2.5]])
+    rows = cypher_pm.query(spec("UNWIND [1, 2] AS x RETURN x, collect(DISTINCT $f) ORDER BY x DESC", {"f": 2.0}))
+    assert kinds(rows) == kinds([[2, [2.0]], [1, [2.0]]])
+
+
+def test_an_item_past_4000_bytes_and_a_map_with_its_keys_in_another_order_collected_once_each(
+    cypher_pm: PersistenceManager,
+):
+    # Not in the spec yet: Oracle keeps each item once as JSON compares items, not as their text does.
+    big = "y" * 5_000
+    rows = cypher_pm.query(spec("UNWIND [[$b], [$b], 'a'] AS x RETURN collect(DISTINCT x)", {"b": big}))
+    assert rows == [[[big], "a"]]
+    rows = cypher_pm.query(spec("UNWIND [{a: 1, b: 2}, {b: 2, a: 1}] AS x RETURN collect(DISTINCT x)"))
+    assert rows == [[{"a": 1, "b": 2}]]
+
+
+def test_a_map_parameter_keyed_as_extended_json_writes_a_value_beside_a_whole_float_in_it_comes_back_a_map(
+    cypher_pm: PersistenceManager,
+):
+    p = {"a": 2.5, "m": {"$numberDouble": "1"}, "l": {"$numberLong": "5"}}
+    (row,) = cypher_pm.query(spec("RETURN $p", {"p": {**p, "b": 2.0}}))
+    assert kinds({key: value for key, value in row.items() if key != "b"}) == kinds(p)
+
+
+def test_a_map_parameter_keyed_as_extended_json_beside_a_whole_float_a_write_reads_is_written_a_map(
+    cypher_pm: PersistenceManager,
+):
+    # A write reads every parameter from the same object.
+    clear(cypher_pm)
+    long = {"$numberLong": "5"}
+    (row,) = cypher_pm.query(spec("CREATE (n:CyWrite {id: 2}) RETURN [$f, $l]", {"f": 2.0, "l": long}))
+    assert row[1] == long
+
+
+def test_a_walk_sorts_by_coalesce_of_an_aggregate_collected_once_each_and_a_distinct_projection_by_an_item(
+    cypher_pm: PersistenceManager,
+):
+    # Not in the spec yet: an order term that reads an aggregate _distinct_first worked out first is carried out, beside
+    # a walk, as drivine4j#162's sort was.
+    seeded(cypher_pm)
+    rows = cypher_pm.query(
+        spec(
+            "MATCH (:Person {name: 'Laurence'})-[*]->(b) RETURN coalesce(b.name, b.title) AS n, count(*) "
+            "ORDER BY coalesce(head(collect(DISTINCT b.born)), 0), n"
+        )
+    )
+    assert rows == [["Johnny Mnemonic", 1], ["The Matrix", 3], ["The Matrix Reloaded", 2], ["Keanu", 1], ["Carrie", 1]]
+    rows = cypher_pm.query(
+        spec(
+            "MATCH (p:Person)-[:ACTED_IN]->(m) RETURN DISTINCT p.name AS n, collect(DISTINCT m.title) AS ts "
+            "ORDER BY coalesce(ts[2], 'zz'), n SKIP 1 LIMIT 2"
+        )
+    )
+    assert rows == [["Carrie", ["The Matrix", "The Matrix Reloaded"]], ["Laurence", ["The Matrix"]]]

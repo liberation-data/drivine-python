@@ -1,6 +1,8 @@
 """A Cypher statement read into the syntax tree the compiler works from: drivine4j's CypherReaderTest, ported."""
 
 from datetime import UTC, date, datetime, time, timedelta, timezone
+from decimal import Decimal
+from enum import Enum
 from typing import Any
 
 import pytest
@@ -176,6 +178,10 @@ def test_a_statement_is_read_once():
     assert read_cypher("MATCH (n) RETURN n") is read_cypher("MATCH (n) RETURN n")
 
 
+class Colour(Enum):
+    RED = "red"
+
+
 @pytest.mark.parametrize(
     ("value", "written"),
     [
@@ -188,6 +194,9 @@ def test_a_statement_is_read_once():
         (timedelta(hours=-1), '"P-1DT23H"'),
         (timedelta(0), '"PT0S"'),
         ({"n": 9007199254740993, "f": 0.1, "l": (1, "é")}, '{"n":9007199254740993,"f":0.1,"l":[1,"é"]}'),
+        # An Enum as its value, and a Decimal as the number it is: whole or not.
+        ({"e": Colour.RED, "s": frozenset({Colour.RED})}, '{"e":"red","s":["red"]}'),
+        ([Decimal("2.00"), Decimal("2.5")], "[2,2.5]"),
     ],
 )
 def test_a_parameter_is_bound_as_the_json_text_of_its_value(value: Any, written: str):

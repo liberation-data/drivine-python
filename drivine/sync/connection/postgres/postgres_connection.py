@@ -60,13 +60,20 @@ class PostgresConnection(Connection):
         return self.result_mapper.map_query_results(rows, finalized)
 
     def open_cursor(self, spec: CursorSpecification[T]) -> PostgresCursor[T]:
-        """A server-side cursor: held past the statement outside a transaction, where each statement commits itself."""
+        """
+        A server-side cursor: held past the statement outside a transaction, where each statement commits itself. A
+        Cypher statement that writes is read with a cursor of the client's, so it writes when the cursor is opened, as
+        on a graph engine: a server-side cursor runs its function at the first fetch, so one closed unread in a
+        transaction would write nothing. The function hands its rows back whole all the same.
+        """
         finalized = spec.finalized_copy("SQL")
         sql, prelude = cypher_compiled(finalized, "POSTGRES", self.graph)
         compiled = PostgresSpecCompiler(sql).compile()
         if prelude is not None:
             self.connection.execute(prelude)
-        cursor = self.connection.cursor(name=f"drivine_{next(_CURSORS)}", withhold=not self._in_transaction)
+            cursor = self.connection.cursor()
+        else:
+            cursor = self.connection.cursor(name=f"drivine_{next(_CURSORS)}", withhold=not self._in_transaction)
         cursor.execute(compiled.statement, _bindable(compiled.parameters))
         return PostgresCursor(finalized, cursor, self.result_mapper, compiled=sql is not finalized)
 

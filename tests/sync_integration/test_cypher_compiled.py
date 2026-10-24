@@ -6,16 +6,21 @@ on every run (a UUID, the time), parameters of Python's temporal types, statemen
 needs a transaction of its own. drivine4j keeps the same in its Cypher*CrossEngineTest.
 """
 
+import dataclasses
 import re
 from datetime import UTC, date, datetime, time, timedelta, timezone
 from typing import Any
 
 import pytest
 
+from drivine.backend.oracle.oracle_graph import OracleGraph
+from drivine.backend.postgres.postgres_graph import PostgresGraph
 from drivine.model import stamps
 from drivine.query.statement import cypher_statement
 from drivine.sync import (
+    ConnectionProperties,
     CursorSpecification,
+    DatabaseRegistry,
     DatabaseType,
     DrivineError,
     PersistenceManager,
@@ -23,7 +28,7 @@ from drivine.sync import (
     QuerySpecification,
     transaction,
 )
-from tests.sync_integration.conftest import ORACLE, POSTGRES
+from tests.sync_integration.conftest import ORACLE, POSTGRES, SQL_STORES
 
 UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
@@ -154,6 +159,19 @@ def test_a_cursor_reads_the_rows_of_a_cypher_statement_that_writes_and_its_write
     assert cypher_pm.query(spec("MATCH (n:CyWrite) RETURN count(n)")) == [3]
 
 
+def test_a_cursor_over_a_cypher_statement_that_writes_in_a_transaction_writes_though_closed_unread(
+    cypher_pm: PersistenceManager,
+):
+    if cypher_pm.type is DatabaseType.ORACLE:
+        pytest.skip("On Oracle a write is a block, not read through a cursor: see the test of that below.")
+    clear(cypher_pm)
+    # On Postgres a server-side cursor would run the function the write is compiled to only at its first fetch.
+    with transaction():
+        cursor = cypher_pm.open_cursor(CursorSpecification[Any](cypher_statement("CREATE (n:CyWrite) RETURN n")))
+        cursor.close()
+    assert cypher_pm.query(spec("MATCH (n:CyWrite) RETURN count(n)")) == [1]
+
+
 def test_a_parameter_whose_json_is_longer_than_a_varchar2_is_read_and_written(cypher_pm: PersistenceManager):
     # Bound as its JSON text: on Oracle a CLOB past 32,767 bytes, which a query takes where a VARCHAR2 is refused.
     clear(cypher_pm)
@@ -188,6 +206,26 @@ def test_a_write_in_a_transaction_rolled_back_leaves_nothing_and_runs_again_afte
     # The function the write was compiled to went with the transaction, and is made again.
     pm.query(spec("CREATE (:CyWrite {name: 'Ada'})"))
     assert pm.query(spec("MATCH (n:CyWrite) RETURN count(n)")) == [1]
+
+
+@pytest.mark.parametrize("store", [it for it in SQL_STORES if {"postgres": POSTGRES, "oracle": ORACLE}[it]])
+def test_a_cypher_statement_is_compiled_against_the_tables_of_the_graph_its_datasource_names(
+    store: str, registry: DatabaseRegistry, factory: PersistenceManagerFactory
+):
+    name = "cy_named"
+    if registry.registered(f"{store}_{name}") is None:
+        properties = dataclasses.replace(ConnectionProperties.from_env(store), default_graph_path=name)
+        registry.builder().with_properties(properties).register(f"{store}_{name}")
+    pm = factory.get(f"{store}_{name}")
+    pm.execute(QuerySpecification((PostgresGraph(name) if store == "postgres" else OracleGraph(name)).ensuring))
+    pm.execute(QuerySpecification(f"DELETE FROM {name}_edge"))
+    pm.execute(QuerySpecification(f"DELETE FROM {name}_node"))
+    pm.query(spec("CREATE (:CyWrite {name: 'Ada'})"))
+    assert pm.query(spec("MATCH (n:CyWrite) RETURN n.name")) == ["Ada"]
+    # A row of plain SQL is a dict of its columns on Postgres, and its one column's value on Oracle.
+    made = pm.get_one(QuerySpecification[Any](f"SELECT COUNT(*) AS made FROM {name}_node"))
+    assert (made["made"] if isinstance(made, dict) else made) == 1
+    pm.execute(QuerySpecification(f"DELETE FROM {name}_node"))
 
 
 @pytest.mark.skipif(not ORACLE, reason="Oracle isn't configured: set ORACLE_TESTS=true.")

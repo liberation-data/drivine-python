@@ -14,8 +14,8 @@ T = TypeVar("T")
 
 class PostgresCursor(BufferedCursor[T]):
     """
-    Reads a batch at a time from a server-side cursor of Postgres. A Cypher statement's, `compiled`, gives each row as
-    its one column.
+    Reads a batch at a time from a server-side cursor of Postgres, or from the client's for a Cypher statement that
+    writes (see PostgresConnection.open_cursor). A Cypher statement's, `compiled`, gives each row as its one column.
     """
 
     def __init__(

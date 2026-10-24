@@ -55,7 +55,9 @@ class PostgresConnectionProvider(ConnectionProvider):
         # Opening an open pool does nothing: two first connections open it once.
         pool.open()
         connection = pool.getconn()
-        return PostgresConnection(connection, pool.putconn, f"postgres.{connection.info.backend_pid}")
+        return PostgresConnection(
+            connection, pool.putconn, f"postgres.{connection.info.backend_pid}", self.graph_name or DEFAULT_GRAPH
+        )
 
     def end(self) -> None:
         # Cleared before waiting, so a second call made meanwhile doesn't close the pool again.

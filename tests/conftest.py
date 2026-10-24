@@ -2,6 +2,11 @@ import os
 
 import pytest
 
+# Neo4j's latest release, so that a change in it shows up here soon. The Cypher spec (tests/cypher) is written for a
+# current release, as drivine4j runs it: the plugin's default, 5.26, refuses an aggregate in an ORDER BY that its RETURN
+# doesn't hold, and a date added to a text.
+os.environ.setdefault("NEO4J_TEST_IMAGE", "neo4j:latest")
+
 # The datasources the tests run on. Drivine's plugin starts a container for each and points these at it. The host is
 # a name that resolves nowhere, so that with the plugin off the tests fail rather than clear a database of yours. To
 # run against your own, set the datasource and USE_LOCAL_NEO4J=true, USE_LOCAL_MEMGRAPH=true, USE_LOCAL_FALKORDB=true or

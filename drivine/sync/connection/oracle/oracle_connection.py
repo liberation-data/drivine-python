@@ -7,9 +7,12 @@ import re
 import time
 from typing import Any, TypeVar
 
+from drivine.backend.sql.sql_graph import DEFAULT_GRAPH
 from drivine.connection.oracle.oracle_result_mapper import OracleResultMapper
 from drivine.connection.oracle.oracle_spec_compiler import OracleSpecCompiler
 from drivine.cursor.cursor_specification import CursorSpecification
+from drivine.cypher.cypher_specification import cypher_compiled
+from drivine.drivine_error import DrivineError
 from drivine.logger import log_statement
 from drivine.query.query_specification import QuerySpecification
 from drivine.sync.connection.connection import Connection
@@ -26,26 +29,30 @@ _BLOCK = re.compile(r"^\s*(DECLARE|BEGIN)\b", re.IGNORECASE)
 class OracleConnection(Connection):
     """
     A connection to Oracle. Outside a transaction each statement commits itself, as a statement does on the graph
-    engines. A PL/SQL block hands its rows back with `DBMS_SQL.RETURN_RESULT`; the first such set is its result.
+    engines. A PL/SQL block hands its rows back with `DBMS_SQL.RETURN_RESULT`; the first such set is its result. A
+    Cypher statement is compiled to SQL over the graph's tables (see SqlCypherCompiler): a read to a query, and a write
+    to a block.
     """
 
-    def __init__(self, connection: Any, release: Any, session_id: str) -> None:
+    def __init__(self, connection: Any, release: Any, session_id: str, graph: str = DEFAULT_GRAPH) -> None:
         self.connection = connection
         self._release = release
         self.session_id = session_id
+        self.graph = graph
         self.result_mapper = OracleResultMapper()
         self._in_transaction = False
 
     def query(self, spec: QuerySpecification[T]) -> list[T]:
         finalized = spec.finalized_copy("SQL")
-        compiled = OracleSpecCompiler(finalized).compile()
+        sql = cypher_compiled(finalized, "ORACLE", self.graph)[0]
+        compiled = OracleSpecCompiler(sql).compile()
         start = time.perf_counter()
         self.connection.autocommit = not self._in_transaction
         cursor: Any = self.connection.cursor()
         rows: list[Any] = []
         columns: list[str] = []
         try:
-            cursor.execute(compiled.statement, compiled.parameters, fetch_lobs=False)
+            cursor.execute(compiled.statement, self._bindable(sql, finalized, compiled.parameters), fetch_lobs=False)
             if cursor.description is None and _BLOCK.match(compiled.statement):
                 implicit = _implicit_results(cursor)
                 cursor.close()
@@ -61,12 +68,39 @@ class OracleConnection(Connection):
 
     def open_cursor(self, spec: CursorSpecification[T]) -> OracleCursor[T]:
         finalized = spec.finalized_copy("SQL")
-        compiled = OracleSpecCompiler(finalized).compile()
+        sql = cypher_compiled(finalized, "ORACLE", self.graph)[0]
+        compiled = OracleSpecCompiler(sql).compile()
+        if sql is not finalized and _BLOCK.match(compiled.statement):
+            raise DrivineError(
+                "A Cypher statement that writes is a block on Oracle, which hands its rows back whole: run it with "
+                "query, not through a cursor.",
+                spec,
+            )
         self.connection.autocommit = not self._in_transaction
         cursor = self.connection.cursor()
         cursor.arraysize = spec.batch
-        cursor.execute(compiled.statement, compiled.parameters, fetch_lobs=False)
+        cursor.execute(compiled.statement, self._bindable(sql, finalized, compiled.parameters), fetch_lobs=False)
         return OracleCursor(finalized, cursor, self.result_mapper)
+
+    def _bindable(
+        self, sql: QuerySpecification[Any], finalized: QuerySpecification[Any], parameters: dict[str, Any]
+    ) -> dict[str, Any]:
+        """
+        The parameters, with each text of a compiled Cypher statement of more than _MAX_TEXT bytes as a CLOB, as
+        drivine4j binds one: a Cypher parameter is bound as its JSON text, which for a long list is more than a query
+        takes as a VARCHAR2 (ORA-01460).
+        """
+        if sql is finalized:
+            return parameters
+        import oracledb
+
+        bindable = dict(parameters)
+        for name, value in parameters.items():
+            # A character is at most four bytes of UTF-8, so a text of fewer than a quarter of _MAX_TEXT fits.
+            if isinstance(value, str) and len(value) * 4 > _MAX_TEXT and len(value.encode()) > _MAX_TEXT:
+                clob: Any = oracledb.DB_TYPE_CLOB  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+                bindable[name] = self.connection.createlob(clob, value)
+        return bindable
 
     def start_transaction(self) -> None:
         # Oracle begins a transaction with the first statement that writes; until commit, none commits itself.
@@ -89,6 +123,10 @@ class OracleConnection(Connection):
                 self.connection.rollback()
         finally:
             self._release(self.connection)
+
+
+_MAX_TEXT = 32_767
+"""The most bytes of text Oracle binds as a VARCHAR2; past it a compiled statement's text is bound as a CLOB."""
 
 
 def _implicit_results(cursor: Any) -> list[Any]:

@@ -59,7 +59,7 @@ class OracleConnectionProvider(ConnectionProvider):
         except BaseException:
             pool.release(connection)
             raise
-        return OracleConnection(connection, pool.release, f"oracle.{row[0] if row else '?'}")
+        return OracleConnection(connection, pool.release, f"oracle.{row[0] if row else '?'}", self.graph.name)
 
     def end(self) -> None:
         # Cleared before waiting, so a second call made meanwhile doesn't close the pool again.

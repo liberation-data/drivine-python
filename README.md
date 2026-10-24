@@ -145,9 +145,10 @@ makes it: one over the property whatever the label, and one over the label's nod
 through. A uniqueness constraint comes with a range index over its properties, which stays when the constraint is
 dropped. The object manager writes SQL for it, and the query DSL, grouped reads, search and schema management work as on
 the graph engines. A raw `where` is SQL over the node's row, `n`: its `labels`, `props` (a JSON object keyed by stored
-name) and `stamp`, say `JSON_VALUE(n.props, '$.name') = $name`. Your own statements are SQL too. `matches` takes a
-regular expression in Oracle's POSIX dialect, matched against the whole value. A leading `(?i)` ignores case; what Java
-adds, such as `(?:…)`, a look-around or `\b`, is not read. A backreference names the group the expression numbers it by,
+name) and `stamp`, say `JSON_VALUE(n.props, '$.name') = $name`. Your own statements are SQL too, unless written as
+Cypher (see [Cypher on Postgres and Oracle](#cypher-on-postgres-and-oracle)). `matches` takes a regular expression in
+Oracle's POSIX dialect, matched against the whole value. A leading `(?i)` ignores case; what Java adds, such as
+`(?:…)`, a look-around or `\b`, is not read. A backreference names the group the expression numbers it by,
 `\1` to `\8`; `\9` is refused, as the group that anchors the expression would make it the tenth, which POSIX does not
 have.
 
@@ -188,8 +189,10 @@ as `jsonb` and a GIN index over the labels, so a node carries any number of them
 constraints Drivine made; and `<graph>_write`, the function a save's steps are carried out by, as one statement that is
 applied whole or not at all.
 
-- A statement you write yourself is SQL. Parameters are named `$name`, as in Cypher, and a statement is bound only the
-  ones it names. A row comes back as a dict of its columns, a `jsonb` column as Python values.
+- A statement you write yourself is SQL, unless written as Cypher (see
+  [Cypher on Postgres and Oracle](#cypher-on-postgres-and-oracle)). Parameters are named `$name`, as in Cypher, and a
+  statement is bound only the ones it names. A row comes back as a dict of its columns, a `jsonb` column as Python
+  values.
 - A raw `where`, for a load or a delete, is SQL over the root's row: its `props`, `labels` and `stamp`, say
   `(n.props ->> 'name') = $name`.
 - A number is compared as a number only where one is stored: `'7'` is not `7`, as on the graph engines.
@@ -232,6 +235,40 @@ await pm.execute(spec)                   # no results
 - A node or relationship comes back as its properties, and Neo4j's dates and times as the standard library's.
 - A row of one column is its value, and a row of several is a list.
 - A failed statement raises `DrivineError`, which holds the specification, and the database's error as its cause.
+
+### Cypher on Postgres and Oracle
+
+A statement written as Cypher, with `cypher_statement` or `cypher_file`, is compiled to SQL over the graph's tables on
+Postgres and Oracle, and gives the rows a graph engine gives, as drivine4j compiles it:
+
+```python
+from drivine import QuerySpecification, cypher_statement
+
+spec = QuerySpecification(cypher_statement("MATCH (p:Person {city: $city}) RETURN properties(p)"))
+people = await pm.query(spec.bind({"city": "Sydney"}))
+```
+
+- A read is a query. A write (`CREATE`, `MERGE`, `SET`, `REMOVE`, `DELETE`) is an anonymous PL/SQL block on Oracle, and
+  a function made for the statement in `pg_temp` on Postgres: one statement, applied whole or not at all. A block hands
+  its rows back whole, so on Oracle a write is run with `query`, and a cursor over one is refused. On Postgres a cursor
+  over a write writes when it is opened, as on a graph engine.
+- Parameters are named, `$name`: a statement bound to a list of them is refused.
+- A row of one item is its value, and a row of several a list of them. A node is its properties.
+- A value is compared as JSON, so `'7'` is not `7`, and a missing property is null. A map keeps its keys in the order
+  written.
+- openCypher's temporal values are their ISO 8601 text, as the store keeps a moment: `date`, `datetime`, `duration` and
+  the rest make one, their fields read, and two moments compare as the moments they are. A parameter of a `date`,
+  `time`, `datetime` or `timedelta` is a temporal value of its kind.
+- `UNION`, `CALL { … }`, `EXISTS { … }`, `COUNT { … }`, `FOREACH`, `=~`, variable-length relationships, `shortestPath`
+  and `allShortestPaths` compile. What isn't compiled yet (a slice, a path returned whole, `SKIP` of an expression…) is
+  refused by name before anything is sent, and what isn't Cypher with where it went wrong.
+- On Oracle a text read out of JSON is at most 4,000 bytes, and an empty one is null; `reduce` doesn't run in a
+  statement that writes, in the step of a `reduce`, or where its step reads a path; and `map[key]` reads null where an
+  expression gives the key.
+- What each statement gives is the [Cypher spec](https://github.com/liberation-data/drivine-cypher-spec), which the
+  three Drivine libraries run alike.
+
+The parser runs on ANTLR's runtime, which `drivine[postgres]` and `drivine[oracle]` install.
 
 ### Cursors
 
@@ -739,7 +776,8 @@ the datasource at it. Datasources of one type share a container. `USE_LOCAL_NEO4
 
 Drivine's own tests run on Oracle only with `ORACLE_TESTS=true`: its image is large, and the database wants two
 gigabytes. A run without it ends with the line `Oracle tests skipped: set ORACLE_TESTS=true to run them`. CI runs the
-Oracle tests in a job of their own, with `pytest -k oracle`.
+Oracle tests in a job of their own, with `pytest -k oracle`. The tests run on `neo4j:latest`, as the Cypher spec is
+written for a current Neo4j, where the plugin's own default is 5.26.
 
 ## Logging
 

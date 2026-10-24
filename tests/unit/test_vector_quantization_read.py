@@ -29,3 +29,17 @@ def test_reads_vector_quantization_type_over_vector_quantization_enabled_when_bo
 
 def test_reads_neither_as_none_not_as_disabled():
     assert quantization_read_from() is None
+
+
+def test_reads_vector_quantization_type_in_any_case():
+    assert quantization_read_from(**{"vector.quantization.type": "none"}) is False
+    assert quantization_read_from(**{"vector.quantization.type": "scalar"}) is True
+
+
+def test_reads_a_kind_of_quantization_it_does_not_know_as_enabled_since_only_none_is_not():
+    assert quantization_read_from(**{"vector.quantization.type": "PRODUCT"}) is True
+
+
+def test_reads_vector_quantization_enabled_when_vector_quantization_type_is_not_a_string():
+    config = {"vector.quantization.type": 0, "vector.quantization.enabled": False}
+    assert quantization_read_from(**config) is False

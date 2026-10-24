@@ -7,6 +7,7 @@ import pytest
 from drivine import (
     DatabaseType,
     DrivineError,
+    EngineVectorOptions,
     FullTextIndex,
     NodeFragment,
     NodeId,
@@ -60,6 +61,26 @@ class TestIndexes:
         assert (await gom.indexes.recreate(wider)).status == "RECREATED"
         assert (await gom.indexes.ensure(wider)).status == "ALREADY_MATCHING"
         await gom.indexes.drop(wider)
+
+    async def test_a_pinned_quantization_reads_back_matches_and_drifts_when_pinned_the_other_way(self, gom, pm, label):
+        if pm.type is not DatabaseType.NEO4J:
+            pytest.skip("Quantization is a Neo4j option.")
+        unquantized = vector_index(
+            label, "embedding", 4, "COSINE", engine_options=(EngineVectorOptions("Neo4j", quantization_enabled=False),)
+        )
+        assert (await gom.indexes.ensure(unquantized)).status == "CREATED"
+        [listed] = [it for it in await gom.indexes.list("VECTOR") if it.label == label]
+        assert listed.quantization_enabled is False
+        assert (await gom.indexes.ensure(unquantized)).status == "ALREADY_MATCHING"
+        quantized = vector_index(
+            label, "embedding", 4, "COSINE", engine_options=(EngineVectorOptions("Neo4j", quantization_enabled=True),)
+        )
+        drift = await gom.indexes.ensure(quantized)
+        assert drift.status == "DRIFT" and drift.found is not None and drift.found.quantization_enabled is False
+        assert (await gom.indexes.recreate(quantized)).status == "RECREATED"
+        [listed] = [it for it in await gom.indexes.list("VECTOR") if it.label == label]
+        assert listed.quantization_enabled is True
+        await gom.indexes.drop(quantized)
 
     async def test_full_text_index(self, gom, label):
         spec = full_text_index(label, ["title", "body"])

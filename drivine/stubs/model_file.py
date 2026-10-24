@@ -7,7 +7,6 @@ the same classes a load reads.
 
 from __future__ import annotations
 
-import importlib
 import importlib.metadata
 import json
 import tomllib
@@ -21,6 +20,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Annotated, Any, Literal, Union, cast, get_args, get_origin
 
+from pydantic import AwareDatetime, FutureDate, FutureDatetime, NaiveDatetime, PastDate, PastDatetime
+
 from drivine.drivine_error import DrivineError
 from drivine.model.field_mapping import FieldMapping
 from drivine.model.field_shape import FieldShape
@@ -28,6 +29,7 @@ from drivine.model.fragment_model import FragmentModel
 from drivine.model.graph_view_model import GraphViewModel
 from drivine.model.model_registry import ModelRegistry
 from drivine.model.relationship_fragment_model import RelationshipFragmentModel
+from drivine.stubs.stub_writer import declared
 
 FORMAT = "drivine-model/1"
 
@@ -59,6 +61,16 @@ _SCALARS: tuple[tuple[type, str], ...] = (
     (timedelta, "duration"),
 )
 
+_PYDANTIC: dict[Any, str] = {
+    # Pydantic's checked dates and times, which are not subclasses of the type they check.
+    AwareDatetime: "datetime",
+    NaiveDatetime: "localDatetime",
+    PastDatetime: "datetime",
+    FutureDatetime: "datetime",
+    PastDate: "date",
+    FutureDate: "date",
+}
+
 _INDEXES = {"UNIQUE": "unique", "RANGE": "range", "FULLTEXT": "fullText"}
 
 
@@ -85,11 +97,8 @@ class ModelReader:
         self._read = ReadModel()
 
     def read(self) -> ReadModel:
-        for name in self.modules:
-            module = importlib.import_module(name)
-            for value in list(vars(module).values()):
-                if isinstance(value, type) and value.__module__ == name and self._registry.kind_of(value) is not None:
-                    self._add(value)
+        for type_ in declared(self.modules):
+            self._add(type_)
         for entries in (self._read.fragments, self._read.relationship_fragments, self._read.views):
             entries.sort(key=lambda it: it["id"])
         return self._read
@@ -314,6 +323,8 @@ def _typed(annotation: Any) -> tuple[str, str | None, list[str] | None]:
         if all(isinstance(it, str) for it in members):
             return "enum", None, members
         return ("int", None, None) if all(isinstance(it, int) for it in members) else ("any", None, None)
+    if isinstance(item, type) and item in _PYDANTIC:
+        return _PYDANTIC[item], None, None
     if isinstance(item, type):
         for scalar, name in _SCALARS:
             if issubclass(item, scalar):

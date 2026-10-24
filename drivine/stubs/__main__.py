@@ -20,7 +20,7 @@ import sys
 from pathlib import Path
 
 from drivine.drivine_error import DrivineError
-from drivine.stubs.model_file import FILE, Project, write_model_file
+from drivine.stubs.model_file import Project, write_model_file
 from drivine.stubs.stub_writer import StubWriter
 
 
@@ -38,11 +38,11 @@ def main(argv: list[str] | None = None) -> int:
     command = " ".join(["python -m drivine.stubs", *args.modules, *(["--out", args.out] if args.out else [])])
     runtime, stub = StubWriter(args.modules, command).write()
     files = {out.with_suffix(".py"): runtime, out.with_suffix(".pyi"): stub}
-    model = "off" if args.no_model else _model_file(args.modules, out, args.check)
+    stale_model = None if args.no_model else _model_file(args.modules, out, args.check)
     if args.check:
         stale = [str(path) for path, text in files.items() if not path.exists() or path.read_text() != text]
-        if model == "stale":
-            stale.append(str(FILE))
+        if stale_model:
+            stale.append(str(stale_model))
         if stale:
             print(f"Out of date: {', '.join(stale)}. Run {command} to write them again.", file=sys.stderr)
             return 1
@@ -53,20 +53,21 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def _model_file(modules: list[str], out: Path, check: bool) -> str:
+def _model_file(modules: list[str], out: Path, check: bool) -> Path | None:
     """
-    Writes the model file of the project the written module is in, or with `check` says whether it is current. A
-    module in no project, with no pyproject.toml above it, gets none: there is nowhere the file belongs.
+    Writes the model file of the project the written module is in, or with `check` gives its path when it is out of
+    date, to be named with the stubs. A module in no project, with no pyproject.toml above it, gets none: there is
+    nowhere the file belongs.
     """
     try:
         project = Project.of(out.resolve().parent)
     except DrivineError as error:
         print(f"Drivine model file: not written. {error}", file=sys.stderr)
-        return "none"
+        return None
     outcome = write_model_file(modules, project, check, lambda it: print(it, file=sys.stderr))
     if outcome == "written":
         print(f"Wrote {project.file}")
-    return outcome
+    return project.file if outcome == "stale" else None
 
 
 def _beside(module: str) -> Path:

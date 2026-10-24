@@ -329,3 +329,93 @@ def test_a_module_in_no_project_gets_no_model_file_and_its_stubs_still(tmp_path:
     assert main([a, "--out", str(out)]) == 0
     assert out.is_file()
     assert "Drivine model file: not written. There is no pyproject.toml" in capsys.readouterr().err
+
+
+def test_pydantic_s_checked_dates_and_times_are_the_temporal_types_they_check(modules, project: Project):
+    (names,) = modules(
+        checked="""
+        from typing import Annotated
+        from pydantic import AwareDatetime, FutureDate, NaiveDatetime, PastDatetime
+        from drivine import NodeFragment, NodeId
+
+        class Event(NodeFragment, labels=["Event"]):
+            id: Annotated[str, NodeId()]
+            at: AwareDatetime
+            local: NaiveDatetime
+            happened: PastDatetime
+            due: FutureDate | None = None
+        """
+    )
+    write_model_file([names], project, False, quiet)
+    properties = {it["name"]: (it["type"], it["nullable"]) for it in written(project)["fragments"][0]["properties"]}
+    assert properties == {
+        "id": ("string", False),
+        "at": ("datetime", False),
+        "local": ("localDatetime", False),
+        "happened": ("datetime", False),
+        "due": ("date", True),
+    }
+
+
+def test_an_index_on_one_property_is_that_property_s_and_one_over_several_the_fragment_s(modules, project: Project):
+    (names,) = modules(
+        indexed="""
+        from typing import Annotated
+        from drivine import FullTextIndex, GraphProperty, NodeFragment, NodeId, RangeIndex, Unique, VectorIndex
+
+        class Doc(
+            NodeFragment, labels=["Doc"], schema=[Unique(["tenant_id", "user_id"]), RangeIndex(["title"])]
+        ):
+            id: Annotated[str, NodeId()]
+            email: Annotated[str, Unique(), GraphProperty("mail")]
+            title: str
+            body: Annotated[str, FullTextIndex()]
+            tenant_id: str
+            user_id: str
+            embedding: Annotated[list[float] | None, VectorIndex(similarity="EUCLIDEAN", dimensions=3)] = None
+            other: Annotated[list[float] | None, VectorIndex()] = None
+        """
+    )
+    write_model_file([names], project, False, quiet)
+    (doc,) = written(project)["fragments"]
+    properties = {it["name"]: it for it in doc["properties"]}
+    assert {name: it.get("index") for name, it in properties.items() if it.get("index")} == {
+        "email": "unique",
+        "title": "range",
+        "body": "fullText",
+    }
+    assert properties["embedding"]["vector"] == {"similarity": "EUCLIDEAN", "dimensions": 3}
+    assert properties["other"]["vector"] == {"similarity": "COSINE"}
+    # Named by field, as the format names a property, though the fields are stored as tenantId and userId.
+    assert doc["indexes"] == [{"kind": "unique", "properties": ["tenant_id", "user_id"]}]
+
+
+def test_a_class_of_another_module_a_view_leads_to_is_written_too(modules, project: Project):
+    other, views = modules(
+        other=FRAGMENT.format(name="Other"),
+        views="""
+        from typing import Annotated
+        from drivine import GraphView, Relationship, Root
+        from .other import Other
+
+        class Pair(GraphView):
+            root: Annotated[Other, Root()]
+            next: Annotated[Other | None, Relationship("NEXT")] = None
+        """,
+    )
+    write_model_file([views], project, False, quiet)
+    file = written(project)
+    assert [it["id"] for it in file["fragments"]] == [f"{other}.Other"]
+    assert [it["id"] for it in file["views"]] == [f"{views}.Pair"]
+
+
+def test_check_names_the_stale_model_file_by_its_path(tmp_path: Path, modules, capsys):
+    (a,) = modules(a=FRAGMENT.format(name="A"))
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "cli"\n')
+    out = tmp_path / "refs.py"
+    assert main([a, "--out", str(out)]) == 0
+    (tmp_path / ".drivine" / "model.json").write_text("{}\n")
+    capsys.readouterr()
+    assert main([a, "--out", str(out), "--check"]) == 1
+    assert f"Out of date: {tmp_path / '.drivine' / 'model.json'}." in capsys.readouterr().err
+    assert main([a, "--out", str(out), "--check", "--no-model"]) == 0

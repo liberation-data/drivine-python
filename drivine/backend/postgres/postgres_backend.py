@@ -20,6 +20,7 @@ from drivine.backend.postgres.postgres_statement import PostgresStatement
 from drivine.backend.postgres.postgres_views import PostgresViews
 from drivine.backend.postgres.postgres_writes import PostgresWrites
 from drivine.backend.save_statement import SaveStatement
+from drivine.backend.sql.cypher_shorthand import CypherShorthand
 from drivine.backend.sql.sql_cascade import beyond_count, kept_targets
 from drivine.backend.sql.sql_catalog import CATALOG_KINDS, catalog_properties
 from drivine.backend.sql.sql_graph import sql_text
@@ -81,6 +82,13 @@ class PostgresBackend:
         return PostgresQueryRenderer.render(
             query, target, lambda depth: PostgresViews(self.graph, depth), ROW_ALIAS, labels_of_class
         )
+
+    def written(self, predicate: str) -> str:
+        """
+        A predicate the caller wrote, as the store reads it: each property of the root written as Cypher writes it,
+        `n.name`, read as that property (see CypherShorthand).
+        """
+        return CypherShorthand(ROW_ALIAS, ROW_ALIAS, text_of).rewrite(predicate)
 
     def render_where(
         self, where: Any, target: TargetModel, labels_of_class: Callable[[type], list[str]]

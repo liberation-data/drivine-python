@@ -2,6 +2,7 @@
 # change that, and run the script again.
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Literal
 
@@ -66,7 +67,16 @@ class GroupOperations:
         A path key's value is the node it reaches, mapped to its class.
         """
         model = self._registry.fragment(source)
-        query = GroupQuery(keys, aggregates or {}, where, bindings or {}, having, order_by, limit, skip)
+        query = GroupQuery(
+            keys,
+            {name: self._written_filter(it) for name, it in (aggregates or {}).items()},
+            self._written(where),
+            bindings or {},
+            having,
+            order_by,
+            limit,
+            skip,
+        )
         targets: dict[str, FragmentModel] = {}
         for name, group_key in keys.items():
             if isinstance(group_key, PathKey):
@@ -102,3 +112,11 @@ class GroupOperations:
             source, keys={"value": key(property)}, aggregates={"count": count()}, where=where, bindings=bindings
         )
         return {it["value"]: it["count"] or 0 for it in rows}
+
+    def _written(self, where: str | Any | None) -> str | Any | None:
+        """A predicate the caller wrote, as the store reads it (see the backend's `written`); conditions as they are."""
+        return self._backend.written(where) if isinstance(where, str) and where else where
+
+    def _written_filter(self, aggregate: GroupAggregate) -> GroupAggregate:
+        """The aggregate with a filter the caller wrote read as the store reads it."""
+        return dataclasses.replace(aggregate, filter=self._written(aggregate.filter))

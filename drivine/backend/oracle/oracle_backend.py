@@ -11,7 +11,7 @@ from drivine.backend.graph_statement import GraphStatement
 from drivine.backend.matched_node import MatchedNode
 from drivine.backend.matching_search import MatchingSearch
 from drivine.backend.nearest_search import NearestSearch
-from drivine.backend.oracle.oracle_graph import OracleGraph, has_labels, json_key, node_document
+from drivine.backend.oracle.oracle_graph import OracleGraph, has_labels, json_key, node_document, text_of
 from drivine.backend.oracle.oracle_groups import OracleGroups
 from drivine.backend.oracle.oracle_query_renderer import OracleQueryRenderer
 from drivine.backend.oracle.oracle_save_builder import OracleSaveBuilder
@@ -21,6 +21,7 @@ from drivine.backend.oracle.oracle_views import OracleViews
 from drivine.backend.oracle.oracle_writes import OracleWrites
 from drivine.backend.page import Page
 from drivine.backend.save_statement import SaveStatement
+from drivine.backend.sql.cypher_shorthand import CypherShorthand
 from drivine.backend.sql.sql_cascade import beyond_count, kept_targets
 from drivine.backend.sql.sql_catalog import catalog_properties
 from drivine.drivine_error import DrivineError
@@ -81,6 +82,13 @@ class OracleBackend:
         return OracleQueryRenderer.render(
             query, target, lambda depth: OracleViews(self.graph, depth), ROW_ALIAS, labels_of_class, indexed
         )
+
+    def written(self, predicate: str) -> str:
+        """
+        A predicate the caller wrote, as the store reads it: each property of the root written as Cypher writes it,
+        `n.name`, read as that property (see CypherShorthand).
+        """
+        return CypherShorthand(ROW_ALIAS, ROW_ALIAS, text_of).rewrite(predicate)
 
     def render_where(
         self, where: Any, target: TargetModel, labels_of_class: Callable[[type], list[str]]

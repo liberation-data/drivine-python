@@ -71,6 +71,10 @@ class CypherBackend:
         """
         return QueryRenderer.render(query, target, self.grammar, NODE_ALIAS, labels_of_class)
 
+    def written(self, predicate: str) -> str:
+        """A predicate the caller wrote, as the store reads it: Cypher, as it is."""
+        return predicate
+
     def render_where(
         self, where: Any, target: TargetModel, labels_of_class: Callable[[type], list[str]]
     ) -> tuple[str, dict[str, Any]]:

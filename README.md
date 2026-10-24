@@ -145,7 +145,9 @@ makes it: one over the property whatever the label, and one over the label's nod
 through. A uniqueness constraint comes with a range index over its properties, which stays when the constraint is
 dropped. The object manager writes SQL for it, and the query DSL, grouped reads, search and schema management work as on
 the graph engines. A raw `where` is SQL over the node's row, `n`: its `labels`, `props` (a JSON object keyed by stored
-name) and `stamp`, say `JSON_VALUE(n.props, '$.name') = $name`. Your own statements are SQL too, unless written as
+name) and `stamp`, say `JSON_VALUE(n.props, '$.name') = $name`. A property of the node may be written as Cypher writes
+it, `n.name = $name` (or ``n.`a name` ``), and is read as that property; a property compared with `true` or `false` is
+compared with the text a JSON boolean is read as. Your own statements are SQL too, unless written as
 Cypher (see [Cypher on Postgres and Oracle](#cypher-on-postgres-and-oracle)). `matches` takes a regular expression in
 Oracle's POSIX dialect, matched against the whole value. A leading `(?i)` ignores case; what Java adds, such as
 `(?:…)`, a look-around or `\b`, is not read. A backreference names the group the expression numbers it by,
@@ -194,7 +196,9 @@ applied whole or not at all.
   statement is bound only the ones it names. A row comes back as a dict of its columns, a `jsonb` column as Python
   values.
 - A raw `where`, for a load or a delete, is SQL over the root's row: its `props`, `labels` and `stamp`, say
-  `(n.props ->> 'name') = $name`.
+  `(n.props ->> 'name') = $name`. A property of the root may be written as Cypher writes it, `n.name = $name` (or
+  ``n.`a name` ``), and is read as that property, as text; a property compared with `true` or `false` is compared with
+  the text a JSON boolean is read as.
 - A number is compared as a number only where one is stored: `'7'` is not `7`, as on the graph engines.
 - Text is ordered by the database's collation, so a page of mixed-case text may not be in the order Neo4j gives
   (`a, b, B` rather than `B, a, b`). The range indexes are made in that collation, so an order and a seek are read

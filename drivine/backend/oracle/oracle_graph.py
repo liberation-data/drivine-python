@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 
 from drivine.backend.sql.sql_graph import DEFAULT_GRAPH, SqlGraph, sql_text
@@ -76,6 +77,27 @@ END;"""
 def json_key(name: str) -> str:
     """A JSON path step naming a key, quoted: `."metadata.source"`."""
     return '."' + _escaped(name) + '"'
+
+
+_PLAIN_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def drivine4j_step(key: str) -> str:
+    """
+    The step of a JSON path naming `key` as drivine4j writes it: bare where SQL would take it for an identifier, else
+    quoted as `json_key` quotes it, for the SQL literal it is written in.
+    """
+    return key if _PLAIN_KEY.match(key) and key not in ("true", "false", "null") else json_key(key)[1:]
+
+
+def text_of(alias: str, property: str) -> str:
+    """
+    The property of the node row `alias` as text, as drivine4j's `OracleSql.property` reads it. The stamp is a column
+    of its own.
+    """
+    if property == stamps.PROPERTY:
+        return f"{alias}.stamp"
+    return f"JSON_VALUE({alias}.props, '$.{drivine4j_step(property)}')"
 
 
 def holding(alias: str, property: str) -> str:

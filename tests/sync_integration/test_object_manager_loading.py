@@ -55,7 +55,6 @@ class TestFragments:
         found = gom.load_all(Person, "n.name IN $names", {"names": ["n2", "n4"]})
         assert sorted(it.uuid for it in found) == ["p2", "p4"]
 
-    @pytest.mark.fails_on_sql_stores("#96: a raw where doesn't read a root property written as Cypher writes it")
     def test_filters_and_counts_with_a_predicate_of_a_property(self, pm, gom):
         run(pm, "UNWIND range(1, 5) AS i CREATE (:Person {uuid: 'p' + toString(i), name: 'n' + toString(i)})")
         found = gom.load_all(Person, "n.name = $a OR n.name = $b", {"a": "n2", "b": "n4"})

@@ -641,10 +641,11 @@ class StatelessGraphObjectManager:
         self, target_: TargetModel, where: str | Where | None, bindings: Mapping[str, Any] | None
     ) -> tuple[str | None, dict[str, Any]]:
         """
-        A filter as a predicate over `n`, with its values: Cypher as it is given, or conditions written for the store.
+        A filter as a predicate over `n`, with its values: as the caller wrote it, read as the store reads it (see the
+        backend's `written`), or conditions written for the store.
         """
         if where is None or isinstance(where, str):
-            return where, dict(bindings or {})
+            return self.backend.written(where) if where else where, dict(bindings or {})
         written, values = self.backend.render_where(where, target_, self._labels)
         return written, {**(bindings or {}), **values}
 
@@ -657,8 +658,9 @@ class StatelessGraphObjectManager:
         indexed: Sequence[SchemaItem] = (),
     ) -> RenderedQuery:
         """
-        A load's query written for the store. A Cypher `where` is kept as it is, and joined to what the query's terms
-        write, such as a keyset. `indexed` is what conditions may be read through (see `_filter_indexes`).
+        A load's query written for the store. A `where` the caller wrote is read as the store reads it (see the
+        backend's `written`), and joined to what the query's terms write, such as a keyset. `indexed` is what
+        conditions may be read through (see `_filter_indexes`).
         """
         _checked(query.depth)
         conditions = None if where is None or isinstance(where, str) else where
@@ -667,6 +669,7 @@ class StatelessGraphObjectManager:
         )
         if not isinstance(where, str):
             return dataclasses.replace(rendered, bindings={**(bindings or {}), **rendered.bindings})
+        where = self.backend.written(where) if where else where
         predicate = f"({where}) AND {rendered.where}" if rendered.where else where
         return dataclasses.replace(rendered, where=predicate, bindings={**(bindings or {}), **rendered.bindings})
 

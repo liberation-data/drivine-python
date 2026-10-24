@@ -164,10 +164,23 @@ def _neo4j_vectors(rows: list[Any]) -> list[SchemaItem]:
                 str(config.get("vector.similarity_function")).upper(),  # pyright: ignore[reportArgumentType]
                 _number(config.get("vector.hnsw.m")),
                 _number(config.get("vector.hnsw.ef_construction")),
-                config.get("vector.quantization.enabled"),
+                _quantization_enabled(config),
             )
         )
     return items
+
+
+def _quantization_enabled(config: dict[str, Any]) -> bool | None:
+    """
+    Whether a Neo4j vector index quantizes, as its `indexConfig` reports it. Neo4j up to 2026.05 reports
+    `vector.quantization.enabled`. From 2026.06 it reports `vector.quantization.type` in its place: `NONE`, or the kind
+    of quantization, `SCALAR` or `BINARY`. None when it reports neither.
+    """
+    kind = config.get("vector.quantization.type")
+    if isinstance(kind, str):
+        return kind.upper() != "NONE"
+    enabled = config.get("vector.quantization.enabled")
+    return enabled if isinstance(enabled, bool) else None
 
 
 def _neo4j_create_vector(spec: VectorIndexSpec) -> list[str]:
@@ -175,6 +188,7 @@ def _neo4j_create_vector(spec: VectorIndexSpec) -> list[str]:
     config = [
         f"`vector.dimensions`: {spec.dimensions}",
         f"`vector.similarity_function`: '{spec.similarity.lower()}'",
+        # `enabled`, not `type`: every Neo4j from 5 to 2026.10 accepts `enabled`; those before 2026.06 refuse `type`.
         *(
             [f"`vector.quantization.enabled`: {str(tuning.quantization_enabled).lower()}"]
             if tuning.quantization_enabled is not None

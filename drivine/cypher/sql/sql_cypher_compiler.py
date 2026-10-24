@@ -179,25 +179,41 @@ _COMPARED = {
 
 
 @dataclass(frozen=True)
+class Hop:
+    """A relationship a walk's step takes, the row `edge`, in `direction` from the node the step is at."""
+
+    edge: str
+    direction: Direction
+
+
+@dataclass(frozen=True)
 class Walk:
     """
-    A variable-length relationship's walk, from the node whose id is `from_` to the one whose is `to`, as rows named
-    `name`: by relationships named `edge` in `direction` that meet `conditions`, to a depth from `min` to `max` (any, if
-    None). With `backwards` it is walked from the pattern's later node. `seed`, where there is one, is the condition the
-    node walked from meets of its own, over a node row.
+    A walk from the node whose id is `from_` to the one whose is `to`, as rows named `name`, to a depth from `min` to
+    `max` (any, if None). Each step takes the `hops` in turn, from the node the step is at, and meets `conditions`: one
+    hop for a variable-length relationship, a hop for each relationship of a quantified path pattern's. A node the
+    conditions read is the row `nodes` names, at its place among the hops' nodes: the node the step is at first, then
+    the far node of each hop. With `backwards` a walk of one hop is walked from the pattern's later node. `seed`, where
+    there is one, is the condition the node walked from meets of its own, over a node row.
     """
 
     from_: str
     to: str
     name: str
     step: str
-    edge: str
-    direction: Direction
+    hops: tuple[Hop, ...]
+    nodes: tuple[str | None, ...]
     min: int
     max: int | None
     conditions: tuple[str, ...]
     backwards: bool
     seed: Callable[[str], str] | None
+
+    def __post_init__(self) -> None:
+        if len(self.nodes) != len(self.hops) + 1:
+            raise ValueError("A walk's step has one node more than it has hops.")
+        if self.backwards and len(self.hops) != 1:
+            raise ValueError("A walk of more than one hop a step is walked forwards.")
 
 
 @dataclass(frozen=True)
@@ -267,8 +283,8 @@ class _Select:
 class _Hop:
     """
     The relationships one part of a pattern matched: one, its id `eids`, or with `many` those a variable-length
-    relationship walked, a list of ids. Of the types it may have; `nodes` is the list of the ids of the nodes it reaches
-    after the one it starts from.
+    relationship or a quantified path pattern walked, a list of ids. Of the types it may have; `nodes` is the list of
+    the ids of the nodes it reaches after the one it starts from.
     """
 
     eids: str
@@ -652,9 +668,51 @@ class SqlCypherCompiler(ABC):
     def id_rows(self, list_: str, alias: str) -> str:
         """The ids of the list as rows named `alias`, with columns `id` and `ord`, in its order."""
 
+    walks_read_row = True
+    """
+    Whether a walk reads the row it is in: a condition of a quantified path pattern may then read a variable bound
+    outside it.
+    """
+
     @abstractmethod
     def walk(self, walk: Walk) -> Walked:
-        """A walk of a variable-length relationship: see Walk."""
+        """A walk of a variable-length relationship or a quantified path pattern: see Walk."""
+
+    def leaves(self, edge: str, direction: Direction, at: str) -> tuple[str, str]:
+        """
+        The condition that the relationship row `edge` leaves the node whose id is `at` in `direction`, and the id of
+        the node it reaches.
+        """
+        if direction is Direction.OUTGOING:
+            return f"{edge}.src = {at}", f"{edge}.dst"
+        if direction is Direction.INCOMING:
+            return f"{edge}.dst = {at}", f"{edge}.src"
+        # Either way, and a relationship from a node to itself once.
+        return (
+            f"({edge}.src = {at} OR {edge}.dst = {at})",
+            f"CASE WHEN {edge}.src = {at} THEN {edge}.dst ELSE {edge}.src END",
+        )
+
+    def steps(self, walk: Walk, at: str) -> tuple[list[str], list[str], list[str]]:
+        """
+        The joins of a walk's step from the node whose id is `at`: each hop's relationship, and each node a condition
+        reads. Gives them, the ids of the nodes the hops reach, in turn, and that no two relationships of the step are
+        one.
+        """
+        joins: list[str] = []
+        reached: list[str] = []
+        first = walk.nodes[0]
+        if first is not None:
+            joins.append(f"JOIN {self.nodes} {first} ON {first}.nid = {at}")
+        for i, hop in enumerate(walk.hops):
+            join, far = self.leaves(hop.edge, hop.direction, reached[-1] if reached else at)
+            joins.append(f"JOIN {self.edges} {hop.edge} ON {join}")
+            reached.append(far)
+            node = walk.nodes[i + 1]
+            if node is not None:
+                joins.append(f"JOIN {self.nodes} {node} ON {node}.nid = {far}")
+        distinct = [f"{a.edge}.eid <> {b.edge}.eid" for i, a in enumerate(walk.hops) for b in walk.hops[i + 1 :]]
+        return joins, reached, distinct
 
     @abstractmethod
     def reduce(
@@ -774,6 +832,8 @@ class SqlCypherCompiler(ABC):
         The order of the rows the projection being compiled reads, which `collect` gathers them in, as Cypher gathers
         them: a group's rows are not read in the order of the query they come from.
         """
+        self._stepping = False
+        """Whether a quantified path pattern's conditions are being compiled: what they hold is in its walk's step."""
 
     def _alias(self, prefix: str) -> str:
         self._counter += 1
@@ -1037,6 +1097,13 @@ class SqlCypherCompiler(ABC):
                 select.where.append(self._properties_match(value.props, node.properties, select.scope))
             bound.append(value)
         for i, relationship in enumerate(pattern.relationships):
+            if relationship.group is not None:
+                hops.append(
+                    self._quantified(
+                        select, relationship, bound[i].nid, bound[i + 1].nid, self._seed(pattern.nodes[i], before)
+                    )
+                )
+                continue
             if relationship.range is not None:
                 # Walked from its far node when only that one is pinned: the same relationships, read backwards.
                 if pinned[i + 1] and not pinned[i]:
@@ -1102,7 +1169,7 @@ class SqlCypherCompiler(ABC):
         that meet `where`, the `WHERE` of its `MATCH`, as Cypher's shortest path is the least of those.
         """
         relationship = pattern.relationships[0] if len(pattern.relationships) == 1 else None
-        if relationship is None or relationship.range is None:
+        if relationship is None or relationship.range is None or relationship.group is not None:
             unsupported("A shortest path of anything but one variable-length relationship")
         inner = _Select(select.scope)
         hops: list[_Hop] = []
@@ -1210,14 +1277,14 @@ class SqlCypherCompiler(ABC):
                 else []
             ),
         ]
-        walked = self.walk(
+        walked = self._walked(
             Walk(
                 from_,
                 to,
                 self._alias("p"),
                 self._alias("w"),
-                edge,
-                relationship.direction,
+                (Hop(edge, relationship.direction),),
+                (None, None),
                 range_.min if range_.min is not None else 1,
                 range_.max,
                 tuple(conditions),
@@ -1231,6 +1298,148 @@ class SqlCypherCompiler(ABC):
         if relationship.variable is not None:
             select.bind(relationship.variable, self._relationship_list(walked.eids))
         return _Hop(walked.eids, True, relationship.types, walked.nids)
+
+    def _quantified(
+        self, select: _Select, relationship: RelationshipPattern, from_: str, to: str, seed: Callable[[str], str] | None
+    ) -> _Hop:
+        """
+        A quantified path pattern, `((a)-[r:R]->(b) WHERE …){min,max}`, from the node `from_` to the node `to`: a walk
+        whose each step is a repetition of the group's pattern, that takes a relationship no more than once, as a walk
+        of a variable-length relationship does. Each variable of the group is bound to the list of what it matched in
+        each repetition, in turn.
+        """
+        group = relationship.group
+        range_ = relationship.range
+        assert group is not None and range_ is not None
+        inner = group.pattern
+        rows = [self._alias("n") for _ in inner.nodes]
+        links = [self._alias("e") for _ in inner.relationships]
+        scope: list[tuple[str, Value]] = [
+            *(
+                (node.variable, _node(row))
+                for node, row in zip(inner.nodes, rows, strict=True)
+                if node.variable is not None
+            ),
+            *(
+                (part.variable, _relationship(edge))
+                for part, edge in zip(inner.relationships, links, strict=True)
+                if part.variable is not None
+            ),
+        ]
+        outside = select.scope
+        named: dict[str, int] = {}
+        for variable, _ in scope:
+            named[variable] = named.get(variable, 0) + 1
+        for variable, times in named.items():
+            if times > 1:
+                unsupported("A variable named twice in a quantified path pattern")
+            if outside.get(variable) is not None:
+                raise DrivineError(f"{variable} is bound outside the quantified path pattern that names it.")
+        tests = [
+            *(it.properties for it in inner.nodes if it.properties is not None),
+            *(it.properties for it in inner.relationships if it.properties is not None),
+            *_present(group.where),
+        ]
+        read = _union_of(variables_in, tests)
+        # A subquery reads every variable, for variables_in names none of a subquery's: as _evaluate takes it.
+        subquery = any(holds_subquery(it) for it in tests)
+        if not self.walks_read_row and any(outside.get(it) is not None for it in read):
+            unsupported("On Oracle, a quantified path pattern that reads a variable from outside it")
+        if not self.walks_read_row and subquery and outside:
+            unsupported("On Oracle, a subquery in a quantified path pattern that may read a variable from outside it")
+        within = {**outside, **dict(scope)}
+        stepping = self._stepping
+        self._stepping = True
+        try:
+            conditions = [
+                *(
+                    test
+                    for node, row in zip(inner.nodes, rows, strict=True)
+                    for test in _present(
+                        self.has_labels(f"{row}.labels", node.labels) if node.labels else None,
+                        self._properties_match(f"{row}.props", node.properties, within)
+                        if node.properties is not None
+                        else None,
+                    )
+                ),
+                *(
+                    test
+                    for part, edge in zip(inner.relationships, links, strict=True)
+                    for test in _present(
+                        self._types(f"{edge}.type", part.types),
+                        self._properties_match(f"{edge}.props", part.properties, within)
+                        if part.properties is not None
+                        else None,
+                    )
+                ),
+                *([self.bool(self._expression(group.where, within))] if group.where is not None else []),
+            ]
+        finally:
+            self._stepping = stepping
+        # A node is joined to the step where a condition reads it.
+        joined = tuple(
+            row
+            if (subquery and node.variable is not None)
+            or node.labels
+            or node.properties is not None
+            or node.variable in read
+            else None
+            for node, row in zip(inner.nodes, rows, strict=True)
+        )
+        walked = self._walked(
+            Walk(
+                from_,
+                to,
+                self._alias("p"),
+                self._alias("w"),
+                tuple(Hop(edge, part.direction) for part, edge in zip(inner.relationships, links, strict=True)),
+                joined,
+                range_.min if range_.min is not None else 1,
+                range_.max,
+                tuple(conditions),
+                False,
+                seed,
+            )
+        )
+        select.source(walked.source)
+        select.where.append(walked.condition)
+        # The step's nodes and relationships, k of each a repetition, in turn: each variable is every k-th of them.
+        k = len(inner.relationships)
+        nids = self.join_ids([self.ids(from_), walked.nids])
+        for i, node in enumerate(inner.nodes):
+            if node.variable is not None:
+                select.bind(node.variable, Entities(self._every(nids, i, k, k - i), relationships=False))
+        for i, part in enumerate(inner.relationships):
+            if part.variable is not None:
+                select.bind(part.variable, Entities(self._every(walked.eids, i, k, 0), relationships=True))
+        typed = all(it.types for it in inner.relationships)
+        types = tuple(dict.fromkeys(t for it in inner.relationships for t in it.types)) if typed else ()
+        return _Hop(walked.eids, True, types, walked.nids)
+
+    def _every(self, list_: str, first: int, stride: int, leave: int) -> str:
+        """
+        The ids of the store's list from the one after the first `first`, every `stride`-th, short of the last `leave`,
+        as a JSON list in its order.
+        """
+        u = self._alias("u")
+        v = self._alias("v")
+        listed = self.comparable(Json(self.aggregate_list(self.scalar(f"{v}.id"), f"{v}.ord"), ordered=True))
+        counted = f"SELECT {u}.id, {u}.ord, COUNT(*) OVER () AS cnt FROM {self.id_rows(list_, u)}"
+        return (
+            f"(SELECT {listed} FROM ({counted}) {v} "
+            f"WHERE {v}.ord > {first} AND MOD({v}.ord - {first + 1}, {stride}) = 0 AND {v}.ord <= {v}.cnt - {leave})"
+        )
+
+    def _walked(self, walk: Walk) -> Walked:
+        """
+        `walk`'s rows. On Oracle, no walk is in another's step, for its recursive query holds no `WITH` of its own.
+        """
+        if not self.walks_read_row and self._stepping:
+            unsupported(
+                "On Oracle, a variable-length relationship or quantified path pattern in a subquery of a quantified "
+                "path pattern"
+            )
+        return self.walk(walk)
 
     def _node_list(self, nids: str) -> Entities:
         """The nodes whose ids are the store's list, in its order: null where the list is."""
@@ -1628,6 +1837,8 @@ class SqlCypherCompiler(ABC):
             else:
                 raise DrivineError(f"{node.variable} is not a node, and is used as one in a pattern.")
         for i, relationship in enumerate(pattern.relationships):
+            if relationship.group is not None:
+                unsupported("A quantified path pattern in CREATE or MERGE")
             if relationship.range is not None:
                 unsupported("A variable-length relationship in CREATE or MERGE")
             if len(relationship.types) != 1:
@@ -3043,7 +3254,52 @@ def variables_in_pattern(pattern: Pattern) -> set[str]:
             found.add(part.variable)
         if part.properties is not None:
             found |= variables_in(part.properties)
+    for relationship in pattern.relationships:
+        if relationship.group is not None:
+            found |= variables_in_pattern(relationship.group.pattern)
+            if relationship.group.where is not None:
+                found |= variables_in(relationship.group.where)
     return found
+
+
+def holds_subquery(expression: Expression) -> bool:
+    """
+    Whether the expression holds a subquery anywhere: in a comprehension's, a quantifier's or a pattern's condition or
+    properties too, where `contains` does not look.
+    """
+    if isinstance(expression, Subquery):
+        return True
+    if isinstance(expression, ListComprehension):
+        return any(holds_subquery(it) for it in _present(expression.list, expression.where, expression.projection))
+    if isinstance(expression, Quantifier):
+        return any(holds_subquery(it) for it in _present(expression.list, expression.where))
+    if isinstance(expression, Reduce):
+        return any(holds_subquery(it) for it in [expression.initial, expression.list, expression.expression])
+    if isinstance(expression, PatternComprehension):
+        return pattern_holds_subquery(expression.pattern) or any(
+            holds_subquery(it) for it in _present(expression.where, expression.projection)
+        )
+    if isinstance(expression, PatternPredicate):
+        return pattern_holds_subquery(expression.pattern)
+    if isinstance(expression, Exists):
+        return any(pattern_holds_subquery(it) for it in expression.patterns) or (
+            expression.where is not None and holds_subquery(expression.where)
+        )
+    return any(holds_subquery(it) for it in children(expression))
+
+
+def pattern_holds_subquery(pattern: Pattern) -> bool:
+    """Whether the pattern holds a subquery in its parts' properties or a quantified path pattern's condition."""
+    for part in [*pattern.nodes, *pattern.relationships]:
+        if part.properties is not None and holds_subquery(part.properties):
+            return True
+    for relationship in pattern.relationships:
+        group = relationship.group
+        if group is not None and (
+            pattern_holds_subquery(group.pattern) or (group.where is not None and holds_subquery(group.where))
+        ):
+            return True
+    return False
 
 
 def children(expression: Expression) -> list[Expression]:

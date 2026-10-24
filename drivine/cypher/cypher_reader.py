@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import functools
 from typing import Any, NoReturn
 
@@ -55,7 +56,7 @@ from drivine.cypher.ast.node_pattern import NodePattern
 from drivine.cypher.ast.pattern import Pattern, Shortest
 from drivine.cypher.ast.projection import Projection, ProjectionItem, SortItem
 from drivine.cypher.ast.query import Query, Union
-from drivine.cypher.ast.relationship_pattern import Direction, Range, RelationshipPattern
+from drivine.cypher.ast.relationship_pattern import Direction, Group, Range, RelationshipPattern
 from drivine.cypher.ast.remove_item import RemoveItem, RemoveLabels, RemoveProperty
 from drivine.cypher.ast.set_item import SetAdd, SetItem, SetLabels, SetProperty, SetReplace
 from drivine.drivine_error import DrivineError
@@ -270,30 +271,69 @@ class _Reader:
         inner = context.oC_PatternElement()
         if inner is not None:
             return self.pattern(inner, variable)
-        return self.chain(context.oC_NodePattern(), context.oC_PatternElementChain(), variable)
+        nodes: list[NodePattern] = []
+        relationships: list[RelationshipPattern] = []
+        # A quantified path pattern with no node beside it is joined to a node of no label of its own.
+        for child in context.children:
+            if isinstance(child, self.p.OC_NodePatternContext):
+                if len(nodes) > len(relationships):
+                    raise DrivineError(
+                        "Two nodes of a path are side by side: a relationship or a quantified path pattern goes "
+                        "between them."
+                    )
+                nodes.append(self.node(child))
+            elif isinstance(child, self.p.OC_PatternElementChainContext):
+                # Only after a quantified path pattern: Cypher puts a node between them.
+                if len(nodes) == len(relationships):
+                    raise DrivineError("A relationship after a quantified path pattern has a node between them.")
+                relationships.append(self.chained(child))
+                nodes.append(self.node(child.oC_NodePattern()))
+            elif isinstance(child, self.p.OC_QuantifiedPathPatternContext):
+                if len(nodes) == len(relationships):
+                    nodes.append(NodePattern(None, (), None))
+                relationships.append(self.quantified(child))
+        if len(nodes) == len(relationships):
+            nodes.append(NodePattern(None, (), None))
+        return Pattern(variable, tuple(nodes), tuple(relationships))
+
+    def quantified(self, context: Context) -> RelationshipPattern:
+        """
+        `((a)-[:R]->(b) WHERE …){1,3}`: a relationship of the pattern that repeats its own, between the nodes beside
+        it.
+        """
+        pattern = self.pattern(context.oC_PatternElement(), None)
+        if not pattern.relationships:
+            raise DrivineError("A quantified path pattern holds a relationship.")
+        for relationship in pattern.relationships:
+            if relationship.group is not None:
+                raise DrivineError("A quantified path pattern holds no quantified path pattern.")
+            if relationship.range is not None:
+                _refuse("A variable-length relationship in a quantified path pattern")
+        where = context.oC_Where()
+        group = Group(pattern, self.expression(where.oC_Expression()) if where is not None else None)
+        range_ = self.quantifier_range(context.oC_PathQuantifier())
+        # As in Neo4j: a group that may repeat no times at most matches nothing of its own.
+        if range_.max == 0:
+            raise DrivineError("A quantified path pattern's quantifier has a maximum of at least 1.")
+        return RelationshipPattern(None, (), Direction.OUTGOING, range_, None, group)
 
     def relationships_pattern(self, context: Context, variable: str | None) -> Pattern:
-        return self.chain(context.oC_NodePattern(), context.oC_PatternElementChain(), variable)
-
-    def chain(self, first: Context, chains: list[Context], variable: str | None) -> Pattern:
-        nodes = [self.node(first)]
+        nodes = [self.node(context.oC_NodePattern())]
         relationships: list[RelationshipPattern] = []
-        for chain in chains:
-            relationship = self.relationship(chain.oC_RelationshipPattern())
-            quantifier = chain.oC_PathQuantifier()
-            if quantifier is not None:
-                if relationship.range is not None:
-                    _refuse("A quantified relationship that has a range of its own")
-                relationship = RelationshipPattern(
-                    relationship.variable,
-                    relationship.types,
-                    relationship.direction,
-                    self.quantifier_range(quantifier),
-                    relationship.properties,
-                )
-            relationships.append(relationship)
+        for chain in context.oC_PatternElementChain():
+            relationships.append(self.chained(chain))
             nodes.append(self.node(chain.oC_NodePattern()))
         return Pattern(variable, tuple(nodes), tuple(relationships))
+
+    def chained(self, chain: Context) -> RelationshipPattern:
+        """The relationship of a link of a path, `-[:R]->` or a quantified relationship, `-[:R]->{1,3}`."""
+        relationship = self.relationship(chain.oC_RelationshipPattern())
+        quantifier = chain.oC_PathQuantifier()
+        if quantifier is None:
+            return relationship
+        if relationship.range is not None:
+            _refuse("A quantified relationship that has a range of its own")
+        return dataclasses.replace(relationship, range=self.quantifier_range(quantifier))
 
     def quantifier_range(self, context: Context) -> Range:
         """`+` is one or more, `*` any, `{n}` exactly n, and `{m,n}` from m to n, either bound left out."""

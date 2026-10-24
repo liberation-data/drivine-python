@@ -45,3 +45,17 @@ def test_a_sum_of_twice_the_terms_compiles_to_about_twice_the_statement(compiler
 
     short, long = (len(compiler("g").compile(summed(it)).sql) for it in (8, 16))
     assert long < 3 * short, (short, long)
+
+
+@COMPILERS
+def test_a_quantified_path_pattern_of_twice_the_hops_each_node_read_by_its_where_compiles_to_about_twice_the_statement(
+    compiler: type[SqlCypherCompiler],
+) -> None:
+    def group(hops: int) -> str:
+        chain = "".join(f"-[:R]->(n{it})" for it in range(1, hops + 1))
+        where = " AND ".join(f"n{it - 1}.v < n{it}.v" for it in range(1, hops + 1))
+        return f"MATCH (a:Claim) ((n0){chain} WHERE {where}){{1,3}} (b) RETURN b"
+
+    short, long = (len(compiler("g").compile(group(it)).sql) for it in (4, 8))
+    assert short < 20_000, short
+    assert long < 3 * short, (short, long)

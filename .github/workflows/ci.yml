@@ -6,6 +6,18 @@ on:
   pull_request:
 
 jobs:
+  # The Cypher spec's copies in tests/cypher are the tag tests/cypher/VERSION names, unchanged, and a later tag is
+  # shown as a warning. The script reads the standard library alone, so nothing is installed for it.
+  cypher-spec:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - name: Check the Cypher spec
+        run: python scripts/check_cypher_spec.py
+
   test:
     runs-on: ubuntu-latest
     strategy:

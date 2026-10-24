@@ -7,7 +7,8 @@ recorded in tests/cypher/VERSION.
 
 The three Drivine libraries run the same files, so a Cypher statement gives the same rows from each: run this when the
 spec is tagged again, and tests/integration/test_cypher_spec.py and tests/unit/test_cypher_refusals.py run what it
-says. drivine4j's scripts/sync-cypher-spec.sh, ported.
+says. scripts/check_cypher_spec.py checks the copies are the tag's. drivine4j's scripts/sync-cypher-spec.sh,
+ported.
 """
 
 from __future__ import annotations
@@ -30,26 +31,33 @@ def fetch(url: str) -> bytes:
         return response.read()
 
 
+def spec(tag: str) -> dict[str, bytes]:
+    """
+    Each of FILES at the spec's tag, by its name. Every file is read before any is given, so a tag without one fails
+    here, and nothing is written.
+    """
+    archive = fetch(f"https://github.com/{REPOSITORY}/archive/refs/tags/{tag}.tar.gz")
+    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as tar:
+        # Each file by its name under the archive's one folder: nothing else in the archive is read.
+        members = {
+            Path(it.name).relative_to(Path(it.name).parts[0]).as_posix(): it for it in tar.getmembers() if it.isfile()
+        }
+        contents: dict[str, bytes] = {}
+        for name in FILES:
+            content = tar.extractfile(members[name]) if name in members else None
+            if content is None:
+                raise SystemExit(f"{name} is not a file in {REPOSITORY}@{tag}.")
+            contents[name] = content.read()
+    return contents
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0] if __doc__ else None)
     parser.add_argument("tag", help="a tag of the Cypher spec, such as v0.3.0")
     args = parser.parse_args()
 
-    archive = fetch(f"https://github.com/{REPOSITORY}/archive/refs/tags/{args.tag}.tar.gz")
-    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as tar:
-        # Each file by its name under the archive's one folder: nothing else in the archive is read, or written out.
-        members = {
-            Path(it.name).relative_to(Path(it.name).parts[0]).as_posix(): it for it in tar.getmembers() if it.isfile()
-        }
-        # Every file read before any is written, so a tag without one leaves tests/cypher as it was.
-        contents: dict[str, bytes] = {}
-        for name in FILES:
-            content = tar.extractfile(members[name]) if name in members else None
-            if content is None:
-                raise SystemExit(f"{name} is not a file in {REPOSITORY}@{args.tag}.")
-            contents[name] = content.read()
-        for name, content in contents.items():
-            (SPEC / name).write_bytes(content)
+    for name, content in spec(args.tag).items():
+        (SPEC / name).write_bytes(content)
     (SPEC / "VERSION").write_text(f"{args.tag}\n")
     print(f"tests/cypher is now {REPOSITORY}@{args.tag}.")
     return 0

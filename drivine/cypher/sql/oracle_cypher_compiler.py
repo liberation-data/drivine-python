@@ -4,7 +4,6 @@ import re
 from collections.abc import Callable, Sequence
 from typing import Any
 
-from drivine.cypher.ast.relationship_pattern import Direction
 from drivine.cypher.sql.compiled_cypher import CompiledCypher
 from drivine.cypher.sql.oracle_temporal_sql import OracleTemporalSql
 from drivine.cypher.sql.parameters import OBJECT, cypher_json
@@ -312,32 +311,32 @@ class OracleCypherCompiler(SqlCypherCompiler):
             f"COLUMNS (ord FOR ORDINALITY, id NUMBER PATH '$')) {alias}"
         )
 
+    walks_read_row = False
+    """Oracle's recursive queries read nothing of the row they are in."""
+
     def walk(self, walk: Walk) -> Walked:
         """A recursive query from each node that meets the seed, each row carrying the node it started from."""
         w = walk.step
-        e = walk.edge
         n = f"{walk.name}_n"
-        if walk.direction is Direction.OUTGOING:
-            join, far = f"{e}.src = {w}.nid", f"{e}.dst"
-        elif walk.direction is Direction.INCOMING:
-            join, far = f"{e}.dst = {w}.nid", f"{e}.src"
-        else:
-            # Either way, and a relationship from a node to itself once.
-            join, far = (
-                f"({e}.src = {w}.nid OR {e}.dst = {w}.nid)",
-                f"CASE WHEN {e}.src = {w}.nid THEN {e}.dst ELSE {e}.src END",
-            )
+        joins, reached, distinct = self.steps(walk, f"{w}.nid")
+        eids = [f"{it.edge}.eid" for it in walk.hops]
         conditions = [
-            f"INSTR({w}.eids, ',' || {e}.eid || ',') = 0",
+            *(f"INSTR({w}.eids, ',' || {it} || ',') = 0" for it in eids),
+            *distinct,
             *([f"{w}.depth < {walk.max}"] if walk.max is not None else []),
             *walk.conditions,
         ]
         seeded = f" WHERE {walk.seed(n)}" if walk.seed is not None else ""
         # Walked backwards, each node it leaves goes first, so its nodes end with the one it started from.
         if walk.backwards:
-            step = f"    SELECT {w}.src, {far}, {w}.depth + 1, ',' || {w}.nid || {w}.nids, ',' || {e}.eid || {w}.eids"
+            step = (
+                f"    SELECT {w}.src, {reached[0]}, {w}.depth + 1, ',' || {w}.nid || {w}.nids, "
+                f"',' || {eids[0]} || {w}.eids"
+            )
         else:
-            step = f"    SELECT {w}.src, {far}, {w}.depth + 1, {w}.nids || {far} || ',', {w}.eids || {e}.eid || ','"
+            nids = "".join(f" || {it} || ','" for it in reached)
+            appended = "".join(f" || {it} || ','" for it in eids)
+            step = f"    SELECT {w}.src, {reached[-1]}, {w}.depth + 1, {w}.nids{nids}, {w}.eids{appended}"
         text = "\n".join(
             [
                 f"WITH {w} (src, nid, depth, nids, eids) AS (",
@@ -345,9 +344,12 @@ class OracleCypherCompiler(SqlCypherCompiler):
                 f"    FROM {self.nodes} {n}{seeded}",
                 "    UNION ALL",
                 step,
-                f"    FROM {w} JOIN {self.edges} {e} ON {join}",
+                f"    FROM {w}",
+                *(f"    {it}" for it in joins),
                 f"    WHERE {' AND '.join(conditions)}",
-                ")",
+                # A walk may come back to a node it left, which Oracle takes for a cycle unless told what one is: a
+                # step takes no relationship twice, so no row's relationships are an earlier row's.
+                ") CYCLE eids SET looped TO 'Y' DEFAULT 'N'",
                 f"SELECT src, nid, nids, eids FROM {w} WHERE depth >= {walk.min}",
             ]
         )

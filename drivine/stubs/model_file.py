@@ -97,8 +97,16 @@ class ModelReader:
         self._read = ReadModel()
 
     def read(self) -> ReadModel:
+        """The entries of every model the modules declare or lead to, each kind sorted by id, as the format asks."""
         for type_ in declared(self.modules):
             self._add(type_)
+        # A current entry refers only to current ones, so a subtype the registry refused, and named, is not listed.
+        ids = {it["id"] for it in self._read.fragments}
+        for entry in self._read.fragments:
+            if "subtypes" in entry:
+                entry["subtypes"] = [it for it in entry["subtypes"] if it in ids]
+                if not entry["subtypes"]:
+                    del entry["subtypes"]
         for entries in (self._read.fragments, self._read.relationship_fragments, self._read.views):
             entries.sort(key=lambda it: it["id"])
         return self._read
@@ -288,6 +296,7 @@ def _field_of(mapping: FieldMapping, stored: str) -> str:
 
 
 def _dict_value(annotation: Any) -> Any:
+    """The type of a dict's values, or Any for a field that is not a dict or does not say."""
     shape = FieldShape.of(annotation) if annotation is not None else None
     args = get_args(_unwrap(annotation)) if shape and shape.collection == "dict" else ()
     return args[1] if len(args) == 2 else Any
@@ -423,6 +432,7 @@ class Project:
 
     @property
     def file(self) -> Path:
+        """The model file, `.drivine/model.json` in the project's directory."""
         return self.directory / FILE
 
     @classmethod

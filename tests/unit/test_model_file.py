@@ -85,6 +85,11 @@ def test_each_entry_says_what_model_registry_builds_of_its_class(project: Projec
         assert bool(entry.get("stamp")) == (runtime.stamp_field is not None)
         if runtime.node_labels:
             assert entry["labelSet"]["field"] == runtime.node_labels.field
+            members = runtime.node_labels.members
+            assert entry["labelSet"].get("values") == (list(members) if members is not None else None)
+        assert [it.get("flat", False) for it in entry.get("bags", [])] == [
+            it.flat for it in sorted(runtime.property_bags, key=lambda bag: bag.field)
+        ]
     for entry in file["views"]:
         runtime = registry.view(classes[entry["id"]])
         assert entry["root"] == {"field": runtime.root_field, "fragment": model_id(runtime.root.type)}
@@ -102,11 +107,22 @@ def test_each_entry_says_what_model_registry_builds_of_its_class(project: Projec
                 rel.max_depth,
             )
             assert bool(it.get("readOnly")) == rel.read_only
+            sorted_by = (rel.sorted_by.path, rel.sorted_by.ascending) if rel.sorted_by else None
+            assert (
+                (it["sortedBy"]["property"], it["sortedBy"]["ascending"]) if "sortedBy" in it else None
+            ) == sorted_by
         for path in runtime.paths:
             it = written_rels[path.field]
             assert it["target"] == model_id(path.target.type)
-            assert [hop["type"] for hop in it["path"]] == [hop.type for hop in path.hops]
-        assert [it["field"] for it in entry.get("aggregates", [])] == sorted(it.field for it in runtime.aggregates)
+            assert [(hop["type"], hop["direction"], hop.get("label"), hop.get("orderBy")) for hop in it["path"]] == [
+                (hop.type, str(hop.direction), hop.label or None, hop.order_by or None) for hop in path.hops
+            ]
+        assert [
+            (it["field"], it["function"], it["type"], it.get("property")) for it in entry.get("aggregates", [])
+        ] == [
+            (it.field, str(it.function), it.type, it.property or None)
+            for it in sorted(runtime.aggregates, key=lambda aggregate: aggregate.field)
+        ]
 
 
 def _classes(module: str) -> list[type]:
@@ -154,7 +170,10 @@ def test_a_field_s_type_and_whether_it_may_be_absent_are_read_from_its_annotatio
             scores: dict[str, int] = {}
             stored_as: Annotated[str, GraphProperty("weird name")]
             blob: Annotated[dict[str, Any], JsonPacked()] = {}
+            packed: Annotated[Any, JsonPacked()] = None
             anything: Any = None
+            level: Literal[1, 2]
+            mixed: Literal[1, "one"]
         """
     )
     write_model_file(names, project, False, quiet)
@@ -179,7 +198,10 @@ def test_a_field_s_type_and_whether_it_may_be_absent_are_read_from_its_annotatio
         "scores": ("map", "int", None, False),
         "stored_as": ("string", None, None, False),
         "blob": ("map", "any", None, False),
+        "packed": ("json", None, None, True),
         "anything": ("any", None, None, True),
+        "level": ("int", None, None, False),
+        "mixed": ("any", None, None, False),
     }
     assert properties["stored_as"]["stored"] == "weird name"
     assert properties["seen"]["stored"] == "seen"
@@ -230,10 +252,15 @@ def test_a_project_that_never_declared_anything_gets_no_file(modules, project: P
     assert not project.file.exists()
 
 
-def test_a_file_of_another_format_is_written_over_and_said_so(modules, project: Project):
+@pytest.mark.parametrize(
+    "before",
+    ['{"format": "drivine-model/9", "fragments": [{"id": "x"}]}', "<<<<<<< HEAD\n{}", '["drivine-model/1"]'],
+    ids=["another format", "not JSON", "not an object"],
+)
+def test_a_file_of_another_format_is_written_over_and_said_so(modules, project: Project, before: str):
     (a,) = modules(a=FRAGMENT.format(name="A"))
     project.file.parent.mkdir()
-    project.file.write_text('{"format": "drivine-model/9", "fragments": [{"id": "x"}]}')
+    project.file.write_text(before)
     warnings: list[str] = []
     write_model_file([a], project, False, warnings.append)
     assert warnings == [f"Drivine model file: {project.file} is not a drivine-model/1 file, so nothing in it is kept."]
@@ -419,3 +446,28 @@ def test_check_names_the_stale_model_file_by_its_path(tmp_path: Path, modules, c
     assert main([a, "--out", str(out), "--check"]) == 1
     assert f"Out of date: {tmp_path / '.drivine' / 'model.json'}." in capsys.readouterr().err
     assert main([a, "--out", str(out), "--check", "--no-model"]) == 0
+
+
+def test_a_subtype_model_registry_refuses_is_not_listed_as_a_subtype(modules, project: Project):
+    """A current entry refers only to current ones: a refused subtype is named, and in no fragment's subtypes."""
+    (names,) = modules(
+        refused_subtype="""
+        from typing import Annotated
+        from drivine import NodeFragment, NodeId
+
+        class Animal(NodeFragment, labels=["Animal"]):
+            id: Annotated[str, NodeId()]
+
+        class Dog(Animal, labels=["Dog"]):
+            pass
+
+        class Twice(Animal, labels=["Twice"]):
+            other: Annotated[str, NodeId()]
+        """
+    )
+    warnings: list[str] = []
+    write_model_file([names], project, False, warnings.append)
+    assert warnings == [f"Drivine model file: {names}.Twice: Twice has 2 NodeId fields (id, other). A node has one id."]
+    fragments = {it["name"]: it for it in written(project)["fragments"]}
+    assert sorted(fragments) == ["Animal", "Dog"]
+    assert fragments["Animal"]["subtypes"] == [f"{names}.Dog"]

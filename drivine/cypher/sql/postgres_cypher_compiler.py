@@ -5,7 +5,6 @@ import re
 from collections.abc import Callable, Sequence
 from typing import Any
 
-from drivine.cypher.ast.relationship_pattern import Direction
 from drivine.cypher.sql.compiled_cypher import CompiledCypher
 from drivine.cypher.sql.parameters import OBJECT, cypher_json
 from drivine.cypher.sql.postgres_temporal_sql import PostgresTemporalSql
@@ -242,34 +241,30 @@ class PostgresCypherCompiler(SqlCypherCompiler):
     def walk(self, walk: Walk) -> Walked:
         """A lateral recursive query from the node walked from, which reads its row."""
         w = walk.step
-        e = walk.edge
-        if walk.direction is Direction.OUTGOING:
-            join, far = f"{e}.src = {w}.nid", f"{e}.dst"
-        elif walk.direction is Direction.INCOMING:
-            join, far = f"{e}.dst = {w}.nid", f"{e}.src"
-        else:
-            # Either way, and a relationship from a node to itself once.
-            join, far = (
-                f"({e}.src = {w}.nid OR {e}.dst = {w}.nid)",
-                f"CASE WHEN {e}.src = {w}.nid THEN {e}.dst ELSE {e}.src END",
-            )
+        joins, reached, distinct = self.steps(walk, f"{w}.nid")
+        eids = [f"{it.edge}.eid" for it in walk.hops]
         conditions = [
-            f"{e}.eid <> ALL ({w}.eids)",
+            *(f"{it} <> ALL ({w}.eids)" for it in eids),
+            *distinct,
             *([f"{w}.depth < {walk.max}"] if walk.max is not None else []),
             *walk.conditions,
         ]
         # Walked backwards, each node it leaves goes first, so its nodes end with the one it started from.
         if walk.backwards:
-            step = f"    SELECT {far}, {w}.depth + 1, {w}.nid || {w}.nids, {e}.eid || {w}.eids"
+            step = f"    SELECT {reached[0]}, {w}.depth + 1, {w}.nid || {w}.nids, {eids[0]} || {w}.eids"
         else:
-            step = f"    SELECT {far}, {w}.depth + 1, {w}.nids || {far}, {w}.eids || {e}.eid"
+            step = (
+                f"    SELECT {reached[-1]}, {w}.depth + 1, {w}.nids || ARRAY[{', '.join(reached)}], "
+                f"{w}.eids || ARRAY[{', '.join(eids)}]"
+            )
         text = "\n".join(
             [
                 f"WITH RECURSIVE {w} (nid, depth, nids, eids) AS (",
                 f"    SELECT {walk.from_}, 0, {self.no_ids}, {self.no_ids}",
                 "    UNION ALL",
                 step,
-                f"    FROM {w} JOIN {self.edges} {e} ON {join}",
+                f"    FROM {w}",
+                *(f"    {it}" for it in joins),
                 f"    WHERE {' AND '.join(conditions)}",
                 ")",
                 f"SELECT nid, nids, eids FROM {w} WHERE depth >= {walk.min}",

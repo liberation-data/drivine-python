@@ -26,8 +26,8 @@ from drivine.cypher.ast.expression import (
     Variable,
 )
 from drivine.cypher.ast.node_pattern import NodePattern
-from drivine.cypher.ast.pattern import Pattern
-from drivine.cypher.ast.relationship_pattern import Direction, Range, RelationshipPattern
+from drivine.cypher.ast.pattern import Pattern, Shortest
+from drivine.cypher.ast.relationship_pattern import Direction, Group, Range, RelationshipPattern
 from drivine.cypher.ast.remove_item import RemoveLabels, RemoveProperty
 from drivine.cypher.ast.set_item import SetAdd, SetLabels, SetProperty, SetReplace
 from drivine.cypher.cypher_reader import read_cypher
@@ -54,6 +54,39 @@ def test_a_quantified_relationship_reads_as_its_range():
     match = read_cypher("MATCH (a)-[:R]->{2,}(b)-[:R]->+(c)-[:R]->{,3}(d) RETURN a").clauses[0]
     assert isinstance(match, Match)
     assert [it.range for it in match.patterns[0].relationships] == [Range(2, None), Range(1, None), Range(0, 3)]
+
+
+def test_a_quantified_path_pattern_reads_as_a_relationship_of_its_group():
+    match = read_cypher("MATCH (a) ((x:P)-[r:R]->(y) WHERE x.v < y.v){1,3} (b) RETURN a").clauses[0]
+    assert isinstance(match, Match)
+    where = Binary(BinaryOperator.LESS_THAN, Property(Variable("x"), "v"), Property(Variable("y"), "v"))
+    group = Group(
+        Pattern(
+            None,
+            (NodePattern("x", ("P",), None), NodePattern("y", (), None)),
+            (RelationshipPattern("r", ("R",), Direction.OUTGOING, None, None),),
+        ),
+        where,
+    )
+    assert match.patterns == (
+        Pattern(
+            None,
+            (NodePattern("a", (), None), NodePattern("b", (), None)),
+            (RelationshipPattern(None, (), Direction.OUTGOING, Range(1, 3), None, group),),
+        ),
+    )
+
+
+def test_a_pattern_in_parentheses_with_no_quantifier_is_the_pattern_and_a_shortest_path_is_unchanged():
+    def patterns(cypher: str) -> tuple[Pattern, ...]:
+        match = read_cypher(cypher).clauses[0]
+        assert isinstance(match, Match)
+        return match.patterns
+
+    assert patterns("MATCH (a)-[:R]->(b) RETURN a") == patterns("MATCH ((a)-[:R]->(b)) RETURN a")
+    (shortest,) = patterns("MATCH p = shortestPath((a)-[:R*]->(b)) RETURN p")
+    assert shortest.shortest is Shortest.ONE
+    assert shortest.relationships == (RelationshipPattern(None, ("R",), Direction.OUTGOING, Range(None, None), None),)
 
 
 def test_a_chain_of_comparisons_reads_as_their_conjunction_and_precedence_is_the_grammars():

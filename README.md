@@ -260,7 +260,12 @@ people = await pm.query(spec.bind({"city": "Sydney"}))
   the rest make one, their fields read, and two moments compare as the moments they are. A parameter of a `date`,
   `time`, `datetime` or `timedelta` is a temporal value of its kind.
 - `UNION`, `CALL { … }`, `EXISTS { … }`, `COUNT { … }`, `FOREACH`, `=~`, variable-length relationships, `shortestPath`
-  and `allShortestPaths` compile. What isn't compiled yet (a slice, a path returned whole, `SKIP` of an expression…) is
+  and `allShortestPaths` compile, as do quantified relationships (`-[:R]->{1,3}`) and quantified path patterns
+  (`(a) ((x)-[r:R]->(y) WHERE x.v < y.v){1,3} (b)`), whose variables are lists of what each repetition matched. On
+  Oracle, whose recursive queries read nothing of the row they are in, a quantified path pattern's `WHERE` and
+  properties read no variable from outside it, and hold a subquery only where no variable of its `MATCH` or before it
+  is named, and that walks no variable-length relationship or quantified path pattern of its own; on Postgres they may.
+  What isn't compiled yet (a slice, a path returned whole, `SKIP` of an expression…) is
   refused by name before anything is sent, and what isn't Cypher with where it went wrong.
 - On Oracle a text read out of JSON is at most 4,000 bytes, and an empty one is null; `reduce` doesn't run in a
   statement that writes, in the step of a `reduce`, or where its step reads a path; and `map[key]` reads null where an

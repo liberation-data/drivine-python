@@ -79,7 +79,7 @@ def json_key(name: str) -> str:
     return '."' + _escaped(name) + '"'
 
 
-_PLAIN_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_PLAIN_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
 def drivine4j_step(key: str) -> str:
@@ -87,7 +87,7 @@ def drivine4j_step(key: str) -> str:
     The step of a JSON path naming `key` as drivine4j writes it: bare where SQL would take it for an identifier, else
     quoted as `json_key` quotes it, for the SQL literal it is written in.
     """
-    return key if _PLAIN_KEY.match(key) and key not in ("true", "false", "null") else json_key(key)[1:]
+    return key if _PLAIN_KEY.fullmatch(key) and key not in ("true", "false", "null") else json_key(key)[1:]
 
 
 def text_of(alias: str, property: str) -> str:

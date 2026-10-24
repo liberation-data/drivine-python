@@ -85,3 +85,10 @@ def test_postgres_reads_a_property_as_it_reads_one_and_a_graph_engine_keeps_cyph
         "(n.props ->> 'name') = 'x' AND (n.props ->> 'locked') = 'true' AND n.stamp IS NULL"
     )
     assert CypherBackend(NEO4J_GRAMMAR).written("n.name = 'x'") == "n.name = 'x'"
+
+
+def test_a_quote_in_a_name_in_backticks_stays_inside_the_literal_it_is_written_in():
+    assert rewrite("n.`it's` = 1") == "JSON_VALUE(n_.props, '$.\"it''s\"') = 1"
+    assert rewrite('n.`a"b\\c` = 1') == 'JSON_VALUE(n_.props, \'$."a\\"b\\\\c"\') = 1'
+    assert rewrite("n.`a\n` = 1") == "JSON_VALUE(n_.props, '$.\"a\n\"') = 1"
+    assert PostgresBackend().written("n.`it's` = 1") == "(n.props ->> 'it''s') = 1"

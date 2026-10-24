@@ -775,8 +775,9 @@ the datasource at it. Datasources of one type share a container. `USE_LOCAL_NEO4
 `NEO4J_TEST_IMAGE` picks another image.
 
 Drivine's own tests run on Oracle only with `ORACLE_TESTS=true`: its image is large, and the database wants two
-gigabytes. They run on `neo4j:latest`, as the Cypher spec is written for a current Neo4j, where the plugin's own
-default is 5.26.
+gigabytes. A run without it ends with the line `Oracle tests skipped: set ORACLE_TESTS=true to run them`. CI runs the
+Oracle tests in a job of their own, with `pytest -k oracle`. The tests run on `neo4j:latest`, as the Cypher spec is
+written for a current Neo4j, where the plugin's own default is 5.26.
 
 ## Logging
 
@@ -789,6 +790,7 @@ logger when the application hasn't.
 ```
 uv sync
 uv run pytest            # starts Neo4j, Memgraph, FalkorDB and Postgres in Docker
+ORACLE_TESTS=true uv run pytest -k oracle   # and Oracle, for its tests alone
 uv run ruff check . && uv run pyright
 ```
 

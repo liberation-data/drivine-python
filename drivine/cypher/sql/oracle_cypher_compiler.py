@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Sequence
-from typing import Any
+from typing import Any, cast
 
 from drivine.cypher.sql.compiled_cypher import CompiledCypher
 from drivine.cypher.sql.oracle_temporal_sql import OracleTemporalSql
-from drivine.cypher.sql.parameters import OBJECT, cypher_json
+from drivine.cypher.sql.parameters import OBJECT, cypher_json, json_text, jsonable
 from drivine.cypher.sql.sql_cypher_compiler import (
+    CALLER,
     COUNT,
     DOOMED,
     FOUND,
@@ -60,14 +61,49 @@ class OracleCypherCompiler(SqlCypherCompiler):
         super().__init__(graph)
         self._folding = False
         """Whether the step of a `reduce` is being written, as its function's own: see `reduce`."""
+        self._extended: dict[int, str] = {}
+        """
+        The parameters' texts that hold a float as Oracle's extended JSON writes one, by identity: see `parameter_text`.
+        A map parameter `{"$numberDouble": "2.0"}` is written as the same text as the float 2.0. Each text is kept, so
+        its id is no other's.
+        """
 
     def literal_json(self, value: Any) -> str:
         if isinstance(value, float):
             return f"JSON_SCALAR(TO_BINARY_DOUBLE({literal(repr(value))}))"
         return f"JSON({literal(cypher_json(value))})"
 
-    def parameter_json(self, marker: str) -> str:
-        return f"JSON({marker})"
+    def parameter_json(self, marker: str, text: str | None) -> str:
+        """
+        A text that holds an extended JSON double is read as extended JSON, and only one: else a map of the parameter's
+        whose key is `$numberDouble` would be read as a double.
+        """
+        return f"JSON({marker} EXTENDED)" if text is not None and id(text) in self._extended else f"JSON({marker})"
+
+    def parameter_text(self, value: Any) -> str:
+        """
+        A float that is a whole number, `2.0`, written as Oracle's extended JSON writes a double,
+        `{"$numberDouble": "2.0"}`, which `JSON(… EXTENDED)` reads as one: Oracle reads JSON's `2.0` as the number 2, a
+        whole number, as it reads `2`.
+        """
+        doubled = False
+
+        def doubles(it: Any) -> Any:
+            # A Decimal is no float: cypher_json writes a whole one as the whole number it is.
+            nonlocal doubled
+            if isinstance(it, float) and it.is_integer():
+                doubled = True
+                return {_DOUBLE: repr(it)}
+            if isinstance(it, dict):
+                return {key: doubles(item) for key, item in cast(dict[str, Any], it).items()}
+            if isinstance(it, list):
+                return [doubles(item) for item in cast(list[Any], it)]
+            return it
+
+        text = json_text(doubles(jsonable(value)))
+        if doubled:
+            self._extended[id(text)] = text
+        return text
 
     def parameter_count(self, marker: str) -> str:
         return f"CAST({marker} AS NUMBER)"
@@ -181,18 +217,18 @@ class OracleCypherCompiler(SqlCypherCompiler):
         ordered = f" ORDER BY {order}" if order is not None else ""
         return f"COALESCE(JSON_ARRAYAGG({value}{ordered} NULL ON NULL RETURNING JSON), JSON('[]'))"
 
-    def collect(self, value: str, distinct: bool, order: str | None) -> str:
-        """
-        `JSON_ARRAYAGG` leaves nulls out, and takes no `DISTINCT`: distinct values are gathered as their text, which
-        `LISTAGG` keeps once each.
-        """
-        if distinct:
-            return (
-                f"JSON('[' || LISTAGG(DISTINCT JSON_SERIALIZE({value}), ',') WITHIN GROUP "
-                f"(ORDER BY JSON_SERIALIZE({value})) || ']')"
-            )
+    def collect(self, value: str, order: str | None) -> str:
+        """`JSON_ARRAYAGG` leaves nulls out."""
         ordered = f" ORDER BY {order}" if order is not None else ""
         return f"COALESCE(JSON_ARRAYAGG({value}{ordered} RETURNING JSON), JSON('[]'))"
+
+    def distinct_items(self, list_: str) -> str:
+        """Oracle groups no `JSON`: each item is grouped by its text, and read back from it."""
+        return (
+            "(SELECT COALESCE(JSON_ARRAYAGG(JSON(d.item) ORDER BY d.first RETURNING JSON), JSON('[]')) "
+            f"FROM (SELECT MIN(e.item_no) AS first, JSON_SERIALIZE(e.item) AS item FROM {self.elements(list_, 'e')} "
+            "GROUP BY JSON_SERIALIZE(e.item)) d)"
+        )
 
     def extreme(self, value: str, min_: bool) -> str:
         """Of the values of the kind that comes first, or last, as `kind_order` orders them."""
@@ -243,7 +279,9 @@ class OracleCypherCompiler(SqlCypherCompiler):
             "tolower": lambda: f"JSON_SCALAR(LOWER({self.text(json)}))",
             "toupper": lambda: f"JSON_SCALAR(UPPER({self.text(json)}))",
             "trim": lambda: f"JSON_SCALAR(TRIM({self.text(json)}))",
-            "tostring": lambda: f"JSON_SCALAR(JSON_VALUE({json}, '$'))",
+            # A float that is a whole number is written with its fraction, 2.0, as in Cypher: Oracle writes a double of
+            # 2 as 2. Whole as the double it is: a double too small for a NUMBER, 1e-200, is the NUMBER 0.
+            "tostring": lambda: self.shared1(json, _to_string),
             "tointeger": lambda: (
                 f"JSON_SCALAR(TRUNC(TO_NUMBER(JSON_VALUE({json}, '$') DEFAULT NULL ON CONVERSION ERROR)))"
             ),
@@ -521,7 +559,7 @@ class OracleCypherCompiler(SqlCypherCompiler):
         """An anonymous block, which returns its rows as an implicit result."""
         declared = [
             "DECLARE",
-            f"    {PARAMS} JSON := JSON(${OBJECT});",
+            f"    {PARAMS} JSON := JSON(${OBJECT}{' EXTENDED' if self._extended else ''});",
             f"    {ROWS} JSON;",
             f"    {OUT} JSON;",
             f"    {ROW} JSON;",
@@ -533,7 +571,7 @@ class OracleCypherCompiler(SqlCypherCompiler):
             f"    {CURSOR} SYS_REFCURSOR;",
         ]
         for depth in range(1, NESTING + 1):
-            declared += [f"    {SAVED}{depth} JSON;", f"    {GATHERED}{depth} JSON;"]
+            declared += [f"    {SAVED}{depth} JSON;", f"    {GATHERED}{depth} JSON;", f"    {CALLER}{depth} JSON;"]
         return CompiledCypher("\n".join([*declared, "BEGIN", indent("\n".join(body)), "END;"]), parameters)
 
     def return_rows(self, query: str) -> list[str]:
@@ -556,6 +594,18 @@ class OracleCypherCompiler(SqlCypherCompiler):
 
     def without_label(self, labels: str, label: str) -> str:
         return f"JSON_TRANSFORM({labels}, REMOVE {literal(f'$[*]?(@ == {_quoted(label)})')})"
+
+
+def _to_string(x: str) -> str:
+    n = f"JSON_VALUE({x}, '$' RETURNING NUMBER)"
+    return (
+        f"CASE WHEN {_kind(x)} = 'double' AND ABS({n}) < 1e15 AND JSON_VALUE({x}, '$' RETURNING BINARY_DOUBLE) = "
+        f"TRUNC({n}) THEN JSON_SCALAR(TO_CHAR(TRUNC({n})) || '.0') ELSE JSON_SCALAR(JSON_VALUE({x}, '$')) END"
+    )
+
+
+_DOUBLE = "$numberDouble"
+"""The key of a double in Oracle's extended JSON."""
 
 
 def _kind(json: str) -> str:

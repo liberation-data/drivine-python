@@ -28,14 +28,16 @@ class Parameters:
     def __init__(
         self,
         given: Mapping[str, Any],
-        as_json: Callable[[str], str],
+        as_json: Callable[[str, str | None], str],
         as_count: Callable[[str], str],
         in_object: bool = False,
+        text: Callable[[Any], str] | None = None,
     ) -> None:
         """
-        `as_json` is the bound JSON text at a marker, or with `in_object` the parameter of a name, as the store's JSON;
-        `as_count` the bound whole number at a marker, or with `in_object` the parameter of a name, as the store's
-        number.
+        `as_json` is the bound JSON text at a marker, or with `in_object` the parameter of a name, as the store's JSON:
+        given the marker, and the text bound at it, or the name and None. `as_count` is the bound whole number at a
+        marker, or with `in_object` the parameter of a name, as the store's number. `text` is the JSON text a value is
+        bound as: `cypher_json`'s, unless a store writes it otherwise.
         """
         # An iterator is read once, here: a statement may name its parameter more than once.
         self._given: dict[str, Any] = {
@@ -44,21 +46,23 @@ class Parameters:
         self._as_json = as_json
         self._as_count = as_count
         self._in_object = in_object
+        self._text = text or cypher_json
         self._bound: dict[str, Any] = {}
 
     @property
     def values(self) -> dict[str, Any]:
         """What the SQL binds."""
-        return {OBJECT: cypher_json(dict(self._given))} if self._in_object else self._bound
+        return {OBJECT: self._text(dict(self._given))} if self._in_object else self._bound
 
     def json(self, name: str) -> str:
         """The parameter, as JSON."""
         value = self.value(name)
         if self._in_object:
-            return self._as_json(name)
+            return self._as_json(name, None)
         key = f"_cy_{name}"
-        self._bound[key] = None if value is None else cypher_json(value)
-        return self._as_json(f"${key}")
+        written = None if value is None else self._text(value)
+        self._bound[key] = written
+        return self._as_json(f"${key}", written)
 
     def count(self, name: str) -> str:
         """The parameter, as a whole number."""
@@ -82,7 +86,17 @@ def cypher_json(value: Any) -> str:
     zoned one with its offset, and a timedelta as an ISO 8601 duration, as the Neo4j driver sends each. A set, a tuple
     or an iterator is a list, and bytes are their base64 text, as drivine4j writes a byte array.
     """
-    return json.dumps(_jsonable(value), separators=(",", ":"), ensure_ascii=False)
+    return json_text(jsonable(value))
+
+
+def json_text(value: Any) -> str:
+    """A value of JSON's own kinds, as `jsonable` gives one, as compact JSON text."""
+    return json.dumps(value, separators=(",", ":"), ensure_ascii=False)
+
+
+def jsonable(value: Any) -> Any:
+    """The value as JSON's own kinds, as `cypher_json` writes it."""
+    return _jsonable(value)
 
 
 def _jsonable(value: Any) -> Any:

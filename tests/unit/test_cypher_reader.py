@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 
 from drivine import DrivineError
-from drivine.cypher.ast.clause import Create, Delete, Match, Merge, Remove, Return, SetClause
+from drivine.cypher.ast.clause import Create, Delete, Match, Merge, Remove, Return, SetClause, Unwind, With
 from drivine.cypher.ast.expression import (
     Binary,
     BinaryOperator,
@@ -110,6 +110,20 @@ def test_strings_names_in_backticks_parameters_and_numbers_read_as_their_values(
     assert returned("RETURN 0xff") == Literal(255)
     assert returned("RETURN 1.5e3") == Literal(1500.0)
     assert returned("RETURN '\\uD83D\\uDE00'") == Literal("\U0001f600")
+    # The least whole number is its digits negated, which alone are past the greatest.
+    assert returned("RETURN -9223372036854775808") == Literal(-9223372036854775808)
+    assert returned("RETURN -0x8000000000000000") == Literal(-9223372036854775808)
+    assert returned("RETURN -1") == Unary(UnaryOperator.NEGATE, Literal(1))
+    with pytest.raises(DrivineError) as refused:
+        read_cypher("RETURN 9223372036854775808")
+    assert str(refused.value) == (
+        "9223372036854775808 is past the range of a whole number, from -9223372036854775808 to 9223372036854775807."
+    )
+    with pytest.raises(DrivineError) as refused:
+        read_cypher("RETURN -9223372036854775809")
+    assert str(refused.value) == (
+        "-9223372036854775809 is past the range of a whole number, from -9223372036854775808 to 9223372036854775807."
+    )
 
 
 def test_a_literal_is_of_its_kind():
@@ -209,6 +223,19 @@ def test_cypher_the_compiler_does_not_take_is_refused_by_name_and_what_is_not_cy
     assert str(refused.value) == "A procedure call (CALL) is Cypher, and is not compiled to SQL yet."
     with pytest.raises(DrivineError, match=r"^The statement is not Cypher, at line 1, column \d+: "):
         read_cypher("MATCH (n RETURN n")
+
+
+def test_a_reading_clause_straight_after_a_write_reads_in_the_order_written():
+    clauses = read_cypher("CREATE (n:Thing) UNWIND [1, 2] AS x MATCH (m:Thing) RETURN count(m)").clauses
+    assert [type(it) for it in clauses] == [Create, Unwind, Match, Return]
+    clauses = read_cypher("MATCH (n) SET n.a = 1 MATCH (m) DELETE m").clauses
+    assert [type(it) for it in clauses] == [Match, SetClause, Match, Delete]
+    # And in a part that ends in a WITH.
+    clauses = read_cypher("CREATE (n:Thing) MATCH (m:Thing) WITH count(m) AS c RETURN c").clauses
+    assert [type(it) for it in clauses] == [Create, Match, With, Return]
+    # As in Neo4j, a query that returns nothing ends in a write.
+    with pytest.raises(DrivineError):
+        read_cypher("CREATE (n) MATCH (m)")
 
 
 def test_a_statement_is_read_once():

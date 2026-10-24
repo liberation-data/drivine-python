@@ -104,3 +104,12 @@ def test_a_subquery_in_the_where_of_a_quantified_path_pattern_in_a_pattern_is_fo
     subquery = "COUNT { MATCH (n) RETURN n } > 0"
     assert holds_subquery(returned(f"RETURN EXISTS {{ (y) ((c)-[:R]->(d) WHERE {subquery}){{1}} () }}"))
     assert not holds_subquery(returned("RETURN EXISTS { (y) ((c)-[:R]->(d) WHERE c.v > 0){1} () }"))
+
+
+@pytest.mark.parametrize("compiler", COMPILERS.values(), ids=COMPILERS.keys())
+def test_collect_distinct_beside_a_variable_no_other_item_is_outside_its_aggregates_is_refused_as_collect_is(
+    compiler: type[SqlCypherCompiler],
+) -> None:
+    # Not in the spec yet: _distinct_first groups by each such variable, so it is refused before.
+    with pytest.raises(DrivineError, match="names p outside its aggregates"):
+        compiler("g").compile("MATCH (p:Person) RETURN p.born, collect(DISTINCT p.name) + p.name")

@@ -1,10 +1,13 @@
 """A Cypher parameter is bound as its JSON text, as drivine4j binds one."""
 
 from datetime import timedelta
+from decimal import Decimal
 
 import pytest
 
+from drivine.cypher.sql.oracle_cypher_compiler import OracleCypherCompiler
 from drivine.cypher.sql.parameters import Parameters, cypher_json
+from drivine.cypher.sql.postgres_cypher_compiler import PostgresCypherCompiler
 
 
 @pytest.mark.parametrize(
@@ -38,7 +41,26 @@ def test_a_collection_is_a_list_and_bytes_their_base64_as_drivine4j_writes_them(
 
 
 def test_an_iterator_named_twice_is_read_once():
-    parameters = Parameters({"ids": (it for it in [1, 2])}, lambda marker: marker, lambda marker: marker)
+    parameters = Parameters({"ids": (it for it in [1, 2])}, lambda marker, _: marker, lambda marker: marker)
     parameters.json("ids")
     parameters.json("ids")
     assert parameters.values == {"_cy_ids": "[1,2]"}
+
+
+def test_on_oracle_a_whole_float_parameter_is_bound_as_extended_jsons_double_and_a_whole_decimal_as_its_number():
+    # As drivine4j's OracleParameterTextTest: `JSON(… EXTENDED)` reads such a double, where `JSON(…)` reads 2.0 as 2.
+    compiled = OracleCypherCompiler("g").compile(
+        "RETURN [$d, $f, $m]", {"d": Decimal("12345678901234567890"), "f": 2.0, "m": {"$numberDouble": "2.0"}}
+    )
+    assert compiled.parameters["_cy_d"] == "12345678901234567890"
+    assert compiled.parameters["_cy_f"] == '{"$numberDouble":"2.0"}'
+    # A map whose text is the float's is read as a map: only the text a float was written into is read EXTENDED.
+    assert compiled.parameters["_cy_m"] == '{"$numberDouble":"2.0"}'
+    assert "$_cy_f EXTENDED" in compiled.sql
+    assert "$_cy_d EXTENDED" not in compiled.sql and "$_cy_m EXTENDED" not in compiled.sql
+
+
+def test_on_oracle_a_procedure_reads_its_parameters_extended_only_where_they_hold_a_whole_float():
+    assert "EXTENDED" in OracleCypherCompiler("g").compile("CREATE (n:T {f: $f})", {"f": 2.0}).sql
+    assert "EXTENDED" not in OracleCypherCompiler("g").compile("CREATE (n:T {f: $f})", {"f": 2.5}).sql
+    assert "EXTENDED" not in PostgresCypherCompiler("g").compile("RETURN $f", {"f": 2.0}).sql

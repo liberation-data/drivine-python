@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import itertools
 import re
 from collections.abc import Callable, Sequence
 from typing import Any
@@ -9,6 +10,7 @@ from drivine.cypher.sql.compiled_cypher import CompiledCypher
 from drivine.cypher.sql.parameters import OBJECT, cypher_json
 from drivine.cypher.sql.postgres_temporal_sql import PostgresTemporalSql
 from drivine.cypher.sql.sql_cypher_compiler import (
+    CALLER,
     COUNT,
     DOOMED,
     FOUND,
@@ -53,7 +55,7 @@ class PostgresCypherCompiler(SqlCypherCompiler):
     def literal_json(self, value: Any) -> str:
         return f"CAST({literal(cypher_json(value))} AS jsonb)"
 
-    def parameter_json(self, marker: str) -> str:
+    def parameter_json(self, marker: str, text: str | None) -> str:
         return f"CAST({marker} AS jsonb)"
 
     def parameter_count(self, marker: str) -> str:
@@ -130,10 +132,15 @@ class PostgresCypherCompiler(SqlCypherCompiler):
         ordered = f" ORDER BY {order}" if order is not None else ""
         return f"COALESCE(json_agg({value}{ordered}), '[]'::json)"
 
-    def collect(self, value: str, distinct: bool, order: str | None) -> str:
-        """Distinct values are in no order: Postgres orders a `DISTINCT` aggregate by its argument alone."""
-        gathered = f"DISTINCT {value}" if distinct else f"{value}{f' ORDER BY {order}' if order is not None else ''}"
-        return f"COALESCE(json_agg({gathered}) FILTER (WHERE {value} IS NOT NULL), '[]'::json)"
+    def collect(self, value: str, order: str | None) -> str:
+        ordered = f" ORDER BY {order}" if order is not None else ""
+        return f"COALESCE(json_agg({value}{ordered}) FILTER (WHERE {value} IS NOT NULL), '[]'::json)"
+
+    def distinct_items(self, list_: str) -> str:
+        return (
+            "(SELECT COALESCE(json_agg(d.item ORDER BY d.first), '[]'::json) FROM (SELECT min(e.item_no) AS first, "
+            f"e.item FROM {self.elements(list_, 'e')} GROUP BY e.item) d)"
+        )
 
     def extreme(self, value: str, min_: bool) -> str:
         # Postgres has no min or max of jsonb, which orders: the first of the values in order is the least.
@@ -383,14 +390,13 @@ class PostgresCypherCompiler(SqlCypherCompiler):
             f"    {MATCHED} record;",
         ]
         for depth in range(1, NESTING + 1):
-            declared += [f"    {SAVED}{depth} jsonb;", f"    {GATHERED}{depth} jsonb;"]
+            declared += [f"    {SAVED}{depth} jsonb;", f"    {GATHERED}{depth} jsonb;", f"    {CALLER}{depth} jsonb;"]
         text = "\n".join([*declared, "BEGIN", indent("\n".join(body)), "END"])
         digest = hashlib.sha256(text.encode()).hexdigest()
         function = f"pg_temp.drivine_cypher_{digest[:24]}"
-        # The body is quoted with dollars, by a tag no text in it holds: a text of `$cy$` would end it.
-        quote = "$cy$"
-        while quote in text:
-            quote = f"{quote[:-1]}_$"
+        # The body is quoted with dollars, by a tag no text in it holds: a text of `$cy$` would end it. The first of
+        # `$cy$`, `$cy1$`, `$cy2$`, … as drivine4j and drivine choose it.
+        quote = next(it for it in itertools.chain(["$cy$"], (f"$cy{n}$" for n in itertools.count(1))) if it not in text)
         prelude = (
             f"CREATE OR REPLACE FUNCTION {function}({PARAMS} jsonb) RETURNS SETOF json LANGUAGE plpgsql "
             f"AS {quote}\n{text}\n{quote}"

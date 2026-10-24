@@ -29,6 +29,7 @@ from drivine.sync import (
     QuerySpecification,
     transaction,
 )
+from tests.cypher.cypher_spec import load
 from tests.sync_integration.conftest import ORACLE, POSTGRES, SQL_STORES
 
 UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
@@ -330,3 +331,318 @@ def test_a_cypher_statement_that_writes_is_not_read_through_a_cursor_on_oracle(
     cursor_spec = CursorSpecification[Any](cypher_statement("CREATE (n:CyWrite) RETURN n"))
     with pytest.raises(DrivineError, match="is a block on Oracle"):
         factory.get("oracle").open_cursor(cursor_spec)
+
+
+def kinds(value: Any) -> Any:
+    """The value with each number paired with its kind, so a float 2.0 and a whole 2 compare unequal, as in Cypher."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return (type(value).__name__, value)
+    if isinstance(value, dict):
+        return {key: kinds(it) for key, it in value.items()}  # pyright: ignore[reportUnknownVariableType]
+    if isinstance(value, list):
+        return [kinds(it) for it in value]  # pyright: ignore[reportUnknownVariableType]
+    return value
+
+
+def seeded(pm: PersistenceManager) -> None:
+    """The graph queries.yaml reads, written again."""
+    clear(pm)
+    pm.query(spec(load("queries.yaml").graph or ""))
+
+
+def test_collect_distinct_beside_keys_other_aggregates_an_order_a_page_and_a_variable_outside_its_aggregates(
+    cypher_pm: PersistenceManager,
+):
+    # Not in the spec yet: _distinct_first's grouping WITH, and the projection over it.
+    seeded(cypher_pm)
+    assert cypher_pm.query(
+        spec(
+            "MATCH (p:Person)-[:ACTED_IN]->(m) RETURN p.name, count(*) + size(collect(DISTINCT m.title)) "
+            "ORDER BY count(*) DESC, p.name SKIP 1 LIMIT 1"
+        )
+    ) == [["Carrie", 4]]
+    assert cypher_pm.query(
+        spec(
+            "MATCH (p:Person)-[:ACTED_IN]->(m) WITH p, collect(DISTINCT m) AS ms WHERE size(ms) > 1 "
+            "RETURN p.name, size(ms) ORDER BY p.name"
+        )
+    ) == [["Carrie", 2], ["Keanu", 3]]
+    assert cypher_pm.query(
+        spec(
+            "MATCH (p:Person)-[:ACTED_IN]->(m) WITH p, size(collect(DISTINCT m.title)) + p.born AS x "
+            "RETURN p.name, x ORDER BY p.name"
+        )
+    ) == [["Carrie", 1969], ["Keanu", 1967], ["Laurence", 1962]]
+
+
+def test_collect_distinct_in_a_distinct_projection_ordered_by_a_keys_property_or_an_aggregate_no_item_is(
+    cypher_pm: PersistenceManager,
+):
+    # Not in the spec yet: the projection over _distinct_first's grouping WITH orders by what that WITH holds.
+    seeded(cypher_pm)
+    assert cypher_pm.query(
+        spec(
+            "MATCH (p:Person)-[:ACTED_IN]->(m) WITH DISTINCT p, size(collect(DISTINCT m.title)) AS n "
+            "ORDER BY p.born DESC RETURN p.name, n"
+        )
+    ) == [["Carrie", 2], ["Keanu", 3], ["Laurence", 1]]
+    assert cypher_pm.query(
+        spec(
+            "MATCH (p:Person)-[:ACTED_IN]->(m) "
+            "RETURN DISTINCT p.name, size(collect(DISTINCT m.title)) ORDER BY count(*)"
+        )
+    ) == [["Laurence", 1], ["Carrie", 2], ["Keanu", 3]]
+    assert cypher_pm.query(
+        spec(
+            "MATCH (p:Person)-[:ACTED_IN]->(m) WITH p.name AS name, m.title AS t "
+            "RETURN name AS nm, size(collect(DISTINCT t)) "
+            "ORDER BY any(x IN collect(DISTINCT t) WHERE x STARTS WITH 'J' AND name = 'Keanu'), nm"
+        )
+    ) == [["Carrie", 2], ["Laurence", 1], ["Keanu", 3]]
+
+
+def test_collect_distinct_beside_an_item_named_after_a_variable_another_item_is_ordered_by_that_name(
+    cypher_pm: PersistenceManager,
+):
+    # Not in the spec yet: in an order term, an item's name is that item, not the variable it shadows.
+    seeded(cypher_pm)
+    rows = cypher_pm.query(
+        spec(
+            "MATCH (p:Person)-[:ACTED_IN]->(m) RETURN p AS person, p.name AS p, size(collect(DISTINCT m.title)) "
+            "ORDER BY toLower(p)"
+        )
+    )
+    assert [it[1:] for it in rows] == [["Carrie", 2], ["Keanu", 3], ["Laurence", 1]]
+
+
+def test_an_item_of_the_relationships_collect_gathers_is_read_in_the_projection_that_gathers_them(
+    cypher_pm: PersistenceManager,
+):
+    # Not in the spec yet: Oracle reads no aggregate from a subquery, so the item is read from what collect gathered.
+    seeded(cypher_pm)
+    assert cypher_pm.query(
+        spec(
+            "MATCH (p:Person)-[r:ACTED_IN]->() WHERE p.name <> 'Keanu' "
+            "RETURN p.name, collect(r)[0].role ORDER BY p.name"
+        )
+    ) == [["Carrie", "Trinity"], ["Laurence", "Morpheus"]]
+    assert cypher_pm.query(
+        spec(
+            "MATCH (:Person {name: 'Laurence'})-[r:ACTED_IN]->() MATCH (:Person {name: 'Carrie'})-[s:ACTED_IN]->() "
+            "RETURN size(collect(r) + collect(s)), (collect(r) + collect(s))[0].role, "
+            "(collect(r) + collect(s))[-1].role"
+        )
+    ) == [[4, "Morpheus", "Trinity"]]
+    assert cypher_pm.query(
+        spec(
+            "MATCH (:Person {name: 'Laurence'})-[r:ACTED_IN]->() WITH collect(r) AS rs "
+            "RETURN rs[9] IS NULL, rs[-9] IS NULL"
+        )
+    ) == [[True, True]]
+
+
+def test_collect_distinct_under_a_comprehension_a_quantifier_or_a_reduce_that_names_a_grouping_key_in_its_body(
+    cypher_pm: PersistenceManager,
+):
+    # Not in the spec yet: _distinct_first's grouping WITH keeps each variable such a body names, outside the aggregate.
+    seeded(cypher_pm)
+    assert cypher_pm.query(
+        spec(
+            "MATCH (p:Person)-[:ACTED_IN]->(m) WITH p.name AS name, m.title AS t "
+            "RETURN name, size([x IN collect(DISTINCT t) WHERE x <> name]), "
+            "any(x IN collect(DISTINCT t) WHERE x = name), "
+            "reduce(n = 0, x IN collect(DISTINCT t) | n + size(name)) ORDER BY name"
+        )
+    ) == [["Carrie", 2, False, 12], ["Keanu", 3, False, 15], ["Laurence", 1, False, 8]]
+
+
+def test_collect_distinct_beside_a_pattern_or_a_subquery_that_names_a_grouping_key(cypher_pm: PersistenceManager):
+    # Not in the spec yet: _distinct_first's grouping WITH keeps each variable a pattern or a subquery names, outside
+    # the aggregate.
+    seeded(cypher_pm)
+    assert cypher_pm.query(
+        spec(
+            "MATCH (p:Person)-[:ACTED_IN]->(m) "
+            "WITH p, size(collect(DISTINCT m.title)) + COUNT { (p)-[:KNOWS]->() } AS x, "
+            "size([(p)-[:KNOWS]->(f) | f.name] + collect(DISTINCT m.title)) AS y, "
+            "size(collect(DISTINCT m.title)) > 2 OR EXISTS { (p)-[:KNOWS]->(:Person {name: 'Keanu'}) } AS z "
+            "RETURN p.name, x, y, z ORDER BY p.name"
+        )
+    ) == [["Carrie", 2, 2, False], ["Keanu", 4, 4, True], ["Laurence", 2, 2, True]]
+
+
+def test_collect_distinct_of_dates_keeps_each_once_as_dates(cypher_pm: PersistenceManager):
+    # Not in the spec yet: what _distinct_first keeps of a collection is still of the kind collect gathered.
+    dates = "UNWIND [date('2020-01-01'), date('2020-01-01'), date('2021-05-01')] AS d"
+    assert cypher_pm.query(spec(f"{dates} WITH collect(DISTINCT d) AS ds RETURN [x IN ds | x.year]")) == [[2020, 2021]]
+    assert cypher_pm.query(spec(f"{dates} RETURN collect(DISTINCT d)[1].month")) == [5]
+
+
+def test_an_item_of_a_pattern_comprehensions_relationships_is_compared_by_its_id(cypher_pm: PersistenceManager):
+    # Not in the spec yet: a pattern comprehension gathers their properties beside their ids, as collect does, but in a
+    # subquery.
+    seeded(cypher_pm)
+    neo = "[(a)-[r:ACTED_IN {role: 'Neo'}]->() | r]"
+    assert cypher_pm.query(
+        spec(
+            f"MATCH (a:Person {{name: 'Keanu'}}) WITH {neo} AS rs, a "
+            f"RETURN [{neo}[0] = {neo}[1], {neo}[1] IN rs, {neo}[0].role = 'Neo']"
+        )
+    ) == [[False, True, True]]
+
+
+def test_a_list_comprehension_over_nodes_or_relationships_that_keeps_them_gives_a_list_of_them_compared_by_id(
+    cypher_pm: PersistenceManager,
+):
+    # Not in the spec yet: what _entity_comprehension keeps, with no projection or one of the item, is still a list of
+    # nodes or relationships.
+    seeded(cypher_pm)
+    assert cypher_pm.query(
+        spec(
+            "MATCH (:Person {name: 'Keanu'})-[r:ACTED_IN {role: 'Neo'}]->() WITH collect(r) AS rs "
+            "RETURN [[x IN rs WHERE x <> rs[0]][0] = rs[1], [x IN rs | x][0] = rs[1], "
+            "size([x IN rs WHERE x = rs[0] | x]), "
+            "rs[0] IN [x IN rs WHERE x <> rs[0]], [x IN rs | x.role]]"
+        )
+    ) == [[True, False, 1, False, ["Neo", "Neo"]]]
+    assert cypher_pm.query(
+        spec(
+            "MATCH p = (:Person {name: 'Laurence'})-[:KNOWS*2]->(b) "
+            "RETURN [[n IN nodes(p) WHERE n.name <> 'Laurence'][0] = nodes(p)[1], b IN [n IN nodes(p) | n], "
+            "[n IN nodes(p) WHERE n = b | n.name]]"
+        )
+    ) == [[True, True, ["Carrie"]]]
+
+
+def test_a_paths_nodes_or_relationships_added_together_are_a_list_of_them_and_of_no_path_null(
+    cypher_pm: PersistenceManager,
+):
+    # Not in the spec yet: lists of nodes no collect gathers, added, indexed and iterated by id; over a null list, null.
+    seeded(cypher_pm)
+    assert cypher_pm.query(
+        spec(
+            "MATCH p = (:Person {name: 'Laurence'})-[:KNOWS*2]->() "
+            "RETURN [size(nodes(p) + nodes(p)), (nodes(p) + nodes(p))[3] = nodes(p)[0], "
+            "(nodes(p) + nodes(p))[3] = nodes(p)[1], [n IN nodes(p) + nodes(p) | n.name], "
+            "relationships(p)[1] IN relationships(p) + relationships(p), size(relationships(p) + relationships(p))]"
+        )
+    ) == [[6, True, False, ["Laurence", "Keanu", "Carrie", "Laurence", "Keanu", "Carrie"], True, 4]]
+    assert cypher_pm.query(
+        spec(
+            "OPTIONAL MATCH p = (:Nope)-->() RETURN [[n IN nodes(p) | n.name], [n IN nodes(p) WHERE true], nodes(p)[0]]"
+        )
+    ) == [[None, None, None]]
+
+
+def test_calls_that_write_nested_give_each_row_its_own_variables_with_the_nodes_they_return(
+    cypher_pm: PersistenceManager,
+):
+    # Not in the spec yet: a caller row at each depth, merged with a node returned from below it.
+    clear(cypher_pm)
+    assert cypher_pm.query(
+        spec(
+            "UNWIND [1, 2] AS x CALL { WITH x CREATE (a:CyWrite {x: x}) WITH a, x "
+            "CALL { WITH a, x CREATE (b:CyWrite {y: x * 10}) RETURN b } RETURN a, b } RETURN [x, a.x, b.y]"
+        )
+    ) == [[1, 1, 10], [2, 2, 20]]
+    assert cypher_pm.query(
+        spec(
+            "UNWIND [1, 2] AS i CALL { WITH i CREATE (n:CyWrite {i: i}) RETURN n } SET n.j = i * 10 "
+            "RETURN [i, n.i, n.j] ORDER BY i"
+        )
+    ) == [[1, 1, 10], [2, 2, 20]]
+    assert cypher_pm.query(
+        spec(
+            "WITH date('2020-01-02') AS d CALL { CREATE (n:CyWrite) RETURN date('2021-03-04') AS e } "
+            "RETURN [d.year, e.month]"
+        )
+    ) == [[2020, 3]]
+
+
+def test_a_float_parameter_that_is_a_whole_number_stays_a_float_nested_in_maps_and_lists_and_past_1e15(
+    cypher_pm: PersistenceManager,
+):
+    p = {"a": [1.0, 2.5, {"b": -3.0}], "n": 4}
+    assert kinds(cypher_pm.query(spec("RETURN $p", {"p": p}))) == kinds([p])
+    rows = cypher_pm.query(spec("RETURN [$p.a[2].b, toString($f)]", {"p": p, "f": -2.0}))
+    assert kinds(rows) == kinds([[-3.0, "-2.0"]])
+    # Postgres's jsonb reads a float past a long's range back as a whole number.
+    if cypher_pm.type is not DatabaseType.POSTGRES:
+        assert kinds(cypher_pm.query(spec("RETURN [$big, $big * 2]", {"big": 1e20}))) == kinds([[1e20, 2e20]])
+
+
+def test_a_float_parameter_that_is_a_whole_number_stays_a_float_in_a_union_and_in_a_parameter_past_32_kb(
+    cypher_pm: PersistenceManager,
+):
+    rows = cypher_pm.query(spec("RETURN $f AS x UNION ALL RETURN 1.5 AS x", {"f": 2.0}))
+    assert kinds(rows) == kinds([2.0, 1.5])
+    doc = {"text": "y" * 40_000, "n": 2.0}
+    assert kinds(cypher_pm.query(spec("RETURN $doc.n", {"doc": doc}))) == kinds([2.0])
+
+
+def test_a_map_parameter_keyed_as_extended_json_writes_a_double_comes_back_a_map(cypher_pm: PersistenceManager):
+    m = {"$numberDouble": "1"}
+    assert cypher_pm.query(spec("RETURN $m", {"m": m})) == [m]
+    # Beside a float parameter whose text is the same as the map's.
+    same = {"$numberDouble": "2.0"}
+    assert kinds(cypher_pm.query(spec("RETURN [$f, $m]", {"f": 2.0, "m": same}))) == kinds([[2.0, same]])
+
+
+def test_to_string_writes_a_float_with_its_fraction_an_integer_and_a_text_as_they_are(
+    cypher_pm: PersistenceManager,
+):
+    rows = cypher_pm.query(spec("RETURN [toString(2.5), toString(3), toString('a'), toString($f * 2)]", {"f": 2.0}))
+    assert rows == [["2.5", "3", "a", "4.0"]]
+    # A float too small for Oracle's NUMBER, which reads it as 0, a whole number.
+    assert float(cypher_pm.get_one(spec("RETURN toString(1.0E-200)"))) == 1e-200
+
+
+def test_a_walk_returns_and_sorts_by_to_string_of_a_long_expression_of_where_it_ends(
+    cypher_pm: PersistenceManager,
+):
+    seeded(cypher_pm)
+    # On Oracle toString reads its argument twice, so one this long is bound in a subquery: beside a walk, as
+    # drivine4j#162's sort was.
+    walk = "MATCH (:Person {name: 'Laurence'})-[*]->(b) RETURN toString(coalesce(b.name, b.title)) AS n"
+    rows = ["Carrie", "Johnny Mnemonic", "Keanu", "The Matrix", "The Matrix", "The Matrix", "The Matrix Reloaded"]
+    rows += ["The Matrix Reloaded"]
+    assert sorted(cypher_pm.query(spec(walk))) == rows
+    assert cypher_pm.query(spec(f"{walk} ORDER BY n")) == rows
+
+
+def test_a_float_that_is_a_whole_number_nested_in_a_parameter_a_write_reads_is_written_a_float(
+    cypher_pm: PersistenceManager,
+):
+    clear(cypher_pm)
+    p = {"list": [1.0, 2.5], "big": 1e20}
+    rows = cypher_pm.query(spec("CREATE (n:CyWrite {list: $p.list, big: $p.big}) RETURN n.list", {"p": p}))
+    assert kinds(rows) == kinds([[1.0, 2.5]])
+    # Postgres's jsonb reads a float past a long's range back as a whole number.
+    if cypher_pm.type is not DatabaseType.POSTGRES:
+        rows = cypher_pm.query(spec("MATCH (n:CyWrite) RETURN [n.list, n.big]"))
+        assert kinds(rows) == kinds([[[1.0, 2.5], 1e20]])
+
+
+def test_a_float_that_is_a_whole_number_in_a_parameter_past_32_kb_a_write_reads_is_written_a_float(
+    cypher_pm: PersistenceManager,
+):
+    clear(cypher_pm)
+    doc = {"text": "y" * 40_000, "n": 2.0}
+    rows = cypher_pm.query(spec("CREATE (n:CyWrite {f: $doc.n}) RETURN n.f", {"doc": doc}))
+    assert kinds(rows) == kinds([2.0])
+
+
+def test_a_map_parameter_keyed_as_extended_json_writes_a_double_is_written_a_map(cypher_pm: PersistenceManager):
+    clear(cypher_pm)
+    m = {"$numberDouble": "1"}
+    assert cypher_pm.query(spec("CREATE (n:CyWrite {id: 1}) RETURN $m", {"m": m})) == [m]
+
+
+def test_to_string_of_a_float_that_is_a_whole_number_written_and_read_back_keeps_its_fraction(
+    cypher_pm: PersistenceManager,
+):
+    clear(cypher_pm)
+    assert cypher_pm.query(spec("CREATE (n:CyWrite {g: 3.0}) RETURN toString(n.g)")) == ["3.0"]
+    assert cypher_pm.query(spec("MATCH (n:CyWrite) RETURN toString(n.g)")) == ["3.0"]

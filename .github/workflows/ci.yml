@@ -35,11 +35,6 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.14"
-      # The Oracle image takes about six gigabytes unpacked, beside the other engines' images.
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-          df -h /
       # Pulled here, so that the time the image takes isn't counted against the container's start. The image is the
       # one drivine/testing/drivine_test_containers.py names.
       - name: Pull the Oracle image

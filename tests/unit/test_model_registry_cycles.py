@@ -6,7 +6,8 @@ each other do, and a model that refers to a refused view can't be loaded.
 from __future__ import annotations
 
 import re
-from typing import Annotated
+import threading
+from typing import Annotated, Any
 
 import pytest
 
@@ -82,3 +83,29 @@ def test_two_views_that_refer_to_each_other_and_load_are_each_built_once():
     assert registry.view(Down) is down
     assert down.relationships[0].related is up
     assert up.relationships[0].related is down
+
+
+def test_a_view_refused_on_one_thread_is_refused_again_while_another_thread_builds_a_view(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    registry = ModelRegistry()
+    build_view = registry._build_view  # pyright: ignore[reportPrivateUsage]
+    building, done = threading.Event(), threading.Event()
+
+    def slowly(type_: type) -> Any:
+        if type_ is Down:
+            building.set()
+            done.wait(5)
+        return build_view(type_)
+
+    monkeypatch.setattr(registry, "_build_view", slowly)
+    other = threading.Thread(target=registry.view, args=(Up,))
+    other.start()
+    assert building.wait(5)
+    # Each thread's build is its own: this one's refusal isn't left to the other's to undo.
+    with pytest.raises(DrivineError, match=REFUSED):
+        registry.view(Right)
+    done.set()
+    other.join(5)
+    with pytest.raises(DrivineError, match=REFUSED):
+        registry.view(Right)

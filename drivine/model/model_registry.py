@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from typing import Any, Literal
 
 from pydantic import BaseModel
@@ -91,10 +92,11 @@ class ModelRegistry:
         self._relationship_fragments: dict[type, RelationshipFragmentModel] = {}
         self._views: dict[type, GraphViewModel] = {}
         self._registered_subtypes: dict[type, list[type]] = {}
-        self._building: list[tuple[dict[type, Any], type]] | None = None
+        self._thread = threading.local()
         """
-        What has been cached since the outermost view being built was asked for: each model's cache and class. A view
-        that fails takes all of them with it, as one built on its account may refer to it.
+        The thread's `building`: what has been cached since the outermost view it is building was asked for, each
+        model's cache and class. A view that fails takes all of them with it, as one built on its account may refer to
+        it. Kept per thread, as the sync API may share the registry between threads, each building its own view.
         """
 
     # ----- Kinds and subtypes -----
@@ -172,17 +174,19 @@ class ModelRegistry:
             model = self._build_relationship_fragment(type_)
             self._relationship_fragments[type_] = model
             # It may lead to a view still being built, so it goes if that view fails.
-            if self._building is not None:
-                self._building.append((self._relationship_fragments, type_))
+            building: list[tuple[dict[type, Any], type]] | None = getattr(self._thread, "building", None)
+            if building is not None:
+                building.append((self._relationship_fragments, type_))
         return model
 
     def view(self, type_: type) -> GraphViewModel:
         model = self._views.get(type_)
         if model is not None:
             return model
-        outermost = self._building is None
-        building = self._building = [] if outermost else self._building
-        assert building is not None
+        building: list[tuple[dict[type, Any], type]] | None = getattr(self._thread, "building", None)
+        outermost = building is None
+        if building is None:
+            building = self._thread.building = []
         try:
             # Cached before its relationships are resolved, so that a view that refers to itself finds itself.
             model = self._build_view(type_)
@@ -201,7 +205,7 @@ class ModelRegistry:
             raise
         finally:
             if outermost:
-                self._building = None
+                self._thread.building = None
         return model
 
     # ----- Building -----

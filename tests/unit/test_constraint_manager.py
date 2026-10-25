@@ -4,12 +4,12 @@ import dataclasses
 import logging
 import time
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, Literal
 
 import pytest
 from neo4j.exceptions import Neo4jError
 
-from drivine import DrivineError, uniqueness_constraint
+from drivine import DrivineError, concurrency, uniqueness_constraint
 from drivine.schema.constraint_manager import ConstraintManager
 from drivine.schema.ensure_result import EnsureResult
 from drivine.schema.native_operation import NativeOperation
@@ -351,15 +351,22 @@ class BuildingInStore:
     An executor over a FalkorDB holding a constraint another process is building. Until it is dropped, each listing
     gives the next of `builds`, the last from then on; None lists nothing, as when that process has dropped its failed
     build. Once dropped, nothing is listed until the constraint is made, and then each listing gives the next of
-    `rebuilds`. The query for keys held more than once gives `conflicts`.
+    `rebuilds`. The query for keys held more than once gives `conflicts`. With `refused_drop`, FalkorDB refuses each
+    drop: "dropped first" as when another process has dropped the constraint first, so it is no longer listed, and
+    "still listed" leaving it listed as it was.
     """
 
     def __init__(
-        self, *builds: str | None, rebuilds: tuple[str, ...] = ("OPERATIONAL",), conflicts: list[Any] | None = None
+        self,
+        *builds: str | None,
+        rebuilds: tuple[str, ...] = ("OPERATIONAL",),
+        conflicts: list[Any] | None = None,
+        refused_drop: Literal["dropped first", "still listed"] | None = None,
     ) -> None:
         self.builds = builds
         self.rebuilds = rebuilds
         self.conflicts = conflicts or []
+        self.refused_drop = refused_drop
         self.phase = "building"
         self.listings = 0
         self.ran: list[str | NativeOperation] = []
@@ -371,7 +378,10 @@ class BuildingInStore:
         self.ran.append(statement)
         if isinstance(statement, NativeOperation):
             if statement.native == "CONSTRAINT_DROP":
-                self.phase = "dropped"
+                if self.refused_drop != "still listed":
+                    self.phase = "dropped"
+                if self.refused_drop:
+                    raise DrivineError(NO_SUCH_CONSTRAINT)
             elif statement.native == "CONSTRAINT_CREATE":
                 self.phase, self.listings = "made", 0
             return []
@@ -389,6 +399,10 @@ class BuildingInStore:
 
     def listed(self) -> int:
         return sum(1 for it in self.ran if it == FALKORDB_SCHEMA.list_uniques.statement)
+
+
+NO_SUCH_CONSTRAINT = "Unable to drop constraint on label Person, no such constraint"
+"""How FalkorDB refuses to drop a constraint it no longer holds."""
 
 
 class SyncBuildingInStore(BuildingInStore):
@@ -447,6 +461,21 @@ async def test_on_falkordb_a_constraint_dropped_while_under_construction_is_made
     assert (store.count("CONSTRAINT_DROP"), store.count("CONSTRAINT_CREATE")) == (0, 1)
 
 
+async def test_on_falkordb_dropping_a_failed_build_found_there_is_told_and_warned_of_though_the_data_is_a_violation(
+    caplog: pytest.LogCaptureFixture,
+):
+    store = BuildingInStore("FAILED", conflicts=[REPEATED])
+    told: list[None] = []
+
+    with caplog.at_level(logging.WARNING, "drivine.schema"):
+        result = await ConstraintManager(store, FALKORDB_SCHEMA, lambda: told.append(None)).ensure(PERSON_EMAIL)  # pyright: ignore[reportArgumentType]
+
+    assert result == EnsureResult("VIOLATION", PERSON_EMAIL, sample=(REPEATED,))
+    # The object manager's list of constraints held it, and is now stale.
+    assert told == [None]
+    assert "Dropped the uniqueness constraint on Person(email)" in caplog.text and "FAILED" in caplog.text
+
+
 def test_on_falkordb_the_sync_api_waits_on_a_constraint_already_under_construction():
     built = SyncBuildingInStore("UNDER CONSTRUCTION", "OPERATIONAL")
     failed = SyncBuildingInStore("UNDER CONSTRUCTION", "FAILED", rebuilds=("FAILED",), conflicts=[REPEATED])
@@ -458,6 +487,64 @@ def test_on_falkordb_the_sync_api_waits_on_a_constraint_already_under_constructi
         "VIOLATION", PERSON_EMAIL, sample=(REPEATED,)
     )
     assert failed.count("CONSTRAINT_DROP") == 1
+
+
+async def test_on_falkordb_a_constraint_still_under_construction_when_the_wait_ends_raises_and_nothing_is_changed(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    async def no_wait(seconds: float) -> None:
+        pass
+
+    monkeypatch.setattr(concurrency, "sleep", no_wait)
+    store = BuildingInStore("UNDER CONSTRUCTION")
+
+    with pytest.raises(DrivineError, match=r"The uniqueness constraint on Person\(email\) was not built\."):
+        await ConstraintManager(store, FALKORDB_SCHEMA).ensure(PERSON_EMAIL)  # pyright: ignore[reportArgumentType]
+
+    assert store.listed() == 50
+    assert (store.count("CONSTRAINT_DROP"), store.count("CONSTRAINT_CREATE")) == (0, 0)
+
+
+async def test_on_falkordb_a_failed_build_another_process_dropped_first_is_built_again_here():
+    store = BuildingInStore("FAILED", refused_drop="dropped first")
+
+    result = await ConstraintManager(store, FALKORDB_SCHEMA).ensure(PERSON_EMAIL)  # pyright: ignore[reportArgumentType]
+
+    assert result == EnsureResult("CREATED", PERSON_EMAIL)
+    natives = [it.native for it in store.ran if isinstance(it, NativeOperation)]
+    assert natives == ["CONSTRAINT_DROP", "CONSTRAINT_CREATE"]
+
+
+async def test_on_falkordb_a_failed_build_made_here_another_process_dropped_first_is_a_violation_when_a_key_repeats():
+    store = BuildingInStore(None, rebuilds=("FAILED",), conflicts=[REPEATED], refused_drop="dropped first")
+
+    result = await ConstraintManager(store, FALKORDB_SCHEMA).ensure(PERSON_EMAIL, 0)  # pyright: ignore[reportArgumentType]
+
+    assert result == EnsureResult("VIOLATION", PERSON_EMAIL, sample=())
+    assert (store.count("CONSTRAINT_DROP"), store.count("CONSTRAINT_CREATE")) == (1, 1)
+
+
+@pytest.mark.parametrize("builds", [("FAILED",), (None,)], ids=["already failed", "failed when made here"])
+async def test_on_falkordb_a_refused_drop_of_a_failed_build_is_raised_while_it_is_still_listed(
+    builds: tuple[str | None],
+):
+    store = BuildingInStore(*builds, rebuilds=("FAILED",), conflicts=[], refused_drop="still listed")
+
+    with pytest.raises(DrivineError, match=NO_SUCH_CONSTRAINT):
+        await ConstraintManager(store, FALKORDB_SCHEMA).ensure(PERSON_EMAIL, 0)  # pyright: ignore[reportArgumentType]
+
+    assert store.count("CONSTRAINT_DROP") == 1
+
+
+def test_on_falkordb_the_sync_api_builds_again_a_failed_build_another_process_dropped_first():
+    built = SyncBuildingInStore("FAILED", refused_drop="dropped first")
+    kept = SyncBuildingInStore("FAILED", refused_drop="still listed")
+
+    assert SyncConstraintManager(built, FALKORDB_SCHEMA).ensure(PERSON_EMAIL) == EnsureResult(  # pyright: ignore[reportArgumentType]
+        "CREATED", PERSON_EMAIL
+    )
+    with pytest.raises(DrivineError, match=NO_SUCH_CONSTRAINT):
+        SyncConstraintManager(kept, FALKORDB_SCHEMA).ensure(PERSON_EMAIL)  # pyright: ignore[reportArgumentType]
 
 
 def test_only_falkordb_lists_the_constraints_it_failed_to_build():

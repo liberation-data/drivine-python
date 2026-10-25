@@ -69,7 +69,7 @@ class ConstraintManager:
             # FalkorDB keeps listing a constraint whose build failed, though it enforces nothing. It isn't the
             # constraint: it is dropped and the constraint made again, which gives a VIOLATION when the data still holds
             # a key more than once.
-            await self._drop_unique(spec)
+            await self._drop_failed_build(spec)
             self.changed()
             logger.warning(
                 "Dropped the uniqueness constraint on %s(%s), whose build %s had listed as FAILED, to make it again",
@@ -130,6 +130,25 @@ class ConstraintManager:
     async def _drop_unique(self, spec: UniquenessConstraintSpec) -> None:
         for statement in self.grammar.drop_unique(spec):
             await self.executor.run(statement)
+
+    async def _drop_failed_build(self, spec: UniquenessConstraintSpec) -> None:
+        """
+        Drops the constraint, whose build FalkorDB listed as FAILED. Another process waiting on the same build sees it
+        fail too, and may drop it first: FalkorDB then refuses the drop, as there is no such constraint, which is no
+        error once the failed build is no longer listed. A refusal while it is still listed is raised.
+        """
+        try:
+            await self._drop_unique(spec)
+        except Exception as refusal:
+            if await self._failed(spec):
+                raise
+            logger.debug(
+                "The uniqueness constraint on %s(%s), whose build %s had listed as FAILED, was dropped already: %s",
+                spec.label,
+                ", ".join(spec.properties),
+                self.grammar.engine,
+                refusal,
+            )
 
     async def _blocking_index(self, spec: UniquenessConstraintSpec) -> SchemaItem | None:
         """The plain range index over the constraint's label and properties, in its order; None when there is none."""
@@ -201,7 +220,7 @@ class ConstraintManager:
         though the data is read to confirm it). A build that fails with no key held more than once, or data that can't
         be read, raises DrivineError.
         """
-        await self._drop_unique(spec)
+        await self._drop_failed_build(spec)
         failed = (
             f"{self.grammar.engine} could not build the uniqueness constraint on "
             f"{spec.label}({', '.join(spec.properties)})"

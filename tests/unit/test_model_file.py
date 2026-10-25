@@ -471,3 +471,41 @@ def test_a_subtype_model_registry_refuses_is_not_listed_as_a_subtype(modules, pr
     fragments = {it["name"]: it for it in written(project)["fragments"]}
     assert sorted(fragments) == ["Animal", "Dog"]
     assert fragments["Animal"]["subtypes"] == [f"{names}.Dog"]
+
+
+def test_a_view_that_leads_to_a_refused_view_is_named_and_left_out_not_written_with_a_dangling_id(
+    modules, project: Project
+):
+    """
+    A current entry refers only to current ones. In a cycle the registry keeps A, built while B was, though B is then
+    refused, so A is left out by the reader, and named.
+    """
+    (names,) = modules(
+        cycle="""
+        from __future__ import annotations
+        from typing import Annotated
+        from drivine import GraphView, NodeFragment, NodeId, Relationship, Root
+
+        class Good(NodeFragment, labels=["Good"]):
+            id: Annotated[str, NodeId()]
+
+        class Twice(NodeFragment, labels=["Twice"]):
+            a: Annotated[str, NodeId()]
+            b: Annotated[str, NodeId()]
+
+        class B(GraphView):
+            good: Annotated[Good, Root()]
+            a: Annotated[list[A], Relationship("R")]
+            bad: Annotated[list[Twice], Relationship("S")]
+
+        class A(GraphView):
+            good: Annotated[Good, Root()]
+            b: Annotated[list[B], Relationship("R")]
+        """
+    )
+    warnings: list[str] = []
+    write_model_file([names], project, False, warnings.append)
+    file = written(project)
+    assert [it["name"] for it in file["fragments"]] == ["Good"]
+    assert file["views"] == []
+    assert f"Drivine model file: {names}.A: refers to {names}.B, which is left out." in warnings

@@ -107,9 +107,24 @@ class ModelReader:
                 entry["subtypes"] = [it for it in entry["subtypes"] if it in ids]
                 if not entry["subtypes"]:
                     del entry["subtypes"]
+        # A view the registry kept while a view it leads to, in a cycle, was refused refers to one left out: it can't
+        # load either, so it is left out, and named, as is what refers to it in turn.
+        while dangling := [
+            (entries, entry, ref)
+            for entries in (self._read.relationship_fragments, self._read.views)
+            for entry in entries
+            for ref in _refers_to(entry)
+            if ref not in self._ids()
+        ]:
+            entries, entry, ref = dangling[0]
+            entries.remove(entry)
+            self._read.problems.append(f"{entry['id']}: refers to {ref}, which is left out.")
         for entries in (self._read.fragments, self._read.relationship_fragments, self._read.views):
             entries.sort(key=lambda it: it["id"])
         return self._read
+
+    def _ids(self) -> set[str]:
+        return {it["id"] for it in (*self._read.fragments, *self._read.relationship_fragments, *self._read.views)}
 
     def _add(self, type_: type) -> None:
         if type_ in self._seen:
@@ -278,6 +293,13 @@ class ModelReader:
 def model_id(type_: type) -> str:
     """A class's id in the file: its module and qualified name, as `sample.fragments.person.Person`."""
     return f"{type_.__module__}.{type_.__qualname__}"
+
+
+def _refers_to(entry: Entry) -> list[str]:
+    """The ids a relationship fragment's or view's entry refers to: its target, or its root and relationships'."""
+    if "target" in entry:
+        return [entry["target"]["fragment"]]
+    return [entry["root"]["fragment"], *(it["target"] for it in entry["relationships"])]
 
 
 def _entry(**keys: Any) -> Entry:

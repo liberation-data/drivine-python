@@ -74,6 +74,7 @@ class OracleCypherCompiler(SqlCypherCompiler):
         """
         self._extended_parameters: set[str] = set()
         """The names of a procedure's parameters that hold a float as extended JSON writes one: see `property_of`."""
+        self.parameter_path = self._parameter_path
 
     def literal_json(self, value: Any) -> str:
         if isinstance(value, float):
@@ -125,6 +126,23 @@ class OracleCypherCompiler(SqlCypherCompiler):
                 entries = cast(dict[str, Any], written)
                 self._extended_parameters.update(key for key, item in entries.items() if _keyed_as_extended(item))
         return text
+
+    def _parameter_path(self, marker: str, text: str | None, keys: Sequence[str], value: Any) -> str:
+        """
+        A value in a parameter that is a map, `$p.text`, read with one path from the text the parameter is bound as, and
+        not from the parameter read as JSON first: Oracle crashed the session (#145) where a statement read a value from
+        a parameter past 32 KB, taken as JSON, for each of two rows. Read as extended JSON where the parameter is (see
+        `parameter_text`) and the value holds such a double.
+        """
+        extended = (
+            keys[0] in self._extended_parameters
+            if marker == PARAMS
+            else text is not None and id(text) in self._extended
+        )
+        path = _path_of(keys)
+        if extended and _doubled(value):
+            return f"JSON(JSON_QUERY({marker}, {path} RETURNING CLOB) EXTENDED)"
+        return f"JSON_QUERY({marker}, {path} RETURNING JSON)"
 
     def parameter_count(self, marker: str) -> str:
         return f"CAST({marker} AS NUMBER)"
@@ -769,10 +787,30 @@ def _quoted(text: str) -> str:
 def _path(key: str) -> str:
     """The path of the property, as a SQL literal: a key quoted when it must be, so a key with a dot in it is one
     key."""
+    return literal(f"$.{_step(key)}")
+
+
+def _step(key: str) -> str:
+    """The key, as a step of a JSON path: quoted when it must be, so a key with a dot in it is one key."""
     if not key:
         raise DrivineError("A property name is empty: an empty name is no property a statement can read.")
-    step = key if _PLAIN_KEY.fullmatch(key) and key not in _JSON_WORDS else _quoted(key)
-    return literal(f"$.{step}")
+    return key if _PLAIN_KEY.fullmatch(key) and key not in _JSON_WORDS else _quoted(key)
+
+
+def _path_of(keys: Sequence[str]) -> str:
+    """The path of the property the keys lead to, each of a map in the one before, as a SQL literal: `'$.p.text'`."""
+    return literal("$" + "".join(f".{_step(key)}" for key in keys))
+
+
+def _doubled(value: Any) -> bool:
+    """Whether the value, of JSON's own kinds, holds a float that is a whole number: see `parameter_text`."""
+    if isinstance(value, float):
+        return value.is_integer()
+    if isinstance(value, dict):
+        return any(_doubled(it) for it in cast(dict[str, Any], value).values())
+    if isinstance(value, list):
+        return any(_doubled(it) for it in cast(list[Any], value))
+    return False
 
 
 def _keys_of(json: str) -> str:

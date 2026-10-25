@@ -415,7 +415,15 @@ class SqlCypherCompiler(ABC):
         if query.unions:
             return self._with_functions(self._union(query, parameters))
         if not any(writes(it) for it in query.clauses):
-            self._begin(Parameters(parameters, self.parameter_json, self.parameter_count, text=self.parameter_text))
+            self._begin(
+                Parameters(
+                    parameters,
+                    self.parameter_json,
+                    self.parameter_count,
+                    text=self.parameter_text,
+                    as_path=self.parameter_path,
+                )
+            )
             return self._with_functions(CompiledCypher(self._query(query), self._parameters.values))
         self.procedural = True
         # A procedure takes its parameters as one object, and reads each from it.
@@ -426,6 +434,7 @@ class SqlCypherCompiler(ABC):
                 lambda it: self.number(self.property_of(PARAMS, it)),
                 in_object=True,
                 text=self.parameter_text,
+                as_path=self._in_params(self.parameter_path),
             )
         )
         # The parameters' text is written before the procedure's body is: on Oracle, writing it is what says whether the
@@ -497,7 +506,15 @@ class SqlCypherCompiler(ABC):
         if any(it != names[0] for it in names):
             listed = " and ".join("(" + ", ".join(it) + ")" for it in names)
             raise DrivineError(f"Each query of a UNION returns the same names, as in Cypher: {listed}.")
-        self._begin(Parameters(parameters, self.parameter_json, self.parameter_count, text=self.parameter_text))
+        self._begin(
+            Parameters(
+                parameters,
+                self.parameter_json,
+                self.parameter_count,
+                text=self.parameter_text,
+                as_path=self.parameter_path,
+            )
+        )
         rows = "\nUNION ALL\n".join(
             f"SELECT {i + 1} AS part, {self.row_number} AS n, q.result "
             f"FROM (\n{indent(self._query(Query(clauses)))}\n) q"
@@ -528,6 +545,24 @@ class SqlCypherCompiler(ABC):
     def parameter_text(self, value: Any) -> str:
         """The JSON text a parameter's value is bound as."""
         return cypher_json(value)
+
+    parameter_path: Callable[[str, str | None, Sequence[str], Any], str] | None = None
+    """
+    Where a store reads a value in a parameter that is a map, `$p.text`, straight from the text bound as a marker: given
+    the marker, the JSON text bound at it (in a procedure, PARAMS and None, the parameter's name first among the keys),
+    the keys, and the value at them, of JSON's own kinds, the value as JSON. None where the store reads the parameter as
+    JSON, then each key of it.
+    """
+
+    @staticmethod
+    def _in_params(
+        read: Callable[[str, str | None, Sequence[str], Any], str] | None,
+    ) -> Callable[[str, str | None, Sequence[str], Any], str] | None:
+        """`parameter_path` in a procedure, which reads each parameter from PARAMS: the parameter's name is its first
+        key."""
+        if read is None:
+            return None
+        return lambda name, _, keys, value: read(PARAMS, None, [name, *keys], value)
 
     @abstractmethod
     def parameter_count(self, marker: str) -> str:
@@ -2708,6 +2743,9 @@ class SqlCypherCompiler(ABC):
                 )
             return scope[expression.name]
         if isinstance(expression, Property):
+            in_parameter = self._in_parameter(expression)
+            if in_parameter is not None:
+                return Json(in_parameter)
             return self._property(self._expression(expression.subject, scope), expression.key)
         if isinstance(expression, HasLabels):
             subject = self._expression(expression.subject, scope)
@@ -2788,6 +2826,46 @@ class SqlCypherCompiler(ABC):
             item_lists=bool(entities) and all(_is_list(it) for it in entities),
         )
 
+    def _known(self, index: Expression) -> Any:
+        """An index written, or bound to a parameter, is known: a text is the property of that name, a number an
+        item."""
+        if isinstance(index, Literal):
+            return index.value
+        if isinstance(index, Parameter):
+            return self._parameters.value(index.name)
+        if isinstance(index, Unary):
+            # `-1` is a negated number.
+            operand = index.operand
+            if index.operator is UnaryOperator.NEGATE and isinstance(operand, Literal) and _is_number(operand.value):
+                return operand.value
+        return None
+
+    def _in_parameter(self, value: Property | Index) -> str | None:
+        """
+        A value in a parameter that is a map, `$p.text`, `$p.a.b` or `$p['a'].b`, each key a property or an index known
+        as a text, read at once from the text the parameter is bound as, where the store reads it so (see
+        `Parameters.json_at`); None otherwise. Oracle crashed the session where a statement took a parameter past 32 KB
+        as JSON, then the value from it, for each of two rows (#145).
+        """
+        keys: list[str] = []
+        subject: Expression = value
+        while True:
+            if isinstance(subject, Property):
+                keys.insert(0, subject.key)
+            elif isinstance(subject, Index):
+                known = self._known(subject.index)
+                if not isinstance(known, str):
+                    break
+                keys.insert(0, known)
+            else:
+                break
+            subject = subject.subject
+        if not isinstance(subject, Parameter) or not keys:
+            return None
+        if self._given_parameters is not None and subject.name in self._given_parameters:
+            return None
+        return self._parameters.json_at(subject.name, keys)
+
     def _index(self, expression: Index, scope: Scope) -> Value:
         index = expression.index
         listed: list[Value] = []
@@ -2801,18 +2879,11 @@ class SqlCypherCompiler(ABC):
             return self.comparable(self.json(subject_value()))
 
         at = self.comparable(self.json(self._expression(index, scope)))
-        # An index written, or bound to a parameter, is known: a text is the property of that name, a number an item.
-        known: Any = None
-        if isinstance(index, Literal):
-            known = index.value
-        elif isinstance(index, Parameter):
-            known = self._parameters.value(index.name)
-        elif isinstance(index, Unary):
-            # `-1` is a negated number.
-            operand = index.operand
-            if index.operator is UnaryOperator.NEGATE and isinstance(operand, Literal) and _is_number(operand.value):
-                known = operand.value
+        known = self._known(index)
         if isinstance(known, str):
+            in_parameter = self._in_parameter(expression)
+            if in_parameter is not None:
+                return Json(in_parameter)
             return self._property(self._expression(expression.subject, scope), known)
         # An item of a list of nodes or relationships is the node or the relationship, so it is compared by its id; of
         # one collect gathers in this query, its properties, for a store reads no aggregate from a subquery. A pattern

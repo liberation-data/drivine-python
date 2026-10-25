@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from enum import Enum
@@ -32,12 +32,16 @@ class Parameters:
         as_count: Callable[[str], str],
         in_object: bool = False,
         text: Callable[[Any], str] | None = None,
+        as_path: Callable[[str, str | None, Sequence[str], Any], str] | None = None,
     ) -> None:
         """
         `as_json` is the bound JSON text at a marker, or with `in_object` the parameter of a name, as the store's JSON:
         given the marker, and the text bound at it, or the name and None. `as_count` is the bound whole number at a
         marker, or with `in_object` the parameter of a name, as the store's number. `text` is the JSON text a value is
-        bound as: `cypher_json`'s, unless a store writes it otherwise.
+        bound as: `cypher_json`'s, unless a store writes it otherwise. `as_path` is the value at a path of keys in a
+        parameter that is a map, read straight from the text it is bound as: given the marker and the text as `as_json`
+        is given them, the keys, and the value at them, of JSON's own kinds (see `jsonable`); None where the store reads
+        the parameter, then each key of it.
         """
         # An iterator is read once, here: a statement may name its parameter more than once.
         self._given: dict[str, Any] = {
@@ -47,12 +51,16 @@ class Parameters:
         self._as_count = as_count
         self._in_object = in_object
         self._text = text or cypher_json
+        self._as_path = as_path
         self._bound: dict[str, Any] = {}
+        self._trees: dict[str, Any] = {}
 
     @property
     def values(self) -> dict[str, Any]:
         """What the SQL binds."""
-        return {OBJECT: self._text(dict(self._given))} if self._in_object else self._bound
+        return (
+            {OBJECT: self._text({name: self._tree(name) for name in self._given})} if self._in_object else self._bound
+        )
 
     def json(self, name: str) -> str:
         """The parameter, as JSON."""
@@ -60,9 +68,42 @@ class Parameters:
         if self._in_object:
             return self._as_json(name, None)
         key = f"_cy_{name}"
-        written = None if value is None else self._text(value)
+        written = None if value is None else self._text(self._tree(name))
         self._bound[key] = written
         return self._as_json(f"${key}", written)
+
+    def json_at(self, name: str, keys: Sequence[str]) -> str | None:
+        """
+        The value at the keys in the parameter, as JSON, where the store reads it from the text the parameter is bound
+        as (see `as_path`) and the parameter is a map that holds a map at each key but the last; None otherwise.
+        """
+        read = self._as_path
+        if read is None:
+            return None
+        # Walked as its text is written, each key a text: see `_tree`.
+        tree = self._tree(name)
+        map_: Any = tree
+        for key in keys[:-1]:
+            map_ = cast(dict[str, Any], map_).get(key) if isinstance(map_, dict) else None
+        if not isinstance(map_, dict):
+            return None
+        value = cast(dict[str, Any], map_).get(keys[-1])
+        if self._in_object:
+            return read(name, None, keys, value)
+        key = f"_cy_{name}"
+        written = self._text(tree)
+        self._bound[key] = written
+        return read(f"${key}", written, keys, value)
+
+    def _tree(self, name: str) -> Any:
+        """
+        The parameter as JSON's own kinds (see `jsonable`), worked out once, and its text written from it, which
+        `jsonable` gives again: an iterator in a map the parameter holds is read once, though the statement reads the
+        parameter, or a value in it, more than once.
+        """
+        if name not in self._trees:
+            self._trees[name] = jsonable(self.value(name))
+        return self._trees[name]
 
     def count(self, name: str) -> str:
         """The parameter, as a whole number."""

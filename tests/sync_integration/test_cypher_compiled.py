@@ -781,6 +781,29 @@ def test_to_string_of_a_double_past_oracles_number_range_writes_its_shortest_dig
     assert cypher_pm.query(spec("RETURN toString(5e-324)")) == ["4.9E-324"]
 
 
+def test_round_reads_a_precision_from_data_or_a_whole_float_as_a_whole_number_toward_zero_and_a_null_as_null(
+    cypher_pm: PersistenceManager,
+):
+    # Not in the spec yet: its round() case takes the precision as written or given. A negative one from data is #148.
+    clear(cypher_pm)
+    cypher_pm.execute(spec("CREATE (:Round {p: 1.7, q: -0.5, w: 2.0})"))
+    assert cypher_pm.query(
+        spec(
+            "MATCH (n:Round) RETURN [round(2.555, n.p), round(2.55, n.p, 'UP'), round(2.5, n.q), "
+            "round(2.5, n.q, 'HALF_UP'), round(2.555, n.w), round(2.555, 2.0, 'HALF_UP')]"
+        )
+    ) == [[2.6, 2.6, 3.0, 3.0, 2.56, 2.56]]
+    assert cypher_pm.query(
+        spec(
+            "RETURN [round(2.5, 0, 'HALF_UP'), round(-2.5, 0, 'HALF_EVEN'), round(2.5, 0, 'DOWN'), "
+            "round(2.1, 0, 'CEILING'), round(2.9, 0, 'FLOOR'), round(-2.1, 0, 'UP'), round(-2.5, 0, 'HALF_DOWN')]"
+        )
+    ) == [[3.0, -2.0, 2.0, 3.0, 2.0, -3.0, -2.0]]
+    assert cypher_pm.query(
+        spec("RETURN [round(null, 2), round(2.5, null), round(null, 2, 'UP'), round(2.5, null, 'UP')]")
+    ) == [[None, None, None, None]]
+
+
 def test_a_union_in_call_whose_queries_return_a_list_with_an_identity_beside_one_without_compiles(
     cypher_pm: PersistenceManager,
 ):

@@ -4,6 +4,9 @@ wrong, on each store alike: before the store is sent anything. The statements an
 tests/cypher/refusals.yaml.
 """
 
+from decimal import Decimal
+from typing import Any
+
 import pytest
 
 from drivine import DrivineError
@@ -113,3 +116,32 @@ def test_collect_distinct_beside_a_variable_no_other_item_is_outside_its_aggrega
     # Not in the spec yet: _distinct_first groups by each such variable, so it is refused before.
     with pytest.raises(DrivineError, match="names p outside its aggregates"):
         compiler("g").compile("MATCH (p:Person) RETURN p.born, collect(DISTINCT p.name) + p.name")
+
+
+@pytest.mark.parametrize("compiler", COMPILERS.values(), ids=COMPILERS.keys())
+@pytest.mark.parametrize(
+    ("cypher", "parameters"),
+    [
+        ("RETURN round(1234.5, -2)", {}),
+        ("RETURN round(1234.5, -1.2)", {}),
+        ("RETURN round(1234.5, -$p)", {"p": 2}),
+        ("RETURN round(1234.5, $p)", {"p": -2.5}),
+        ("RETURN round(1234.5, $p)", {"p": Decimal("-1.2")}),
+        ("RETURN round(1234.5, $p)", {"p": float("-inf")}),
+    ],
+)
+def test_round_of_two_arguments_refuses_a_precision_below_0_toward_zero_written_negated_or_given(
+    compiler: type[SqlCypherCompiler], cypher: str, parameters: dict[str, Any]
+) -> None:
+    # Not in the spec's refusals yet, which name the message for three arguments alone.
+    with pytest.raises(DrivineError, match=r"^round\(\) takes a precision of 0 or more, as in Neo4j\.$"):
+        compiler("g").compile(cypher, parameters)
+
+
+@pytest.mark.parametrize("compiler", COMPILERS.values(), ids=COMPILERS.keys())
+@pytest.mark.parametrize("p", [-0.9, Decimal("-0.5"), float("nan")])
+def test_round_takes_a_precision_above_minus_1_as_0_places_and_compiles_one_that_is_nan(
+    compiler: type[SqlCypherCompiler], p: Any
+) -> None:
+    # -0.5 and -0.9 cut toward zero are 0 places; NaN is no precision below 0, and is left to the store.
+    assert compiler("g").compile("RETURN [round(1234.5, -0.5), round(1234.5, $p, 'HALF_UP')]", {"p": p}).sql

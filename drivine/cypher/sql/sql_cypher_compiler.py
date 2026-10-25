@@ -4107,7 +4107,8 @@ class SqlCypherCompiler(ABC):
         """
         negated = isinstance(precision, Unary) and precision.operator is UnaryOperator.NEGATE
         given = jsonable(self._given(precision.operand if isinstance(precision, Unary) and negated else precision))
-        if _is_number(given) and math.trunc(-given if negated else given) < 0:
+        # At -1 or less, as below 0 toward zero: math.trunc fails on NaN or an infinity.
+        if _is_number(given) and (-given if negated else given) <= -1:
             raise DrivineError("round() takes a precision of 0 or more, as in Neo4j.")
 
     def _collected(self, value: Value) -> str:

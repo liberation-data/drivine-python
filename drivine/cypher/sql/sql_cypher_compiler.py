@@ -69,7 +69,7 @@ from drivine.cypher.ast.remove_item import RemoveItem, RemoveProperty
 from drivine.cypher.ast.set_item import SetAdd, SetItem, SetProperty, SetReplace
 from drivine.cypher.cypher_reader import read_cypher
 from drivine.cypher.sql.compiled_cypher import CompiledCypher
-from drivine.cypher.sql.parameters import Parameters, cypher_json
+from drivine.cypher.sql.parameters import Parameters, cypher_json, jsonable
 from drivine.cypher.sql.temporal import Temporal
 from drivine.cypher.sql.temporal_sql import TemporalSql
 from drivine.cypher.sql.temporals import FIELD_NAMES, NoNumber, Temporals, canonical
@@ -3860,7 +3860,9 @@ class SqlCypherCompiler(ABC):
                 # As Neo4j refuses it, where the precision is written, negated or not, or a parameter's value.
                 precision = function.arguments[1]
                 negated = isinstance(precision, Unary) and precision.operator is UnaryOperator.NEGATE
-                given = self._given(precision.operand if isinstance(precision, Unary) and negated else precision)
+                given = jsonable(
+                    self._given(precision.operand if isinstance(precision, Unary) and negated else precision)
+                )
                 if _is_number(given) and (-given if negated else given) < 0:
                     raise DrivineError("round() takes a precision of 0 or more, as in Neo4j.")
                 number = self.number(self.comparable(self.json(arguments[0])))
@@ -4005,7 +4007,8 @@ class SqlCypherCompiler(ABC):
         """
         if not isinstance(mode, (Literal, Parameter)):
             unsupported("A rounding mode an expression gives")
-        name = self._given(mode)
+        # As it is bound: an Enum is its value.
+        name = jsonable(self._given(mode))
         if name is None:
             return None
         if name not in ROUNDING_MODES:
@@ -4515,7 +4518,10 @@ def java_text(value: Any) -> str:
     double, from its shortest decimal, with no exponent from 10^-3 up to 10^7, a point and a digit after it at least,
     `2.0`, and else as `1.0E7`, `1.2E-4`; NaN and the infinities by Java's names.
     """
-    if isinstance(value, bool) or not isinstance(value, float):
+    if isinstance(value, int) and not isinstance(value, bool):
+        # An int's own text, not a subclass's: an Enum of ints writes its name.
+        return int.__repr__(value)
+    if not isinstance(value, float):
         return str(value)
     if math.isnan(value):
         return "NaN"
@@ -4523,7 +4529,8 @@ def java_text(value: Any) -> str:
         return "Infinity" if value > 0 else "-Infinity"
     if value == 0.0:
         return "-0.0" if math.copysign(1.0, value) < 0 else "0.0"
-    shortest = Decimal(repr(value))
+    # A float's own repr, not a subclass's: numpy's float64 writes np.float64(2.5).
+    shortest = Decimal(float.__repr__(value))
     if 1e-3 <= abs(value) < 1e7:
         text = format(shortest, "f")
         return text if "." in text else f"{text}.0"

@@ -591,7 +591,7 @@ def _written(value: Any) -> str:
         if math.isinf(value):
             return '"Infinity"' if value > 0 else '"-Infinity"'
         if value.is_integer():
-            whole = format(Decimal(repr(value)), "f")
+            whole = format(Decimal(float.__repr__(value)), "f")
             return whole if "." in whole else f"{whole}.0"
         # As Java writes it, as drivine4j binds it: Postgres works a float out in exact decimal, so its digits are
         # those it computes with, 4.9E-324 and not 5e-324.

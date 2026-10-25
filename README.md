@@ -262,6 +262,9 @@ people = await pm.query(spec.bind({"city": "Sydney"}))
 - A row of one item is its value, and a row of several a list of them. A node is its properties.
 - A value is compared as JSON, so `'7'` is not `7`, and a missing property is null. A map keeps its keys in the order
   written.
+- A map or a list that holds a node or a relationship (`{x: r}`, `[r, 1]`) compares by what it holds, not by its
+  properties, through a `WITH` or a `CALL { … }` too, as on a graph engine. Unwound by `UNWIND`, as a comprehension's
+  or a reduce's variable, or carried past a write in the statement, it compares by its properties.
 - openCypher's temporal values are their ISO 8601 text, as the store keeps a moment: `date`, `datetime`, `duration` and
   the rest make one, their fields read, and two moments compare as the moments they are. A parameter of a `date`,
   `time`, `datetime` or `timedelta` is a temporal value of its kind.
@@ -277,7 +280,8 @@ people = await pm.query(spec.bind({"city": "Sydney"}))
   label and type something has now, read from the nodes and relationships; any other procedure is refused. A parameter
   may be named by a keyword (`$limit`), as in Neo4j. Functions of numbers (`exp`, `log`, `sin`, `atan2`, `round` by a
   mode …) give the floats Neo4j gives, but where Neo4j gives NaN or an infinity (`log(0)`, `sqrt(-1)`, `exp(1000)`) the
-  statement fails: JSON holds neither.
+  statement fails: JSON holds neither. A float is written as Java writes a double, by `toString` and added to a text:
+  `1.0E7`, `1.2E-4`.
 - On Postgres, compiled Cypher works float arithmetic out in exact decimal (`numeric`), not as a double, so a result
   can differ from a graph engine's in its last digits: `0.1 * 3` is `0.3`, where Neo4j gives `0.30000000000000004`. A
   float's text carries no trailing zeros: `toString(4.0 / 2)` is `"2.0"`.

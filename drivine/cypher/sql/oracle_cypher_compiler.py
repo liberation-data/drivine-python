@@ -95,7 +95,7 @@ class OracleCypherCompiler(SqlCypherCompiler):
         `{"$numberLong": "5"}`, which `JSON(… EXTENDED)` would read as the value it writes: such a value is written as
         JSON is, its floats that are whole numbers read as whole numbers. A statement that writes binds all its
         parameters as one text, and reads as extended JSON only those of them with such a double in them: see
-        `property_of`.
+        `property_of`. NaN and the infinities are texts: see `_finite`.
         """
         tree = _finite(jsonable(value))
         if _keyed_as_extended(tree):

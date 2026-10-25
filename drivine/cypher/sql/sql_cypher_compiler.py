@@ -192,6 +192,17 @@ MATH_FUNCTIONS = frozenset(
 )
 """openCypher's functions of one number that `math` works out, as Neo4j names them, lowered."""
 
+TEXT_FUNCTIONS = frozenset({"tostring", "toupper", "tolower", "trim"})
+"""The functions of one value a store writes (`function`) whose result is a text, or null: see Json.text."""
+
+
+class MadeText:
+    """A side of a `+` the statement makes a text, or null, though it does not give it: see Json.text."""
+
+
+MADE_TEXT = MadeText()
+"""The one MadeText: what `add` is given for such a side."""
+
 ROUNDING_MODES = ("CEILING", "FLOOR", "UP", "DOWN", "HALF_EVEN", "HALF_UP", "HALF_DOWN", "UNNECESSARY")
 """The modes `round()` takes, as Java's `RoundingMode` names them."""
 
@@ -741,7 +752,7 @@ class SqlCypherCompiler(ABC):
     def add(self, a: str, b: str, given: tuple[Any, Any] = (None, None)) -> str:
         """
         `a + b` of the JSON values: numbers added, lists joined, texts put together. `given` is what the statement gives
-        each as, where it does: see `summed_text`.
+        each as, where it does, or MADE_TEXT where it makes it a text without giving it: see `summed_text`.
         """
 
     def summed_text(
@@ -752,13 +763,14 @@ class SqlCypherCompiler(ABC):
         `written`, as `toString` writes it, a float as Java writes a double. Where the statement gives it a number,
         `given`, it is that number's text, worked out here; and where it gives the other side, `other`, a number, or
         this side a text, it is its own text, `plain`, for a side is put together with a number only where it is a
-        text. So only a side the statement gives neither way is written as `toString` writes it, which is long:
+        text. So is a side the statement makes a text (MADE_TEXT), as `'x' + toString(i)`. So only a side the
+        statement gives or makes neither way, which may be a float, is written as `toString` writes it, which is long:
         `c.name + 1` compiles as it did before floats were so written. NaN and the infinities count as given neither
         way: Postgres binds them as texts, so a number may be added to one as text.
         """
         if _is_given_number(given):
             return literal(java_text(given))
-        if isinstance(given, str) or _is_given_number(other):
+        if isinstance(given, str) or given is MADE_TEXT or _is_given_number(other):
             return plain(json)
         return written(json)
 
@@ -1227,7 +1239,8 @@ class SqlCypherCompiler(ABC):
         sql = ("\nUNION\n" if distinct else "\nUNION ALL\n").join(
             f"SELECT * FROM (\n{indent(it.sql)}\n) {self._alias('q')}" for it in projected
         )
-        # A value is of a temporal kind where each query makes it of that one.
+        # A value is of a temporal kind where each query makes it of that one, and a text, or a list of texts, where
+        # each makes it one.
         scope: dict[str, Value] = {}
         for variable, value in projected[0].scope.items():
             if not isinstance(value, Json):
@@ -1240,6 +1253,8 @@ class SqlCypherCompiler(ABC):
                 value,
                 temporal=next(iter(temporals)) if len(temporals) == 1 else None,
                 items=next(iter(items)) if len(items) == 1 else None,
+                text=all(_is_text(it) for it in all_),
+                texts=all(_holds_texts(it) for it in all_),
             )
         return _Projected(sql, scope, [])
 
@@ -1267,7 +1282,16 @@ class SqlCypherCompiler(ABC):
 
         items = self.shared1(self.comparable(self.json(listed)), items_of)
         select.source(self.elements(items, name))
-        select.bind(unwind.variable, Json(f"{name}.item", temporal=_items_of(listed), list=_holds_lists(listed)))
+        # An item of a list of texts, or of a text, is a text.
+        select.bind(
+            unwind.variable,
+            Json(
+                f"{name}.item",
+                temporal=_items_of(listed),
+                list=_holds_lists(listed),
+                text=_holds_texts(listed) or _is_text(listed),
+            ),
+        )
         select.order.append((f"{name}.item_no", False))
 
     def _distinct(self, a: _Hop, b: _Hop) -> str:
@@ -1846,6 +1870,8 @@ class SqlCypherCompiler(ABC):
                         items=carried.items if carried else None,
                         list=carried.list if carried else False,
                         item_lists=carried.item_lists if carried else False,
+                        text=carried.text if carried else False,
+                        texts=carried.texts if carried else False,
                     ),
                 )
             elif kind in (_Kind.NODES, _Kind.RELATIONSHIPS):
@@ -2733,7 +2759,7 @@ class SqlCypherCompiler(ABC):
 
     def _expression(self, expression: Expression, scope: Scope) -> Value:
         if isinstance(expression, Literal):
-            return Json(self.literal_json(expression.value))
+            return Json(self.literal_json(expression.value), text=isinstance(expression.value, str))
         if isinstance(expression, Parameter):
             if self._given_parameters is not None and expression.name in self._given_parameters:
                 return self._given_parameters[expression.name]
@@ -2830,6 +2856,7 @@ class SqlCypherCompiler(ABC):
             identity=self._identity_holding(items, self.json_array),
             list=True,
             item_lists=bool(entities) and all(_is_list(it) for it in entities),
+            texts=all(_is_text(it) for it in items),
         )
 
     def _known(self, index: Expression) -> Any:
@@ -2905,6 +2932,7 @@ class SqlCypherCompiler(ABC):
                 temporal=_items_of(subject_value()),
                 identity=self._identity_taken(subject_value(), element, True, lambda it: self.element(it, at)),
                 list=_holds_lists(subject_value()),
+                text=_holds_texts(subject_value()),
             )
 
         def item(list_: str) -> str:
@@ -2923,6 +2951,7 @@ class SqlCypherCompiler(ABC):
             temporal=_items_of(subject_value()),
             identity=self._identity_taken(subject_value(), taken, True, item),
             list=_holds_lists(subject_value()),
+            text=_holds_texts(subject_value()),
         )
 
     def _entity_at(self, entities: Entities, at: str) -> Value:
@@ -3187,6 +3216,7 @@ class SqlCypherCompiler(ABC):
             identity=self._identity_taken(listed, taken, False, sliced),
             list=True,
             item_lists=_holds_lists(listed),
+            texts=_holds_texts(listed),
         )
 
     def _exists(self, patterns: Sequence[Pattern], where: Expression | None, scope: Scope) -> Bool:
@@ -3495,14 +3525,25 @@ class SqlCypherCompiler(ABC):
                 )
                 ids = self.shared([left_value.ids, right_value.ids], lambda it: self.add(it[0], it[1]))
                 return Entities(ids, left_value.relationships, gathered)
-            # Two lists of items of one kind are, together, a list of that kind.
+            # Two lists of items of one kind are, together, a list of that kind. A side the statement makes a text, not
+            # given, is written as its own text; a text put together with a text, or a number given, is a text.
             items = _items_of(left_value)
-            given = (self._given(binary.left), self._given(binary.right))
+            given_left, given_right = self._given(binary.left), self._given(binary.right)
+            text_left = _is_text(left_value) or isinstance(given_left, str)
+            text_right = _is_text(right_value) or isinstance(given_right, str)
+            given = (
+                MADE_TEXT if given_left is None and text_left else given_left,
+                MADE_TEXT if given_right is None and text_right else given_right,
+            )
             return Json(
                 self.shared([a, b], lambda it: self.add(it[0], it[1], given)),
                 items=items if items == _items_of(right_value) else None,
                 list=_is_list(left_value) or _is_list(right_value),
                 item_lists=_holds_lists(left_value) and (_holds_lists(right_value) or not _is_list(right_value)),
+                text=(text_left and (text_right or _is_given_number(given_right)))
+                or (text_right and _is_given_number(given_left)),
+                texts=(_holds_texts(left_value) and (_holds_texts(right_value) or text_right))
+                or (text_left and _holds_texts(right_value)),
             )
         if operator is BinaryOperator.SUBTRACT:
             return Json(self.shared([a, b], lambda it: self.arithmetic(it[0], it[1], "-")))
@@ -3736,6 +3777,8 @@ class SqlCypherCompiler(ABC):
             identity=identity,
             list=all(_is_list(result) for _, result in results),
             item_lists=all(_holds_lists(result) for _, result in results),
+            text=all(_is_text(result) for _, result in results),
+            texts=all(_holds_texts(result) for _, result in results),
         )
 
     def _function(self, function: Function, scope: Scope) -> Value:
@@ -3759,7 +3802,7 @@ class SqlCypherCompiler(ABC):
         if name == "type":
             subject = one()
             if isinstance(subject, Relationship):
-                return Json(self.scalar(subject.type))
+                return Json(self.scalar(subject.type), text=True)
             raise DrivineError("type() takes a relationship.")
         if name in ("id", "elementid"):
             subject = one()
@@ -3786,7 +3829,10 @@ class SqlCypherCompiler(ABC):
         if name == "coalesce":
             coalesced = ", ".join(self.null_if_json_null(self.comparable(self.json(it))) for it in arguments)
             return Json(
-                f"COALESCE({coalesced})", temporal=_kind_of(list(zip(function.arguments, arguments, strict=True)))
+                f"COALESCE({coalesced})",
+                temporal=_kind_of(list(zip(function.arguments, arguments, strict=True))),
+                text=all(_is_text(it) for it in arguments),
+                texts=all(_holds_texts(it) for it in arguments),
             )
         if name == "count":
             return Json(self.scalar(f"count({distinct}{self._countable(one())})"))
@@ -3811,6 +3857,7 @@ class SqlCypherCompiler(ABC):
                 items=kind,
                 list=True,
                 item_lists=_is_list(gathered),
+                texts=_is_text(gathered),
                 identity=(
                     self.comparable(Json(self.collect(identity, self._row_order), ordered=True))
                     if identity is not None
@@ -3834,6 +3881,7 @@ class SqlCypherCompiler(ABC):
                         identity=self.comparable(Json(self.distinct_items(listed.identity), ordered=True)),
                         list=True,
                         item_lists=listed.item_lists,
+                        texts=listed.texts,
                     )
                 return Json(
                     self.distinct_items(self.comparable(listed)),
@@ -3841,6 +3889,7 @@ class SqlCypherCompiler(ABC):
                     items=listed.items,
                     list=True,
                     item_lists=listed.item_lists,
+                    texts=listed.texts,
                 )
             return Json(self.distinct_items(self.comparable(self.json(listed))), ordered=True)
         if name == "sum":
@@ -3858,7 +3907,11 @@ class SqlCypherCompiler(ABC):
                 key = self.list_sort_key(self.comparable(value))
             else:
                 key = None
-            return Json(self.extreme(self.comparable(value), min_=name == "min", key=key), temporal=temporal)
+            return Json(
+                self.extreme(self.comparable(value), min_=name == "min", key=key),
+                temporal=temporal,
+                text=_is_text(value),
+            )
         if name == "range":
             if len(arguments) not in (2, 3):
                 raise DrivineError("range() takes a start, an end and a step.")
@@ -3871,7 +3924,7 @@ class SqlCypherCompiler(ABC):
             if len(arguments) != 2:
                 raise DrivineError("split() takes a text and a separator.")
             text, separator = (self.text(self.comparable(self.json(it))) for it in arguments)
-            return Json(self.split(text, separator), list=True)
+            return Json(self.split(text, separator), list=True, texts=True)
         if name == "reverse":
             subject = one()
 
@@ -3888,6 +3941,8 @@ class SqlCypherCompiler(ABC):
                 items=_items_of(subject),
                 list=_is_list(subject),
                 item_lists=_holds_lists(subject),
+                text=_is_text(subject),
+                texts=_holds_texts(subject),
             )
         if name == "tail":
             subject = one()
@@ -3905,6 +3960,7 @@ class SqlCypherCompiler(ABC):
                 items=_items_of(subject),
                 list=_is_list(subject),
                 item_lists=_holds_lists(subject),
+                texts=_holds_texts(subject),
             )
         if name == "toboolean":
             # A text is read as Cypher reads it, its case and the spaces around it aside; a number is true but for 0.
@@ -3967,7 +4023,7 @@ class SqlCypherCompiler(ABC):
         if name == "sign":
             return Json(self.scalar(f"SIGN({self.number(self.comparable(self.json(one())))})"))
         if name in ("ltrim", "rtrim"):
-            return Json(self.scalar(f"{name.upper()}({self.text(self.comparable(self.json(one())))})"))
+            return Json(self.scalar(f"{name.upper()}({self.text(self.comparable(self.json(one())))})"), text=True)
         if name == "randomuuid":
             if arguments:
                 raise DrivineError("randomUUID() takes no argument.")
@@ -3978,17 +4034,20 @@ class SqlCypherCompiler(ABC):
                 raise DrivineError("substring() takes a text, a start and a length.")
             text, start = self._text_and_count(arguments)
             length = f", {self._whole(arguments[2])}" if len(arguments) == 3 else ""
-            return Json(self.scalar(f"SUBSTR({text}, {start} + 1{length})"))
+            return Json(self.scalar(f"SUBSTR({text}, {start} + 1{length})"), text=True)
         if name in ("left", "right"):
             if len(arguments) != 2:
                 raise DrivineError(f"{function.name}() takes a text and a length.")
             text, count = self._text_and_count(arguments)
-            return Json(self.scalar(f"SUBSTR({text}, 1, {count})" if name == "left" else self.right_text(text, count)))
+            return Json(
+                self.scalar(f"SUBSTR({text}, 1, {count})" if name == "left" else self.right_text(text, count)),
+                text=True,
+            )
         if name == "replace":
             if len(arguments) != 3:
                 raise DrivineError("replace() takes a text, what to replace, and what with.")
             text, search, replacement = (self.text(self.comparable(self.json(it))) for it in arguments)
-            return Json(self.scalar(f"REPLACE({text}, {search}, {replacement})"))
+            return Json(self.scalar(f"REPLACE({text}, {search}, {replacement})"), text=True)
         kind = Temporal.of_function(name)
         if kind is not None:
             return self._temporal(kind, function, arguments, scope)
@@ -4021,8 +4080,9 @@ class SqlCypherCompiler(ABC):
                 temporal=_items_of(one()),
                 identity=self._identity_taken(one(), result, True, applied),
                 list=_holds_lists(one()),
+                text=_holds_texts(one()),
             )
-        return Json(result)
+        return Json(result, text=name in TEXT_FUNCTIONS)
 
     def _truncate(self, function: Function, arguments: list[Value], to: Temporal) -> Value:
         """`date.truncate(unit, value)` and its like: the value cut short to the unit, as a value of `to`."""
@@ -4594,6 +4654,16 @@ def _is_list(value: Value | None) -> bool:
 def _holds_lists(value: Value) -> bool:
     """Whether the statement makes the value a list whose every item is a list: see Json.item_lists."""
     return isinstance(value, Json) and value.item_lists
+
+
+def _is_text(value: Value) -> bool:
+    """Whether the statement makes the value a text, or null: see Json.text."""
+    return isinstance(value, Json) and value.text
+
+
+def _holds_texts(value: Value) -> bool:
+    """Whether the statement makes the value a list whose every item is a text, or null: see Json.texts."""
+    return isinstance(value, Json) and value.texts
 
 
 def _is_given_number(value: Any) -> bool:

@@ -1,6 +1,7 @@
 # Written by scripts/unasync.py from tests/integration/test_object_manager_batches_patches_edges.py:
 # change that, and run the script again.
 import json
+from enum import Enum
 from typing import Annotated
 
 import pytest
@@ -27,6 +28,7 @@ from drivine.sync import (
     transaction,
 )
 from tests.models import Customer, Dog, Organization, Person, PersonCareer, Puppy, WorkHistory
+from tests.sets import reordered_set
 from tests.sync_integration.stores import equals, nodes
 
 
@@ -48,6 +50,26 @@ class Coding(RelationshipFragment):
 class CodedHolder(GraphView):
     root: Annotated[Coded, Root()]
     codings: Annotated[list[Coding], Relationship("CODING")] = []
+
+
+class Shade(Enum):
+    """A plain Enum, which no driver takes as it is."""
+
+    DARK = "dark"
+
+
+class CodingAsStored(RelationshipFragment):
+    """A CODING relationship's properties as the store holds them: a set's list in its stored order."""
+
+    reasons: list[str] = []
+    shade: str | None = None
+    pair: list[str] = []
+    target: Annotated[Coded, TargetNode()]
+
+
+class CodedAsStoredHolder(GraphView):
+    root: Annotated[Coded, Root()]
+    codings: Annotated[list[CodingAsStored], Relationship("CODING")] = []
 
 
 @pytest.fixture
@@ -248,22 +270,32 @@ class TestSets:
     def test_relate_writes_a_set_property_as_its_sorted_items_and_loads_it_in_a_relationship_fragment(self, gom):
         gom.save_all([Coded(id="root"), Coded(id="target")])
         root, target = node_ref(Coded, "root"), node_ref(Coded, "target")
-        assert gom.edges.relate(root, target, "CODING", {"reasons": {"why", "because"}})
+        reasons = reordered_set("reason")
+        assert gom.edges.relate(root, target, "CODING", {"reasons": reasons})
         loaded = gom.load(CodedHolder, "root")
-        assert loaded is not None and [(it.reasons, it.target.id) for it in loaded.codings] == [
-            ({"because", "why"}, "target")
-        ]
+        assert loaded is not None and [(it.reasons, it.target.id) for it in loaded.codings] == [(reasons, "target")]
+        as_stored = gom.load(CodedAsStoredHolder, "root")
+        assert as_stored is not None and [it.reasons for it in as_stored.codings] == [sorted(reasons)]
+
+    def test_relate_writes_an_enum_property_as_its_value_and_a_tuple_as_a_list(self, gom):
+        gom.save_all([Coded(id="root"), Coded(id="target")])
+        root, target = node_ref(Coded, "root"), node_ref(Coded, "target")
+        assert gom.edges.relate(root, target, "CODING", {"shade": Shade.DARK, "pair": ("b", "a")})
+        loaded = gom.load(CodedAsStoredHolder, "root")
+        assert loaded is not None and [(it.shade, it.pair) for it in loaded.codings] == [("dark", ["b", "a"])]
 
     def test_relating_again_with_the_same_set_finds_the_relationship_as_it_is(self, gom):
         gom.save_all([Coded(id="root"), Coded(id="target")])
         root, target = node_ref(Coded, "root"), node_ref(Coded, "target")
-        gom.edges.relate(root, target, "CODING", {"reasons": {"why", "because", "how"}})
+        reasons = reordered_set("reason")
+        again = set(list(reasons))
+        gom.edges.relate(root, target, "CODING", {"reasons": reasons})
         before = gom.load(Coded, "root")
         assert before is not None
 
-        # The same set, built in another order: stored as the same sorted list, so neither end is marked.
-        assert gom.edges.relate(root, target, "CODING", {"reasons": {"how", "because", "why"}})
+        # The same set, iterating in another order: stored as the same sorted list, so neither end is marked.
+        assert gom.edges.relate(root, target, "CODING", {"reasons": again})
         after = gom.load(Coded, "root")
         assert after is not None and after.stamp == before.stamp
         holder = gom.load(CodedHolder, "root")
-        assert holder is not None and [it.reasons for it in holder.codings] == [{"because", "how", "why"}]
+        assert holder is not None and [it.reasons for it in holder.codings] == [reasons]

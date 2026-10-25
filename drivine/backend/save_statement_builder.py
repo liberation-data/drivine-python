@@ -338,7 +338,7 @@ class SaveStatementBuilder:
         """
         held = self._options.loaded_properties.get(name)
         if held is None:
-            return json.dumps(to_jsonable_python(value))
+            return packed(value)
         return held if isinstance(held, str) else _as_compared(held)
 
     def _removals(
@@ -739,7 +739,7 @@ def props_of(
             continue
         value = getattr(obj, field_, None)
         if value is not None:
-            props[name] = json.dumps(to_jsonable_python(value)) if field_ in mapping.json_packed else stored(value)
+            props[name] = packed(value) if field_ in mapping.json_packed else stored(value)
         elif clear_nulls and field_ in assigned:
             props[name] = None
     return props
@@ -793,6 +793,21 @@ def _flat_bag_owns(model: FragmentModel, key: str) -> bool:
         and not key.startswith(RESERVED_PREFIX)
         and not any(key.startswith(it.namespace) for it in model.property_bags if not it.flat)
     )
+
+
+def packed(value: Any) -> str:
+    """
+    A JsonPacked field's value as a save writes it: JSON text, a set's items sorted as `stored` sorts them. The text is
+    then the same whatever order the set iterates in, so the check of a save given `from_`, which packs the value it
+    holds, compares the text the save that wrote it packed.
+    """
+    jsonable: Any = to_jsonable_python(value)
+    if isinstance(value, (set, frozenset)):
+        try:
+            jsonable = sorted(jsonable)  # pyright: ignore[reportUnknownArgumentType]
+        except TypeError:
+            pass
+    return json.dumps(jsonable)
 
 
 def stored(value: Any) -> Any:

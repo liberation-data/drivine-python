@@ -2,13 +2,11 @@ from __future__ import annotations
 
 import dataclasses
 import inspect
-import json
 import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any, Literal, TypeVar
 
 from pydantic import BaseModel
-from pydantic_core import to_jsonable_python
 
 from drivine.backend.backends import backend_for
 from drivine.backend.fragment_group import FragmentGroup
@@ -17,7 +15,7 @@ from drivine.backend.matching_search import MatchingSearch
 from drivine.backend.nearest_search import NearestSearch
 from drivine.backend.page import Page
 from drivine.backend.save_statement import SaveStatement
-from drivine.backend.save_statement_builder import id_of, items, props_of, root_of, target
+from drivine.backend.save_statement_builder import id_of, items, packed, props_of, root_of, stored, target
 from drivine.backend.vector_writes import split_vectors
 from drivine.connection.database_type import DatabaseType
 from drivine.connection.transaction_mode import TransactionMode
@@ -591,8 +589,8 @@ class StatelessGraphObjectManager:
         values: dict[str, Any] = {}
         for field in named:
             value = (set or {}).get(field)
-            packed = value is not None and field in root.json_packed
-            values[root.graph_properties.get(field, field)] = json.dumps(to_jsonable_python(value)) if packed else value
+            is_packed = value is not None and field in root.json_packed
+            values[root.graph_properties.get(field, field)] = packed(value) if is_packed else stored(value)
         props, vectors = split_vectors(root, values)
         statement = self.backend.patch_one(root, predicate)
         spec = statement.spec({**values_bound, "id": id, "set": props, "vectors": vectors})

@@ -25,7 +25,7 @@ from drivine import (
     VectorIndex,
 )
 from drivine.backend.cypher_grammar import FALKORDB_GRAMMAR, MEMGRAPH_GRAMMAR, NEO4J_GRAMMAR, CypherGrammar
-from drivine.backend.save_statement_builder import SaveStatementBuilder, stored
+from drivine.backend.save_statement_builder import SaveStatementBuilder, packed, stored
 
 STAMP = "0123456789abcdef:fedcba9876543210"
 
@@ -278,3 +278,6 @@ def test_stores_a_set_as_the_same_sorted_list_in_every_process_and_one_that_wont
     assert stored(frozenset({Shade.RED, Shade.BLUE})) == ["Blue", "Red"], "sorted as stored, an Enum as its value"
     assert sorted(stored({"a", 1}), key=str) == [1, "a"], "items that don't order are stored as the set iterates"
     assert stored(("b", "a")) == ["b", "a"], "a tuple keeps its order"
+
+    assert packed(frozenset({Shade.RED, Shade.BLUE})) == '["Blue", "Red"]', "a packed set is packed sorted, as stored"
+    assert packed(["b", "a"]) == '["b", "a"]', "a packed list keeps its order"

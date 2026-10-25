@@ -539,6 +539,12 @@ the keys, so a page of groups is the same every time.
 - **More markers:** `GraphPath([hop(...), ...])` for the nodes at the end of several hops, `Count` and `Aggregate`
   computed in the query, `SortedBy`, `ReadOnly`, `Transient`, `NodeStamp`, `NodeLabels`, `PropertyBag`,
   `JsonPacked`, `NullAsDefault` and `EmptyWhenAbsent`, as in TypeScript's Drivine.
+- **A set field** is stored as a list of its items, sorted where they order (as the set iterates where they don't),
+  and a `JsonPacked` one packed so: a set is written alike in every process, whatever order it iterates in. One that
+  0.1.0 wrote, in the order it iterated in, loads and `update` saves it, but until a save writes it again a `where`
+  that compares the whole set, which it writes sorted, doesn't find it on the graph engines (on Postgres and Oracle a
+  whole-set `where` on a set that isn't `JsonPacked` doesn't find it either way), and on Neo4j a save given `from_` of
+  a `JsonPacked` one is refused.
 - **A flat `PropertyBag(flat=True)`** stores each entry under its bare key and loads every property no field or other
   bag is stored under. A save refuses, before it writes anything, an entry whose key a field (the id among them) is
   stored under, one under another bag's prefix, or one beginning `__drivine.`, Drivine's own, such as the stamp.
@@ -578,13 +584,14 @@ people = await gom.edges.load_related(node_ref(Issue, a), "ASSIGNED_TO", Person)
   new stamp. `update` loads, applies your change and saves what it altered, again if the node changed meanwhile.
 - **On Neo4j a load can be handed a stamp newer than its data.** Neo4j reads under read committed, without a snapshot,
   so a load that runs while another writer commits can find that writer's stamp and the data from before its write.
-  `update` therefore compares each field of the root as it loaded it too, under the node's lock, and loads again if one
-  differs: a field's value (a `JsonPacked` field's as the text the node held), a `PropertyBag`'s keys and their values,
-  and the labels a `NodeLabels` field reads. A `save` checks the same when you give it the object as loaded, as `from_`.
-  Without `from_` it has only the stamp to go on, and in that moment it can write over the other writer's change: hold
-  on to what you loaded and pass it, or change the node with `update`. Where only the stamp makes the round trip, as
-  through a web form, the stamp is all there is. Memgraph reads from a snapshot, FalkorDB runs no read beside a write,
-  and Oracle and Postgres read a statement whole, so on them the stamp is what was read.
+  `update` therefore compares each field of the root as it loaded it too, under the node's lock, and loads again if
+  one differs: a field's value (a set field's items, in any order and each once or more, and a `JsonPacked` field's as
+  the text the node held), a `PropertyBag`'s keys and their values, and the labels a `NodeLabels` field reads. A
+  `save` checks the same when you give it the object as loaded, as `from_`. Without `from_` it has only the stamp to
+  go on, and in that moment it can write over the other writer's change: hold on to what you loaded and pass it, or
+  change the node with `update`. Where only the stamp makes the round trip, as through a web form, the stamp is all
+  there is. Memgraph reads from a snapshot, FalkorDB runs no read beside a write, and Oracle and Postgres read a
+  statement whole, so on them the stamp is what was read.
 - **`from_` is the object as you loaded it**, when what you save is a changed copy of it. The save is then checked
   against the stamp `from_` carries, whatever stamp the copy carries, as `update` checks against what it loaded, and on
   Neo4j against each field of `from_`'s root too. A `JsonPacked` field is compared as a save packs it: `from_` holds the

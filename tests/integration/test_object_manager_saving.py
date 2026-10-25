@@ -1,4 +1,5 @@
 import asyncio
+import json
 from collections.abc import Callable
 from datetime import UTC, date, datetime
 from enum import StrEnum
@@ -25,6 +26,7 @@ from drivine import (
     StatelessGraphObjectManager,
     cypher_statement,
     node_ref,
+    refs,
     stamps,
     transaction,
 )
@@ -132,6 +134,15 @@ class Bag(NodeFragment, labels=["Bag"]):
     id: Annotated[str, NodeId()]
     name: str | None = None
     tags: set[str] = set()
+    stamp: Annotated[str | None, NodeStamp()] = None
+
+
+class PackedBag(NodeFragment, labels=["PackedBag"]):
+    """A set field packed as JSON text, which a check compares as the text a save packs."""
+
+    id: Annotated[str, NodeId()]
+    name: str | None = None
+    tags: Annotated[set[str], JsonPacked()] = set()
     stamp: Annotated[str | None, NodeStamp()] = None
 
 
@@ -858,7 +869,13 @@ class TestASetFieldAsLoaded:
             await gom.save(loaded.model_copy(update={"name": "two"}), from_=loaded)
         with pytest.raises(StaleObjectError, match="a field is not as it was loaded"):
             await gom.save(loaded.model_copy(update={"name": "two"}), from_=loaded.model_copy(update={"tags": {"x"}}))
+        await pm.execute(QuerySpecification("MATCH (n:Bag {id: 'b1'}) SET n.tags = 'zeta'"))
+        with pytest.raises(StaleObjectError, match="a field is not as it was loaded"):
+            await gom.save(
+                loaded.model_copy(update={"name": "two"}), from_=loaded.model_copy(update={"tags": {"zeta"}})
+            )
         assert await stored(pm, "Bag", "name") == "one", "nothing written"
+        await self.held_as(pm, [*FIVE, "theirs"])
 
         unmarked = "MATCH (n:Bag {id: 'b1'}) SET n.tags = n.tags + 'later'"
         assert await applied_after_unmarked(pm, gom, Bag, "b1", unmarked, self.renamed) == 2
@@ -957,3 +974,51 @@ async def test_patch_and_patch_all_write_a_property_past_4000_bytes(gom):
         PatchResult(True, True, True)
     ]
     assert await bios(gom) == {"p1": text, "p2": text}
+
+    async def test_a_packed_set_drivine_saved_saves_again_from_its_loaded_copy(self, pm, gom):
+        tags = reordered_by_a_load()
+        await gom.save(PackedBag(id="b1", name="one", tags=tags))
+        loaded = await gom.load(PackedBag, "b1")
+        assert loaded is not None
+
+        saved = await gom.save(loaded.model_copy(update={"name": "two"}), from_=loaded)
+        await gom.save(saved.model_copy(update={"name": "three"}), from_=saved)
+        assert await stored(pm, "PackedBag", "tags") == json.dumps(sorted(tags)), "a packed set is written sorted"
+
+        assert (await gom.patch(PackedBag, "b1", set={"tags": tags})).applied
+        assert await stored(pm, "PackedBag", "tags") == json.dumps(sorted(tags)), "and patched sorted"
+        loaded = await gom.load(PackedBag, "b1")
+        assert loaded is not None
+        await gom.save(loaded.model_copy(update={"name": "four"}), from_=loaded)
+
+
+async def test_a_where_finds_a_packed_set_by_a_set_that_iterates_in_another_order(pm, gom):
+    tags = reordered_by_a_load()
+    await gom.save(PackedBag(id="b1", name="one", tags=tags))
+    other = set(list(tags))
+    assert other == tags and list(other) != list(tags)
+
+    q = refs(PackedBag)
+    assert [it.id for it in await gom.load_all(PackedBag, where=q.tags.eq(other))] == ["b1"]
+    assert [it.id for it in await gom.load_all(PackedBag, where=q.tags.in_([{"x"}, other]))] == ["b1"]
+    assert await gom.load_all(PackedBag, where=q.tags.neq(other)) == []
+
+    # Packed before sets were packed sorted, in the order the set iterated in: it loads, but a where packs the set
+    # sorted, so it finds the node only once a save has written the set again.
+    assert list(tags) != sorted(tags)
+    await set_property(pm, "PackedBag", "tags", json.dumps(list(tags)))
+    loaded = await gom.load(PackedBag, "b1")
+    assert loaded is not None and loaded.tags == tags
+    assert await gom.load_all(PackedBag, where=q.tags.eq(other)) == []
+    await gom.save(loaded)
+    assert [it.id for it in await gom.load_all(PackedBag, where=q.tags.eq(other))] == ["b1"]
+
+
+async def test_a_patched_set_is_written_sorted_as_a_save_writes_it_and_a_where_finds_it(pm, gom):
+    tags = reordered_by_a_load()
+    await gom.save(Bag(id="b1", name="one", tags={"x"}))
+
+    assert (await gom.patch(Bag, "b1", set={"tags": tags})).applied
+    assert await stored(pm, "Bag", "tags") == sorted(tags), "patched as a save writes it"
+    if pm.type in (DatabaseType.NEO4J, DatabaseType.MEMGRAPH, DatabaseType.FALKORDB):
+        assert [it.id for it in await gom.load_all(Bag, where=refs(Bag).tags.eq(set(list(tags))))] == ["b1"]

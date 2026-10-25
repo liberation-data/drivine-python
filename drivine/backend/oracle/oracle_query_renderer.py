@@ -1,13 +1,11 @@
 from __future__ import annotations
 
-import json
 from collections.abc import Callable, Sequence
 from typing import Any, Literal
 
-from pydantic_core import to_jsonable_python
-
 from drivine.backend.oracle.oracle_graph import holding, json_key, labelled_value
 from drivine.backend.oracle.oracle_views import OracleViews
+from drivine.backend.save_statement_builder import packed as packed_
 from drivine.backend.save_statement_builder import stored
 from drivine.backend.sql.compared import Compared
 from drivine.backend.sql.sql_json import storable
@@ -159,7 +157,7 @@ class OracleQueryRenderer(SqlQueryRenderer):
         k = json_key(name)
 
         def packed(value: Any) -> Any:
-            return json.dumps(to_jsonable_python(value)) if json_packed else storable(stored(value))
+            return packed_(value) if json_packed else storable(stored(value))
 
         def filtered(expression: str, values: list[Any]) -> str:
             passing = ", ".join(f'{self._bind(packed(value))} AS "v{i}"' for i, value in enumerate(values))

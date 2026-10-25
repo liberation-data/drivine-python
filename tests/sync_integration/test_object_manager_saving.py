@@ -1,5 +1,6 @@
 # Written by scripts/unasync.py from tests/integration/test_object_manager_saving.py:
 # change that, and run the script again.
+import json
 from collections.abc import Callable
 from datetime import UTC, date, datetime
 from enum import StrEnum
@@ -26,6 +27,7 @@ from drivine.sync import (
     StatelessGraphObjectManager,
     cypher_statement,
     node_ref,
+    refs,
     stamps,
     transaction,
 )
@@ -125,6 +127,24 @@ class Pet(NodeFragment, labels=["Pet"]):
 
 class Hound(Pet, labels=["Hound"]):
     breed: str | None = None
+
+
+class Bag(NodeFragment, labels=["Bag"]):
+    """A set field, which the store holds as a list in an order, and maybe with a duplicate, the set doesn't keep."""
+
+    id: Annotated[str, NodeId()]
+    name: str | None = None
+    tags: set[str] = set()
+    stamp: Annotated[str | None, NodeStamp()] = None
+
+
+class PackedBag(NodeFragment, labels=["PackedBag"]):
+    """A set field packed as JSON text, which a check compares as the text a save packs."""
+
+    id: Annotated[str, NodeId()]
+    name: str | None = None
+    tags: Annotated[set[str], JsonPacked()] = set()
+    stamp: Annotated[str | None, NodeStamp()] = None
 
 
 @pytest.fixture
@@ -692,6 +712,115 @@ class TestConcurrency:
         assert gom.count(Person) == 0
 
 
+FIVE = ["zeta", "alpha", "mid", "beta", "omega"]
+
+
+def reordered_by_a_load() -> set[str]:
+    """
+    A set that, stored as a list in the order it iterates in, loads as a set that iterates in another. Which sets do
+    depends on each string's hash, which differs in each process, so one is looked for.
+    """
+    for size in range(5, 100):
+        tags = {f"tag{it}" for it in range(size)}
+        if list(tags) != list(set(list(tags))):
+            return tags
+    raise AssertionError("no set loads in another order")
+
+
+@pytest.mark.usefixtures("reads_without_snapshot")
+class TestASetFieldAsLoaded:
+    """
+    A set is stored as a list, and Neo4j compares lists item by item. The set loaded from the list may iterate in
+    another order and holds no duplicate, so the check compares it with the stored list as a set.
+    """
+
+    @staticmethod
+    def held_as(pm: PersistenceManager, tags: list[str]) -> None:
+        """Stores the list as the bag's tags, leaving its stamp alone: as another library or plain Cypher writes it."""
+        pm.execute(QuerySpecification("MATCH (n:Bag {id: 'b1'}) SET n.tags = $tags").bind({"tags": tags}))
+
+    @staticmethod
+    def renamed(it: Bag) -> None:
+        it.name = "two"
+
+    def test_a_stored_duplicate_saves_from_the_loaded_copy_and_in_an_update(self, pm, gom):
+        gom.save(Bag(id="b1", name="one", tags={"x"}))
+        self.held_as(pm, ["a", "a", "b"])
+
+        loaded = gom.load(Bag, "b1")
+        assert loaded is not None and loaded.tags == {"a", "b"}
+        assert gom.update(Bag, "b1", self.renamed, attempts=1) is not None
+        assert stored(pm, "Bag", "name", "tags") == ["two", ["a", "a", "b"]], "an update wrote the name alone"
+
+        loaded = gom.load(Bag, "b1")
+        assert loaded is not None
+        gom.save(loaded.model_copy(update={"name": "three"}), from_=loaded)
+        assert stored(pm, "Bag", "name", "tags") == ["three", ["a", "b"]], "a save writes the whole set"
+
+    def test_a_stored_order_the_set_doesnt_iterate_in_saves_from_the_loaded_copy_and_in_an_update(self, pm, gom):
+        gom.save(Bag(id="b1", name="one", tags=set(FIVE)))
+        loaded = gom.load(Bag, "b1")
+        assert loaded is not None
+        # The node holds the set's items in an order other than the one the loaded set iterates in.
+        other = list(reversed(list(loaded.tags)))
+        self.held_as(pm, other)
+
+        assert gom.update(Bag, "b1", self.renamed, attempts=1) is not None
+        assert stored(pm, "Bag", "tags") == other, "an update wrote the name alone"
+
+        loaded = gom.load(Bag, "b1")
+        assert loaded is not None
+        self.held_as(pm, other[1:] + other[:1])
+        gom.save(loaded.model_copy(update={"name": "three"}), from_=loaded)
+        assert stored(pm, "Bag", "name", "tags") == ["three", sorted(FIVE)], "a save writes the set sorted"
+
+    def test_a_set_drivine_saved_saves_again_from_its_loaded_copy_and_from_what_the_save_handed_back(self, pm, gom):
+        tags = reordered_by_a_load()
+        gom.save(Bag(id="b1", name="one", tags=tags))
+        loaded = gom.load(Bag, "b1")
+        assert loaded is not None
+
+        saved = gom.save(loaded.model_copy(update={"name": "two"}), from_=loaded)
+        gom.save(saved.model_copy(update={"name": "three"}), from_=saved)
+        assert gom.update(Bag, "b1", lambda it: setattr(it, "name", "four"), attempts=1) is not None
+
+        again = gom.load(Bag, "b1")
+        assert again is not None and (again.name, again.tags) == ("four", tags)
+
+    def test_a_changed_set_is_written_from_the_loaded_copy_and_in_an_update(self, pm, gom):
+        gom.save(Bag(id="b1", name="one", tags={"x"}))
+        self.held_as(pm, [*FIVE, "alpha"])
+        loaded = gom.load(Bag, "b1")
+        assert loaded is not None
+
+        gom.save(loaded.model_copy(update={"tags": {*loaded.tags, "new"}}), from_=loaded)
+        assert sorted(stored(pm, "Bag", "tags")) == sorted([*FIVE, "new"])
+        assert gom.update(Bag, "b1", lambda it: it.tags.discard("mid"), attempts=1) is not None
+
+        again = gom.load(Bag, "b1")
+        assert again is not None and again.tags == {*FIVE, "new"} - {"mid"}
+
+    def test_a_set_another_writer_changed_under_the_same_stamp_is_still_refused(self, pm, gom):
+        gom.save(Bag(id="b1", name="one", tags=set(FIVE)))
+        loaded = gom.load(Bag, "b1")
+        assert loaded is not None
+        self.held_as(pm, [*FIVE, "theirs"])
+
+        with pytest.raises(StaleObjectError, match="a field is not as it was loaded"):
+            gom.save(loaded.model_copy(update={"name": "two"}), from_=loaded)
+        with pytest.raises(StaleObjectError, match="a field is not as it was loaded"):
+            gom.save(loaded.model_copy(update={"name": "two"}), from_=loaded.model_copy(update={"tags": {"x"}}))
+        pm.execute(QuerySpecification("MATCH (n:Bag {id: 'b1'}) SET n.tags = 'zeta'"))
+        with pytest.raises(StaleObjectError, match="a field is not as it was loaded"):
+            gom.save(loaded.model_copy(update={"name": "two"}), from_=loaded.model_copy(update={"tags": {"zeta"}}))
+        assert stored(pm, "Bag", "name") == "one", "nothing written"
+        self.held_as(pm, [*FIVE, "theirs"])
+
+        unmarked = "MATCH (n:Bag {id: 'b1'}) SET n.tags = n.tags + 'later'"
+        assert applied_after_unmarked(pm, gom, Bag, "b1", unmarked, self.renamed) == 2
+        assert sorted(stored(pm, "Bag", "tags")) == sorted([*FIVE, "theirs", "later"])
+
+
 LONG_TEXTS = ["x" * 40_000, "é" * 20_000]
 """Texts of 40,000 bytes, past the 32,767 a VARCHAR2 holds on Oracle: one character a byte, and two."""
 
@@ -782,3 +911,51 @@ def test_patch_and_patch_all_write_a_property_past_4000_bytes(gom):
     assert gom.patch(Person, "p1", set={"bio": text}) == PatchResult(True, True, True)
     assert gom.patch_all([Person(uuid="p2", name="Grace", bio=text)], only=["bio"]) == [PatchResult(True, True, True)]
     assert bios(gom) == {"p1": text, "p2": text}
+
+    def test_a_packed_set_drivine_saved_saves_again_from_its_loaded_copy(self, pm, gom):
+        tags = reordered_by_a_load()
+        gom.save(PackedBag(id="b1", name="one", tags=tags))
+        loaded = gom.load(PackedBag, "b1")
+        assert loaded is not None
+
+        saved = gom.save(loaded.model_copy(update={"name": "two"}), from_=loaded)
+        gom.save(saved.model_copy(update={"name": "three"}), from_=saved)
+        assert stored(pm, "PackedBag", "tags") == json.dumps(sorted(tags)), "a packed set is written sorted"
+
+        assert (gom.patch(PackedBag, "b1", set={"tags": tags})).applied
+        assert stored(pm, "PackedBag", "tags") == json.dumps(sorted(tags)), "and patched sorted"
+        loaded = gom.load(PackedBag, "b1")
+        assert loaded is not None
+        gom.save(loaded.model_copy(update={"name": "four"}), from_=loaded)
+
+
+def test_a_where_finds_a_packed_set_by_a_set_that_iterates_in_another_order(pm, gom):
+    tags = reordered_by_a_load()
+    gom.save(PackedBag(id="b1", name="one", tags=tags))
+    other = set(list(tags))
+    assert other == tags and list(other) != list(tags)
+
+    q = refs(PackedBag)
+    assert [it.id for it in gom.load_all(PackedBag, where=q.tags.eq(other))] == ["b1"]
+    assert [it.id for it in gom.load_all(PackedBag, where=q.tags.in_([{"x"}, other]))] == ["b1"]
+    assert gom.load_all(PackedBag, where=q.tags.neq(other)) == []
+
+    # Packed before sets were packed sorted, in the order the set iterated in: it loads, but a where packs the set
+    # sorted, so it finds the node only once a save has written the set again.
+    assert list(tags) != sorted(tags)
+    set_property(pm, "PackedBag", "tags", json.dumps(list(tags)))
+    loaded = gom.load(PackedBag, "b1")
+    assert loaded is not None and loaded.tags == tags
+    assert gom.load_all(PackedBag, where=q.tags.eq(other)) == []
+    gom.save(loaded)
+    assert [it.id for it in gom.load_all(PackedBag, where=q.tags.eq(other))] == ["b1"]
+
+
+def test_a_patched_set_is_written_sorted_as_a_save_writes_it_and_a_where_finds_it(pm, gom):
+    tags = reordered_by_a_load()
+    gom.save(Bag(id="b1", name="one", tags={"x"}))
+
+    assert (gom.patch(Bag, "b1", set={"tags": tags})).applied
+    assert stored(pm, "Bag", "tags") == sorted(tags), "patched as a save writes it"
+    if pm.type in (DatabaseType.NEO4J, DatabaseType.MEMGRAPH, DatabaseType.FALKORDB):
+        assert [it.id for it in gom.load_all(Bag, where=refs(Bag).tags.eq(set(list(tags))))] == ["b1"]

@@ -386,6 +386,12 @@ class SqlCypherCompiler(ABC):
     aggregates_case_subqueries = True
     """Whether the store aggregates a `CASE` whose result holds a subquery: see `_cases_first`."""
 
+    extremes_by_list_key = True
+    """
+    Whether `min` and `max` of a list the statement makes order it by `list_sort_key`, item by item, as an `ORDER BY`
+    sorts it: where the store's own JSON order puts the shorter list first.
+    """
+
     def __init__(self, graph: str) -> None:
         self.nodes = f"{graph}_node"
         self.edges = f"{graph}_edge"
@@ -3891,14 +3897,16 @@ class SqlCypherCompiler(ABC):
         if name == "avg":
             return Json(self.scalar(self.float_(f"avg({distinct}{self.number(self.comparable(self.json(one())))})")))
         if name in ("min", "max"):
-            # Zoned values as the moments they are, whatever their offsets; of a temporal kind, still of it.
+            # Zoned values as the moments they are, whatever their offsets; of a temporal kind, still of it. A list the
+            # statement makes item by item, as an ORDER BY sorts it: a store's JSON may put the shorter list first.
             value = self.json(one())
             temporal = value.temporal
-            key = (
-                self.temporals.moment(self.text(self.comparable(value)), temporal)
-                if temporal and temporal.zoned
-                else None
-            )
+            if temporal and temporal.zoned:
+                key: str | None = self.temporals.moment(self.text(self.comparable(value)), temporal)
+            elif self.extremes_by_list_key and _is_list(one()):
+                key = self.list_sort_key(self.comparable(value))
+            else:
+                key = None
             return Json(
                 self.extreme(self.comparable(value), min_=name == "min", key=key),
                 temporal=temporal,

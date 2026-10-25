@@ -658,6 +658,31 @@ async def test_a_map_or_a_list_that_holds_a_relationship_is_equal_to_one_whose_n
     ) == [[True, True, True, True]]
 
 
+async def test_min_and_max_of_lists_the_statement_makes_compare_them_item_by_item_whatever_their_lengths(
+    cypher_pm: PersistenceManager,
+):
+    # Not in the spec yet: a nested list (liberation-data/drivine#287). The spec holds DISTINCT and the grouping WITH.
+    assert await cypher_pm.query(spec("UNWIND [[[1, 2]], [[3]], [[1], [2]]] AS xs RETURN [min(xs), max(xs)]")) == [
+        [[[1], [2]], [[3]]]
+    ]
+    # The least and the greatest moment still, whatever their offsets.
+    assert await cypher_pm.query(
+        spec(
+            "UNWIND [datetime('2020-01-01T00:00+01:00'), datetime('2020-01-01T00:30+02:00')] AS x "
+            "RETURN [min(x) = datetime('2020-01-01T00:30+02:00'), max(x) = datetime('2020-01-01T00:00+01:00')]"
+        )
+    ) == [[True, True]]
+    if cypher_pm.type is DatabaseType.ORACLE:
+        # Oracle puts a null item first and a number before a text (liberation-data/drivine4j#205).
+        return
+    assert await cypher_pm.query(spec("UNWIND [[1, 'a'], ['a', 1], [true]] AS xs RETURN [min(xs), max(xs)]")) == [
+        [["a", 1], [1, "a"]]
+    ]
+    assert await cypher_pm.query(spec("UNWIND [[1, null], [1], [null], null] AS xs RETURN [min(xs), max(xs)]")) == [
+        [[1], [None]]
+    ]
+
+
 HUB_GRAPH = "cy_hub"
 """The graph a hub is written to on a SQL store: tables of its own, apart from those the other tests read."""
 

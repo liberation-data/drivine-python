@@ -42,6 +42,7 @@ from tests.models import (
     Puppy,
     WorkHistory,
 )
+from tests.sets import reordered_set
 from tests.sync_integration.stores import equals, labels, nodes, set_property
 
 T = TypeVar("T")
@@ -715,18 +716,6 @@ class TestConcurrency:
 FIVE = ["zeta", "alpha", "mid", "beta", "omega"]
 
 
-def reordered_by_a_load() -> set[str]:
-    """
-    A set that, stored as a list in the order it iterates in, loads as a set that iterates in another. Which sets do
-    depends on each string's hash, which differs in each process, so one is looked for.
-    """
-    for size in range(5, 100):
-        tags = {f"tag{it}" for it in range(size)}
-        if list(tags) != list(set(list(tags))):
-            return tags
-    raise AssertionError("no set loads in another order")
-
-
 @pytest.mark.usefixtures("reads_without_snapshot")
 class TestASetFieldAsLoaded:
     """
@@ -775,7 +764,7 @@ class TestASetFieldAsLoaded:
         assert stored(pm, "Bag", "name", "tags") == ["three", sorted(FIVE)], "a save writes the set sorted"
 
     def test_a_set_drivine_saved_saves_again_from_its_loaded_copy_and_from_what_the_save_handed_back(self, pm, gom):
-        tags = reordered_by_a_load()
+        tags = reordered_set("tag")
         gom.save(Bag(id="b1", name="one", tags=tags))
         loaded = gom.load(Bag, "b1")
         assert loaded is not None
@@ -912,25 +901,26 @@ def test_patch_and_patch_all_write_a_property_past_4000_bytes(gom):
     assert gom.patch_all([Person(uuid="p2", name="Grace", bio=text)], only=["bio"]) == [PatchResult(True, True, True)]
     assert bios(gom) == {"p1": text, "p2": text}
 
-    def test_a_packed_set_drivine_saved_saves_again_from_its_loaded_copy(self, pm, gom):
-        tags = reordered_by_a_load()
-        gom.save(PackedBag(id="b1", name="one", tags=tags))
-        loaded = gom.load(PackedBag, "b1")
-        assert loaded is not None
 
-        saved = gom.save(loaded.model_copy(update={"name": "two"}), from_=loaded)
-        gom.save(saved.model_copy(update={"name": "three"}), from_=saved)
-        assert stored(pm, "PackedBag", "tags") == json.dumps(sorted(tags)), "a packed set is written sorted"
+def test_a_packed_set_drivine_saved_saves_again_from_its_loaded_copy(pm, gom):
+    tags = reordered_set("tag")
+    gom.save(PackedBag(id="b1", name="one", tags=tags))
+    loaded = gom.load(PackedBag, "b1")
+    assert loaded is not None
 
-        assert (gom.patch(PackedBag, "b1", set={"tags": tags})).applied
-        assert stored(pm, "PackedBag", "tags") == json.dumps(sorted(tags)), "and patched sorted"
-        loaded = gom.load(PackedBag, "b1")
-        assert loaded is not None
-        gom.save(loaded.model_copy(update={"name": "four"}), from_=loaded)
+    saved = gom.save(loaded.model_copy(update={"name": "two"}), from_=loaded)
+    gom.save(saved.model_copy(update={"name": "three"}), from_=saved)
+    assert stored(pm, "PackedBag", "tags") == json.dumps(sorted(tags)), "a packed set is written sorted"
+
+    assert (gom.patch(PackedBag, "b1", set={"tags": tags})).applied
+    assert stored(pm, "PackedBag", "tags") == json.dumps(sorted(tags)), "and patched sorted"
+    loaded = gom.load(PackedBag, "b1")
+    assert loaded is not None
+    gom.save(loaded.model_copy(update={"name": "four"}), from_=loaded)
 
 
 def test_a_where_finds_a_packed_set_by_a_set_that_iterates_in_another_order(pm, gom):
-    tags = reordered_by_a_load()
+    tags = reordered_set("tag")
     gom.save(PackedBag(id="b1", name="one", tags=tags))
     other = set(list(tags))
     assert other == tags and list(other) != list(tags)
@@ -952,7 +942,7 @@ def test_a_where_finds_a_packed_set_by_a_set_that_iterates_in_another_order(pm, 
 
 
 def test_a_patched_set_is_written_sorted_as_a_save_writes_it_and_a_where_finds_it(pm, gom):
-    tags = reordered_by_a_load()
+    tags = reordered_set("tag")
     gom.save(Bag(id="b1", name="one", tags={"x"}))
 
     assert (gom.patch(Bag, "b1", set={"tags": tags})).applied

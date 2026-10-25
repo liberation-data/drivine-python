@@ -1,20 +1,75 @@
 # Written by scripts/unasync.py from tests/integration/test_object_manager_batches_patches_edges.py:
 # change that, and run the script again.
+import json
+from enum import Enum
+from typing import Annotated
+
 import pytest
 
 from drivine.sync import (
     DrivineError,
+    GraphProperty,
+    GraphView,
+    JsonPacked,
+    NodeFragment,
+    NodeId,
+    NodeStamp,
     NullPolicy,
     PatchResult,
     PersistenceManager,
     RelateMode,
+    Relationship,
+    RelationshipFragment,
+    Root,
     StaleObjectError,
     StatelessGraphObjectManager,
+    TargetNode,
     node_ref,
     transaction,
 )
 from tests.models import Customer, Dog, Organization, Person, PersonCareer, Puppy, WorkHistory
+from tests.sets import reordered_set
 from tests.sync_integration.stores import equals, nodes
+
+
+class Coded(NodeFragment, labels=["Coded"]):
+    """Set fields: one stored under another name, one packed as JSON text, and one with a default."""
+
+    id: Annotated[str, NodeId()]
+    codes: Annotated[set[str] | None, GraphProperty("code_set")] = None
+    packed: Annotated[set[str] | None, JsonPacked()] = None
+    badges: set[str] = set()
+    stamp: Annotated[str | None, NodeStamp()] = None
+
+
+class Coding(RelationshipFragment):
+    reasons: set[str] = set()
+    target: Annotated[Coded, TargetNode()]
+
+
+class CodedHolder(GraphView):
+    root: Annotated[Coded, Root()]
+    codings: Annotated[list[Coding], Relationship("CODING")] = []
+
+
+class Shade(Enum):
+    """A plain Enum, which no driver takes as it is."""
+
+    DARK = "dark"
+
+
+class CodingAsStored(RelationshipFragment):
+    """A CODING relationship's properties as the store holds them: a set's list in its stored order."""
+
+    reasons: list[str] = []
+    shade: str | None = None
+    pair: list[str] = []
+    target: Annotated[Coded, TargetNode()]
+
+
+class CodedAsStoredHolder(GraphView):
+    root: Annotated[Coded, Root()]
+    codings: Annotated[list[CodingAsStored], Relationship("CODING")] = []
 
 
 @pytest.fixture
@@ -173,3 +228,74 @@ class TestEdges:
             gom.edges.relate(node_ref(Person, "p1"), node_ref(Dog, it), "OWNS")
         owned = gom.edges.load_related(node_ref(Person, "p1"), "OWNS", Dog)
         assert sorted(type(it).__name__ for it in owned) == ["Dog", "Puppy"]
+
+
+class TestSets:
+    """No store holds a set, so patch and relate write one as the sorted list of its items, as save does."""
+
+    def test_patch_writes_a_set_as_its_sorted_items_packed_or_not_and_loads_it_back_as_a_set(self, pm, gom):
+        gom.save(Coded(id="c1", codes={"old"}))
+        patched = gom.patch(Coded, "c1", set={"codes": {"y", "x"}, "packed": {"q", "p"}, "badges": {"silver", "gold"}})
+        assert patched == PatchResult(True, True, True)
+        [props] = nodes(pm, "Coded")
+        assert (props["code_set"], json.loads(props["packed"]), props["badges"]) == (
+            ["x", "y"],
+            ["p", "q"],
+            ["gold", "silver"],
+        )
+        loaded = gom.load(Coded, "c1")
+        assert loaded is not None
+        assert (loaded.codes, loaded.packed, loaded.badges) == ({"x", "y"}, {"p", "q"}, {"gold", "silver"})
+
+        # A loaded set handed back with an item added, and an empty one.
+        assert loaded.packed is not None
+        gom.patch(Coded, "c1", set={"packed": {*loaded.packed, "r"}, "badges": set()})
+        [props] = nodes(pm, "Coded")
+        assert (json.loads(props["packed"]), props["badges"]) == (["p", "q", "r"], [])
+        again = gom.load(Coded, "c1")
+        assert again is not None and (again.packed, again.badges) == ({"p", "q", "r"}, set())
+
+    def test_patch_all_writes_sets_as_their_sorted_items_packed_or_not(self, pm, gom):
+        gom.save_all([Coded(id="a1"), Coded(id="a2")])
+        patched = [
+            Coded(id="a1", codes={"x"}, packed={"p"}, badges={"gold"}),
+            Coded(id="a2", codes={"z", "y"}, packed={"r", "q"}, badges=set()),
+        ]
+        gom.patch_all(patched, only=["codes", "packed", "badges"], null_policy=NullPolicy.CLEAR)
+        rows = [[it["code_set"], json.loads(it["packed"]), it["badges"]] for it in nodes(pm, "Coded")]
+        assert rows == [[["x"], ["p"], ["gold"]], [["y", "z"], ["q", "r"], []]]
+        loaded = gom.load(Coded, "a2")
+        assert loaded is not None and (loaded.codes, loaded.packed, loaded.badges) == ({"y", "z"}, {"q", "r"}, set())
+
+    def test_relate_writes_a_set_property_as_its_sorted_items_and_loads_it_in_a_relationship_fragment(self, gom):
+        gom.save_all([Coded(id="root"), Coded(id="target")])
+        root, target = node_ref(Coded, "root"), node_ref(Coded, "target")
+        reasons = reordered_set("reason")
+        assert gom.edges.relate(root, target, "CODING", {"reasons": reasons})
+        loaded = gom.load(CodedHolder, "root")
+        assert loaded is not None and [(it.reasons, it.target.id) for it in loaded.codings] == [(reasons, "target")]
+        as_stored = gom.load(CodedAsStoredHolder, "root")
+        assert as_stored is not None and [it.reasons for it in as_stored.codings] == [sorted(reasons)]
+
+    def test_relate_writes_an_enum_property_as_its_value_and_a_tuple_as_a_list(self, gom):
+        gom.save_all([Coded(id="root"), Coded(id="target")])
+        root, target = node_ref(Coded, "root"), node_ref(Coded, "target")
+        assert gom.edges.relate(root, target, "CODING", {"shade": Shade.DARK, "pair": ("b", "a")})
+        loaded = gom.load(CodedAsStoredHolder, "root")
+        assert loaded is not None and [(it.shade, it.pair) for it in loaded.codings] == [("dark", ["b", "a"])]
+
+    def test_relating_again_with_the_same_set_finds_the_relationship_as_it_is(self, gom):
+        gom.save_all([Coded(id="root"), Coded(id="target")])
+        root, target = node_ref(Coded, "root"), node_ref(Coded, "target")
+        reasons = reordered_set("reason")
+        again = set(list(reasons))
+        gom.edges.relate(root, target, "CODING", {"reasons": reasons})
+        before = gom.load(Coded, "root")
+        assert before is not None
+
+        # The same set, iterating in another order: stored as the same sorted list, so neither end is marked.
+        assert gom.edges.relate(root, target, "CODING", {"reasons": again})
+        after = gom.load(Coded, "root")
+        assert after is not None and after.stamp == before.stamp
+        holder = gom.load(CodedHolder, "root")
+        assert holder is not None and [it.reasons for it in holder.codings] == [reasons]

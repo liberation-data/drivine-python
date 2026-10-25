@@ -356,14 +356,14 @@ class OracleCypherCompiler(SqlCypherCompiler):
         return self.shared1(json, text)
 
     aggregates_case_subqueries = False
+    """`collect(CASE WHEN … THEN [r] ELSE [m.title] END)` fails with ORA-00979, or closes the session: see
+    `_cases_first`."""
 
     extremes_by_list_key = False
     """
     Oracle's JSON orders lists item by item already, and a grouped `KEEP (DENSE_RANK FIRST ORDER BY …)` by the list key
     drops the connection (ORA-03113), as drivine4j found.
     """
-    """`collect(CASE WHEN … THEN [r] ELSE [m.title] END)` fails with ORA-00979, or closes the session: see
-    `_cases_first`."""
 
     def identity_equals(self, x: str, y: str) -> str:
         """`JSON_EQUAL`, which compares values larger than `=` does, with ORA-40180 past about 32 KB."""

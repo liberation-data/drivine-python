@@ -50,9 +50,7 @@ class OracleConnection(Connection):
         rows: list[Any] = []
         columns: list[str] = []
         try:
-            await cursor.execute(
-                compiled.statement, await self._bindable(sql, finalized, compiled.parameters), fetch_lobs=False
-            )
+            await cursor.execute(compiled.statement, await self._bindable(compiled.parameters), fetch_lobs=False)
             if cursor.description is None and _BLOCK.match(compiled.statement):
                 implicit = _implicit_results(cursor)
                 cursor.close()
@@ -79,21 +77,16 @@ class OracleConnection(Connection):
         self.connection.autocommit = not self._in_transaction
         cursor = self.connection.cursor()
         cursor.arraysize = spec.batch
-        await cursor.execute(
-            compiled.statement, await self._bindable(sql, finalized, compiled.parameters), fetch_lobs=False
-        )
+        await cursor.execute(compiled.statement, await self._bindable(compiled.parameters), fetch_lobs=False)
         return OracleCursor(finalized, cursor, self.result_mapper)
 
-    async def _bindable(
-        self, sql: QuerySpecification[Any], finalized: QuerySpecification[Any], parameters: dict[str, Any]
-    ) -> dict[str, Any]:
+    async def _bindable(self, parameters: dict[str, Any]) -> dict[str, Any]:
         """
-        The parameters, with each text of a compiled Cypher statement of more than _MAX_TEXT bytes as a CLOB, as
-        drivine4j binds one: a Cypher parameter is bound as its JSON text, which for a long list is more than a query
-        takes as a VARCHAR2 (ORA-01460).
+        The parameters, with each text of more than _MAX_TEXT bytes as a CLOB, as drivine4j binds one, whatever wrote
+        the statement: a compiled Cypher statement's parameter is bound as its JSON text, a save's properties as theirs,
+        and a schema marker's inventory as one text, any of which may be more than Oracle takes as a VARCHAR2
+        (ORA-01460, ORA-01461, or ORA-06502 in a block).
         """
-        if sql is finalized:
-            return parameters
         import oracledb
 
         bindable = dict(parameters)
@@ -128,7 +121,7 @@ class OracleConnection(Connection):
 
 
 _MAX_TEXT = 32_767
-"""The most bytes of text Oracle binds as a VARCHAR2; past it a compiled statement's text is bound as a CLOB."""
+"""The most bytes of text Oracle binds as a VARCHAR2; past it a text is bound as a CLOB."""
 
 
 def _implicit_results(cursor: Any) -> list[Any]:

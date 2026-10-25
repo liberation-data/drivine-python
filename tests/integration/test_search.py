@@ -221,6 +221,14 @@ class Story(NodeFragment, labels=["MatchStory"]):
     body: Annotated[str | None, FullTextIndex()] = None
 
 
+class ReviewedStory(NodeFragment, labels=["MatchStory", "MatchReviewed"]):
+    """Searched by Story's index, over MatchStory, so a hit without the second label is dropped after it."""
+
+    id: Annotated[str, NodeId()]
+    title: str | None = None
+    body: Annotated[str | None, FullTextIndex()] = None
+
+
 async def ensure_ranked_index(gom: StatelessGraphObjectManager) -> None:
     """
     Story's full-text index, as ensure_indexes makes it. On FalkorDB it is made again: once nodes it matched were
@@ -276,6 +284,13 @@ class TestLoadMatchingBound:
         assert len(await gom.load_matching(Story, "zebra", top_k=LARGEST_TOP_K)) == 12
         kept = await gom.load_matching(Story, "zebra", top_k=LARGEST_TOP_K, where=refs(Story).title.eq("keep"))
         assert len(kept) == 6
+
+    @pytest.mark.graph_engine_only("the second label is set by a Cypher statement")
+    async def test_reaches_past_the_best_hit_for_a_fragment_whose_second_label_it_lacks(self, gom):
+        # z1 ranks best and isn't MatchReviewed: an index asked for top_k alone yields it, and the label check drops it.
+        await gom.persistence_manager.execute(QuerySpecification("MATCH (z:MatchStory {id: 'z2'}) SET z:MatchReviewed"))
+        reviewed = await gom.load_matching(ReviewedStory, "zebra", top_k=1)
+        assert [it.value.id for it in reviewed] == ["z2"]
 
 
 LAST = "z-last"

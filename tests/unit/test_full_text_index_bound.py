@@ -12,7 +12,18 @@ from typing import Annotated, Any
 
 import pytest
 
-from drivine import Direction, FullTextIndex, GraphView, ModelRegistry, NodeFragment, NodeId, Relationship, Root
+from drivine import (
+    Direction,
+    FullTextIndex,
+    GraphPath,
+    GraphView,
+    ModelRegistry,
+    NodeFragment,
+    NodeId,
+    Relationship,
+    Root,
+    hop,
+)
 from drivine.backend.cypher_backend import CypherBackend
 from drivine.backend.cypher_grammar import FALKORDB_GRAMMAR, MEMGRAPH_GRAMMAR, NEO4J_GRAMMAR, CypherGrammar
 from drivine.backend.matching_search import FILTERED_OVER_FETCH, INDEX_LIMIT_CEILING, MatchingSearch, index_limit
@@ -20,6 +31,13 @@ from drivine.model.graph_view_model import GraphViewModel
 
 
 class Article(NodeFragment, labels=["Article"]):
+    id: Annotated[str, NodeId()]
+    body: Annotated[str | None, FullTextIndex()] = None
+
+
+class ReviewedArticle(NodeFragment, labels=["Article", "Reviewed"]):
+    """A fragment of two labels: the index is over the first, so a hit without the second is dropped after it."""
+
     id: Annotated[str, NodeId()]
     body: Annotated[str | None, FullTextIndex()] = None
 
@@ -143,3 +161,26 @@ def test_a_view_is_limited_after_it_is_projected():
 
     assert "WITH n, _score" not in text
     assert text.endswith("ORDER BY result.score DESC\nLIMIT 8")
+
+
+class EditedArticleView(GraphView):
+    """A view with a required path: its check removes the hits that have no editor's author at its far end."""
+
+    article: Annotated[Article, Root()]
+    editor: Annotated[Author, GraphPath([hop("EDITED_BY", Direction.OUTGOING, "Author"), hop("WROTE")])]
+
+
+def test_a_view_over_fetches_for_its_required_path_alone():
+    assert cut(search(EditedArticleView)) == 8 * FILTERED_OVER_FETCH
+
+
+def test_a_view_without_a_required_relationship_over_fetches_for_a_where():
+    assert cut(search(ArticleView, where="n.id = $id")) == 8 * FILTERED_OVER_FETCH
+
+
+def test_a_fragment_over_fetches_for_its_labels_beyond_the_first():
+    # The index is over Article; the label check after it drops the hits that aren't Reviewed.
+    text = search(ReviewedArticle)
+
+    assert cut(text) == 8 * FILTERED_OVER_FETCH
+    assert "MATCH (n) WHERE n:Article:Reviewed" in text, text

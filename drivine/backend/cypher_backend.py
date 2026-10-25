@@ -294,11 +294,18 @@ class CypherBackend:
 
     def _filters_after_search(self, target: TargetModel, where: str | None) -> bool:
         """
-        Whether something drops a hit after the search: a caller's `where`, or a view's requirements. A threshold keeps
-        the best hits, as the index's limit does, so it is not counted.
+        Whether something drops a hit after the search: a caller's `where`, a view's requirements, or a root label
+        beyond the first, which the index is over. A threshold keeps the best hits, as the index's limit does, so it is
+        not counted.
         """
-        return bool(where) or (
-            isinstance(target, GraphViewModel) and bool(ViewProjector(self.grammar).requirements(target, NODE_ALIAS))
+        root = target.root if isinstance(target, GraphViewModel) else target
+        return (
+            bool(where)
+            or len(root.labels) > 1
+            or (
+                isinstance(target, GraphViewModel)
+                and bool(ViewProjector(self.grammar).requirements(target, NODE_ALIAS))
+            )
         )
 
     def save(

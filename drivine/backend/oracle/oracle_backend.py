@@ -218,18 +218,33 @@ END;""")
         return self._deleting(root, self._root_where(target, where), tested)
 
     def search_index_table(
-        self, kind: Literal["VECTOR", "FULLTEXT"], label: str, properties: Sequence[str]
+        self,
+        kind: Literal["VECTOR", "FULLTEXT"],
+        label: str,
+        properties: Sequence[str],
+        dimensions: int | None = None,
     ) -> GraphStatement:
         """
         The statement giving the name of the table an index made for a search is over, for the index over the label's
         properties, recorded as drivine4j records it or as this library did before: one row, or none when the index was
-        not made.
+        not made. Given `dimensions`, only a vector index made for embeddings of that size: Oracle refuses to measure a
+        vector against an index of another size (ORA-51808), so a search by it measures every node instead.
         """
         recorded, earlier = recorded_as(kind)
+        sized = kind == "VECTOR" and dimensions is not None
+        bindings: dict[str, Any] = {
+            "kind": recorded,
+            "earlier": earlier,
+            "label": label,
+            "properties": catalog_properties(properties),
+        }
+        if sized:
+            bindings["dimensions"] = dimensions
         return GraphStatement(
             f'SELECT object_name AS "table" FROM {self.graph.catalog} WHERE kind IN ($kind, $earlier) '
-            "AND label = $label AND properties = $properties AND object_name IS NOT NULL",
-            {"kind": recorded, "earlier": earlier, "label": label, "properties": catalog_properties(properties)},
+            "AND label = $label AND properties = $properties AND object_name IS NOT NULL"
+            + (" AND JSON_VALUE(details, '$.dimensions' RETURNING NUMBER) = $dimensions" if sized else ""),
+            bindings,
         )
 
     def nearest(self, target: TargetModel, search: NearestSearch) -> GraphStatement:

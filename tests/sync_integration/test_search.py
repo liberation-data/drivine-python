@@ -1,6 +1,6 @@
 # Written by scripts/unasync.py from tests/integration/test_search.py:
 # change that, and run the script again.
-from typing import Annotated
+from typing import Annotated, Any
 
 import pytest
 
@@ -21,6 +21,7 @@ from drivine.sync import (
     StatelessGraphObjectManager,
     VectorIndex,
     refs,
+    vector_index,
 )
 from tests.sync_integration.stores import equals
 
@@ -379,3 +380,110 @@ def test_a_search_asking_for_more_than_a_thousand_hits_gets_them(gom: StatelessG
     if gom.persistence_manager.type == DatabaseType.NEO4J:
         gom.persistence_manager.execute(QuerySpecification("CALL db.awaitIndexes(30)"))
     assert len(gom.load_matching(Story, "zebra", top_k=MANY)) == MANY
+
+
+class SizedDoc(NodeFragment, labels=["SizedTest"]):
+    """A document whose embedding has 4 dimensions, as the index made for it has, but for W's 3."""
+
+    id: Annotated[str, NodeId()]
+    title: str | None = None
+    embedding: Annotated[list[float] | None, VectorIndex(dimensions=4)] = None
+
+
+class PartitionedDoc(SizedDoc, labels=["SizedCorpus"]):
+    """A document of a partition no index is made for, so a search partitioned by it measures every node, on SQL."""
+
+
+class SizedAuthor(NodeFragment, labels=["SizedTest", "SizedAuthor"]):
+    id: Annotated[str, NodeId()]
+
+
+class SizedDocView(GraphView):
+    doc: Annotated[SizedDoc, Root()]
+    authors: Annotated[list[SizedAuthor], Relationship("WRITTEN_BY", required=True)]
+
+
+SIZED_QUERY = [1.0, 0.0, 0.0, 0.0]
+"""The vector searched by: A's own embedding, of the index's 4 dimensions."""
+
+MIS_SIZED_QUERY = [1.0, 0.0, 0.0]
+"""W's own embedding, of 3 dimensions."""
+
+SIZED_WIDE = 10
+"""Wide enough that every store, approximate or not, sees every node."""
+
+
+@pytest.fixture(params=[True, False], ids=["indexed", "unindexed"])
+def sized_docs(request: pytest.FixtureRequest, gom: StatelessGraphObjectManager) -> bool:
+    """
+    The documents, with the index made for them, and on a SQL store also without it, where it measures every node.
+    Memgraph refuses to write an embedding of another size than its index's, so it has no such node to leave out.
+    """
+    indexed: bool = request.param
+    engine = gom.persistence_manager.type
+    if engine == DatabaseType.MEMGRAPH:
+        pytest.skip("Memgraph refuses to store an embedding of another size than its index's.")
+    if not indexed and engine not in (DatabaseType.ORACLE, DatabaseType.POSTGRES):
+        pytest.skip("A graph engine searches only through an index.")
+    spec = vector_index("SizedTest", "embedding", 4)
+    gom.indexes.drop(spec)
+    if indexed:
+        gom.indexes.ensure(spec)
+    author = SizedAuthor(id="au1")
+
+    def written(doc: SizedDoc) -> SizedDocView:
+        return SizedDocView(doc=doc, authors=[author])
+
+    gom.save_all(
+        [
+            written(PartitionedDoc(id="A", title="Alpha", embedding=SIZED_QUERY)),
+            written(SizedDoc(id="B", title="Beta", embedding=[0.8, 0.6, 0, 0])),
+            written(SizedDoc(id="C", title="Gamma", embedding=[0.6, 0, 0.8, 0])),
+            written(PartitionedDoc(id="W", title="Wrong size", embedding=MIS_SIZED_QUERY)),
+        ]
+    )
+    gom.save(SizedDoc(id="D", title="Delta", embedding=[0, 0, 0, 1]))
+    if engine == DatabaseType.NEO4J:
+        gom.persistence_manager.execute(QuerySpecification("CALL db.awaitIndexes(30)"))
+    return indexed
+
+
+def _ids(hits: list[Any]) -> list[str]:
+    return [it.value.id for it in hits]
+
+
+class TestLoadNearestOfAnotherSize:
+    """
+    W, whose embedding has 3 dimensions where the others and the index have 4, is left out of a search by a vector of
+    4 on every store rather than failing it: Oracle refuses to measure two sizes against each other (ORA-51808). W has
+    an author, so that a view leaves it out for its size and not for a missing relationship. W and A are in a
+    partition, so that a search partitioned by it has one node of each size to measure. Ported from drivine4j's
+    NearestAmongCrossEngineTest.
+    """
+
+    def test_leaves_out_a_node_whose_embedding_is_of_another_size_plain_filtered_or_as_a_view(self, gom, sized_docs):
+        wide = {"top_k": SIZED_WIDE, "search_k": SIZED_WIDE}
+        assert _ids(gom.load_nearest(SizedDoc, SIZED_QUERY, **wide)) == ["A", "B", "C", "D"]
+        filtered = gom.load_nearest(SizedDoc, SIZED_QUERY, **wide, where=refs(SizedDoc).title.neq("Alpha"))
+        assert _ids(filtered) == ["B", "C", "D"]
+        # W has an author, as A, B and C do; D has none, so a view leaves it out.
+        viewed = gom.load_nearest(SizedDocView, SIZED_QUERY, **wide)
+        assert [it.value.doc.id for it in viewed] == ["A", "B", "C"]
+
+    def test_finds_only_the_nodes_of_a_vectors_size_when_the_index_is_of_another_or_refuses_it(self, gom, sized_docs):
+        wide = {"top_k": SIZED_WIDE, "search_k": SIZED_WIDE}
+        if gom.persistence_manager.type not in (DatabaseType.ORACLE, DatabaseType.POSTGRES):
+            # A graph engine searches only through its index, which refuses a vector of another size.
+            with pytest.raises(Exception):  # noqa: B017
+                gom.load_nearest(SizedDoc, MIS_SIZED_QUERY, **wide)
+            return
+        # A SQL store with an index of another size measures every node instead, as one with none does.
+        assert _ids(gom.load_nearest(SizedDoc, MIS_SIZED_QUERY, **wide)) == ["W"]
+
+    def test_leaves_out_a_node_whose_embedding_is_of_another_size_from_a_search_partitioned_with_no_index(
+        self, gom, sized_docs
+    ):
+        if gom.persistence_manager.type not in (DatabaseType.ORACLE, DatabaseType.POSTGRES):
+            pytest.skip("A graph engine searches a partition only through an index made for it.")
+        found = gom.load_nearest(SizedDoc, SIZED_QUERY, top_k=SIZED_WIDE, partition_label="SizedCorpus")
+        assert _ids(found) == ["A"]

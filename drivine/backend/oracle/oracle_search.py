@@ -21,10 +21,11 @@ class OracleSearch:
     requirements), then the trim.
 
     Each goes through the index made for it (a table beside the nodes, see the Oracle schema grammar) where there is
-    one, and otherwise reads every node of the label. A vector search scores on Neo4j's scale ((1 + cos) / 2 for cosine,
-    1 / (1 + d²) for euclidean): approximate through the index, exact without. A full-text query is the core of Lucene's
-    syntax (see TextQuery): Oracle Text scores through the index; without one, how often each term occurs as whole
-    words. Either is scaled by the best hit.
+    one, and otherwise reads every node of the label. A vector search goes through an index made for embeddings of the
+    vector's size only, and without one measures only the embeddings of that size: Oracle refuses to measure two sizes
+    against each other. It scores on Neo4j's scale ((1 + cos) / 2 for cosine, 1 / (1 + d²) for euclidean): approximate
+    through the index, exact without. A full-text query is the core of Lucene's syntax (see TextQuery): Oracle Text
+    scores through the index; without one, how often each term occurs as whole words. Either is scaled by the best hit.
     """
 
     def __init__(self, graph: OracleGraph) -> None:
@@ -44,13 +45,17 @@ class OracleSearch:
                 f"{search.table} v ORDER BY distance FETCH APPROX FIRST {search.k} ROWS ONLY) k"
             )
             return self._scored(target, candidates, search.where, search.threshold, search.limit, search.depth)
+        # Every node of the label that holds an embedding of the vector's size (ORA-51808 for any other), so a node of
+        # another size is left out, as the other stores leave it out.
         k = json_key(search.property)
         value = f"TO_VECTOR(JSON_SERIALIZE(JSON_QUERY(c.props, '${k}')))"
         distance = f"VECTOR_DISTANCE({value}, TO_VECTOR($_vector), {metric})"
+        held = [has_labels("c", [search.label]), f"JSON_EXISTS(c.props, '${k}')"]
+        if search.dimensions is not None:
+            held.append(f"VECTOR_DIMENSION_COUNT({value}) = {search.dimensions}")
         candidates = (
-            f"SELECT c.nid, {score(distance)} AS score FROM {self.graph.nodes} c WHERE "
-            f"{has_labels('c', [search.label])} AND JSON_EXISTS(c.props, '${k}') ORDER BY {distance} "
-            f"FETCH FIRST {search.k} ROWS ONLY"
+            f"SELECT c.nid, {score(distance)} AS score FROM {self.graph.nodes} c WHERE {' AND '.join(held)} "
+            f"ORDER BY {distance} FETCH FIRST {search.k} ROWS ONLY"
         )
         return self._scored(target, candidates, search.where, search.threshold, search.limit, search.depth)
 

@@ -26,7 +26,12 @@ from drivine import (
 )
 from drivine.backend.cypher_backend import CypherBackend
 from drivine.backend.cypher_grammar import FALKORDB_GRAMMAR, MEMGRAPH_GRAMMAR, NEO4J_GRAMMAR, CypherGrammar
+from drivine.backend.graph_backend import GraphBackend
 from drivine.backend.matching_search import FILTERED_OVER_FETCH, INDEX_LIMIT_CEILING, MatchingSearch, index_limit
+from drivine.backend.oracle.oracle_backend import OracleBackend
+from drivine.backend.oracle.oracle_graph import OracleGraph
+from drivine.backend.postgres.postgres_backend import PostgresBackend
+from drivine.backend.postgres.postgres_graph import PostgresGraph
 from drivine.model.graph_view_model import GraphViewModel
 
 
@@ -184,3 +189,59 @@ def test_a_fragment_over_fetches_for_its_labels_beyond_the_first():
 
     assert cut(text) == 8 * FILTERED_OVER_FETCH
     assert "MATCH (n) WHERE n:Article:Reviewed" in text, text
+
+
+class ReviewedArticleView(GraphView):
+    """A view rooted on a fragment of two labels."""
+
+    article: Annotated[ReviewedArticle, Root()]
+    authors: Annotated[list[Author], Relationship("WROTE", Direction.INCOMING)] = []
+
+
+@pytest.mark.parametrize("type_", [ReviewedArticle, ReviewedArticleView], ids=lambda it: it.__name__)
+@pytest.mark.parametrize("grammar", ENGINES, ids=lambda it: it.engine)
+def test_a_root_of_more_labels_is_checked_for_them_before_its_hits_are_cut_or_scaled(
+    type_: type[Any], grammar: CypherGrammar
+):
+    # The best of the scale is a hit the search can return. The check is a WITH of its own: FalkorDB and Memgraph take
+    # no WHERE before an ORDER BY in one.
+    text = search(type_, grammar=grammar)
+
+    assert "YIELD node, score\nWITH node, score WHERE node:Article:Reviewed\nWITH node, score\nORDER BY" in text, text
+    assert cut(text) == 8 * FILTERED_OVER_FETCH
+
+
+@pytest.mark.parametrize("type_", [Article, ArticleView], ids=lambda it: it.__name__)
+def test_a_root_of_one_label_has_its_hits_cut_with_no_label_check(type_: type[Any]):
+    assert "WHERE node:" not in search(type_)
+
+
+SQL_STORES = [
+    pytest.param(PostgresBackend(PostgresGraph()), None, "c.labels @> '[\"Reviewed\"]'", id="postgres"),
+    pytest.param(OracleBackend(OracleGraph()), None, ',"Reviewed",', id="oracle"),
+    pytest.param(OracleBackend(OracleGraph()), "drivine_t_Article", ',"Reviewed",', id="oracle-text"),
+]
+
+
+def scaled(backend: GraphBackend, type_: type[Any], table: str | None) -> str:
+    """The hits a SQL store's scale, its MAX() OVER (), is taken over, before they are joined to the nodes returned."""
+    registry = ModelRegistry()
+    target = registry.view(type_) if issubclass(type_, GraphView) else registry.fragment(type_)
+    text = backend.matching(target, MatchingSearch("Article", ("body",), 8, text="graph", table=table)).text
+    return text[text.index("OVER ()") : text.index(") s JOIN")]
+
+
+@pytest.mark.parametrize("type_", [ReviewedArticle, ReviewedArticleView], ids=lambda it: it.__name__)
+@pytest.mark.parametrize(("backend", "table", "second"), SQL_STORES)
+def test_a_sql_store_checks_a_roots_every_label_before_it_scales_the_hits(
+    backend: GraphBackend, table: str | None, second: str, type_: type[Any]
+):
+    assert second in scaled(backend, type_, table)
+
+
+@pytest.mark.parametrize("type_", [Article, ArticleView], ids=lambda it: it.__name__)
+@pytest.mark.parametrize(("backend", "table", "second"), SQL_STORES)
+def test_a_sql_store_checks_no_other_label_before_it_scales_the_hits_of_a_root_of_one(
+    backend: GraphBackend, table: str | None, second: str, type_: type[Any]
+):
+    assert "Reviewed" not in scaled(backend, type_, table)

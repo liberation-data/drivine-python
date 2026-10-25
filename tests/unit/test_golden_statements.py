@@ -120,6 +120,14 @@ def oracle_statements() -> dict[str, str]:
             ),
         ).text,
         "Person.searchIndexTable": backend.search_index_table("VECTOR", "Person", ["embedding"]).text,
+        # As load_nearest writes them: by a vector of 3, only embeddings and an index of that size (else ORA-51808).
+        "Person.nearest.sized": backend.nearest(
+            person, NearestSearch("Person", "embedding", "COSINE", 5, dimensions=3)
+        ).text,
+        "Person.nearest.filtered.sized": backend.nearest(
+            person, NearestSearch("Person", "embedding", "EUCLIDEAN", 20, SQL_WHERE, True, 5, dimensions=3)
+        ).text,
+        "Person.searchIndexTable.sized": backend.search_index_table("VECTOR", "Person", ["embedding"], 3).text,
         **indexed_reads(backend),
     }
 

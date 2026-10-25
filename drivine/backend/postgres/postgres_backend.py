@@ -223,11 +223,16 @@ class PostgresBackend:
         return self._deleting(root, self._root_where(target, where))
 
     def search_index_table(
-        self, kind: Literal["VECTOR", "FULLTEXT"], label: str, properties: Sequence[str]
+        self,
+        kind: Literal["VECTOR", "FULLTEXT"],
+        label: str,
+        properties: Sequence[str],
+        dimensions: int | None = None,
     ) -> GraphStatement:
         """
         Whether a search index was made, which is over the node table: the size of the embeddings a vector index holds,
         and the name of a full-text index. One row, or none when the index was not made, or was dropped by hand.
+        `dimensions` is not needed here: the search compares the index's size with the vector's itself.
         """
         made = "details ->> 'dimensions'" if kind == "VECTOR" else "object_name"
         return PostgresStatement(

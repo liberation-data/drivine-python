@@ -152,7 +152,9 @@ Cypher (see [Cypher on Postgres and Oracle](#cypher-on-postgres-and-oracle)). `m
 Oracle's POSIX dialect, matched against the whole value. A leading `(?i)` ignores case; what Java adds, such as
 `(?:…)`, a look-around or `\b`, is not read. A backreference names the group the expression numbers it by,
 `\1` to `\8`; `\9` is refused, as the group that anchors the expression would make it the tenth, which POSIX does not
-have.
+have. A vector index is a table of embeddings beside the nodes, holding those of the index's size: a node written with
+another size is left out, not refused. `load_nearest` is approximate through it. With no index made, or one of another
+size than the vector's, it measures every node of the label whose embedding is of the vector's size, and is exact.
 
 On Postgres, `DATABASE_NAME` is the database, and `DATABASE_DEFAULT_GRAPH_PATH` names the graph, `drivine` by default:
 see [Postgres](#postgres).
@@ -721,7 +723,8 @@ found = await gom.load_matching(Chunk, "graph AND database", top_k=10, threshold
 ```
 
 - **One scale on every engine.** A nearest score is a similarity, higher nearer: (1 + cos) / 2 for cosine, 1 / (1 + d²)
-  for euclidean. A matching score is scaled so that the best hit is 1.
+  for euclidean. A matching score is scaled so that the best hit is 1: the best with every label of the root, as the
+  index is over the first.
 - **Memgraph's cosine scores are read from its distance**, not its similarity, which is the absolute value of
   1 - distance (memgraph/memgraph#5199). Earlier releases read the similarity, so a vector more than 90 degrees from
   the query scored as its mirror image does: a cosine of -0.6 as 0.8, not 0.2. Those scores, and the hits a cosine

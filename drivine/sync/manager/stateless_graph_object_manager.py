@@ -278,7 +278,7 @@ class StatelessGraphObjectManager:
                 threshold is not None,
                 top_k if search_k is not None else None,
                 _checked(depth) or {},
-                self._search_table("VECTOR", label, [searched.property]),
+                self._search_table("VECTOR", label, [searched.property], len(vector)),
                 len(vector),
             ),
         )
@@ -346,12 +346,21 @@ class StatelessGraphObjectManager:
         rows = self.persistence_manager.query(statement.spec({**values, "_text": text, "_threshold": threshold}))
         return [Scored(self._mapped(target, row["value"]), row["score"]) for row in rows]
 
-    def _search_table(self, kind: Literal["VECTOR", "FULLTEXT"], label: str, properties: Sequence[str]) -> str | None:
-        """Where the store keeps a search index as a table of its own (Oracle), that table; None elsewhere."""
+    def _search_table(
+        self,
+        kind: Literal["VECTOR", "FULLTEXT"],
+        label: str,
+        properties: Sequence[str],
+        dimensions: int | None = None,
+    ) -> str | None:
+        """
+        Where the store keeps a search index as a table of its own (Oracle), that table; None elsewhere. For a vector
+        search by a vector of `dimensions`, only an index made for embeddings of that size.
+        """
         statement = getattr(self.backend, "search_index_table", None)
         if statement is None:
             return None
-        rows = self.persistence_manager.query(statement(kind, label, properties).spec())
+        rows = self.persistence_manager.query(statement(kind, label, properties, dimensions).spec())
         return rows[0] if rows else None
 
     def _mapped(self, target_: TargetModel, row: Any) -> Any:

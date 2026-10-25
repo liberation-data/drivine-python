@@ -277,10 +277,18 @@ class CypherBackend:
         The cut's sort stays even where the call yields its hits best first: `collect` keeps the order it is given and
         `UNWIND` the order of the list, so the rows come out best first, and a fragment's limit takes no sort of its
         own.
+
+        The index is on the root's first label, so it yields nodes with that label alone, which are not the root's. A
+        root with more labels has its hits checked for all of them before they are cut or scaled, so the best of the
+        scale is a hit the search can return, as on a store that narrows by labels first. The check is a `WITH` of its
+        own: FalkorDB and Memgraph take no `WHERE` before an `ORDER BY` in one.
         """
         limit = index_limit(search.limit, self._filters_after_search(target, search.where))
+        root = target.root if isinstance(target, GraphViewModel) else target
+        labelled = [f"WITH node, score WHERE node{label_expression(root.labels)}"] if len(root.labels) > 1 else []
         head = [
             self.grammar.full_text_search(search.label, search.properties, limit),
+            *labelled,
             "WITH node, score",
             "ORDER BY score DESC",
             f"LIMIT {limit}",

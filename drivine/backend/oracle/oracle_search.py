@@ -21,10 +21,11 @@ class OracleSearch:
     requirements), then the trim.
 
     Each goes through the index made for it (a table beside the nodes, see the Oracle schema grammar) where there is
-    one, and otherwise reads every node of the label. A vector search scores on Neo4j's scale ((1 + cos) / 2 for cosine,
-    1 / (1 + d²) for euclidean): approximate through the index, exact without. A full-text query is the core of Lucene's
-    syntax (see TextQuery): Oracle Text scores through the index; without one, how often each term occurs as whole
-    words. Either is scaled by the best hit.
+    one, and otherwise reads every node of the label. A vector search goes through an index made for embeddings of the
+    vector's size only, and without one measures only the embeddings of that size: Oracle refuses to measure two sizes
+    against each other. It scores on Neo4j's scale ((1 + cos) / 2 for cosine, 1 / (1 + d²) for euclidean): approximate
+    through the index, exact without. A full-text query is the core of Lucene's syntax (see TextQuery): Oracle Text
+    scores through the index; without one, how often each term occurs as whole words. Either is scaled by the best hit.
     """
 
     def __init__(self, graph: OracleGraph) -> None:
@@ -44,13 +45,17 @@ class OracleSearch:
                 f"{search.table} v ORDER BY distance FETCH APPROX FIRST {search.k} ROWS ONLY) k"
             )
             return self._scored(target, candidates, search.where, search.threshold, search.limit, search.depth)
+        # Every node of the label that holds an embedding of the vector's size (ORA-51808 for any other), so a node of
+        # another size is left out, as the other stores leave it out.
         k = json_key(search.property)
         value = f"TO_VECTOR(JSON_SERIALIZE(JSON_QUERY(c.props, '${k}')))"
         distance = f"VECTOR_DISTANCE({value}, TO_VECTOR($_vector), {metric})"
+        held = [has_labels("c", [search.label]), f"JSON_EXISTS(c.props, '${k}')"]
+        if search.dimensions is not None:
+            held.append(f"VECTOR_DIMENSION_COUNT({value}) = {search.dimensions}")
         candidates = (
-            f"SELECT c.nid, {score(distance)} AS score FROM {self.graph.nodes} c WHERE "
-            f"{has_labels('c', [search.label])} AND JSON_EXISTS(c.props, '${k}') ORDER BY {distance} "
-            f"FETCH FIRST {search.k} ROWS ONLY"
+            f"SELECT c.nid, {score(distance)} AS score FROM {self.graph.nodes} c WHERE {' AND '.join(held)} "
+            f"ORDER BY {distance} FETCH FIRST {search.k} ROWS ONLY"
         )
         return self._scored(target, candidates, search.where, search.threshold, search.limit, search.depth)
 
@@ -65,6 +70,9 @@ class OracleSearch:
             bindings[name] = value
             return f"${name}"
 
+        # Narrowed by the root's every label before the scale, so the best of it is a hit the search can return.
+        root = target.root if isinstance(target, GraphViewModel) else target
+        labels = [search.label, *(it for it in root.labels if it != search.label)]
         if search.table:
             # Through Oracle Text: each property's score added, then scaled by the best. The index holds what has been
             # committed, so a search does not see what its own transaction wrote.
@@ -74,9 +82,15 @@ class OracleSearch:
                 for i, it in enumerate(search.properties)
             ]
             scores = " + ".join(f"SCORE({i + 1})" for i in range(len(search.properties)))
+            matched = (
+                f"({' OR '.join(contains)}) AND t.nid IN (SELECT c.nid FROM {self.graph.nodes} c WHERE "
+                f"{has_labels('c', labels)})"
+                if len(labels) > 1
+                else " OR ".join(contains)
+            )
             candidates = (
                 f"SELECT nid, hit_count / MAX(hit_count) OVER () AS score FROM (SELECT t.nid, {scores} AS hit_count "
-                f"FROM {search.table} t WHERE {' OR '.join(contains)}) WHERE hit_count > 0"
+                f"FROM {search.table} t WHERE {matched}) WHERE hit_count > 0"
             )
             return self._scored(
                 target, candidates, search.where, search.threshold, search.limit, search.depth, bindings
@@ -94,7 +108,7 @@ class OracleSearch:
         conditions = [*(f"{count(it)} > 0" for it in query.required), *(f"{count(it)} = 0" for it in query.excluded)]
         candidates = f"""SELECT nid, hit_count / MAX(hit_count) OVER () AS score FROM (
     SELECT x.nid, {occurrences} AS hit_count
-    FROM (SELECT c.nid, {text} AS text FROM {self.graph.nodes} c WHERE {has_labels("c", [search.label])}) x
+    FROM (SELECT c.nid, {text} AS text FROM {self.graph.nodes} c WHERE {has_labels("c", labels)}) x
     {f"WHERE {' AND '.join(conditions)}" if conditions else ""}
 ) WHERE hit_count > 0"""
         return self._scored(target, candidates, search.where, search.threshold, search.limit, search.depth, bindings)

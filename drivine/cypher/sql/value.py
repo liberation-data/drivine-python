@@ -11,13 +11,20 @@ class Json:
     A JSON value: `jsonb`, or with `ordered` `json`, whose object keys keep the order they were written in. Where the
     statement makes it of a temporal kind (a constructor, a parameter of a datetime type, temporal arithmetic), it is
     that kind's ISO text; where it makes it a list whose every item is of one, `items` is that kind, so an item taken
-    from it, unwound or indexed, is of it.
+    from it, unwound or indexed, is of it. Where it is a map or a list the statement builds that holds a node or a
+    relationship, `identity` is the same value, as JSON that compares, with each node or relationship in it as its id:
+    it is compared by that, as a graph engine compares what it holds by identity, not by its properties.
     """
 
     sql: str
     ordered: bool = False
     temporal: Temporal | None = None
     items: Temporal | None = None
+    identity: str | None = None
+    list: bool = False
+    """Whether the statement makes it a list, and with `item_lists` a list of lists: a store may sort a list as Cypher
+    does only then."""
+    item_lists: bool = False
 
 
 @dataclass(frozen=True)

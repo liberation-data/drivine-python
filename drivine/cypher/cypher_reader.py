@@ -59,6 +59,7 @@ from drivine.cypher.ast.query import Query, Union
 from drivine.cypher.ast.relationship_pattern import Direction, Group, Range, RelationshipPattern
 from drivine.cypher.ast.remove_item import RemoveItem, RemoveLabels, RemoveProperty
 from drivine.cypher.ast.set_item import SetAdd, SetItem, SetLabels, SetProperty, SetReplace
+from drivine.cypher.procedure import Procedure, procedure_named
 from drivine.drivine_error import DrivineError
 
 # The parse tree's contexts are ANTLR's, generated without types: each is read as Any here.
@@ -70,8 +71,9 @@ def read_cypher(cypher: str) -> Query:
     """
     The statement, read into a Query: parsed with openCypher's grammar, then walked into the syntax tree the compiler
     works from, which says what the statement means and no more of how it was written. A statement that is not Cypher
-    is refused with where it went wrong. A statement that is Cypher the compiler does not take (a procedure call) is
-    refused by name.
+    is refused with where it went wrong. A statement that is Cypher the compiler does not take (a call of a procedure
+    it does not know) is refused by name. A call of one it knows, `CALL db.labels()`, is read as the query that gives
+    its rows: see Procedure.
 
     ANTLR's Python runtime parses slowly, so a statement is read once: the tree is kept by its text, and is never
     changed, so each compile of the statement reads the one tree.
@@ -105,9 +107,62 @@ class _Reader:
 
     def query(self, context: Context) -> Query:
         regular = context.oC_RegularQuery()
-        if regular is None:
+        return self.regular(regular) if regular is not None else self.standalone(context.oC_StandaloneCall())
+
+    def standalone(self, call: Context) -> Query:
+        """
+        `CALL db.labels()` as the whole statement: the procedure's rows, each field under the name it is yielded as, or
+        its own where it yields them all, by `YIELD *` or no `YIELD`.
+        """
+        invocation = call.oC_ExplicitProcedureInvocation()
+        name = (invocation or call.oC_ImplicitProcedureInvocation()).oC_ProcedureName()
+        procedure = self.procedure(name)
+        items = call.oC_YieldItems()
+        # As Neo4j refuses it: a WHERE filters rows a clause after it reads.
+        if items is not None and items.oC_Where() is not None:
+            raise DrivineError(
+                "A CALL that is the whole statement takes no WHERE, as in Cypher: follow its YIELD with WITH or "
+                f"RETURN, as in CALL {procedure.qualified_name}() YIELD {procedure.field} WHERE … "
+                f"RETURN {procedure.field}."
+            )
+        yields = self.yields(items) if items is not None else [(procedure.field, procedure.field)]
+        arguments = [self.expression(it) for it in invocation.oC_Expression()] if invocation is not None else []
+        return procedure.query(arguments, yields, None)
+
+    def in_query(self, call: Context) -> Clause:
+        """
+        `CALL db.labels() YIELD label` within a query: for each row, the procedure's rows, joined to it as a
+        `CALL { … }`'s are, each field yielded bound for the clauses after.
+        """
+        invocation = call.oC_ExplicitProcedureInvocation()
+        procedure = self.procedure(invocation.oC_ProcedureName())
+        # As Neo4j refuses it: within a query, what a procedure gives is named.
+        items = call.oC_YieldItems()
+        if items is None:
+            raise DrivineError(
+                "A CALL of a procedure within a query names what it yields, as in Cypher: "
+                f"CALL {procedure.qualified_name}() YIELD {procedure.field}."
+            )
+        where = self.where(items.oC_Where())
+        arguments = [self.expression(it) for it in invocation.oC_Expression()]
+        return Call(False, procedure.query(arguments, self.yields(items), where))
+
+    def procedure(self, name: Context) -> Procedure:
+        """The procedure a call names, or the call refused where the compiler does not take it."""
+        namespace = "".join(_symbolic(it) + "." for it in name.oC_Namespace().oC_SymbolicName())
+        procedure = procedure_named(namespace + _symbolic(name.oC_SymbolicName()))
+        if procedure is None:
             _refuse("A procedure call (CALL)")
-        return self.regular(regular)
+        return procedure
+
+    def yields(self, items: Context) -> list[tuple[str, str]]:
+        """Each field a `YIELD` names, and the variable it is bound to: its own name, or the one after `AS`."""
+        named: list[tuple[str, str]] = []
+        for item in items.oC_YieldItem():
+            variable = self.name(item.oC_Variable())
+            field = item.oC_ProcedureResultField()
+            named.append((_symbolic(field.oC_SymbolicName()) if field is not None else variable, variable))
+        return named
 
     def regular(self, regular: Context) -> Query:
         return Query(
@@ -219,7 +274,7 @@ class _Reader:
         unwind = context.oC_Unwind()
         if unwind is not None:
             return Unwind(self.expression(unwind.oC_Expression()), self.name(unwind.oC_Variable()))
-        _refuse("A procedure call (CALL)")
+        return self.in_query(context.oC_InQueryCall())
 
     def readings(self, context: Context) -> Query:
         """Reading clauses that return nothing, the body of an `EXISTS { … }` or a `COUNT { … }`."""
@@ -676,8 +731,12 @@ class _Reader:
         )
 
     def parameter(self, context: Context) -> Parameter:
-        symbolic = context.oC_SymbolicName()
-        return Parameter(_symbolic(symbolic) if symbolic is not None else context.DecimalInteger().getText())
+        """`$name`, `$1`, or a keyword, `$limit`, which names a parameter as any other word does."""
+        schema = context.oC_SchemaName()
+        if schema is not None:
+            return Parameter(self.schema_name(schema))
+        number = context.DecimalInteger()
+        return Parameter(number.getText() if number is not None else context.getChild(1).getText())
 
     # ----- Names -----
 

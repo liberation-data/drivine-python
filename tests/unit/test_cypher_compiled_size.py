@@ -34,9 +34,9 @@ def test_a_duration_added_to_a_value_read_from_the_store_grows_with_each_additio
         return "MATCH (c:Claim) RETURN " + "(" * times + "c.day" + " + duration('P1D'))" * times
 
     one, two, four = (len(compiler("g").compile(added(it)).sql) for it in (1, 2, 4))
-    # drivine4j's bound is 20,000, which its 19,978 characters on Oracle just keep to: the JSON_TRANSFORM a result is
-    # read through here (python-oracledb#622) is a few more.
-    assert one < 21_000, one
+    # drivine4j's bound is 25,000, as a sum that may be a text writes each side as toString does, a float as Java
+    # writes it; the JSON_TRANSFORM a result is read through here (python-oracledb#622) is a few characters more.
+    assert one < 25_000, one
     assert four < 3 * two, (two, four)
 
 
@@ -93,3 +93,49 @@ def test_a_quantified_path_pattern_of_twice_the_hops_each_node_read_by_its_where
     short, long = (len(compiler("g").compile(group(it)).sql) for it in (4, 8))
     assert short < 20_000, short
     assert long < 3 * short, (short, long)
+
+
+@COMPILERS
+def test_items_taken_out_of_lists_nested_twice_as_deep_holding_a_relationship_compile_to_about_twice_the_statement(
+    compiler: type[SqlCypherCompiler],
+) -> None:
+    def taken(depth: int) -> str:
+        return f"MATCH (c:Claim)-[r:R]->() WITH {'[' * depth}r, 1{']' * depth} AS m RETURN m{'[0]' * depth} = 1"
+
+    short, long = (len(compiler("g").compile(taken(it)).sql) for it in (4, 8))
+    assert short < 20_000, short
+    assert long < 3 * short, (short, long)
+
+
+@pytest.mark.parametrize(
+    ("compiler", "written"), [(PostgresCypherCompiler, "to_char("), (OracleCypherCompiler, "TO_CHAR(")]
+)
+def test_a_sum_writes_a_side_as_to_string_writes_a_float_only_where_the_statement_gives_neither_side(
+    compiler: type[SqlCypherCompiler], written: str
+) -> None:
+    # A number the statement gives is written out at compile time, and a side added to one is a text where the sum is
+    # one.
+    def writes(cypher: str, parameters: dict[str, object] | None = None) -> int:
+        return compiler("g").compile(cypher, parameters).sql.count(written)
+
+    once = writes("MATCH (c:Claim) RETURN c.a + c.b") // 2
+    assert once > 0
+    assert writes("MATCH (c:Claim) RETURN c.a + 1, 2.5 + c.b, c.a + $n", {"n": 1.5}) == 0
+    assert writes("MATCH (c:Claim) RETURN 'x' + c.b") == once
+    # NaN and the infinities are bound as texts on Postgres, so both sides of a sum with one are written as toString
+    # writes them.
+    assert writes("MATCH (c:Claim) RETURN c.a + $n", {"n": float("nan")}) == 2 * once
+
+
+def test_a_sort_by_a_property_on_postgres_is_by_its_json_alone_and_only_a_list_the_statement_makes_is_keyed_as_a_list():
+    # Keyed as a list, a term costs thousands a row in the planner's estimate, which brings in its JIT for the whole
+    # statement past a few dozen rows (drivine4j#223).
+    def ordered(cypher: str) -> str:
+        return PostgresCypherCompiler("g").compile(cypher).sql.split("ORDER BY ", 1)[1]
+
+    assert ordered("MATCH (c:Claim) RETURN c.name ORDER BY c.name") == "NULLIF(p2.s1, 'null'::jsonb)"
+    listed = ordered("MATCH (c:Claim) WITH c.name AS n, collect(c.id) AS ids RETURN n ORDER BY ids")
+    assert "WITH RECURSIVE" in listed, listed
+    # Its items as arrays unnested, which the planner takes for 10 items, not a set-returning function's 100: a 150th
+    # of the cost.
+    assert "FROM jsonb_array_elements(" not in listed and "unnest(ARRAY(SELECT jsonb_array_elements(" in listed, listed

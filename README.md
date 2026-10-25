@@ -271,8 +271,16 @@ people = await pm.query(spec.bind({"city": "Sydney"}))
   Oracle, whose recursive queries read nothing of the row they are in, a quantified path pattern's `WHERE` and
   properties read no variable from outside it, and hold a subquery only where no variable of its `MATCH` or before it
   is named, and that walks no variable-length relationship or quantified path pattern of its own; on Postgres they may.
-  What isn't compiled yet (a slice, a path returned whole, `SKIP` of an expression…) is
+  What isn't compiled yet (a path returned whole, `SKIP` of an expression…) is
   refused by name before anything is sent, and what isn't Cypher with where it went wrong.
+- `CALL db.labels()` and `CALL db.relationshipTypes()` compile, alone or within a query with `YIELD`, and give each
+  label and type something has now, read from the nodes and relationships; any other procedure is refused. A parameter
+  may be named by a keyword (`$limit`), as in Neo4j. Functions of numbers (`exp`, `log`, `sin`, `atan2`, `round` by a
+  mode …) give the floats Neo4j gives, but where Neo4j gives NaN or an infinity (`log(0)`, `sqrt(-1)`, `exp(1000)`) the
+  statement fails: JSON holds neither.
+- On Postgres, compiled Cypher works float arithmetic out in exact decimal (`numeric`), not as a double, so a result
+  can differ from a graph engine's in its last digits: `0.1 * 3` is `0.3`, where Neo4j gives `0.30000000000000004`. A
+  float's text carries no trailing zeros: `toString(4.0 / 2)` is `"2.0"`.
 - On Oracle a text read out of JSON is at most 4,000 bytes, and an empty one is null; `reduce` doesn't run in a
   statement that writes, in the step of a `reduce`, or where its step reads a path; and `map[key]` reads null where an
   expression gives the key.

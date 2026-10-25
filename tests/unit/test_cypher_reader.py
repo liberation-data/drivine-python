@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 
 from drivine import DrivineError
-from drivine.cypher.ast.clause import Create, Delete, Match, Merge, Remove, Return, SetClause, Unwind, With
+from drivine.cypher.ast.clause import Call, Create, Delete, Match, Merge, Remove, Return, SetClause, Unwind, With
 from drivine.cypher.ast.expression import (
     Binary,
     BinaryOperator,
@@ -104,9 +104,8 @@ def test_strings_names_in_backticks_parameters_and_numbers_read_as_their_values(
     assert returned("RETURN 'it\\'s \"quoted\"\\n'") == Literal('it\'s "quoted"\n')
     assert returned("RETURN `my var`.`odd``key`") == Property(Variable("my var"), "odd`key")
     assert returned("RETURN $1") == Parameter("1")
-    # Strict openCypher: a parameter is not named with a reserved word.
-    with pytest.raises(DrivineError):
-        read_cypher("RETURN $skip")
+    # As in Neo4j, and not strict openCypher: a parameter may be named with a reserved word.
+    assert returned("RETURN $skip") == Parameter("skip")
     assert returned("RETURN 0xff") == Literal(255)
     assert returned("RETURN 1.5e3") == Literal(1500.0)
     assert returned("RETURN '\\uD83D\\uDE00'") == Literal("\U0001f600")
@@ -213,13 +212,57 @@ def test_a_word_the_grammar_adds_is_still_a_name_of_a_variable_a_property_or_a_m
     assert returned(f"RETURN {{{word}: 1}}") == MapLiteral(((word, Literal(1)),))
 
 
+@pytest.mark.parametrize(
+    "word", ["limit", "skip", "order", "match", "count", "end", "call", "yield", "Return", "null", "foreach"]
+)
+def test_a_parameter_is_named_by_any_word_a_keyword_among_them_in_a_page_a_condition_a_map_an_unwind_and_a_set(
+    word: str,
+):
+    parameter = Parameter(word)
+    assert returned(f"RETURN ${word}") == parameter
+    match, unwind, ret = read_cypher(
+        f"MATCH (n {{k: ${word}}}) WHERE n.x = ${word} UNWIND ${word} AS i RETURN i SKIP ${word} LIMIT ${word}"
+    ).clauses
+    assert isinstance(match, Match) and isinstance(unwind, Unwind) and isinstance(ret, Return)
+    properties = match.patterns[0].nodes[0].properties
+    assert isinstance(properties, MapLiteral) and properties.entries[0][1] == parameter
+    assert isinstance(match.where, Binary) and match.where.right == parameter
+    assert unwind.list == parameter
+    assert [ret.projection.skip, ret.projection.limit] == [parameter, parameter]
+    set_ = read_cypher(f"MATCH (n) SET n.x = ${word}, n += ${word}").clauses[-1]
+    assert isinstance(set_, SetClause)
+    assert list(set_.items) == [SetProperty("n", "x", parameter), SetAdd("n", parameter)]
+
+
+def test_a_call_of_db_labels_or_db_relationship_types_reads_as_the_query_that_gives_its_rows():
+    labels = read_cypher("CALL db.labels()")
+    unwound = labels.clauses[1]
+    assert isinstance(unwound, Unwind)
+    assert unwound.list == Function("labels", False, (Variable("#procedure"),))
+    last = labels.clauses[-1]
+    assert isinstance(last, Return)
+    assert last.projection.distinct
+    assert [it.name for it in last.projection.items] == ["label"]
+    # Within a query, a CALL { … } of its own, its WHERE a WITH's in it, and what it yields named as the YIELD names it.
+    call = read_cypher(
+        "MATCH (m) CALL db.relationshipTypes() YIELD relationshipType AS t WHERE t <> m.x RETURN t"
+    ).clauses[1]
+    assert isinstance(call, Call)
+    _, with_, ret = call.query.clauses
+    assert isinstance(with_, With) and isinstance(ret, Return)
+    assert with_.projection.items[0].expression == Function("type", False, (Variable("#procedure"),))
+    assert [it.name for it in with_.projection.items] == ["t"]
+    assert isinstance(with_.where, Binary) and with_.where.left == Variable("t")
+    assert [it.name for it in ret.projection.items] == ["t"]
+
+
 def test_cypher_the_compiler_does_not_take_is_refused_by_name_and_what_is_not_cypher_with_where():
     with pytest.raises(DrivineError) as refused:
-        read_cypher("CALL db.labels()")
+        read_cypher("CALL db.indexes()")
     assert str(refused.value) == "A procedure call (CALL) is Cypher, and is not compiled to SQL yet."
     # One among a query's reading clauses is refused alike.
     with pytest.raises(DrivineError) as refused:
-        read_cypher("MATCH (n) CALL db.labels() YIELD label RETURN label")
+        read_cypher("MATCH (n) CALL db.indexes() YIELD label RETURN label")
     assert str(refused.value) == "A procedure call (CALL) is Cypher, and is not compiled to SQL yet."
     with pytest.raises(DrivineError, match=r"^The statement is not Cypher, at line 1, column \d+: "):
         read_cypher("MATCH (n RETURN n")

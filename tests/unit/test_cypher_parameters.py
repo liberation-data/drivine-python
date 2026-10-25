@@ -1,6 +1,6 @@
 """A Cypher parameter is bound as its JSON text, as drivine4j binds one."""
 
-from datetime import timedelta
+from datetime import date, timedelta
 from decimal import Decimal
 from enum import Enum
 
@@ -79,8 +79,8 @@ def test_on_oracle_a_write_binds_its_parameters_as_text_and_reads_extended_only_
     assert "cy_params CLOB :=" in sql and "cy_params JSON" not in sql, sql
     assert "JSON_QUERY(cy_params, '$.a' RETURNING JSON)" in sql, sql
     assert "JSON_QUERY(cy_params, '$.a' RETURNING CLOB)" not in sql, sql
-    for key in ("f", "p"):
-        assert f"JSON(JSON_QUERY(cy_params, '$.{key}' RETURNING CLOB) EXTENDED)" in sql, sql
+    for path in ("f", "p.x"):
+        assert f"JSON(JSON_QUERY(cy_params, '$.{path}' RETURNING CLOB) EXTENDED)" in sql, sql
     assert (
         compiled.parameters["_cy_params"] == '{"a":"x","f":{"$numberDouble":"2.0"},"p":{"x":[{"$numberDouble":"1.0"}]}}'
     )
@@ -90,13 +90,111 @@ def test_on_oracle_a_write_reads_extended_only_a_parameter_named_so_not_a_key_of
     # A key of a map parameter named as a parameter that holds a whole float is read from that map, as JSON.
     sql = OracleCypherCompiler("g").compile("MATCH (n) SET n.a = $p.f, n.f = $f", {"f": 2.0, "p": {"f": "y"}}).sql
     assert "JSON(JSON_QUERY(cy_params, '$.f' RETURNING CLOB) EXTENDED)" in sql, sql
-    assert "'$.p' RETURNING CLOB" not in sql and "'$.f' RETURNING JSON" in sql, sql
+    assert "'$.p.f' RETURNING CLOB" not in sql and "JSON_QUERY(cy_params, '$.p.f' RETURNING JSON)" in sql, sql
     # A parameter keyed as extended JSON's are keeps a whole float beside it from being written as extended JSON.
     compiled = OracleCypherCompiler("g").compile(
         "MATCH (n) SET n.m = $m.x, n.f = $f", {"f": 2.0, "m": {"$numberLong": "5", "x": 1}}
     )
     assert "EXTENDED" not in compiled.sql, compiled.sql
     assert compiled.parameters["_cy_params"] == '{"f":2.0,"m":{"$numberLong":"5","x":1}}'
+
+
+def test_on_oracle_a_value_in_a_map_parameter_is_read_with_one_path_extended_only_where_it_holds_a_whole_float():
+    # As drivine4j's OracleParameterTextTest: Oracle crashed the session where a value was read from a parameter past
+    # 32 KB taken as JSON first, for each of two rows (#145).
+    p = {"p": {"text": "x", "n": 2.0, "m": {"b": 1}}}
+    write = OracleCypherCompiler("g").compile("MATCH (n) SET n.t = $p.text, n.n = $p.n, n.b = $p.m.b", p).sql
+    assert "JSON_QUERY(cy_params, '$.p.text' RETURNING JSON)" in write, write
+    assert "JSON_QUERY(cy_params, '$.p.m.b' RETURNING JSON)" in write, write
+    assert "JSON(JSON_QUERY(cy_params, '$.p.n' RETURNING CLOB) EXTENDED)" in write, write
+    assert "'$.p' RETURNING" not in write, write
+    read = OracleCypherCompiler("g").compile("RETURN [$p.text, $p.n, $p.m.b, $q.text]", {**p, "q": {"text": "y"}})
+    assert "JSON_QUERY($_cy_p, '$.text' RETURNING JSON)" in read.sql, read.sql
+    assert "JSON(JSON_QUERY($_cy_p, '$.n' RETURNING CLOB) EXTENDED)" in read.sql, read.sql
+    assert "JSON_QUERY($_cy_p, '$.m.b' RETURNING JSON)" in read.sql, read.sql
+    assert "JSON_QUERY($_cy_q, '$.text' RETURNING JSON)" in read.sql, read.sql
+    assert "JSON($_cy_" not in read.sql, read.sql
+    assert read.parameters == {"_cy_p": '{"text":"x","n":{"$numberDouble":"2.0"},"m":{"b":1}}', "_cy_q": '{"text":"y"}'}
+    union = OracleCypherCompiler("g").compile("RETURN $p.text AS t UNION RETURN $p.n AS t", p).sql
+    assert "JSON_QUERY($_cy_p, '$.text' RETURNING JSON)" in union, union
+    assert "JSON(JSON_QUERY($_cy_p, '$.n' RETURNING CLOB) EXTENDED)" in union, union
+    assert "JSON($_cy_p" not in union, union
+
+
+def test_on_oracle_a_value_in_a_map_parameter_whose_text_is_extended_json_but_not_there_is_read_as_json():
+    # Only a value that holds a whole float is read as extended JSON: a text beside one is read as it is.
+    p = {"p": {"text": "x", "f": 2.0, "l": [1, {"g": 3.0}]}}
+    read = OracleCypherCompiler("g").compile("RETURN [$p.text, $p.l]", p).sql
+    assert "JSON_QUERY($_cy_p, '$.text' RETURNING JSON)" in read, read
+    assert "JSON(JSON_QUERY($_cy_p, '$.l' RETURNING CLOB) EXTENDED)" in read, read
+    write = OracleCypherCompiler("g").compile("MATCH (n) SET n.t = $p.text, n.l = $p.l", p).sql
+    assert "JSON_QUERY(cy_params, '$.p.text' RETURNING JSON)" in write, write
+    assert "JSON(JSON_QUERY(cy_params, '$.p.l' RETURNING CLOB) EXTENDED)" in write, write
+    # A parameter keyed as extended JSON's are is written as plain JSON, so nothing in it is read as extended JSON.
+    keyed = OracleCypherCompiler("g").compile("RETURN $p.f", {"p": {"f": 2.0, "m": {"$x": 1}}}).sql
+    assert "JSON_QUERY($_cy_p, '$.f' RETURNING JSON)" in keyed and "EXTENDED" not in keyed, keyed
+
+
+def test_on_oracle_a_value_in_a_map_parameter_taken_by_a_subscript_of_known_text_is_read_with_one_path():
+    # As by a property (#145): a text key, written or bound, is the property of that name.
+    p = {"p": {"text": "x", "m": {"b": 1}}, "k": "text"}
+    read = OracleCypherCompiler("g").compile("RETURN [$p['text'], $p['m'].b, $p.m['b'], $p[$k]]", p).sql
+    assert "JSON_QUERY($_cy_p, '$.text' RETURNING JSON)" in read, read
+    assert "JSON_QUERY($_cy_p, '$.m.b' RETURNING JSON)" in read, read
+    assert "JSON($_cy_p)" not in read and "'$.m' RETURNING" not in read, read
+    # A subscript takes any text, so a key with a dot in it is one key, quoted, not a path of two.
+    dotted = OracleCypherCompiler("g").compile("RETURN [$p['a.b'], $p['m']['c d']]", {"p": {"a.b": "x", "m": {}}}).sql
+    assert "JSON_QUERY($_cy_p, '$.\"a.b\"' RETURNING JSON)" in dotted, dotted
+    assert "JSON_QUERY($_cy_p, '$.m.\"c d\"' RETURNING JSON)" in dotted, dotted
+    write = OracleCypherCompiler("g").compile("MATCH (n) SET n.t = $p['text'], n.b = $p['m']['b'], n.k = $p[$k]", p).sql
+    assert "JSON_QUERY(cy_params, '$.p.text' RETURNING JSON)" in write, write
+    assert "JSON_QUERY(cy_params, '$.p.m.b' RETURNING JSON)" in write, write
+    assert "'$.p' RETURNING" not in write and "CASE" not in write, write
+
+
+def test_on_oracle_an_iterator_in_a_map_parameter_whose_value_is_read_with_one_path_is_read_once():
+    # The map is walked to the value and written as its text from one reading of it: an iterator in it is read once.
+    compiled = OracleCypherCompiler("g").compile("RETURN $p.l", {"p": {"l": iter([1, 2.0])}})
+    assert "JSON(JSON_QUERY($_cy_p, '$.l' RETURNING CLOB) EXTENDED)" in compiled.sql, compiled.sql
+    assert compiled.parameters == {"_cy_p": '{"l":[1,{"$numberDouble":"2.0"}]}'}
+    # Read again as a whole, its text is written from the same reading.
+    both = OracleCypherCompiler("g").compile("RETURN [$p.l, $p]", {"p": {"l": iter([1, 2.0])}})
+    assert "JSON($_cy_p EXTENDED)" in both.sql, both.sql
+    assert both.parameters == {"_cy_p": '{"l":[1,{"$numberDouble":"2.0"}]}'}
+    # A procedure writes its parameters' text first, then reads the value from what it wrote.
+    write = OracleCypherCompiler("g").compile("MATCH (n) SET n.l = $p.l", {"p": {"l": iter([1, 2.0])}})
+    assert "JSON(JSON_QUERY(cy_params, '$.p.l' RETURNING CLOB) EXTENDED)" in write.sql, write.sql
+    assert write.parameters == {"_cy_params": '{"p":{"l":[1,{"$numberDouble":"2.0"}]}}'}
+
+
+def test_on_oracle_a_value_in_a_parameter_that_is_no_map_or_past_a_number_is_read_from_the_parameter_as_json():
+    # A list or a date on the way to the key is no map to take one path into, nor is an item taken by a number: the
+    # map before it is still read with one path.
+    given = {"p": {"text": "x", "l": ["x"]}, "d": date(2020, 1, 2), "i": 0}
+    read = OracleCypherCompiler("g").compile("RETURN [$p.l.x, $d.year, $p.l[0], $p['l'][-1], $p.l[$i].x]", given).sql
+    assert "JSON_QUERY(JSON_QUERY($_cy_p, '$.l' RETURNING JSON), '$.x' RETURNING JSON)" in read, read
+    assert "EXTRACT(YEAR FROM" in read and "JSON($_cy_d)" in read, read
+    assert "'$.l[" not in read and "'$.l.x'" not in read and "JSON($_cy_p" not in read, read
+    # A list parameter is no map either.
+    listed = OracleCypherCompiler("g").compile("RETURN $l[0].x", {"l": [{"x": 1}]}).sql
+    assert "JSON($_cy_l)" in listed, listed
+
+
+def test_on_oracle_a_value_in_a_parameter_a_reduce_step_is_given_is_read_from_the_map_its_function_is_given():
+    # A reduce() step reads its parameters from the map its function is given, not from the text they are bound as.
+    p = {"p": {"text": "x"}}
+    for read in ("$p.text", "$p['text']"):
+        sql = OracleCypherCompiler("g").compile(f"RETURN reduce(s = '', x IN [1, 2] | s + {read})", p).sql
+        assert "JSON_QUERY(JSON_QUERY(cy_context, '$.\"$p\"' RETURNING JSON), '$.text' RETURNING JSON)" in sql, sql
+        assert "JSON_QUERY($_cy_p, '$.text'" not in sql, sql
+
+
+def test_postgres_reads_a_value_in_a_map_parameter_from_the_parameter_as_json_as_it_did():
+    # Only Oracle reads it with one path: Postgres's SQL is as it was.
+    p = {"p": {"text": "x", "m": {"b": 1}}, "k": "text"}
+    read = PostgresCypherCompiler("g").compile("RETURN [$p.text, $p['m'].b, $p[$k]]", p)
+    assert read.sql.count("$_cy_p") == 3 and "'$." not in read.sql, read.sql
+    assert read.parameters == {"_cy_p": '{"text":"x","m":{"b":1}}', "_cy_k": '"text"'}
 
 
 def test_on_oracle_a_whole_float_of_a_float_subclass_is_written_as_json_writes_its_number():

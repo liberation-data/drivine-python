@@ -360,6 +360,36 @@ async def test_a_text_past_32_kb_set_on_two_nodes_beside_a_whole_float_or_not_le
             assert rows == [{"id": it, **written} for it in (1, 2)]
 
 
+@pytest.mark.skipif(not ORACLE, reason="Oracle isn't configured: set ORACLE_TESTS=true.")
+async def test_a_text_past_32_kb_in_a_map_parameter_read_and_set_on_two_nodes_leaves_the_session_open(
+    factory: PersistenceManagerFactory,
+):
+    # Oracle crashed the session where a statement read a value past 32 KB from a map parameter, by a property or by a
+    # subscript, for each of two rows, taking the parameter as JSON first and then the value from it (#145): alone in
+    # the parameter, or beside a whole float, which makes its text extended JSON. As above, on one connection, each
+    # statement new, and the session asked again after it.
+    pm = factory.get("oracle")
+    await clear(pm)
+    text = "x" * 40_000
+    written: dict[str, Any] = {}
+    async with transaction(rollback=True):
+        await pm.query(spec("CREATE (:CyWrite {id: 1}), (:CyWrite {id: 2})"))
+        for i in range(3):
+            for j, p in enumerate(({"text": text}, {"text": text, "f": 2.0 + i})):
+                k = i * 2 + j
+                for read in ("$p.text", "$p['text']"):
+                    cypher = f"MATCH (n:CyWrite) WHERE n.id > -{k} RETURN {read} ORDER BY n.id"
+                    assert await pm.query(spec(cypher, {"p": p})) == [text, text]
+                if "f" in p:
+                    await pm.query(spec(f"MATCH (n:CyWrite) SET n.t{k} = $p.text, n.f{k} = $p.f", {"p": p}))
+                    written |= {f"t{k}": text, f"f{k}": p["f"]}
+                else:
+                    await pm.query(spec(f"MATCH (n:CyWrite) SET n.t{k} = $p.text", {"p": p}))
+                    written |= {f"t{k}": text}
+                rows = await pm.query(spec("MATCH (n:CyWrite) RETURN properties(n) ORDER BY n.id"))
+                assert rows == [{"id": it, **written} for it in (1, 2)]
+
+
 async def seeded(pm: PersistenceManager) -> None:
     """The graph queries.yaml reads, written again."""
     await clear(pm)

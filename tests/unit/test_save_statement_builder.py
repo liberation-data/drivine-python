@@ -1,5 +1,8 @@
 """The check of the save `update` makes of what it loaded, where a read takes no snapshot (Neo4j)."""
 
+import os
+import subprocess
+import sys
 from datetime import datetime
 from enum import StrEnum
 from typing import Annotated, Any
@@ -22,7 +25,7 @@ from drivine import (
     VectorIndex,
 )
 from drivine.backend.cypher_grammar import FALKORDB_GRAMMAR, MEMGRAPH_GRAMMAR, NEO4J_GRAMMAR, CypherGrammar
-from drivine.backend.save_statement_builder import SaveStatementBuilder
+from drivine.backend.save_statement_builder import SaveStatementBuilder, stored
 
 STAMP = "0123456789abcdef:fedcba9876543210"
 
@@ -174,9 +177,32 @@ def test_lets_a_field_loaded_as_a_load_gives_an_absent_property_be_held_as_none(
 
     assert "n.embedding IS NULL AND NOT coalesce(n.extra <> $_loaded1, false)" in check, "the packed default"
     assert "AND NOT coalesce(n.slug <> $_loaded2, false)" in check, "the default made of the title as loaded"
-    assert "AND NOT coalesce(n.tags <> $_loaded3, false)" in check, "the empty collection of EmptyWhenAbsent"
+    assert f"AND {as_set('n.tags', '$_loaded3')} AND" in check, "the empty collection of EmptyWhenAbsent"
     assert "n.title IS NOT NULL AND NOT coalesce(n.title <> $_loaded4, false)" in check
     assert (bindings["_loaded1"], bindings["_loaded2"], bindings["_loaded3"]) == ("{}", "ada", [])
+
+
+def as_set(stored: str, loaded: str) -> str:
+    """A set field's comparison: each item of the stored list loaded, and each loaded item stored."""
+    return (
+        f"{stored} IS :: LIST<ANY> AND NOT coalesce(NOT (all(it IN {stored} WHERE it IN {loaded}) AND "
+        f"all(it IN {loaded} WHERE it IN {stored})), false)"
+    )
+
+
+def test_compares_a_set_field_as_a_set_and_a_list_or_tuple_item_by_item(registry):
+    loaded = Note(id="n1", title="Ada", tags={"zeta", "alpha", "mid"}, stamp=STAMP)
+    check, bindings = check_of_change(registry, loaded, loaded.model_copy(update={"title": "Grace"}))
+
+    assert f"n.tags IS NOT NULL AND {as_set('n.tags', '$_loaded3')}" in check
+    assert "n.tags <>" not in check
+    assert bindings["_loaded3"] == ["alpha", "mid", "zeta"]
+
+    # A set field loaded without validation holds the list itself (drivine-python#129), which is compared as it is.
+    listed = Note.model_construct(id="n1", title="Ada", slug="ada", tags=["b", "a", "b"], extra={}, stamp=STAMP)
+    check, bindings = check_of_change(registry, listed, listed.model_copy(update={"title": "Grace"}))
+    assert "n.tags IS NOT NULL AND NOT coalesce(n.tags <> $_loaded3, false)" in check
+    assert bindings["_loaded3"] == ["b", "a", "b"]
 
 
 def test_compares_a_packed_field_as_stored_and_a_vector_in_the_engines_form(registry):
@@ -229,3 +255,26 @@ def test_compares_a_packed_field_as_the_text_the_load_read_and_packs_one_the_nod
     assert packed({"id": "n1", "extra": '{"a":1}'}) == ['{"a":1}'], "as another writer packed it"
     assert packed({"id": "n1"}) == ['{"a": 1}']
     assert packed({"id": "n1", "extra": ["a"]}) == [["a"]], "held as other than text"
+
+
+def test_stores_a_set_as_the_same_sorted_list_in_every_process_and_one_that_wont_sort_as_it_iterates():
+    # A string's hash, which orders a set, differs in each process: each is given another seed.
+    script = (
+        "from drivine.backend.save_statement_builder import stored; "
+        "print(stored({'zeta', 'alpha', 'mid', 'beta', 'omega', 'kappa', 'nu'}))"
+    )
+    written = {
+        subprocess.run(
+            [sys.executable, "-c", script],
+            env={**os.environ, "PYTHONHASHSEED": str(seed)},
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        for seed in (0, 1, 2, 3, 5, 42)
+    }
+    assert written == {"['alpha', 'beta', 'kappa', 'mid', 'nu', 'omega', 'zeta']\n"}
+
+    assert stored(frozenset({Shade.RED, Shade.BLUE})) == ["Blue", "Red"], "sorted as stored, an Enum as its value"
+    assert sorted(stored({"a", 1}), key=str) == [1, "a"], "items that don't order are stored as the set iterates"
+    assert stored(("b", "a")) == ["b", "a"], "a tuple keeps its order"

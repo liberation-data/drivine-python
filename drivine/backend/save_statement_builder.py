@@ -252,9 +252,9 @@ class SaveStatementBuilder:
         What the checked save of `loaded`, the root as `update` loaded it or `save`'s `from_`, requires of the node
         besides the stamp. A load that ran while another writer committed can hold that writer's stamp with the data
         from before its write. Each field is compared as it was loaded too, under the lock, so the save of such an
-        object is refused, as a stale one is: a field its value, a bag the keys it owns and their values, the labels
-        field the labels it reads. A comparison that can't tell (a list holding a None) is not a difference: the stamp
-        still speaks for the field.
+        object is refused, as a stale one is: a field its value, a set field its items, in any order and each once or
+        more, a bag the keys it owns and their values, the labels field the labels it reads. A comparison that can't
+        tell (a list holding a None) is not a difference: the stamp still speaks for the field.
         """
 
         def bind(name: str, value: Any) -> str:
@@ -278,7 +278,15 @@ class SaveStatementBuilder:
             packed = self._packed_as_loaded(name, value) if field_ in model.json_packed else _as_compared(stored(value))
             param = bind(f"_loaded{i}", packed)
             expression = self.grammar.vector_value(param) if field_ in model.vector_fields else param
-            same = f"NOT coalesce({stored_} <> {expression}, false)"
+            if isinstance(value, (set, frozenset)) and field_ not in model.json_packed:
+                # A set is stored as a list, which may hold an item twice or in another order than the set iterates
+                # in: what was loaded is compared as a set, each item held and each held item loaded.
+                same = (
+                    f"{stored_} IS :: LIST<ANY> AND NOT coalesce(NOT (all(it IN {stored_} WHERE it IN {param}) AND "
+                    f"all(it IN {param} WHERE it IN {stored_})), false)"
+                )
+            else:
+                same = f"NOT coalesce({stored_} <> {expression}, false)"
             # A value a load gives a node that holds none may have been loaded from none.
             declared.append(same if value == _absent(model, field_, loaded) else f"{stored_} IS NOT NULL AND {same}")
         reserved = list(model.graph_properties.values())
@@ -788,10 +796,20 @@ def _flat_bag_owns(model: FragmentModel, key: str) -> bool:
 
 
 def stored(value: Any) -> Any:
-    """A value as a driver takes it: an Enum as its value, and a set or tuple as a list."""
+    """
+    A value as a driver takes it: an Enum as its value, and a set or tuple as a list. A set's list is sorted where its
+    items order, so a set is stored as the same list whatever order it iterates in, which a string's hash, different in
+    each process, and the order its items were added in decide.
+    """
     if isinstance(value, Enum):
         return value.value
-    if isinstance(value, (set, tuple, frozenset)):
+    if isinstance(value, (set, frozenset)):
+        items: list[Any] = [stored(it) for it in value]  # pyright: ignore[reportUnknownVariableType]
+        try:
+            return sorted(items)
+        except TypeError:
+            return items
+    if isinstance(value, tuple):
         return [stored(it) for it in value]  # pyright: ignore[reportUnknownVariableType]
     if isinstance(value, list):
         return [stored(it) for it in value]  # pyright: ignore[reportUnknownVariableType]

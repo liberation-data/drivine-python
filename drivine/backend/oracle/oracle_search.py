@@ -65,6 +65,9 @@ class OracleSearch:
             bindings[name] = value
             return f"${name}"
 
+        # Narrowed by the root's every label before the scale, so the best of it is a hit the search can return.
+        root = target.root if isinstance(target, GraphViewModel) else target
+        labels = [search.label, *(it for it in root.labels if it != search.label)]
         if search.table:
             # Through Oracle Text: each property's score added, then scaled by the best. The index holds what has been
             # committed, so a search does not see what its own transaction wrote.
@@ -74,9 +77,15 @@ class OracleSearch:
                 for i, it in enumerate(search.properties)
             ]
             scores = " + ".join(f"SCORE({i + 1})" for i in range(len(search.properties)))
+            matched = (
+                f"({' OR '.join(contains)}) AND t.nid IN (SELECT c.nid FROM {self.graph.nodes} c WHERE "
+                f"{has_labels('c', labels)})"
+                if len(labels) > 1
+                else " OR ".join(contains)
+            )
             candidates = (
                 f"SELECT nid, hit_count / MAX(hit_count) OVER () AS score FROM (SELECT t.nid, {scores} AS hit_count "
-                f"FROM {search.table} t WHERE {' OR '.join(contains)}) WHERE hit_count > 0"
+                f"FROM {search.table} t WHERE {matched}) WHERE hit_count > 0"
             )
             return self._scored(
                 target, candidates, search.where, search.threshold, search.limit, search.depth, bindings
@@ -94,7 +103,7 @@ class OracleSearch:
         conditions = [*(f"{count(it)} > 0" for it in query.required), *(f"{count(it)} = 0" for it in query.excluded)]
         candidates = f"""SELECT nid, hit_count / MAX(hit_count) OVER () AS score FROM (
     SELECT x.nid, {occurrences} AS hit_count
-    FROM (SELECT c.nid, {text} AS text FROM {self.graph.nodes} c WHERE {has_labels("c", [search.label])}) x
+    FROM (SELECT c.nid, {text} AS text FROM {self.graph.nodes} c WHERE {has_labels("c", labels)}) x
     {f"WHERE {' AND '.join(conditions)}" if conditions else ""}
 ) WHERE hit_count > 0"""
         return self._scored(target, candidates, search.where, search.threshold, search.limit, search.depth, bindings)

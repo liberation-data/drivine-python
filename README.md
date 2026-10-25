@@ -721,7 +721,8 @@ found = await gom.load_matching(Chunk, "graph AND database", top_k=10, threshold
 ```
 
 - **One scale on every engine.** A nearest score is a similarity, higher nearer: (1 + cos) / 2 for cosine, 1 / (1 + d²)
-  for euclidean. A matching score is scaled so that the best hit is 1.
+  for euclidean. A matching score is scaled so that the best hit is 1: the best with every label of the root, as the
+  index is over the first.
 - **Memgraph's cosine scores are read from its distance**, not its similarity, which is the absolute value of
   1 - distance (memgraph/memgraph#5199). Earlier releases read the similarity, so a vector more than 90 degrees from
   the query scored as its mirror image does: a cosine of -0.6 as 0.8, not 0.2. Those scores, and the hits a cosine

@@ -831,8 +831,6 @@ class TestLongText:
 
     def test_a_cypher_statement_writes_a_long_parameter(self, pm, gom, text):
         # A Cypher statement's parameter goes as its JSON text, which past 32,767 bytes is bound as a CLOB.
-        if pm.type is DatabaseType.ORACLE and len(text.encode()) != len(text):
-            pytest.skip("A multibyte CLOB parameter past 32 KB closes Oracle's connection: #131.")
         gom.save(Person(uuid="p1", name="Ada", bio="short"))
         pm.execute(
             QuerySpecification(cypher_statement("MATCH (n:Person {uuid: 'p1'}) SET n.bio = $text")).bind({"text": text})

@@ -396,10 +396,10 @@ class SqlCypherCompiler(ABC):
                 text=self.parameter_text,
             )
         )
-        body = self._procedure(query)
-        # The parameters' text is written before the procedure is: on Oracle, writing it is what says whether the
-        # procedure reads it as extended JSON.
+        # The parameters' text is written before the procedure's body is: on Oracle, writing it is what says whether the
+        # body reads it as extended JSON.
         values = self._parameters.values
+        body = self._procedure(query)
         return self.procedure(body, values)
 
     def shared(self, values: Sequence[str], body: Body) -> str:

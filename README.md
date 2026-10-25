@@ -152,7 +152,9 @@ Cypher (see [Cypher on Postgres and Oracle](#cypher-on-postgres-and-oracle)). `m
 Oracle's POSIX dialect, matched against the whole value. A leading `(?i)` ignores case; what Java adds, such as
 `(?:…)`, a look-around or `\b`, is not read. A backreference names the group the expression numbers it by,
 `\1` to `\8`; `\9` is refused, as the group that anchors the expression would make it the tenth, which POSIX does not
-have.
+have. A vector index is a table of embeddings beside the nodes, holding those of the index's size: a node written with
+another size is left out, not refused. `load_nearest` is approximate through it. With no index made, or one of another
+size than the vector's, it measures every node of the label whose embedding is of the vector's size, and is exact.
 
 On Postgres, `DATABASE_NAME` is the database, and `DATABASE_DEFAULT_GRAPH_PATH` names the graph, `drivine` by default:
 see [Postgres](#postgres).

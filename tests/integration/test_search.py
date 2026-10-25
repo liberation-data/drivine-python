@@ -19,6 +19,7 @@ from drivine import (
     VectorIndex,
     refs,
 )
+from drivine.backend.matching_search import FILTERED_OVER_FETCH
 from tests.integration.stores import equals
 
 
@@ -210,3 +211,126 @@ class TestLoadMatching:
     async def test_needs_an_index_to_search(self, gom):
         with pytest.raises(DrivineError, match="declares no FullTextIndex"):
             await gom.load_matching(Section, "graph", top_k=1)
+
+
+class Story(NodeFragment, labels=["MatchStory"]):
+    """One label, the index's own, so nothing but a caller's where removes a hit after the index."""
+
+    id: Annotated[str, NodeId()]
+    title: str | None = None
+    body: Annotated[str | None, FullTextIndex()] = None
+
+
+async def ensure_ranked_index(gom: StatelessGraphObjectManager) -> None:
+    """
+    Story's full-text index, as ensure_indexes makes it. On FalkorDB it is made again: once nodes it matched were
+    deleted, as each test's data is, every score it gives is 0 and its hits come in no order (FalkorDB/FalkorDB#3489).
+    """
+    if gom.persistence_manager.type != DatabaseType.FALKORDB:
+        await ensure_indexes(gom, Story)
+        return
+    for spec in SchemaCatalog.from_fragments(Story).items:
+        await gom.indexes.recreate(spec)  # pyright: ignore[reportArgumentType]
+
+
+LARGEST_TOP_K = 2**63 - 1
+"""The largest top_k an engine takes: a 64-bit integer."""
+
+
+@pytest.fixture
+async def ranked_stories(gom: StatelessGraphObjectManager) -> None:
+    """
+    Twelve stories match "zebra", each longer than the last so each scores below the last; the even ones are titled
+    "keep". Saved worst first, so the order they are stored in is not the order they rank in.
+    """
+    await ensure_ranked_index(gom)
+    await gom.save_all(
+        [
+            Story(id=f"z{i}", title="keep" if i % 2 == 0 else "drop", body="zebra" + " grass" * i)
+            for i in range(12, 0, -1)
+        ]
+    )
+    if gom.persistence_manager.type == DatabaseType.NEO4J:
+        await gom.persistence_manager.execute(QuerySpecification("CALL db.awaitIndexes(30)"))
+
+
+@pytest.mark.usefixtures("ranked_stories")
+class TestLoadMatchingBound:
+    async def test_a_filter_keeps_the_best_hits_it_passes_not_the_first_it_is_given(self, gom):
+        # The limit after the filter takes no sort of its own, so the head must hand it the hits in score order.
+        ranked = await gom.load_matching(Story, "zebra", top_k=20)
+        assert len(ranked) == 12
+        best_kept = [it.score for it in ranked if it.value.title == "keep"][:2]
+        kept = await gom.load_matching(Story, "zebra", top_k=2, where=refs(Story).title.eq("keep"))
+        assert [it.score for it in kept] == pytest.approx(best_kept)
+
+    async def test_a_cut_that_bites_keeps_the_best_hits_not_the_first_the_index_yields(self, gom):
+        # FalkorDB's call takes no limit, and the stories were stored worst first.
+        ranked = await gom.load_matching(Story, "zebra", top_k=20)
+        top = await gom.load_matching(Story, "zebra", top_k=3)
+        assert [it.value.id for it in top] == [it.value.id for it in ranked[:3]]
+
+    async def test_bounds_the_index_by_top_k_at_its_edges(self, gom):
+        with pytest.raises(DrivineError, match="top_k must be a whole number of at least 1"):
+            await gom.load_matching(Story, "zebra", top_k=0)
+        assert len(await gom.load_matching(Story, "zebra", top_k=LARGEST_TOP_K)) == 12
+        kept = await gom.load_matching(Story, "zebra", top_k=LARGEST_TOP_K, where=refs(Story).title.eq("keep"))
+        assert len(kept) == 6
+
+
+LAST = "z-last"
+"""A story far longer than the others, so the index ranks it last of them."""
+
+
+@pytest.fixture
+async def one_long_story(gom: StatelessGraphObjectManager) -> None:
+    """Thirty stories match "zebra": twenty-nine short ones, and LAST."""
+    await ensure_ranked_index(gom)
+    await gom.save_all(
+        [
+            *(Story(id=f"z{i}", title="short", body="zebra " + "grass " * i) for i in range(1, 30)),
+            Story(id=LAST, title="long", body="zebra " + "savannah " * 400),
+        ]
+    )
+    if gom.persistence_manager.type == DatabaseType.NEO4J:
+        await gom.persistence_manager.execute(QuerySpecification("CALL db.awaitIndexes(30)"))
+
+
+@pytest.mark.usefixtures("one_long_story")
+@pytest.mark.graph_engine_only("a SQL store has no index call to bound")
+class TestLoadMatchingIndexLimit:
+    """
+    The full-text index yields no more hits than the search's index limit: observed through the rows, not read off the
+    statement.
+    """
+
+    async def only_the_last(self, gom: StatelessGraphObjectManager, top_k: int) -> list[str]:
+        hits = await gom.load_matching(Story, "zebra", top_k=top_k, where=refs(Story).id.eq(LAST))
+        return [it.value.id for it in hits]
+
+    async def test_a_filtered_search_sees_only_the_best_top_k_times_the_over_fetch(self, gom):
+        assert FILTERED_OVER_FETCH < 29
+        assert await self.only_the_last(gom, 1) == []
+
+    async def test_a_filtered_search_whose_over_fetch_reaches_the_hit_finds_it(self, gom):
+        assert await self.only_the_last(gom, 3) == [LAST]
+
+    async def test_an_unfiltered_search_returns_the_best_top_k_in_score_order(self, gom):
+        found = await gom.load_matching(Story, "zebra", top_k=5)
+        assert len(found) == 5
+        assert found[0].score == pytest.approx(1)
+        assert [it.score for it in found] == sorted((it.score for it in found), reverse=True)
+        assert LAST not in [it.value.id for it in found]
+
+
+MANY = 1_100
+"""More hits than Memgraph's text_search yields when its call is given no limit."""
+
+
+@pytest.mark.graph_engine_only("a SQL store has no index call to bound")
+async def test_a_search_asking_for_more_than_a_thousand_hits_gets_them(gom: StatelessGraphObjectManager):
+    await ensure_indexes(gom, Story)
+    await gom.save_all([Story(id=f"z{i}", title="t", body=f"zebra {i}") for i in range(MANY)])
+    if gom.persistence_manager.type == DatabaseType.NEO4J:
+        await gom.persistence_manager.execute(QuerySpecification("CALL db.awaitIndexes(30)"))
+    assert len(await gom.load_matching(Story, "zebra", top_k=MANY)) == MANY

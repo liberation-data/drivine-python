@@ -306,8 +306,15 @@ class StatelessGraphObjectManager:
         its relevance, scaled so that the best hit is 1, most relevant first. The text is the engine's full-text query
         language (Lucene on Neo4j), passed as it is: escape user input yourself.
 
-        `top_k` is how many to return at most, after `threshold` and `where` filter. `property` names a property of
-        the full-text index searched, needed only when the fragment declares more than one.
+        `top_k` is how many to return at most, after `threshold` and `where` filter. On Neo4j, Memgraph and FalkorDB it
+        bounds the hits the index yields too, since every hit is held to scale the scores: `top_k` of them, or `top_k`
+        times FILTERED_OVER_FETCH (10) when a `where` or a view's required relationship or path filters them. A filter
+        that passes fewer than one in that many of the best hits can then return fewer than `top_k` while the index
+        holds more that pass it. The index is asked for no more than 2,147,483,647 hits, and Memgraph's for no more
+        than 1,000,000.
+
+        `property` names a property of the full-text index searched, needed only when the fragment declares more than
+        one.
         """
         target = self.registry.model_of(type_)
         predicate, values = self._condition(target, where, bindings)

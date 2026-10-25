@@ -4,8 +4,11 @@ on every run (a UUID, the time), parameters of Python's temporal types, statemen
 needs a transaction of its own. drivine4j keeps the same in its Cypher*CrossEngineTest.
 """
 
+import contextlib
 import dataclasses
 import re
+import time as time_module
+from collections.abc import AsyncGenerator
 from datetime import UTC, date, datetime, time, timedelta, timezone
 from typing import Any
 
@@ -366,7 +369,7 @@ async def seeded(pm: PersistenceManager) -> None:
 async def test_collect_distinct_beside_keys_other_aggregates_an_order_a_page_and_a_variable_outside_its_aggregates(
     cypher_pm: PersistenceManager,
 ):
-    # Not in the spec yet: _distinct_first's grouping WITH, and the projection over it.
+    # Not in the spec yet: _aggregates_first's grouping WITH, and the projection over it.
     await seeded(cypher_pm)
     assert await cypher_pm.query(
         spec(
@@ -391,7 +394,7 @@ async def test_collect_distinct_beside_keys_other_aggregates_an_order_a_page_and
 async def test_collect_distinct_in_a_distinct_projection_ordered_by_a_keys_property_or_an_aggregate_no_item_is(
     cypher_pm: PersistenceManager,
 ):
-    # Not in the spec yet: the projection over _distinct_first's grouping WITH orders by what that WITH holds.
+    # Not in the spec yet: the projection over _aggregates_first's grouping WITH orders by what that WITH holds.
     await seeded(cypher_pm)
     assert await cypher_pm.query(
         spec(
@@ -457,7 +460,8 @@ async def test_an_item_of_the_relationships_collect_gathers_is_read_in_the_proje
 async def test_collect_distinct_under_a_comprehension_a_quantifier_or_a_reduce_that_names_a_grouping_key_in_its_body(
     cypher_pm: PersistenceManager,
 ):
-    # Not in the spec yet: _distinct_first's grouping WITH keeps each variable such a body names, outside the aggregate.
+    # Not in the spec yet: _aggregates_first's grouping WITH keeps each variable such a body names, outside the
+    # aggregate.
     await seeded(cypher_pm)
     assert await cypher_pm.query(
         spec(
@@ -470,7 +474,7 @@ async def test_collect_distinct_under_a_comprehension_a_quantifier_or_a_reduce_t
 
 
 async def test_collect_distinct_beside_a_pattern_or_a_subquery_that_names_a_grouping_key(cypher_pm: PersistenceManager):
-    # Not in the spec yet: _distinct_first's grouping WITH keeps each variable a pattern or a subquery names, outside
+    # Not in the spec yet: _aggregates_first's grouping WITH keeps each variable a pattern or a subquery names, outside
     # the aggregate.
     await seeded(cypher_pm)
     assert await cypher_pm.query(
@@ -485,7 +489,7 @@ async def test_collect_distinct_beside_a_pattern_or_a_subquery_that_names_a_grou
 
 
 async def test_collect_distinct_of_dates_keeps_each_once_as_dates(cypher_pm: PersistenceManager):
-    # Not in the spec yet: what _distinct_first keeps of a collection is still of the kind collect gathered.
+    # Not in the spec yet: what _aggregates_first keeps of a collection is still of the kind collect gathered.
     dates = "UNWIND [date('2020-01-01'), date('2020-01-01'), date('2021-05-01')] AS d"
     assert await cypher_pm.query(spec(f"{dates} WITH collect(DISTINCT d) AS ds RETURN [x IN ds | x.year]")) == [
         [2020, 2021]
@@ -593,8 +597,8 @@ async def test_a_foreach_in_calls_that_write_nested_three_deep_leaves_each_calle
 
 
 async def test_collect_distinct_beside_a_key_that_holds_a_parameter_or_a_subquery(cypher_pm: PersistenceManager):
-    # Not in the spec yet: _held_first works such a key out first in the grouping WITH _distinct_first makes, as Oracle
-    # groups by no subquery, and binds a parameter as a marker of its own each time it is named.
+    # Not in the spec yet: _held_first works such a key out first in the grouping WITH _aggregates_first makes, as
+    # Oracle groups by no subquery, and binds a parameter as a marker of its own each time it is named.
     await seeded(cypher_pm)
     assert await cypher_pm.query(
         spec(
@@ -611,9 +615,214 @@ async def test_collect_distinct_beside_a_key_that_holds_a_parameter_or_a_subquer
     ) == [[0, 2], [1, 3]]
 
 
-async def test_to_string_of_a_float_too_small_for_oracles_number_writes_it(cypher_pm: PersistenceManager):
-    # Oracle's NUMBER reads it as 0, a whole number. Its text differs by store, so the spec has no case for it.
-    assert float(await cypher_pm.get_one(spec("RETURN toString(1.0E-200)"))) == 1e-200
+async def test_a_map_or_a_list_that_holds_a_relationship_is_equal_to_one_whose_numbers_or_keys_are_written_otherwise(
+    cypher_pm: PersistenceManager,
+):
+    # Not in the spec yet: identities compare as JSON values, not as their text.
+    await seeded(cypher_pm)
+    assert await cypher_pm.query(
+        spec(
+            "MATCH (:Person {name: 'Keanu'})-[r1:KNOWS]->() RETURN [{x: r1, y: 1} = {x: r1, y: 1.0}, "
+            "[r1, 1] = [r1, 1.0], {a: 1, x: r1} = {x: r1, a: 1}, {x: r1, y: 1} IN [{x: r1, y: 1.0}]]"
+        )
+    ) == [[True, True, True, True]]
+
+
+HUB_GRAPH = "cy_hub"
+"""The graph a hub is written to on a SQL store: tables of its own, apart from those the other tests read."""
+
+
+@contextlib.asynccontextmanager
+async def hub(
+    pm: PersistenceManager, registry: DatabaseRegistry, factory: PersistenceManagerFactory, leaves: int
+) -> AsyncGenerator[PersistenceManager]:
+    """
+    A manager of the store `pm` is of, over a graph of one node with relationships to that many others, cleared again
+    after, however the test ends. On a SQL store the graph's tables are its own: after thousands of rows were written
+    and read in the tables every test shares, Oracle (23.26) at times found no rows for a later test's
+    `MATCH (:Person {name: 'Keanu'})-[:KNOWS]->(p)`, rows it had just written, on main too.
+    """
+    if pm.type is DatabaseType.NEO4J:
+        apart, nodes, edges = pm, None, None
+    else:
+        store = "postgres" if pm.type is DatabaseType.POSTGRES else "oracle"
+        name = f"{store}_{HUB_GRAPH}"
+        if registry.registered(name) is None:
+            properties = dataclasses.replace(ConnectionProperties.from_env(store), default_graph_path=HUB_GRAPH)
+            registry.builder().with_properties(properties).register(name)
+        apart = factory.get(name)
+        graph = PostgresGraph(HUB_GRAPH) if store == "postgres" else OracleGraph(HUB_GRAPH)
+        await apart.execute(QuerySpecification(graph.ensuring))
+        nodes, edges = f"{HUB_GRAPH}_node", f"{HUB_GRAPH}_edge"
+
+    async def cleared() -> None:
+        if nodes is None or edges is None:
+            await apart.execute(QuerySpecification("MATCH (n) DETACH DELETE n"))
+        else:
+            await apart.execute(QuerySpecification(f"DELETE FROM {edges}"))
+            await apart.execute(QuerySpecification(f"DELETE FROM {nodes}"))
+
+    await cleared()
+    try:
+        made = f"CREATE (h:Hub) WITH h UNWIND range(1, {leaves}) AS i CREATE (h)-[:R]->(:Leaf) RETURN count(*)"
+        assert await apart.query(spec(made)) == [leaves]
+        yield apart
+    finally:
+        await cleared()
+
+
+async def test_a_list_of_a_few_thousand_relationships_is_equal_by_identity_to_a_maps_or_a_lists(
+    cypher_pm: PersistenceManager, registry: DatabaseRegistry, factory: PersistenceManagerFactory
+):
+    # Not in the spec yet: their identity is larger than Oracle's = compares (ORA-40180), so Oracle compares it by
+    # JSON_EQUAL.
+    async with hub(cypher_pm, registry, factory, 2500) as pm:
+        assert await pm.query(
+            spec(
+                "MATCH (:Hub)-[r:R]->() WITH collect(r) AS rs "
+                "RETURN [[rs][0] = rs, {x: rs}.x = rs, rs IN [rs], size(rs)]"
+            )
+        ) == [[True, True, True, 2500]]
+
+
+async def test_collect_distinct_keeps_a_few_thousand_lists_or_maps_holding_a_relationship_once_each_in_seconds(
+    cypher_pm: PersistenceManager, registry: DatabaseRegistry, factory: PersistenceManagerFactory
+):
+    # Not in the spec yet: each was compared with every one before it, which took 20 to 40 seconds on Oracle.
+    async with hub(cypher_pm, registry, factory, 5000) as pm:
+        started = time_module.monotonic()
+        assert await pm.query(
+            spec(
+                "MATCH p = (:Hub)-[r:R]->() "
+                "RETURN [size(collect(DISTINCT relationships(p))), size(collect(DISTINCT {x: r}))]"
+            )
+        ) == [[5000, 5000]]
+        seconds = time_module.monotonic() - started
+        assert seconds < 15, seconds
+
+
+async def test_a_whole_float_past_2_to_the_53_written_in_the_statement_or_given_equals_the_same_float_worked_out(
+    cypher_pm: PersistenceManager,
+):
+    # Not in the spec yet: Postgres writes such a float out in full, by its shortest decimal, not the double's exact
+    # value.
+    assert await cypher_pm.query(
+        spec("RETURN [toFloat('1e24') = 1e24, toFloat('1e300') = 1e300, toFloat('1e24') = $x]", {"x": 1e24})
+    ) == [[True, True, True]]
+
+
+async def test_a_number_or_a_text_the_statement_gives_added_to_a_text_is_written_as_to_string_writes_it(
+    cypher_pm: PersistenceManager,
+):
+    # Not in the spec yet: a side the statement gives is written out at compile time, and the other side as it is.
+    assert await cypher_pm.query(
+        spec(
+            "RETURN ['a' + 1e7, 1e7 + 'a', 'a' + 2.0, 'a' + $f, $i + 'b', 'a' + $s, $s + 1.5e-7, 'x' + 10, "
+            "$m.n + 'y', $j + 'b']",
+            {"f": 1.0e-4, "i": 3, "s": "s", "m": {"n": 0.5}, "j": 4},
+        )
+    ) == [["a1.0E7", "1.0E7a", "a2.0", "a1.0E-4", "3b", "as", "s1.5E-7", "x10", "0.5y", "4b"]]
+
+
+async def test_nan_or_an_infinity_the_statement_gives_added_to_a_text_is_written_as_to_string_writes_it(
+    cypher_pm: PersistenceManager,
+):
+    assert await cypher_pm.query(
+        spec(
+            "RETURN ['a' + $n, $p + 'b', 'c' + $q, $n + toString(1.5)]",
+            {"n": float("nan"), "p": float("inf"), "q": float("-inf")},
+        )
+    ) == [["aNaN", "Infinityb", "c-Infinity", "NaN1.5"]]
+
+
+async def test_a_quotient_of_floats_is_written_without_the_zeros_its_scale_leaves(cypher_pm: PersistenceManager):
+    # The spec's float arithmetic steps skip Postgres, which works a float out in exact decimal (drivine4j#188): these
+    # it gives as a double does.
+    assert await cypher_pm.query(
+        spec("RETURN [4.0 / 2, 7 / 2.0, 10.0 / 4, toString(4.0 / 2), toString(10.0 / 4), toString(7 / 2.0)]")
+    ) == [[2.0, 3.5, 2.5, "2.0", "2.5", "3.5"]]
+
+
+async def test_to_string_of_a_double_past_oracles_number_range_writes_its_shortest_digits(
+    cypher_pm: PersistenceManager,
+):
+    # Not in the spec yet: Oracle writes such a double from its own text, not from TO_CHAR's 15 digits.
+    assert await cypher_pm.query(
+        spec(
+            "RETURN [toString(1.7976931348623157e308), toString(1.5e300), toString(1.0e-310), toString($a), "
+            "toString($b)]",
+            {"a": -2.5e-320, "b": -1.5e300},
+        )
+    ) == [["1.7976931348623157E308", "1.5E300", "1.0E-310", "-2.5E-320", "-1.5E300"]]
+    assert await cypher_pm.query(spec("RETURN toString(5e-324)")) == ["4.9E-324"]
+
+
+async def test_a_union_in_call_whose_queries_return_a_list_with_an_identity_beside_one_without_compiles(
+    cypher_pm: PersistenceManager,
+):
+    # Not in the spec yet: the queries are compiled again without identities, so their columns match.
+    await seeded(cypher_pm)
+    assert await cypher_pm.query(
+        spec(
+            "CALL { MATCH (:Person {name: 'Keanu'})-[r:ACTED_IN]->() RETURN collect([r]) AS l UNION RETURN [] AS l } "
+            "RETURN size(l) ORDER BY size(l)"
+        )
+    ) == [0, 3]
+    assert await cypher_pm.query(
+        spec(
+            "CALL { MATCH (:Person {name: 'Keanu'})-[r:KNOWS]->() RETURN {x: r} AS m UNION RETURN {x: 1} AS m } "
+            "RETURN count(*)"
+        )
+    ) == [2]
+
+
+async def test_a_case_that_gives_a_list_of_relationships_or_of_texts_is_read_and_gathered_but_on_oracle(
+    cypher_pm: PersistenceManager,
+):
+    # Not in the spec yet: on Oracle the CASE's results are worked out first; gathered, it closes the session, so it is
+    # refused.
+    await seeded(cypher_pm)
+    assert await cypher_pm.query(
+        spec(
+            "MATCH (:Person {name: 'Keanu'})-[r:ACTED_IN]->(m) WITH r, m ORDER BY m.title "
+            "RETURN CASE WHEN m.released > 2000 THEN [r] ELSE [m.title] END"
+        )
+    ) == [["Johnny Mnemonic"], ["The Matrix"], [{"role": "Neo"}]]
+    # A CASE that reads an aggregate is worked out in the query that aggregates, where a subquery would group it again.
+    assert await cypher_pm.query(
+        spec(
+            "MATCH (a:Person)-[r:ACTED_IN]->(m) "
+            "RETURN a.name, size(CASE WHEN count(*) > 1 THEN collect(r) ELSE [] END) ORDER BY a.name"
+        )
+    ) == [["Carrie", 2], ["Keanu", 3], ["Laurence", 0]]
+    # Counted, by count() or the size() of its collect, it is read on Oracle too, as it was before.
+    assert await cypher_pm.query(
+        spec(
+            "MATCH (a:Person)-[r:ACTED_IN]->(m) RETURN a.name, "
+            "size(collect(CASE WHEN m.released > 2000 THEN [r] ELSE [] END)), "
+            "count(CASE WHEN m.released > 2000 THEN [r] ELSE [] END) ORDER BY a.name"
+        )
+    ) == [["Carrie", 2, 2], ["Keanu", 3, 3], ["Laurence", 1, 1]]
+    gathered = (
+        "MATCH (a:Person)-[r:ACTED_IN]->(m) WITH a, r, m ORDER BY m.title "
+        "RETURN a.name, [x IN collect(CASE WHEN m.released > 2000 THEN [r] ELSE [m.title] END) | x[0]] ORDER BY a.name"
+    )
+    # With no ELSE, its null is the value of another kind.
+    unmatched = (
+        "MATCH (a:Person)-[r:ACTED_IN]->(m) WITH a, r, m ORDER BY m.title "
+        "RETURN a.name, [x IN collect(CASE WHEN m.released > 2000 THEN [r] END) | x[0].role] ORDER BY a.name"
+    )
+    if cypher_pm.type is DatabaseType.ORACLE:
+        for statement in (gathered, unmatched):
+            with pytest.raises(DrivineError, match="On Oracle, an aggregate of a CASE that gives a list of nodes"):
+                await cypher_pm.query(spec(statement))
+        return
+    assert await cypher_pm.query(spec(unmatched)) == [["Carrie", ["Trinity"]], ["Keanu", ["Neo"]], ["Laurence", []]]
+    assert await cypher_pm.query(spec(gathered)) == [
+        ["Carrie", ["The Matrix", {"role": "Trinity"}]],
+        ["Keanu", ["Johnny Mnemonic", "The Matrix", {"role": "Neo"}]],
+        ["Laurence", ["The Matrix"]],
+    ]
 
 
 async def test_a_walk_read_through_a_with_then_sorted_by_to_string_in_a_second_with_keeps_that_order(

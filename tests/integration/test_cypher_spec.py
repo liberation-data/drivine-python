@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 from drivine import DatabaseType, PersistenceManager, QuerySpecification
+from drivine.backend.cypher import quote_name
 from drivine.query.statement import cypher_statement
 from tests.cypher.cypher_spec import Case, check_rows, expanded, failure_matches, load
 
@@ -27,12 +28,27 @@ async def query(pm: PersistenceManager, cypher: str, parameters: dict[str, Any] 
     return await pm.query(QuerySpecification[Any](statement).bind(parameters))
 
 
+RESET: set[int] = set()
+"""The Neo4j managers whose constraints and indexes `clear` has dropped, once for the run: see `clear`."""
+
+
 async def clear(pm: PersistenceManager) -> None:
     """
     Removes every node and relationship, as the other tests clear the graph: the spec's statements match its labels
-    (`:Person`) where they don't name the one its nodes share (`:CyTest`), so another test's nodes would be found.
+    (`:Person`) where they don't name the one its nodes share (`:CyTest`), so another test's nodes would be found. On
+    Neo4j, the first time, every constraint and index but its token lookups goes too, as drivine4j's
+    `TestCleanup.resetGraph` empties the graph for its spec: Neo4j's `db.labels()` lists a label an index or a
+    constraint names, as another test's vector index on `:SizedTest`, though no node has it.
     """
     if pm.type is DatabaseType.NEO4J:
+        if id(pm) not in RESET:
+            # Constraints first: a uniqueness constraint owns its index, which is not dropped while it holds it.
+            for name in await pm.query(QuerySpecification[str]("SHOW CONSTRAINTS YIELD name RETURN name")):
+                await pm.execute(QuerySpecification(f"DROP CONSTRAINT {quote_name(name)} IF EXISTS"))
+            shown = "SHOW INDEXES YIELD name, type WHERE type <> 'LOOKUP' RETURN name"
+            for name in await pm.query(QuerySpecification[str](shown)):
+                await pm.execute(QuerySpecification(f"DROP INDEX {quote_name(name)} IF EXISTS"))
+            RESET.add(id(pm))
         await pm.execute(QuerySpecification("MATCH (n) DETACH DELETE n"))
     else:
         await pm.execute(QuerySpecification("DELETE FROM drivine_edge"))

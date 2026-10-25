@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Callable, Sequence
 from typing import Any, cast
@@ -11,6 +12,7 @@ from drivine.cypher.sql.parameters import OBJECT, cypher_json, json_text, jsonab
 from drivine.cypher.sql.sql_cypher_compiler import (
     CALLER,
     COUNT,
+    DEGREES_TO_RADIANS,
     DOOMED,
     FOUND,
     GATHERED,
@@ -18,6 +20,8 @@ from drivine.cypher.sql.sql_cypher_compiler import (
     NESTING,
     OUT,
     PARAMS,
+    PLAIN_FLOAT,
+    RADIANS_TO_DEGREES,
     ROW,
     ROWS,
     SAVED,
@@ -91,9 +95,9 @@ class OracleCypherCompiler(SqlCypherCompiler):
         `{"$numberLong": "5"}`, which `JSON(… EXTENDED)` would read as the value it writes: such a value is written as
         JSON is, its floats that are whole numbers read as whole numbers. A statement that writes binds all its
         parameters as one text, and reads as extended JSON only those of them with such a double in them: see
-        `property_of`.
+        `property_of`. NaN and the infinities are texts: see `_finite`.
         """
-        tree = jsonable(value)
+        tree = _finite(jsonable(value))
         if _keyed_as_extended(tree):
             return json_text(tree)
         doubled = False
@@ -260,11 +264,21 @@ class OracleCypherCompiler(SqlCypherCompiler):
             f"FROM {self.elements(list_, 'e')}) d WHERE d.n = 1)"
         )
 
-    def extreme(self, value: str, min_: bool) -> str:
-        """Of the values of the kind that comes first, or last, as `kind_order` orders them."""
+    def first_of_each(self, list_: str, identities: str) -> str:
+        return (
+            f"(SELECT {self.aggregate_list('v.item', 'v.item_no')} FROM {self.elements(list_, 'v')} "
+            "JOIN (SELECT d.item_no FROM (SELECT e.item_no, ROW_NUMBER() OVER (PARTITION BY e.item ORDER BY e.item_no) "
+            f"AS n FROM {self.elements(identities, 'e')}) d WHERE d.n = 1) f ON f.item_no = v.item_no)"
+        )
+
+    def extreme(self, value: str, min_: bool, key: str | None = None) -> str:
+        """Of the values of the kind that comes first, or last, as `kind_order` orders them; by `key` first where there
+        is one."""
+        direction = "ASC" if min_ else "DESC"
+        keyed = f", {key} {direction} NULLS LAST" if key is not None else ""
         return (
             f"{'MIN' if min_ else 'MAX'}({self.null_if_json_null(value)}) KEEP (DENSE_RANK FIRST ORDER BY "
-            f"{self.kind_order(value)} {'ASC' if min_ else 'DESC'} NULLS LAST)"
+            f"{self.kind_order(value)} {direction} NULLS LAST{keyed})"
         )
 
     def arithmetic(self, a: str, b: str, operator: str) -> str:
@@ -276,7 +290,7 @@ class OracleCypherCompiler(SqlCypherCompiler):
             f"ELSE JSON_SCALAR({self.number(a)} {operator} {self.number(b)}) END"
         )
 
-    def add(self, a: str, b: str) -> str:
+    def add(self, a: str, b: str, given: tuple[Any, Any] = (None, None)) -> str:
         return (
             f"CASE WHEN {self.type_of(a)} = 'number' AND {self.type_of(b)} = 'number' THEN "
             f"{self.arithmetic(a, b, '+')} "
@@ -285,8 +299,55 @@ class OracleCypherCompiler(SqlCypherCompiler):
             f"WHEN {_kind(a)} = 'array' THEN JSON_TRANSFORM({a}, APPEND '$' = {b}) "
             f"WHEN {_kind(b)} = 'array' THEN JSON_TRANSFORM({b}, INSERT '$[0]' = {a}) "
             f"WHEN {self.type_of(a)} IN ('string', 'number') AND {self.type_of(b)} IN ('string', 'number') THEN "
-            f"JSON_SCALAR(JSON_VALUE({a}, '$') || JSON_VALUE({b}, '$')) END"
+            f"JSON_SCALAR({self._summed_text(a, given)} || {self._summed_text(b, (given[1], given[0]))}) END"
         )
+
+    def _summed_text(self, json: str, given: tuple[Any, Any]) -> str:
+        """The side of a `+` whose sides the statement gives as `given`, this side first, as text: see
+        `summed_text`."""
+        return self.summed_text(json, given[0], given[1], lambda it: f"JSON_VALUE({it}, '$')", self._as_text)
+
+    def _as_text(self, json: str) -> str:
+        """
+        The JSON, a text, a number or a truth value, as `toString` gives it: a float (a double, or a number with a
+        fraction) as Java writes a double, from the shortest decimal Oracle writes it as, with no exponent from 10^-3 up
+        to 10^7, and else as `1.0E7`, `1.2E-4`; NaN and the infinities by Java's names. A double past a `NUMBER`'s
+        range, `1e300`, is written from Oracle's own text of it, its shortest digits, `1E+300`.
+        """
+
+        def text(x: str) -> str:
+            written = f"JSON_VALUE({x}, '$')"
+            float_ = f"{_kind(x)} = 'double' OR ({_kind(x)} = 'number' AND NOT {self.integral(x)})"
+            n = f"TO_NUMBER({written} DEFAULT NULL ON CONVERSION ERROR)"
+            double = f"JSON_VALUE({x}, '$' RETURNING BINARY_DOUBLE)"
+            # Past a NUMBER's range, which reads 1e-200 as 0, the double's own text, with a point where it has none:
+            # `1E-310`. TO_CHAR of the double writes 15 digits, so 1e-310 as 9.99999999999997E-311.
+            scientific = _scientific(
+                f"NVL(TO_CHAR(NULLIF({n}, 0), 'FM9.9999999999999999EEEE'), "
+                f"REGEXP_REPLACE({written}, '^(-?[0-9]+)E', '\\1.0E'))"
+            )
+            return (
+                f"CASE WHEN {_kind(x)} = 'double' AND {written} IN ('Nan', 'Inf', '-Inf') "
+                f"THEN DECODE({written}, 'Nan', 'NaN', 'Inf', 'Infinity', '-Infinity') "
+                f"WHEN {float_} THEN CASE WHEN {double} = 0 THEN '0.0' "
+                f"WHEN ABS({n}) >= 0.001 AND ABS({n}) < 10000000 THEN TO_CHAR({n}, '{PLAIN_FLOAT}') "
+                f"ELSE {scientific} END "
+                f"ELSE {written} END"
+            )
+
+        return self.shared1(json, text)
+
+    aggregates_case_subqueries = False
+    """`collect(CASE WHEN … THEN [r] ELSE [m.title] END)` fails with ORA-00979, or closes the session: see
+    `_cases_first`."""
+
+    def identity_equals(self, x: str, y: str) -> str:
+        """`JSON_EQUAL`, which compares values larger than `=` does, with ORA-40180 past about 32 KB."""
+        return f"JSON_EQUAL({x}, {y})"
+
+    def id_tokens(self, ids: str, key: str) -> str:
+        token = literal('{"' + key + '": \\1}')
+        return f"JSON(REGEXP_REPLACE(JSON_SERIALIZE({ids} RETURNING CLOB), '(-?[0-9]+)', {token}))"
 
     def modulo(self, a: str, b: str) -> str:
         return f"MOD({a}, {b})"
@@ -309,9 +370,7 @@ class OracleCypherCompiler(SqlCypherCompiler):
             "tolower": lambda: f"JSON_SCALAR(LOWER({self.text(json)}))",
             "toupper": lambda: f"JSON_SCALAR(UPPER({self.text(json)}))",
             "trim": lambda: f"JSON_SCALAR(TRIM({self.text(json)}))",
-            # A float that is a whole number is written with its fraction, 2.0, as in Cypher: Oracle writes a double of
-            # 2 as 2. Whole as the double it is: a double too small for a NUMBER, 1e-200, is the NUMBER 0.
-            "tostring": lambda: self.shared1(json, _to_string),
+            "tostring": lambda: f"JSON_SCALAR({self._as_text(json)})",
             "tointeger": lambda: (
                 f"JSON_SCALAR(TRUNC(TO_NUMBER(JSON_VALUE({json}, '$') DEFAULT NULL ON CONVERSION ERROR)))"
             ),
@@ -581,6 +640,32 @@ class OracleCypherCompiler(SqlCypherCompiler):
         """Oracle's GUID, in a UUID's form: unique, though not random as a version 4 UUID is."""
         return "LOWER(REGEXP_REPLACE(RAWTOHEX(SYS_GUID()), '(.{8})(.{4})(.{4})(.{4})(.{12})', '\\1-\\2-\\3-\\4-\\5'))"
 
+    def math(self, name: str, numbers: Sequence[str]) -> str:
+        """
+        Worked out as a `NUMBER`, then made the nearest double: Oracle fails where Neo4j gives NaN or an infinity,
+        `LN(0)`, `SQRT(-1)`, `ASIN(2)` and `1 / TAN(0)` among them, and where a `NUMBER` overflows, past 1e126, as
+        `EXP(300)` does. One too small for a `NUMBER`, below 1e-130, is 0, as `EXP(-1000)` is in Java, and `EXP(-300)`
+        is not. A `BINARY_DOUBLE` would give NaN or an infinity, which JSON holds neither of.
+        """
+        x = numbers[0]
+        results = {
+            "log": lambda: f"LN({x})",
+            "log10": lambda: f"LOG(10, {x})",
+            "cot": lambda: f"(1 / TAN({x}))",
+            # In doubles from the one nearest the cosine, as Java works it out: near 0, that loses digits a NUMBER
+            # keeps.
+            "haversin": lambda: f"((1 - TO_BINARY_DOUBLE(COS({x}))) / 2)",
+            # In doubles, by the ratio Java multiplies by: see RADIANS_TO_DEGREES.
+            "degrees": lambda: f"(TO_BINARY_DOUBLE({x}) * {RADIANS_TO_DEGREES})",
+            "radians": lambda: f"(TO_BINARY_DOUBLE({x}) * {DEGREES_TO_RADIANS})",
+            # Oracle overflows at ATAN2(0, 0), which Java gives as 0.0: a NUMBER has no negative zero to give π for.
+            "atan2": lambda: self.shared(
+                [x, numbers[1]],
+                lambda it: f"CASE WHEN {it[0]} = 0 AND {it[1]} = 0 THEN 0 ELSE ATAN2({it[0]}, {it[1]}) END",
+            ),
+        }
+        return self.float_(results[name]() if name in results else f"{name.upper()}({x})")
+
     def right_text(self, text: str, count: str) -> str:
         """SUBSTR from the end gives null where it is asked for more than there is."""
         return self.shared(
@@ -635,12 +720,24 @@ class OracleCypherCompiler(SqlCypherCompiler):
         return f"JSON_TRANSFORM({labels}, REMOVE {literal(f'$[*]?(@ == {_quoted(label)})')})"
 
 
-def _to_string(x: str) -> str:
-    n = f"JSON_VALUE({x}, '$' RETURNING NUMBER)"
-    return (
-        f"CASE WHEN {_kind(x)} = 'double' AND ABS({n}) < 1e15 AND JSON_VALUE({x}, '$' RETURNING BINARY_DOUBLE) = "
-        f"TRUNC({n}) THEN JSON_SCALAR(TO_CHAR(TRUNC({n})) || '.0') ELSE JSON_SCALAR(JSON_VALUE({x}, '$')) END"
-    )
+def _scientific(text: str) -> str:
+    """`TO_CHAR`'s scientific notation, `1.E+07`, `-1.2E-04`, as Java's: `1.0E7`, `-1.2E-4`."""
+    return f"REGEXP_REPLACE(REPLACE({text}, '.E', '.0E'), 'E\\+?(-?)0*([0-9])', 'E\\1\\2')"
+
+
+def _finite(value: Any) -> Any:
+    """
+    The value, of JSON's own kinds, with NaN and the infinities as the texts drivine4j binds them as, `"NaN"`,
+    `"Infinity"`, `"-Infinity"`: JSON holds no such number, and Oracle reads Python's bare `NaN` as no double it writes
+    by Java's names.
+    """
+    if isinstance(value, float) and not math.isfinite(value):
+        return "NaN" if math.isnan(value) else "Infinity" if value > 0 else "-Infinity"
+    if isinstance(value, dict):
+        return {key: _finite(it) for key, it in cast(dict[str, Any], value).items()}
+    if isinstance(value, list):
+        return [_finite(it) for it in cast(list[Any], value)]
+    return value
 
 
 def _keyed_as_extended(value: Any) -> bool:

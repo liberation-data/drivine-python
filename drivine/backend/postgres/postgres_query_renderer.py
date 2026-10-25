@@ -1,13 +1,11 @@
 from __future__ import annotations
 
-import json
 from collections.abc import Callable, Sequence
 from typing import Any, Literal
 
-from pydantic_core import to_jsonable_python
-
 from drivine.backend.postgres.postgres_graph import json_value, number_of, text_of
 from drivine.backend.postgres.postgres_views import PostgresViews
+from drivine.backend.save_statement_builder import packed
 from drivine.backend.sql.compared import Compared
 from drivine.backend.sql.sql_json import storable, to_json
 from drivine.backend.sql.sql_query_renderer import SqlQueryRenderer
@@ -200,7 +198,7 @@ def _is_number(value: Any) -> bool:
 
 def _packed(value: Any) -> str:
     """A value packed into JSON text, as a JsonPacked field is stored."""
-    return json.dumps(to_jsonable_python(value))
+    return packed(value)
 
 
 def _string(value: Any) -> str:

@@ -1,11 +1,8 @@
 from __future__ import annotations
 
-import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, TypeVar
-
-from pydantic_core import to_jsonable_python
 
 from drivine.backend.cypher import label_expression, quote_name
 from drivine.backend.cypher_grammar import CypherGrammar
@@ -281,7 +278,7 @@ class QueryRenderer:
             raise DrivineError(f"{described(path)} is a property, not a node.")
 
         def packed(value: Any) -> Any:
-            return json.dumps(to_jsonable_python(value)) if json_packed else _stored(value)
+            return _packed(value) if json_packed else _stored(value)
 
         operator = test.operator
         if operator in ("IN", "NOT_IN"):
@@ -435,6 +432,12 @@ def _stored(value: Any) -> Any:
     from drivine.backend.save_statement_builder import stored
 
     return stored(value)
+
+
+def _packed(value: Any) -> str:
+    from drivine.backend.save_statement_builder import packed
+
+    return packed(value)
 
 
 def described(path: Sequence[str]) -> str:

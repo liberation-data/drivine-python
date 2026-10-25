@@ -45,8 +45,8 @@ class OracleWrites:
                 f"    SELECT stamp INTO v_found FROM {self.graph.nodes} WHERE nid = v_root FOR UPDATE;",
                 f"    {condition}",
                 "    IF v_meets > 0 THEN",
-                "        SELECT JSON_SERIALIZE(JSON_MERGEPATCH(JSON($set), JSON(NVL($vectors, '{}')))) INTO v_patch "
-                "FROM dual;",
+                "        SELECT JSON_SERIALIZE(JSON_MERGEPATCH(JSON($set), JSON(NVL($vectors, '{}'))) RETURNING CLOB) "
+                "INTO v_patch FROM dual;",
                 "        v_changed := apply_node(v_root, v_patch, '[]', '[]', NULL, FALSE);",
                 "        restamp(v_root, v_changed);",
                 "    END IF;",
@@ -70,8 +70,9 @@ class OracleWrites:
                 # Read whole before any write: a cursor loop over the bound rows, with writes in it, stopped after the
                 # first node it changed (23.26), silently.
                 "SELECT JSON_SERIALIZE(id), JSON_SERIALIZE(JSON_MERGEPATCH(NVL(props, JSON('{}')), "
-                "NVL(vectors, JSON('{}')))) BULK COLLECT INTO v_ids, v_patches FROM JSON_TABLE($rows, '$[*]' "
-                "COLUMNS (id JSON PATH '$.id', props JSON PATH '$.props', vectors JSON PATH '$.vectors'));",
+                "NVL(vectors, JSON('{}'))) RETURNING CLOB) BULK COLLECT INTO v_ids, v_patches FROM "
+                "JSON_TABLE($rows, '$[*]' COLUMNS (id JSON PATH '$.id', props JSON PATH '$.props', "
+                "vectors JSON PATH '$.vectors'));",
                 "FOR i IN 1 .. v_ids.COUNT LOOP",
                 f"    v_root := find_node({self._match(model)}, v_ids(i));",
                 "    v_changed := FALSE;",

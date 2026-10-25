@@ -150,11 +150,14 @@ def test_keeps_one_schema_marker_per_owner_an_empty_inventory_read_back_empty(pm
     )
 
 
-def test_records_an_inventory_past_4000_characters_and_reads_it_back_whole(pm: PersistenceManager):
-    # JSON_OBJECT with no RETURNING is VARCHAR2(4000), which this inventory overflows (ORA-40478).
+@pytest.mark.parametrize(("count", "past"), [(300, 4_000), (1200, 32_767)])
+def test_records_a_long_inventory_and_reads_it_back_whole(pm: PersistenceManager, count: int, past: int):
+    # 300 items are past the VARCHAR2(4000) JSON_OBJECT gives with no RETURNING (ORA-40478); 1200 are past the 32,767
+    # bytes Oracle binds as a VARCHAR2, so the inventory is bound as a CLOB (ORA-01461).
     backend = OracleBackend()
     scope = f"ora-test-{time.time_ns()}"
-    items = [f"uniqueness:Label{i}:property{i}" for i in range(1, 301)]
+    items = [f"uniqueness:Label{i}:property{i}" for i in range(1, count + 1)]
+    assert len("\n".join(items).encode()) > past
 
     def record(version: str, inventory: list[str]) -> None:
         pm.execute(

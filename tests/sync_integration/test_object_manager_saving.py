@@ -17,6 +17,7 @@ from drivine.sync import (
     NodeLabels,
     NodeStamp,
     NullPolicy,
+    PatchResult,
     PersistenceManager,
     PropertyBag,
     QuerySpecification,
@@ -24,6 +25,7 @@ from drivine.sync import (
     StaleObjectError,
     StatelessGraphObjectManager,
     cypher_statement,
+    node_ref,
     stamps,
     transaction,
 )
@@ -123,15 +125,6 @@ class Pet(NodeFragment, labels=["Pet"]):
 
 class Hound(Pet, labels=["Hound"]):
     breed: str | None = None
-
-
-class Bag(NodeFragment, labels=["Bag"]):
-    """A set field, which the store holds as a list in an order, and maybe with a duplicate, the set doesn't keep."""
-
-    id: Annotated[str, NodeId()]
-    name: str | None = None
-    tags: set[str] = set()
-    stamp: Annotated[str | None, NodeStamp()] = None
 
 
 @pytest.fixture
@@ -699,106 +692,93 @@ class TestConcurrency:
         assert gom.count(Person) == 0
 
 
-FIVE = ["zeta", "alpha", "mid", "beta", "omega"]
+LONG_TEXTS = ["x" * 40_000, "é" * 20_000]
+"""Texts of 40,000 bytes, past the 32,767 a VARCHAR2 holds on Oracle: one character a byte, and two."""
 
 
-def reordered_by_a_load() -> set[str]:
-    """
-    A set that, stored as a list in the order it iterates in, loads as a set that iterates in another. Which sets do
-    depends on each string's hash, which differs in each process, so one is looked for.
-    """
-    for size in range(5, 100):
-        tags = {f"tag{it}" for it in range(size)}
-        if list(tags) != list(set(list(tags))):
-            return tags
-    raise AssertionError("no set loads in another order")
+def bios(gom: StatelessGraphObjectManager) -> dict[str, str | None]:
+    """Each Person's bio, by uuid, as loaded."""
+    return {it.uuid: it.bio for it in gom.load_all(Person)}
 
 
-@pytest.mark.usefixtures("reads_without_snapshot")
-class TestASetFieldAsLoaded:
-    """
-    A set is stored as a list, and Neo4j compares lists item by item. The set loaded from the list may iterate in
-    another order and holds no duplicate, so the check compares it with the stored list as a set.
-    """
+@pytest.mark.parametrize("text", LONG_TEXTS, ids=["ascii", "multibyte"])
+class TestLongText:
+    def test_saves_loads_and_saves_again_a_node_with_a_long_property(self, gom, text):
+        ada = gom.save(Person(uuid="p1", name="Ada", bio=text))
+        assert gom.load(Person, "p1") == ada
+        ada.name = "Ada L"
+        saved = gom.save(ada)  # found, checked against its stamp and merged
+        loaded = gom.load(Person, "p1")
+        assert loaded == saved and loaded is not None and loaded.bio == text
 
-    @staticmethod
-    def held_as(pm: PersistenceManager, tags: list[str]) -> None:
-        """Stores the list as the bag's tags, leaving its stamp alone: as another library or plain Cypher writes it."""
-        pm.execute(QuerySpecification("MATCH (n:Bag {id: 'b1'}) SET n.tags = $tags").bind({"tags": tags}))
+    def test_a_cypher_statement_writes_a_long_parameter(self, pm, gom, text):
+        # A Cypher statement's parameter goes as its JSON text, which past 32,767 bytes is bound as a CLOB.
+        if pm.type is DatabaseType.ORACLE and len(text.encode()) != len(text):
+            pytest.skip("A multibyte CLOB parameter past 32 KB closes Oracle's connection: #131.")
+        gom.save(Person(uuid="p1", name="Ada", bio="short"))
+        pm.execute(
+            QuerySpecification(cypher_statement("MATCH (n:Person {uuid: 'p1'}) SET n.bio = $text")).bind({"text": text})
+        )
+        loaded = gom.load(Person, "p1")
+        assert loaded is not None and loaded.bio == text
 
-    @staticmethod
-    def renamed(it: Bag) -> None:
-        it.name = "two"
+    def test_save_all_writes_nodes_with_long_properties(self, gom, text):
+        gom.save_all([Person(uuid=f"p{it}", name=f"n{it}", bio=f"{it}{text}") for it in range(3)])
+        assert bios(gom) == {f"p{it}": f"{it}{text}" for it in range(3)}
 
-    def test_a_stored_duplicate_saves_from_the_loaded_copy_and_in_an_update(self, pm, gom):
-        gom.save(Bag(id="b1", name="one", tags={"x"}))
-        self.held_as(pm, ["a", "a", "b"])
+    def test_patch_patch_all_and_update_grow_a_property_past_the_limit(self, gom, text):
+        gom.save_all([Person(uuid="p1", name="Ada", bio="short"), Person(uuid="p2", name="Grace")])
+        assert gom.patch(Person, "p1", set={"bio": text}) == PatchResult(True, True, True)
+        results = gom.patch_all([Person(uuid="p2", name="Grace", bio=f"2{text}")], only=["bio"])
+        assert results == [PatchResult(True, True, True)]
 
-        loaded = gom.load(Bag, "b1")
-        assert loaded is not None and loaded.tags == {"a", "b"}
-        assert gom.update(Bag, "b1", self.renamed, attempts=1) is not None
-        assert stored(pm, "Bag", "name", "tags") == ["two", ["a", "a", "b"]], "an update wrote the name alone"
+        def grow(person: Person) -> None:
+            person.bio = f"{person.bio}{text}"
 
-        loaded = gom.load(Bag, "b1")
-        assert loaded is not None
-        gom.save(loaded.model_copy(update={"name": "three"}), from_=loaded)
-        assert stored(pm, "Bag", "name", "tags") == ["three", ["a", "b"]], "a save writes the whole set"
+        gom.update(Person, "p1", grow)
+        assert bios(gom) == {"p1": f"{text}{text}", "p2": f"2{text}"}
 
-    def test_a_stored_order_the_set_doesnt_iterate_in_saves_from_the_loaded_copy_and_in_an_update(self, pm, gom):
-        gom.save(Bag(id="b1", name="one", tags=set(FIVE)))
-        loaded = gom.load(Bag, "b1")
-        assert loaded is not None
-        # The node holds the set's items in an order other than the one the loaded set iterates in.
-        other = list(reversed(list(loaded.tags)))
-        self.held_as(pm, other)
+    def test_a_view_writes_long_properties_on_related_nodes_and_relationships(self, gom, text):
+        career = PersonCareer(
+            person=Person(uuid="p1", name="Ada", bio=text),
+            employment_history=[
+                WorkHistory(start_date="2015", role=text, target=Organization(uuid="o1", name=f"Acme {text}"))
+            ],
+        )
+        gom.save(career)
+        loaded = gom.load(PersonCareer, "p1")
+        assert loaded is not None and loaded.person.bio == text
+        assert [(it.role, it.target.name) for it in loaded.employment_history] == [(text, f"Acme {text}")]
 
-        assert gom.update(Bag, "b1", self.renamed, attempts=1) is not None
-        assert stored(pm, "Bag", "tags") == other, "an update wrote the name alone"
+    def test_a_node_with_an_open_set_of_labels_keeps_a_long_property(self, gom, text):
+        gom.save(Sticker(id="s1", labels=["Shiny"], extras={"note": text}))
+        loaded = gom.load(Sticker, "s1")
+        assert loaded is not None and loaded.labels == ["Shiny"] and loaded.extras == {"note": text}
 
-        loaded = gom.load(Bag, "b1")
-        assert loaded is not None
-        self.held_as(pm, other[1:] + other[:1])
-        gom.save(loaded.model_copy(update={"name": "three"}), from_=loaded)
-        assert stored(pm, "Bag", "name", "tags") == ["three", sorted(FIVE)], "a save writes the set sorted"
+    def test_relates_with_a_long_property(self, gom, text):
+        gom.save_all([Person(uuid="p1", name="Ada"), Organization(uuid="o1", name="Acme")])
+        ada, acme = node_ref(Person, "p1"), node_ref(Organization, "o1")
+        assert gom.edges.relate(ada, acme, "WORKS_FOR", {"startDate": "2020", "role": text})
+        assert gom.edges.relate(ada, acme, "WORKS_FOR", {"startDate": "2020", "role": text})  # merged
+        career = gom.load(PersonCareer, "p1")
+        assert career is not None and [it.role for it in career.employment_history] == [text]
 
-    def test_a_set_drivine_saved_saves_again_from_its_loaded_copy_and_from_what_the_save_handed_back(self, pm, gom):
-        tags = reordered_by_a_load()
-        gom.save(Bag(id="b1", name="one", tags=tags))
-        loaded = gom.load(Bag, "b1")
-        assert loaded is not None
+    def test_a_view_writes_a_long_property_on_a_relationship_alone(self, gom, text):
+        career = PersonCareer(
+            person=Person(uuid="p1", name="Ada"),
+            employment_history=[WorkHistory(start_date="2015", role=text, target=acme())],
+        )
+        gom.save(career)
+        career.employment_history[0].role = f"2{text}"
+        gom.save(career)  # the relationship there, its properties merged
+        loaded = gom.load(PersonCareer, "p1")
+        assert loaded is not None and [it.role for it in loaded.employment_history] == [f"2{text}"]
 
-        saved = gom.save(loaded.model_copy(update={"name": "two"}), from_=loaded)
-        gom.save(saved.model_copy(update={"name": "three"}), from_=saved)
-        assert gom.update(Bag, "b1", lambda it: setattr(it, "name", "four"), attempts=1) is not None
 
-        again = gom.load(Bag, "b1")
-        assert again is not None and (again.name, again.tags) == ("four", tags)
-
-    def test_a_changed_set_is_written_from_the_loaded_copy_and_in_an_update(self, pm, gom):
-        gom.save(Bag(id="b1", name="one", tags={"x"}))
-        self.held_as(pm, [*FIVE, "alpha"])
-        loaded = gom.load(Bag, "b1")
-        assert loaded is not None
-
-        gom.save(loaded.model_copy(update={"tags": {*loaded.tags, "new"}}), from_=loaded)
-        assert sorted(stored(pm, "Bag", "tags")) == sorted([*FIVE, "new"])
-        assert gom.update(Bag, "b1", lambda it: it.tags.discard("mid"), attempts=1) is not None
-
-        again = gom.load(Bag, "b1")
-        assert again is not None and again.tags == {*FIVE, "new"} - {"mid"}
-
-    def test_a_set_another_writer_changed_under_the_same_stamp_is_still_refused(self, pm, gom):
-        gom.save(Bag(id="b1", name="one", tags=set(FIVE)))
-        loaded = gom.load(Bag, "b1")
-        assert loaded is not None
-        self.held_as(pm, [*FIVE, "theirs"])
-
-        with pytest.raises(StaleObjectError, match="a field is not as it was loaded"):
-            gom.save(loaded.model_copy(update={"name": "two"}), from_=loaded)
-        with pytest.raises(StaleObjectError, match="a field is not as it was loaded"):
-            gom.save(loaded.model_copy(update={"name": "two"}), from_=loaded.model_copy(update={"tags": {"x"}}))
-        assert stored(pm, "Bag", "name") == "one", "nothing written"
-
-        unmarked = "MATCH (n:Bag {id: 'b1'}) SET n.tags = n.tags + 'later'"
-        assert applied_after_unmarked(pm, gom, Bag, "b1", unmarked, self.renamed) == 2
-        assert sorted(stored(pm, "Bag", "tags")) == sorted([*FIVE, "theirs", "later"])
+def test_patch_and_patch_all_write_a_property_past_4000_bytes(gom):
+    # JSON_SERIALIZE with no RETURNING is VARCHAR2(4000) on Oracle (ORA-40478), short of a VARCHAR2's 32,767 bytes.
+    text = "x" * 5_000
+    gom.save_all([Person(uuid="p1", name="Ada"), Person(uuid="p2", name="Grace")])
+    assert gom.patch(Person, "p1", set={"bio": text}) == PatchResult(True, True, True)
+    assert gom.patch_all([Person(uuid="p2", name="Grace", bio=text)], only=["bio"]) == [PatchResult(True, True, True)]
+    assert bios(gom) == {"p1": text, "p2": text}

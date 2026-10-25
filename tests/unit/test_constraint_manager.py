@@ -346,6 +346,120 @@ def test_on_falkordb_the_sync_api_drops_a_failed_build_and_gives_a_violation():
     assert store.dropped
 
 
+class BuildingInStore:
+    """
+    An executor over a FalkorDB holding a constraint another process is building. Until it is dropped, each listing
+    gives the next of `builds`, the last from then on; None lists nothing, as when that process has dropped its failed
+    build. Once dropped, nothing is listed until the constraint is made, and then each listing gives the next of
+    `rebuilds`. The query for keys held more than once gives `conflicts`.
+    """
+
+    def __init__(
+        self, *builds: str | None, rebuilds: tuple[str, ...] = ("OPERATIONAL",), conflicts: list[Any] | None = None
+    ) -> None:
+        self.builds = builds
+        self.rebuilds = rebuilds
+        self.conflicts = conflicts or []
+        self.phase = "building"
+        self.listings = 0
+        self.ran: list[str | NativeOperation] = []
+
+    async def run(self, statement: str | NativeOperation, bindings: Mapping[str, Any] | None = None) -> list[Any]:
+        return self.answer(statement)
+
+    def answer(self, statement: str | NativeOperation) -> list[Any]:
+        self.ran.append(statement)
+        if isinstance(statement, NativeOperation):
+            if statement.native == "CONSTRAINT_DROP":
+                self.phase = "dropped"
+            elif statement.native == "CONSTRAINT_CREATE":
+                self.phase, self.listings = "made", 0
+            return []
+        if statement == FALKORDB_SCHEMA.list_uniques.statement:
+            statuses = {"building": self.builds, "made": self.rebuilds}.get(self.phase)
+            if not statuses:
+                return []
+            status = statuses[min(self.listings, len(statuses) - 1)]
+            self.listings += 1
+            return [{"label": "Person", "properties": ["email"], "status": status}] if status else []
+        return self.conflicts if "holders > 1" in statement else []
+
+    def count(self, native: str) -> int:
+        return sum(1 for it in self.ran if isinstance(it, NativeOperation) and it.native == native)
+
+    def listed(self) -> int:
+        return sum(1 for it in self.ran if it == FALKORDB_SCHEMA.list_uniques.statement)
+
+
+class SyncBuildingInStore(BuildingInStore):
+    """The same FalkorDB, for the sync API's executor."""
+
+    def run(self, statement: str | NativeOperation, bindings: Mapping[str, Any] | None = None) -> list[Any]:  # pyright: ignore[reportIncompatibleMethodOverride]
+        return self.answer(statement)
+
+
+async def test_on_falkordb_a_constraint_already_under_construction_is_waited_on_and_matching_once_built():
+    store = BuildingInStore("UNDER CONSTRUCTION", "UNDER CONSTRUCTION", "OPERATIONAL")
+
+    result = await ConstraintManager(store, FALKORDB_SCHEMA).ensure(PERSON_EMAIL)  # pyright: ignore[reportArgumentType]
+
+    assert result == EnsureResult("ALREADY_MATCHING", PERSON_EMAIL)
+    assert store.listed() == 3
+    assert (store.count("CONSTRAINT_DROP"), store.count("CONSTRAINT_CREATE")) == (0, 0)
+
+
+async def test_on_falkordb_a_constraint_already_under_construction_whose_build_fails_is_dropped_and_a_violation():
+    store = BuildingInStore("UNDER CONSTRUCTION", "FAILED", rebuilds=("FAILED",), conflicts=[REPEATED])
+
+    result = await ConstraintManager(store, FALKORDB_SCHEMA).ensure(PERSON_EMAIL)  # pyright: ignore[reportArgumentType]
+
+    assert result == EnsureResult("VIOLATION", PERSON_EMAIL, sample=(REPEATED,))
+    # Dropped, and not made again over data that holds a key more than once.
+    assert (store.count("CONSTRAINT_DROP"), store.count("CONSTRAINT_CREATE")) == (1, 0)
+
+
+async def test_on_falkordb_a_constraint_already_under_construction_whose_build_fails_is_made_again_on_clean_data():
+    store = BuildingInStore("UNDER CONSTRUCTION", "FAILED")
+
+    result = await ConstraintManager(store, FALKORDB_SCHEMA).ensure(PERSON_EMAIL)  # pyright: ignore[reportArgumentType]
+
+    assert result == EnsureResult("CREATED", PERSON_EMAIL)
+    natives = [it.native for it in store.ran if isinstance(it, NativeOperation)]
+    assert natives == ["CONSTRAINT_DROP", "CONSTRAINT_CREATE"]
+
+
+async def test_on_falkordb_a_constraint_already_failed_is_dropped_and_a_violation_at_sample_size_0_when_rebuilt():
+    store = BuildingInStore("FAILED", rebuilds=("FAILED",), conflicts=[REPEATED])
+
+    result = await ConstraintManager(store, FALKORDB_SCHEMA).ensure(PERSON_EMAIL, 0)  # pyright: ignore[reportArgumentType]
+
+    assert result == EnsureResult("VIOLATION", PERSON_EMAIL, sample=())
+    # The one already there, then the one made again, which failed too.
+    assert store.count("CONSTRAINT_DROP") == 2
+
+
+async def test_on_falkordb_a_constraint_dropped_while_under_construction_is_made():
+    store = BuildingInStore("UNDER CONSTRUCTION", None)
+
+    result = await ConstraintManager(store, FALKORDB_SCHEMA).ensure(PERSON_EMAIL)  # pyright: ignore[reportArgumentType]
+
+    assert result == EnsureResult("CREATED", PERSON_EMAIL)
+    assert (store.count("CONSTRAINT_DROP"), store.count("CONSTRAINT_CREATE")) == (0, 1)
+
+
+def test_on_falkordb_the_sync_api_waits_on_a_constraint_already_under_construction():
+    built = SyncBuildingInStore("UNDER CONSTRUCTION", "OPERATIONAL")
+    failed = SyncBuildingInStore("UNDER CONSTRUCTION", "FAILED", rebuilds=("FAILED",), conflicts=[REPEATED])
+
+    assert SyncConstraintManager(built, FALKORDB_SCHEMA).ensure(PERSON_EMAIL) == EnsureResult(  # pyright: ignore[reportArgumentType]
+        "ALREADY_MATCHING", PERSON_EMAIL
+    )
+    assert SyncConstraintManager(failed, FALKORDB_SCHEMA).ensure(PERSON_EMAIL) == EnsureResult(  # pyright: ignore[reportArgumentType]
+        "VIOLATION", PERSON_EMAIL, sample=(REPEATED,)
+    )
+    assert failed.count("CONSTRAINT_DROP") == 1
+
+
 def test_only_falkordb_lists_the_constraints_it_failed_to_build():
     assert FALKORDB_SCHEMA.list_failed_uniques is not None
     assert FALKORDB_SCHEMA.list_failed_uniques.statement == FALKORDB_SCHEMA.list_uniques.statement

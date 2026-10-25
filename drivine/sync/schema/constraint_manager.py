@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Literal
 
 from drivine.drivine_error import DrivineError
 from drivine.schema.ensure_result import EnsureResult
@@ -51,7 +51,10 @@ class ConstraintManager:
         engine to refuse a constraint the data breaks. FalkorDB doesn't refuse one: it builds it in the background and
         lists the build as FAILED. The failed constraint is then dropped, and the result is a VIOLATION when the data
         shows a key held more than once, with up to `sample_size` of them (none at 0, though the data is still read to
-        confirm it), as drivine4j gives. A build that fails with no key held more than once raises DrivineError.
+        confirm it), as drivine4j gives. A build that fails with no key held more than once raises DrivineError. A
+        constraint FalkorDB already lists as UNDER CONSTRUCTION, from another process or an earlier run, is waited on as
+        one made here is: ALREADY_MATCHING once built, and dropped and made again once its build fails, as is one
+        already listed as FAILED.
 
         A plain range index over the label and properties, in their order, that the engine says is in the way of the
         constraint (Neo4j) is reported as BLOCKED_BY_INDEX, and nothing is changed. With `replace_blocking_index`, the
@@ -59,8 +62,23 @@ class ConstraintManager:
         however `sample_size` is set: a key held more than once keeps the index and is a VIOLATION, with an empty sample
         when `sample_size` is 0, and data that can't be read keeps the index and raises the engine's refusal.
         """
-        if self._exists(spec):
+        # One still being built, by another process or an earlier run, may yet fail: its build is waited on, as for one
+        # made here. One dropped meanwhile is made again below.
+        found = self._await_build(spec, until_listed=False)
+        if found == "BUILT":
             return EnsureResult("ALREADY_MATCHING", spec)
+        if found == "FAILED":
+            # FalkorDB keeps listing a constraint whose build failed, though it enforces nothing. It isn't the
+            # constraint: it is dropped and the constraint made again, which gives a VIOLATION when the data still holds
+            # a key more than once.
+            self._drop_unique(spec)
+            self.changed()
+            logger.warning(
+                "Dropped the uniqueness constraint on %s(%s), whose build %s had listed as FAILED, to make it again",
+                spec.label,
+                ", ".join(spec.properties),
+                self.grammar.engine,
+            )
         sample = self.executor.run(self.grammar.conflicts(spec, sample_size)) if sample_size > 0 else []
         if sample:
             return EnsureResult("VIOLATION", spec, sample=tuple(sample))
@@ -144,17 +162,28 @@ class ConstraintManager:
         CREATED once the engine reports the constraint built, which FalkorDB does in the background. A build FalkorDB
         lists as FAILED gives what `_build_failed` gives.
         """
+        if self._await_build(spec, until_listed=True) == "FAILED":
+            return self._build_failed(spec, sample_size)
+        self.changed()
+        return EnsureResult("CREATED", spec)
+
+    def _await_build(self, spec: UniquenessConstraintSpec, until_listed: bool) -> Literal["BUILT", "FAILED"] | None:
+        """
+        Reads the constraint until its build has ended: BUILT, or FAILED where the engine builds it in the background
+        and the build failed. FalkorDB lists the constraint UNDER CONSTRUCTION as it builds it, and may yet list it as
+        FAILED. While it isn't listed, reading goes on when `until_listed` (one just made, not yet listed), and
+        otherwise ends with None (none there, or one dropped meanwhile).
+        """
         for attempt in range(50):
             # One reading per attempt, so that a build marked FAILED between two readings isn't taken for built.
             rows: dict[str, list[Any]] = {}
             if self._listed_by(self.grammar.list_failed_uniques, spec, rows):
-                return self._build_failed(spec, sample_size)
-            # FalkorDB lists the constraint UNDER CONSTRUCTION as it builds it, and may yet mark it FAILED.
-            if self._listed_by(self.grammar.list_uniques, spec, rows) and not self._listed_by(
-                self.grammar.list_building_uniques, spec, rows
-            ):
-                self.changed()
-                return EnsureResult("CREATED", spec)
+                return "FAILED"
+            if self._listed_by(self.grammar.list_uniques, spec, rows):
+                if not self._listed_by(self.grammar.list_building_uniques, spec, rows):
+                    return "BUILT"
+            elif not until_listed:
+                return None
             concurrency.sleep(0.02 * (attempt + 1))
         raise DrivineError(f"The uniqueness constraint on {spec.label}({', '.join(spec.properties)}) was not built.")
 

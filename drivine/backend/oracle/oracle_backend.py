@@ -341,17 +341,18 @@ END;""")
     def record_schema_marker(self) -> GraphStatement:
         """
         The marker found by a query and matched by its id: matched by its scope, the MERGE would update the column it
-        matches on, which Oracle refuses (ORA-38104). Where a race left several, the newest is written.
+        matches on, which Oracle refuses (ORA-38104). Where a race left several, the newest is written. Both props are
+        built RETURNING JSON: with no RETURNING, JSON_OBJECT is VARCHAR2(4000), which a large inventory overflows.
         """
         nodes = self.graph.nodes
         return GraphStatement(
             f"MERGE INTO {nodes} n USING (SELECT (SELECT m.nid FROM {nodes} m WHERE {self._marker('m')} ORDER BY "
             f"{_newest_first('m')} FETCH FIRST 1 ROWS ONLY) AS nid FROM dual) found ON (n.nid = found.nid) "
             "WHEN MATCHED THEN UPDATE SET n.props = JSON_MERGEPATCH(n.props, JSON_OBJECT('version' VALUE $version, "
-            f"'items' VALUE '{_ITEMS_MARK}' || $items, 'appliedAt' VALUE {_NOW_MILLIS})) "
+            f"'items' VALUE '{_ITEMS_MARK}' || $items, 'appliedAt' VALUE {_NOW_MILLIS} RETURNING JSON)) "
             f"WHEN NOT MATCHED THEN INSERT (labels, props) VALUES (JSON('[\"{SCHEMA_MARKER}\"]'), JSON_OBJECT('scope' "
             f"VALUE $scope, 'version' VALUE $version, 'items' VALUE '{_ITEMS_MARK}' || $items, 'appliedAt' VALUE "
-            f"{_NOW_MILLIS} ABSENT ON NULL))"
+            f"{_NOW_MILLIS} ABSENT ON NULL RETURNING JSON))"
         )
 
     def prune_schema_markers(self) -> GraphStatement:

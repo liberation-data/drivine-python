@@ -158,3 +158,31 @@ async def test_keeps_one_schema_marker_per_owner_an_empty_inventory_read_back_em
             {"scope": scope}
         )
     )
+
+
+async def test_records_an_inventory_past_4000_characters_and_reads_it_back_whole(pm: PersistenceManager):
+    # JSON_OBJECT with no RETURNING is VARCHAR2(4000), which this inventory overflows (ORA-40478).
+    backend = OracleBackend()
+    scope = f"ora-test-{time.time_ns()}"
+    items = [f"uniqueness:Label{i}:property{i}" for i in range(1, 301)]
+
+    async def record(version: str, inventory: list[str]) -> None:
+        await pm.execute(
+            backend.record_schema_marker().spec({"scope": scope, "version": version, "items": "\n".join(inventory)})
+        )
+
+    async def read() -> list[str] | None:
+        return backend.marker_items(await pm.maybe_get_one(backend.schema_marker("items").spec({"scope": scope})))
+
+    try:
+        await record("model-v1", items)
+        assert await read() == items
+        # Recorded again, the marker found is updated, and kept whole.
+        await record("model-v2", [*items, "one-more"])
+        assert await read() == [*items, "one-more"]
+    finally:
+        await pm.execute(
+            QuerySpecification[Any]("DELETE FROM drivine_node n WHERE JSON_VALUE(n.props, '$.scope') = $scope").bind(
+                {"scope": scope}
+            )
+        )

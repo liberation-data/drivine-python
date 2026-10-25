@@ -477,8 +477,8 @@ def test_a_view_that_leads_to_a_refused_view_is_named_and_left_out_not_written_w
     modules, project: Project
 ):
     """
-    A current entry refers only to current ones. In a cycle the registry keeps A, built while B was, though B is then
-    refused, so A is left out by the reader, and named, and so is C, which refers to A.
+    A current entry refers only to current ones. In a cycle, A is built while B is, and B is then refused: the registry
+    refuses A with it, and C, which refers to A, so the file names each and writes none of them.
     """
     (names,) = modules(
         cycle="""
@@ -512,5 +512,7 @@ def test_a_view_that_leads_to_a_refused_view_is_named_and_left_out_not_written_w
     file = written(project)
     assert [it["name"] for it in file["fragments"]] == ["Good"]
     assert file["views"] == []
-    assert f"Drivine model file: {names}.A: refers to {names}.B, which is left out." in warnings
-    assert f"Drivine model file: {names}.C: refers to {names}.A, which is left out." in warnings
+    # The registry refuses A and C too, now that a refused view takes what was built on its account with it (#110).
+    refusal = "Twice has 2 NodeId fields (a, b). A node has one id."
+    assert f"Drivine model file: {names}.A: {refusal}" in warnings
+    assert f"Drivine model file: {names}.C: {refusal}" in warnings

@@ -3923,27 +3923,22 @@ class SqlCypherCompiler(ABC):
 
             return Json(self.shared1(self.comparable(self.json(one())), empty))
         if name == "round":
-            # A float, as Cypher gives these; round as Java rounds, half up.
+            # A float, as Cypher gives these; round as Java rounds, half up. The precision is read as a whole number
+            # toward zero, as Neo4j reads it: 1.7 places is 1.
             if len(arguments) == 3:
                 mode = self._rounding_mode(function.arguments[2])
                 if mode is None:
                     return Json(self.literal_json(None))
-                # As Neo4j refuses it, where the precision is written, negated or not, or a parameter's value.
-                precision = function.arguments[1]
-                negated = isinstance(precision, Unary) and precision.operator is UnaryOperator.NEGATE
-                given = jsonable(
-                    self._given(precision.operand if isinstance(precision, Unary) and negated else precision)
-                )
-                if _is_number(given) and (-given if negated else given) < 0:
-                    raise DrivineError("round() takes a precision of 0 or more, as in Neo4j.")
+                self._refuse_negative_precision(function.arguments[1])
                 number = self.number(self.comparable(self.json(arguments[0])))
-                return Json(self.scalar(self.float_(self.round_to(number, self._whole(arguments[1]), mode))))
+                return Json(self.scalar(self.float_(self.round_to(number, self._truncated_whole(arguments[1]), mode))))
             if len(arguments) == 2:
+                self._refuse_negative_precision(function.arguments[1])
                 return Json(
                     self.scalar(
                         self.float_(
                             f"ROUND({self.number(self.comparable(self.json(arguments[0])))}, "
-                            f"{self._whole(arguments[1])})"
+                            f"{self._truncated_whole(arguments[1])})"
                         )
                     )
                 )
@@ -4099,6 +4094,21 @@ class SqlCypherCompiler(ABC):
     def _whole(self, value: Value) -> str:
         """A value as a SQL whole number."""
         return f"CAST({self.number(self.comparable(self.json(value)))} AS INTEGER)"
+
+    def _truncated_whole(self, value: Value) -> str:
+        """A value as a SQL whole number cut toward zero, as Neo4j reads `round()`'s precision."""
+        return f"CAST(TRUNC({self.number(self.comparable(self.json(value)))}) AS INTEGER)"
+
+    def _refuse_negative_precision(self, precision: Expression) -> None:
+        """
+        Refuses a precision for `round()` that is below 0 as a whole number toward zero, as Neo4j refuses it, where it
+        is written, negated or not, or a parameter's value: -0.5 is 0 places, and -1.2 is refused. One read from data is
+        not known here, so it rounds to tens or hundreds where Neo4j fails (#148).
+        """
+        negated = isinstance(precision, Unary) and precision.operator is UnaryOperator.NEGATE
+        given = jsonable(self._given(precision.operand if isinstance(precision, Unary) and negated else precision))
+        if _is_number(given) and math.trunc(-given if negated else given) < 0:
+            raise DrivineError("round() takes a precision of 0 or more, as in Neo4j.")
 
     def _collected(self, value: Value) -> str:
         """The values of a group, gathered as `collect` gathers them, as JSON."""

@@ -728,6 +728,10 @@ class OracleCypherCompiler(SqlCypherCompiler):
     def raise_(self, message: str) -> str:
         return f"RAISE_APPLICATION_ERROR(-20000, {literal(message)});"
 
+    def failure(self, message: str, value: str) -> str:
+        """A text that is no number, read as one: Oracle fails with ORA-01722, the text in its detail."""
+        return f"TO_NUMBER({literal(message + ' ')} || TO_CHAR({value}))"
+
     def id_of(self, json: str, key: str | None) -> str:
         return f"JSON_VALUE({json}, {_path(key) if key is not None else chr(39) + '$' + chr(39)} RETURNING NUMBER)"
 

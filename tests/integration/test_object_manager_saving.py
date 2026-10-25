@@ -975,21 +975,22 @@ async def test_patch_and_patch_all_write_a_property_past_4000_bytes(gom):
     ]
     assert await bios(gom) == {"p1": text, "p2": text}
 
-    async def test_a_packed_set_drivine_saved_saves_again_from_its_loaded_copy(self, pm, gom):
-        tags = reordered_by_a_load()
-        await gom.save(PackedBag(id="b1", name="one", tags=tags))
-        loaded = await gom.load(PackedBag, "b1")
-        assert loaded is not None
 
-        saved = await gom.save(loaded.model_copy(update={"name": "two"}), from_=loaded)
-        await gom.save(saved.model_copy(update={"name": "three"}), from_=saved)
-        assert await stored(pm, "PackedBag", "tags") == json.dumps(sorted(tags)), "a packed set is written sorted"
+async def test_a_packed_set_drivine_saved_saves_again_from_its_loaded_copy(pm, gom):
+    tags = reordered_by_a_load()
+    await gom.save(PackedBag(id="b1", name="one", tags=tags))
+    loaded = await gom.load(PackedBag, "b1")
+    assert loaded is not None
 
-        assert (await gom.patch(PackedBag, "b1", set={"tags": tags})).applied
-        assert await stored(pm, "PackedBag", "tags") == json.dumps(sorted(tags)), "and patched sorted"
-        loaded = await gom.load(PackedBag, "b1")
-        assert loaded is not None
-        await gom.save(loaded.model_copy(update={"name": "four"}), from_=loaded)
+    saved = await gom.save(loaded.model_copy(update={"name": "two"}), from_=loaded)
+    await gom.save(saved.model_copy(update={"name": "three"}), from_=saved)
+    assert await stored(pm, "PackedBag", "tags") == json.dumps(sorted(tags)), "a packed set is written sorted"
+
+    assert (await gom.patch(PackedBag, "b1", set={"tags": tags})).applied
+    assert await stored(pm, "PackedBag", "tags") == json.dumps(sorted(tags)), "and patched sorted"
+    loaded = await gom.load(PackedBag, "b1")
+    assert loaded is not None
+    await gom.save(loaded.model_copy(update={"name": "four"}), from_=loaded)
 
 
 async def test_a_where_finds_a_packed_set_by_a_set_that_iterates_in_another_order(pm, gom):

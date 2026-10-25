@@ -7,6 +7,7 @@ from drivine.annotation.direction import Direction
 from drivine.backend.graph_backend import GraphBackend
 from drivine.backend.graph_statement import GraphStatement
 from drivine.backend.matched_node import MatchedNode
+from drivine.backend.save_statement_builder import stored
 from drivine.manager.node_ref import NodeRef
 from drivine.manager.relate_mode import RelateMode
 from drivine.mapper.graph_object_mapper import GraphObjectMapper
@@ -59,10 +60,12 @@ class EdgeOperations:
         """
         Joins `origin` to `to` with a relationship of the type. Under MERGE, the default, one is made only when there is
         none, and the properties are set whether it was made or found; a call that finds it as it is marks neither end.
-        Under CREATE each call makes another. A property that is None is left out. Returns whether both nodes were
+        Under CREATE each call makes another. A property that is None is left out, and one is written as a save writes
+        it: a set as its items sorted, a tuple as a list, and an Enum as its value. Returns whether both nodes were
         found and joined.
         """
-        statement = self._backend.relate(self._node(origin), self._node(to), type, properties or {}, mode)
+        values = {key: stored(value) for key, value in (properties or {}).items()}
+        statement = self._backend.relate(self._node(origin), self._node(to), type, values, mode)
         return await self._run(statement) > 0
 
     async def unrelate(self, origin: NodeRef, to: NodeRef, type: str) -> int:

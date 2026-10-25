@@ -912,21 +912,22 @@ def test_patch_and_patch_all_write_a_property_past_4000_bytes(gom):
     assert gom.patch_all([Person(uuid="p2", name="Grace", bio=text)], only=["bio"]) == [PatchResult(True, True, True)]
     assert bios(gom) == {"p1": text, "p2": text}
 
-    def test_a_packed_set_drivine_saved_saves_again_from_its_loaded_copy(self, pm, gom):
-        tags = reordered_by_a_load()
-        gom.save(PackedBag(id="b1", name="one", tags=tags))
-        loaded = gom.load(PackedBag, "b1")
-        assert loaded is not None
 
-        saved = gom.save(loaded.model_copy(update={"name": "two"}), from_=loaded)
-        gom.save(saved.model_copy(update={"name": "three"}), from_=saved)
-        assert stored(pm, "PackedBag", "tags") == json.dumps(sorted(tags)), "a packed set is written sorted"
+def test_a_packed_set_drivine_saved_saves_again_from_its_loaded_copy(pm, gom):
+    tags = reordered_by_a_load()
+    gom.save(PackedBag(id="b1", name="one", tags=tags))
+    loaded = gom.load(PackedBag, "b1")
+    assert loaded is not None
 
-        assert (gom.patch(PackedBag, "b1", set={"tags": tags})).applied
-        assert stored(pm, "PackedBag", "tags") == json.dumps(sorted(tags)), "and patched sorted"
-        loaded = gom.load(PackedBag, "b1")
-        assert loaded is not None
-        gom.save(loaded.model_copy(update={"name": "four"}), from_=loaded)
+    saved = gom.save(loaded.model_copy(update={"name": "two"}), from_=loaded)
+    gom.save(saved.model_copy(update={"name": "three"}), from_=saved)
+    assert stored(pm, "PackedBag", "tags") == json.dumps(sorted(tags)), "a packed set is written sorted"
+
+    assert (gom.patch(PackedBag, "b1", set={"tags": tags})).applied
+    assert stored(pm, "PackedBag", "tags") == json.dumps(sorted(tags)), "and patched sorted"
+    loaded = gom.load(PackedBag, "b1")
+    assert loaded is not None
+    gom.save(loaded.model_copy(update={"name": "four"}), from_=loaded)
 
 
 def test_a_where_finds_a_packed_set_by_a_set_that_iterates_in_another_order(pm, gom):

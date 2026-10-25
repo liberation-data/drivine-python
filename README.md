@@ -539,12 +539,12 @@ the keys, so a page of groups is the same every time.
 - **More markers:** `GraphPath([hop(...), ...])` for the nodes at the end of several hops, `Count` and `Aggregate`
   computed in the query, `SortedBy`, `ReadOnly`, `Transient`, `NodeStamp`, `NodeLabels`, `PropertyBag`,
   `JsonPacked`, `NullAsDefault` and `EmptyWhenAbsent`, as in TypeScript's Drivine.
-- **A set field** is stored as a list of its items, sorted where they order (as the set iterates where they don't),
-  and a `JsonPacked` one packed so: a set is written alike in every process, whatever order it iterates in. One that
-  0.1.0 wrote, in the order it iterated in, loads and `update` saves it, but until a save writes it again a `where`
-  that compares the whole set, which it writes sorted, doesn't find it on the graph engines (on Postgres and Oracle a
-  whole-set `where` on a set that isn't `JsonPacked` doesn't find it either way), and on Neo4j a save given `from_` of
-  a `JsonPacked` one is refused.
+- **A set field** is stored as a list of its items, sorted where they order (as the set iterates where they don't), and
+  a `JsonPacked` one packed so: a set is written alike in every process, whatever order it iterates in. `patch` writes
+  one so too, and `edges.relate` writes a set property so. One that 0.1.0 wrote, in the order it iterated in, loads and
+  `update` saves it, but until a save writes it again a `where` that compares the whole set, which it writes sorted,
+  doesn't find it on the graph engines (on Postgres and Oracle a whole-set `where` on a set that isn't `JsonPacked`
+  doesn't find it either way), and on Neo4j a save given `from_` of a `JsonPacked` one is refused.
 - **A flat `PropertyBag(flat=True)`** stores each entry under its bare key and loads every property no field or other
   bag is stored under. A save refuses, before it writes anything, an entry whose key a field (the id among them) is
   stored under, one under another bag's prefix, or one beginning `__drivine.`, Drivine's own, such as the stamp.

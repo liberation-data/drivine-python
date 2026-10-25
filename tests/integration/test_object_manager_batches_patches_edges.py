@@ -1,18 +1,51 @@
+import json
+from typing import Annotated
+
 import pytest
 
 from drivine import (
     DrivineError,
+    GraphProperty,
+    GraphView,
+    JsonPacked,
+    NodeFragment,
+    NodeId,
+    NodeStamp,
     NullPolicy,
     PatchResult,
     PersistenceManager,
     RelateMode,
+    Relationship,
+    RelationshipFragment,
+    Root,
     StaleObjectError,
     StatelessGraphObjectManager,
+    TargetNode,
     node_ref,
     transaction,
 )
 from tests.integration.stores import equals, nodes
 from tests.models import Customer, Dog, Organization, Person, PersonCareer, Puppy, WorkHistory
+
+
+class Coded(NodeFragment, labels=["Coded"]):
+    """Set fields: one stored under another name, one packed as JSON text, and one with a default."""
+
+    id: Annotated[str, NodeId()]
+    codes: Annotated[set[str] | None, GraphProperty("code_set")] = None
+    packed: Annotated[set[str] | None, JsonPacked()] = None
+    badges: set[str] = set()
+    stamp: Annotated[str | None, NodeStamp()] = None
+
+
+class Coding(RelationshipFragment):
+    reasons: set[str] = set()
+    target: Annotated[Coded, TargetNode()]
+
+
+class CodedHolder(GraphView):
+    root: Annotated[Coded, Root()]
+    codings: Annotated[list[Coding], Relationship("CODING")] = []
 
 
 @pytest.fixture
@@ -173,3 +206,66 @@ class TestEdges:
             await gom.edges.relate(node_ref(Person, "p1"), node_ref(Dog, it), "OWNS")
         owned = await gom.edges.load_related(node_ref(Person, "p1"), "OWNS", Dog)
         assert sorted(type(it).__name__ for it in owned) == ["Dog", "Puppy"]
+
+
+class TestSets:
+    """No store holds a set, so patch and relate write one as the sorted list of its items, as save does."""
+
+    async def test_patch_writes_a_set_as_its_sorted_items_packed_or_not_and_loads_it_back_as_a_set(self, pm, gom):
+        await gom.save(Coded(id="c1", codes={"old"}))
+        patched = await gom.patch(
+            Coded, "c1", set={"codes": {"y", "x"}, "packed": {"q", "p"}, "badges": {"silver", "gold"}}
+        )
+        assert patched == PatchResult(True, True, True)
+        [props] = await nodes(pm, "Coded")
+        assert (props["code_set"], json.loads(props["packed"]), props["badges"]) == (
+            ["x", "y"],
+            ["p", "q"],
+            ["gold", "silver"],
+        )
+        loaded = await gom.load(Coded, "c1")
+        assert loaded is not None
+        assert (loaded.codes, loaded.packed, loaded.badges) == ({"x", "y"}, {"p", "q"}, {"gold", "silver"})
+
+        # A loaded set handed back with an item added, and an empty one.
+        assert loaded.packed is not None
+        await gom.patch(Coded, "c1", set={"packed": {*loaded.packed, "r"}, "badges": set()})
+        [props] = await nodes(pm, "Coded")
+        assert (json.loads(props["packed"]), props["badges"]) == (["p", "q", "r"], [])
+        again = await gom.load(Coded, "c1")
+        assert again is not None and (again.packed, again.badges) == ({"p", "q", "r"}, set())
+
+    async def test_patch_all_writes_sets_as_their_sorted_items_packed_or_not(self, pm, gom):
+        await gom.save_all([Coded(id="a1"), Coded(id="a2")])
+        patched = [
+            Coded(id="a1", codes={"x"}, packed={"p"}, badges={"gold"}),
+            Coded(id="a2", codes={"z", "y"}, packed={"r", "q"}, badges=set()),
+        ]
+        await gom.patch_all(patched, only=["codes", "packed", "badges"], null_policy=NullPolicy.CLEAR)
+        rows = [[it["code_set"], json.loads(it["packed"]), it["badges"]] for it in await nodes(pm, "Coded")]
+        assert rows == [[["x"], ["p"], ["gold"]], [["y", "z"], ["q", "r"], []]]
+        loaded = await gom.load(Coded, "a2")
+        assert loaded is not None and (loaded.codes, loaded.packed, loaded.badges) == ({"y", "z"}, {"q", "r"}, set())
+
+    async def test_relate_writes_a_set_property_as_its_sorted_items_and_loads_it_in_a_relationship_fragment(self, gom):
+        await gom.save_all([Coded(id="root"), Coded(id="target")])
+        root, target = node_ref(Coded, "root"), node_ref(Coded, "target")
+        assert await gom.edges.relate(root, target, "CODING", {"reasons": {"why", "because"}})
+        loaded = await gom.load(CodedHolder, "root")
+        assert loaded is not None and [(it.reasons, it.target.id) for it in loaded.codings] == [
+            ({"because", "why"}, "target")
+        ]
+
+    async def test_relating_again_with_the_same_set_finds_the_relationship_as_it_is(self, gom):
+        await gom.save_all([Coded(id="root"), Coded(id="target")])
+        root, target = node_ref(Coded, "root"), node_ref(Coded, "target")
+        await gom.edges.relate(root, target, "CODING", {"reasons": {"why", "because", "how"}})
+        before = await gom.load(Coded, "root")
+        assert before is not None
+
+        # The same set, built in another order: stored as the same sorted list, so neither end is marked.
+        assert await gom.edges.relate(root, target, "CODING", {"reasons": {"how", "because", "why"}})
+        after = await gom.load(Coded, "root")
+        assert after is not None and after.stamp == before.stamp
+        holder = await gom.load(CodedHolder, "root")
+        assert holder is not None and [it.reasons for it in holder.codings] == [{"because", "how", "why"}]

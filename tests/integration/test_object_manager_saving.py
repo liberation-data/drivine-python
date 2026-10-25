@@ -16,6 +16,7 @@ from drivine import (
     NodeLabels,
     NodeStamp,
     NullPolicy,
+    PatchResult,
     PersistenceManager,
     PropertyBag,
     QuerySpecification,
@@ -23,6 +24,7 @@ from drivine import (
     StaleObjectError,
     StatelessGraphObjectManager,
     cypher_statement,
+    node_ref,
     stamps,
     transaction,
 )
@@ -745,3 +747,97 @@ class TestConcurrency:
                 await gom.save(Person(uuid="p1", name="Ada"))
                 raise ValueError("roll back")
         assert await gom.count(Person) == 0
+
+
+LONG_TEXTS = ["x" * 40_000, "é" * 20_000]
+"""Texts of 40,000 bytes, past the 32,767 a VARCHAR2 holds on Oracle: one character a byte, and two."""
+
+
+async def bios(gom: StatelessGraphObjectManager) -> dict[str, str | None]:
+    """Each Person's bio, by uuid, as loaded."""
+    return {it.uuid: it.bio for it in await gom.load_all(Person)}
+
+
+@pytest.mark.parametrize("text", LONG_TEXTS, ids=["ascii", "multibyte"])
+class TestLongText:
+    async def test_saves_loads_and_saves_again_a_node_with_a_long_property(self, gom, text):
+        ada = await gom.save(Person(uuid="p1", name="Ada", bio=text))
+        assert await gom.load(Person, "p1") == ada
+        ada.name = "Ada L"
+        saved = await gom.save(ada)  # found, checked against its stamp and merged
+        loaded = await gom.load(Person, "p1")
+        assert loaded == saved and loaded is not None and loaded.bio == text
+
+    async def test_a_cypher_statement_writes_a_long_parameter(self, pm, gom, text):
+        # A Cypher statement's parameter goes as its JSON text, which past 32,767 bytes is bound as a CLOB.
+        if pm.type is DatabaseType.ORACLE and len(text.encode()) != len(text):
+            pytest.skip("A multibyte CLOB parameter past 32 KB closes Oracle's connection: #131.")
+        await gom.save(Person(uuid="p1", name="Ada", bio="short"))
+        await pm.execute(
+            QuerySpecification(cypher_statement("MATCH (n:Person {uuid: 'p1'}) SET n.bio = $text")).bind({"text": text})
+        )
+        loaded = await gom.load(Person, "p1")
+        assert loaded is not None and loaded.bio == text
+
+    async def test_save_all_writes_nodes_with_long_properties(self, gom, text):
+        await gom.save_all([Person(uuid=f"p{it}", name=f"n{it}", bio=f"{it}{text}") for it in range(3)])
+        assert await bios(gom) == {f"p{it}": f"{it}{text}" for it in range(3)}
+
+    async def test_patch_patch_all_and_update_grow_a_property_past_the_limit(self, gom, text):
+        await gom.save_all([Person(uuid="p1", name="Ada", bio="short"), Person(uuid="p2", name="Grace")])
+        assert await gom.patch(Person, "p1", set={"bio": text}) == PatchResult(True, True, True)
+        results = await gom.patch_all([Person(uuid="p2", name="Grace", bio=f"2{text}")], only=["bio"])
+        assert results == [PatchResult(True, True, True)]
+
+        def grow(person: Person) -> None:
+            person.bio = f"{person.bio}{text}"
+
+        await gom.update(Person, "p1", grow)
+        assert await bios(gom) == {"p1": f"{text}{text}", "p2": f"2{text}"}
+
+    async def test_a_view_writes_long_properties_on_related_nodes_and_relationships(self, gom, text):
+        career = PersonCareer(
+            person=Person(uuid="p1", name="Ada", bio=text),
+            employment_history=[
+                WorkHistory(start_date="2015", role=text, target=Organization(uuid="o1", name=f"Acme {text}"))
+            ],
+        )
+        await gom.save(career)
+        loaded = await gom.load(PersonCareer, "p1")
+        assert loaded is not None and loaded.person.bio == text
+        assert [(it.role, it.target.name) for it in loaded.employment_history] == [(text, f"Acme {text}")]
+
+    async def test_a_node_with_an_open_set_of_labels_keeps_a_long_property(self, gom, text):
+        await gom.save(Sticker(id="s1", labels=["Shiny"], extras={"note": text}))
+        loaded = await gom.load(Sticker, "s1")
+        assert loaded is not None and loaded.labels == ["Shiny"] and loaded.extras == {"note": text}
+
+    async def test_relates_with_a_long_property(self, gom, text):
+        await gom.save_all([Person(uuid="p1", name="Ada"), Organization(uuid="o1", name="Acme")])
+        ada, acme = node_ref(Person, "p1"), node_ref(Organization, "o1")
+        assert await gom.edges.relate(ada, acme, "WORKS_FOR", {"startDate": "2020", "role": text})
+        assert await gom.edges.relate(ada, acme, "WORKS_FOR", {"startDate": "2020", "role": text})  # merged
+        career = await gom.load(PersonCareer, "p1")
+        assert career is not None and [it.role for it in career.employment_history] == [text]
+
+    async def test_a_view_writes_a_long_property_on_a_relationship_alone(self, gom, text):
+        career = PersonCareer(
+            person=Person(uuid="p1", name="Ada"),
+            employment_history=[WorkHistory(start_date="2015", role=text, target=acme())],
+        )
+        await gom.save(career)
+        career.employment_history[0].role = f"2{text}"
+        await gom.save(career)  # the relationship there, its properties merged
+        loaded = await gom.load(PersonCareer, "p1")
+        assert loaded is not None and [it.role for it in loaded.employment_history] == [f"2{text}"]
+
+
+async def test_patch_and_patch_all_write_a_property_past_4000_bytes(gom):
+    # JSON_SERIALIZE with no RETURNING is VARCHAR2(4000) on Oracle (ORA-40478), short of a VARCHAR2's 32,767 bytes.
+    text = "x" * 5_000
+    await gom.save_all([Person(uuid="p1", name="Ada"), Person(uuid="p2", name="Grace")])
+    assert await gom.patch(Person, "p1", set={"bio": text}) == PatchResult(True, True, True)
+    assert await gom.patch_all([Person(uuid="p2", name="Grace", bio=text)], only=["bio"]) == [
+        PatchResult(True, True, True)
+    ]
+    assert await bios(gom) == {"p1": text, "p2": text}

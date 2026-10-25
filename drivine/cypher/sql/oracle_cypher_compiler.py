@@ -356,6 +356,12 @@ class OracleCypherCompiler(SqlCypherCompiler):
         return self.shared1(json, text)
 
     aggregates_case_subqueries = False
+
+    extremes_by_list_key = False
+    """
+    Oracle's JSON orders lists item by item already, and a grouped `KEEP (DENSE_RANK FIRST ORDER BY …)` by the list key
+    drops the connection (ORA-03113), as drivine4j found.
+    """
     """`collect(CASE WHEN … THEN [r] ELSE [m.title] END)` fails with ORA-00979, or closes the session: see
     `_cases_first`."""
 

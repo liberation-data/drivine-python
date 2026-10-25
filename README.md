@@ -657,7 +657,10 @@ raises `DrivineError` there rather than on first use. Without pi-pilgrim, enforc
   FalkorDB doesn't refuse one: it builds it in the background and lists the build as FAILED. Drivine then drops the
   failed constraint, which enforces nothing, and reads the data: a key held more than once is a VIOLATION, as in
   drivine4j, with an empty sample at sample size 0, and a build that fails with no key held more than once raises.
-  Once the data is clean, `ensure` makes the constraint. `drop` also removes a constraint FalkorDB failed to build.
+  Once the data is clean, `ensure` makes the constraint. A constraint FalkorDB already lists as FAILED, or still
+  UNDER CONSTRUCTION (another process's build, or an earlier run's), is not taken as ALREADY_MATCHING: one under
+  construction is waited on, and matches once built, and a failed one is dropped and made again. `drop` also removes a
+  constraint FalkorDB failed to build.
   `mode="FAIL_FAST"`, the default, raises on either; `"WARN"` logs.
 - **Versions.** `catalog.with_version("2")` recreates the catalog's items once, the first time it is enforced. Items an
   owner applied before and no longer declares are reported, never dropped. Each owner's version and inventory are kept

@@ -162,6 +162,8 @@ def test_a_sum_writes_a_side_the_statement_makes_a_text_as_its_own_text_and_one_
     assert writes("MATCH (c:Claim) RETURN c.s + 'b'") == once
     assert writes("MATCH (c:Claim) RETURN toUpper(c.s) + c.f") == once
     assert writes("MATCH (c:Claim) RETURN 'x' + toString(c.i) + c.f") == 2 * once
+    # A text put together with a number given, on either side, is a text.
+    assert writes("MATCH (c:Claim) RETURN 1 + toUpper(c.s) + 'x', toUpper(c.s) + 2.5 + 'x'") == 0
     # A CASE, a coalesce and a list written are a text, or hold texts, where each of theirs is; a text unwound is one.
     assert (
         writes(
@@ -187,11 +189,23 @@ def test_a_sum_writes_a_side_the_statement_makes_a_text_as_its_own_text_and_one_
         )
         == 0
     )
+    # A CASE and a CALL's UNION hold texts where each of theirs does, and not where one may hold a float.
+    case = (
+        "MATCH (c:Claim) WITH collect(toUpper(c.s)) AS ts, collect(c.f) AS fs "
+        "RETURN (CASE WHEN size(ts) > 1 THEN ts ELSE {} END)[0] + 'x'"
+    )
+    assert writes(case.format("['a']")) == 0
+    assert writes(case.format("fs")) == once
+    union = (
+        "MATCH (c:Claim) CALL {{ WITH c RETURN split(c.s, ',') AS v UNION WITH c RETURN {} AS v }} RETURN v[0] + 'x'"
+    )
+    assert writes(union.format("['n']")) == 0
+    assert writes(union.format("[c.f]")) == once
     # Joined to texts, too: the join writes its sides as any `+` does, and its item, added to a text, is written as it
     # is.
     joined = (
         "MATCH (c:Claim) WITH collect(toUpper(c.s)) AS ts, collect(c.f) AS fs "
-        "RETURN (ts + ['a'])[0], ('b' + ts)[0], (ts + fs)[0]"
+        "RETURN (ts + ['a'])[0], (ts + 'a')[0], ('b' + ts)[0], (ts + fs)[0]"
     )
     assert writes(joined.replace("[0],", "[0] + 'x',")) == writes(joined)
     assert writes(f"{joined} + 'x'") == writes(joined) + once

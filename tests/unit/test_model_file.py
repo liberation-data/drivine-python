@@ -478,7 +478,7 @@ def test_a_view_that_leads_to_a_refused_view_is_named_and_left_out_not_written_w
 ):
     """
     A current entry refers only to current ones. In a cycle the registry keeps A, built while B was, though B is then
-    refused, so A is left out by the reader, and named.
+    refused, so A is left out by the reader, and named, and so is C, which refers to A.
     """
     (names,) = modules(
         cycle="""
@@ -501,6 +501,10 @@ def test_a_view_that_leads_to_a_refused_view_is_named_and_left_out_not_written_w
         class A(GraphView):
             good: Annotated[Good, Root()]
             b: Annotated[list[B], Relationship("R")]
+
+        class C(GraphView):
+            good: Annotated[Good, Root()]
+            a: Annotated[list[A], Relationship("R")]
         """
     )
     warnings: list[str] = []
@@ -509,3 +513,4 @@ def test_a_view_that_leads_to_a_refused_view_is_named_and_left_out_not_written_w
     assert [it["name"] for it in file["fragments"]] == ["Good"]
     assert file["views"] == []
     assert f"Drivine model file: {names}.A: refers to {names}.B, which is left out." in warnings
+    assert f"Drivine model file: {names}.C: refers to {names}.A, which is left out." in warnings

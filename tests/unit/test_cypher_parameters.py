@@ -66,6 +66,36 @@ def test_on_oracle_a_procedure_reads_its_parameters_extended_only_where_they_hol
     assert "EXTENDED" not in PostgresCypherCompiler("g").compile("RETURN $f", {"f": 2.0}).sql
 
 
+def test_on_oracle_a_write_binds_its_parameters_as_text_and_reads_extended_only_those_that_hold_a_whole_float():
+    # As drivine4j's OracleParameterTextTest: a JSON variable of the parameters, read once for each row, crashed
+    # Oracle's session past 32 KB (#131).
+    compiled = OracleCypherCompiler("g").compile(
+        "MATCH (n) SET n.a = $a, n.f = $f, n.p = $p.x", {"a": "x", "f": 2.0, "p": {"x": [1.0]}}
+    )
+    sql = compiled.sql
+    assert "cy_params CLOB :=" in sql and "cy_params JSON" not in sql, sql
+    assert "JSON_QUERY(cy_params, '$.a' RETURNING JSON)" in sql, sql
+    assert "JSON_QUERY(cy_params, '$.a' RETURNING CLOB)" not in sql, sql
+    for key in ("f", "p"):
+        assert f"JSON(JSON_QUERY(cy_params, '$.{key}' RETURNING CLOB) EXTENDED)" in sql, sql
+    assert (
+        compiled.parameters["_cy_params"] == '{"a":"x","f":{"$numberDouble":"2.0"},"p":{"x":[{"$numberDouble":"1.0"}]}}'
+    )
+
+
+def test_on_oracle_a_write_reads_extended_only_a_parameter_named_so_not_a_key_of_another_of_that_name():
+    # A key of a map parameter named as a parameter that holds a whole float is read from that map, as JSON.
+    sql = OracleCypherCompiler("g").compile("MATCH (n) SET n.a = $p.f, n.f = $f", {"f": 2.0, "p": {"f": "y"}}).sql
+    assert "JSON(JSON_QUERY(cy_params, '$.f' RETURNING CLOB) EXTENDED)" in sql, sql
+    assert "'$.p' RETURNING CLOB" not in sql and "'$.f' RETURNING JSON" in sql, sql
+    # A parameter keyed as extended JSON's are keeps a whole float beside it from being written as extended JSON.
+    compiled = OracleCypherCompiler("g").compile(
+        "MATCH (n) SET n.m = $m.x, n.f = $f", {"f": 2.0, "m": {"$numberLong": "5", "x": 1}}
+    )
+    assert "EXTENDED" not in compiled.sql, compiled.sql
+    assert compiled.parameters["_cy_params"] == '{"f":2.0,"m":{"$numberLong":"5","x":1}}'
+
+
 def test_on_oracle_a_whole_float_of_a_float_subclass_is_written_as_json_writes_its_number():
     # As numpy's float64 is: its repr, np.float64(2.0), is no number Oracle reads.
     class Float(float):

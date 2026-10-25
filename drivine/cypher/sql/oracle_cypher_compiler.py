@@ -68,6 +68,8 @@ class OracleCypherCompiler(SqlCypherCompiler):
         A map parameter `{"$numberDouble": "2.0"}` is written as the same text as the float 2.0. Each text is kept, so
         its id is no other's.
         """
+        self._extended_parameters: set[str] = set()
+        """The names of a procedure's parameters that hold a float as extended JSON writes one: see `property_of`."""
 
     def literal_json(self, value: Any) -> str:
         if isinstance(value, float):
@@ -87,8 +89,9 @@ class OracleCypherCompiler(SqlCypherCompiler):
         `{"$numberDouble": "2.0"}`, which `JSON(… EXTENDED)` reads as one: Oracle reads JSON's `2.0` as the number 2, a
         whole number, as it reads `2`. Not in a value that holds a map with a key as extended JSON's are,
         `{"$numberLong": "5"}`, which `JSON(… EXTENDED)` would read as the value it writes: such a value is written as
-        JSON is, its floats that are whole numbers read as whole numbers. A statement that writes reads all its
-        parameters as one value.
+        JSON is, its floats that are whole numbers read as whole numbers. A statement that writes binds all its
+        parameters as one text, and reads as extended JSON only those of them with such a double in them: see
+        `property_of`.
         """
         tree = jsonable(value)
         if _keyed_as_extended(tree):
@@ -108,9 +111,15 @@ class OracleCypherCompiler(SqlCypherCompiler):
                 return [doubles(item) for item in cast(list[Any], it)]
             return it
 
-        text = json_text(doubles(tree))
+        written = doubles(tree)
+        text = json_text(written)
         if doubled:
             self._extended[id(text)] = text
+            # A procedure's parameters are one map: those of its entries with a double in them are read as extended
+            # JSON.
+            if isinstance(written, dict):
+                entries = cast(dict[str, Any], written)
+                self._extended_parameters.update(key for key, item in entries.items() if _keyed_as_extended(item))
         return text
 
     def parameter_count(self, marker: str) -> str:
@@ -173,6 +182,15 @@ class OracleCypherCompiler(SqlCypherCompiler):
         return f"JSON_TRANSFORM({json}, {', '.join(f'SET {_path(key)} = {value}' for key, value in entries)})"
 
     def property_of(self, json: str, key: str) -> str:
+        """
+        A procedure's parameter is read from the text its parameters are bound as, each where it is read, and one that
+        holds a double as extended JSON (see `parameter_text`) from its own text, as extended JSON. Oracle crashes the
+        session (ORA-07445 `ksmem_malloc`, then ORA-00600 `kghfrempty:ds`) where a statement run more than once reads a
+        value past 32 KB from JSON it parsed, a `JSON` variable or `JSON(… EXTENDED)` of all the parameters, and not
+        from the text.
+        """
+        if json == PARAMS and key in self._extended_parameters:
+            return f"JSON(JSON_QUERY({PARAMS}, {_path(key)} RETURNING CLOB) EXTENDED)"
         return f"JSON_QUERY({json}, {_path(key)} RETURNING JSON)"
 
     def element(self, json: str, index: str) -> str:
@@ -576,7 +594,8 @@ class OracleCypherCompiler(SqlCypherCompiler):
         """An anonymous block, which returns its rows as an implicit result."""
         declared = [
             "DECLARE",
-            f"    {PARAMS} JSON := JSON(${OBJECT}{' EXTENDED' if self._extended else ''});",
+            # Text, read as JSON where each parameter is read: see `property_of`.
+            f"    {PARAMS} CLOB := ${OBJECT};",
             f"    {ROWS} JSON;",
             f"    {OUT} JSON;",
             f"    {ROW} JSON;",

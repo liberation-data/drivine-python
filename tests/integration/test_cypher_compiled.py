@@ -333,6 +333,30 @@ async def test_a_cypher_statement_that_writes_is_not_read_through_a_cursor_on_or
         await factory.get("oracle").open_cursor(cursor_spec)
 
 
+@pytest.mark.skipif(not ORACLE, reason="Oracle isn't configured: set ORACLE_TESTS=true.")
+async def test_a_text_past_32_kb_set_on_two_nodes_beside_a_whole_float_or_not_leaves_the_session_open(
+    factory: PersistenceManagerFactory,
+):
+    # Oracle crashed the session as the block freed its parameters, held in a JSON variable it had read once for each
+    # row (#131). The crash could come after the rows did, so the session is asked again, on the one connection a
+    # transaction holds; and a block parsed before rarely crashed, so each statement is new. The nodes are read back
+    # whole: see "A parameter past 32 KB set on two nodes" in the spec.
+    pm = factory.get("oracle")
+    await clear(pm)
+    text = "x" * 40_000
+    written: dict[str, Any] = {}
+    async with transaction(rollback=True):
+        await pm.query(spec("CREATE (:CyWrite {id: 1}), (:CyWrite {id: 2})"))
+        for i in range(3):
+            await pm.query(spec(f"MATCH (n:CyWrite) SET n.a{i} = $a{i}", {f"a{i}": text}))
+            await pm.query(
+                spec(f"MATCH (n:CyWrite) SET n.b{i} = $b{i}, n.f{i} = $f{i}", {f"b{i}": text, f"f{i}": 2.0 + i})
+            )
+            written |= {f"a{i}": text, f"b{i}": text, f"f{i}": 2.0 + i}
+            rows = await pm.query(spec("MATCH (n:CyWrite) RETURN properties(n) ORDER BY n.id"))
+            assert rows == [{"id": it, **written} for it in (1, 2)]
+
+
 async def seeded(pm: PersistenceManager) -> None:
     """The graph queries.yaml reads, written again."""
     await clear(pm)

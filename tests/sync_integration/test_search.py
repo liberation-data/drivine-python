@@ -298,6 +298,31 @@ class TestLoadMatchingBound:
         assert [it.value.id for it in kept] == ["z2"]
 
 
+@pytest.fixture
+def reviewed_and_draft(gom: StatelessGraphObjectManager) -> None:
+    """
+    A draft that is only a Story outranks a ReviewedStory on every scorer: it holds the word three times to the
+    other's once. Both are in Story's index, over MatchStory.
+    """
+    ensure_ranked_index(gom)
+    gom.save_all([Story(id="draft", body="zebra zebra zebra")])
+    gom.save_all([ReviewedStory(id="reviewed", body="zebra")])
+    if gom.persistence_manager.type == DatabaseType.NEO4J:
+        gom.persistence_manager.execute(QuerySpecification("CALL db.awaitIndexes(30)"))
+
+
+@pytest.mark.usefixtures("reviewed_and_draft")
+class TestLoadMatchingScale:
+    def test_scales_by_the_best_hit_with_every_root_label_on_every_store(self, gom):
+        # The draft is no ReviewedStory, so it is dropped before the hits are scaled: the reviewed story scores 1, as
+        # the best hit the search can return, on the graph engines and the SQL stores alike.
+        reviewed = gom.load_matching(ReviewedStory, "zebra", top_k=5)
+        assert [it.value.id for it in reviewed] == ["reviewed"]
+        assert reviewed[0].score == pytest.approx(1.0)
+        kept = gom.load_matching(ReviewedStory, "zebra", top_k=5, threshold=0.99)
+        assert [it.value.id for it in kept] == ["reviewed"]
+
+
 LAST = "z-last"
 """A story far longer than the others, so the index ranks it last of them."""
 

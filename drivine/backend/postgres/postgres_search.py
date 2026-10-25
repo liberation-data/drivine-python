@@ -89,10 +89,13 @@ class PostgresSearch:
         occurrences = " + ".join(count(it) for it in query.scored)
         conditions = [*(f"{count(it)} > 0" for it in query.required), *(f"{count(it)} = 0" for it in query.excluded)]
         filtered = f" WHERE {' AND '.join(conditions)}" if conditions else ""
+        # Narrowed by the root's every label before the scale, so the best of it is a hit the search can return.
+        root = target.root if isinstance(target, GraphViewModel) else target
+        labels = [search.label, *(it for it in root.labels if it != search.label)]
         candidates = (
             "SELECT h.nid, CAST(h.hit_count AS double precision) / MAX(h.hit_count) OVER () AS score FROM ("
             f"SELECT x.nid, {occurrences} AS hit_count FROM (SELECT c.nid, {text} AS text FROM {self.graph.nodes} c "
-            f"WHERE {' AND '.join([has_labels('c', [search.label]), *narrowed])}) x{filtered}) h WHERE h.hit_count > 0"
+            f"WHERE {' AND '.join([has_labels('c', labels), *narrowed])}) x{filtered}) h WHERE h.hit_count > 0"
         )
         return self._scored(target, candidates, search.where, search.threshold, search.limit, search.depth, bindings)
 

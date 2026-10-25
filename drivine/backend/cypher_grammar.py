@@ -83,13 +83,15 @@ def _memgraph_full_text_search(label: str, properties: Sequence[str]) -> str:
 
 
 def _memgraph_vector_search(label: str, property: str, similarity: SimilarityFunction) -> tuple[str, str]:
-    # Memgraph's similarity is the cosine itself, or already 1 / (1 + d²). Its vector search returns nodes deleted since
-    # its last garbage collection, and any read of one fails ('Trying to access labels on a deleted node') until it
-    # collects: FREE MEMORY forces it (memgraph/memgraph#4975).
+    # Memgraph's distance is 1 - cos, or d². Its similarity is not read: for a cos index it is the absolute value of
+    # 1 - distance, so a cosine of -0.6 would score as 0.6 does, and opposite vectors as equal ones
+    # (memgraph/memgraph#5199). Its vector search returns nodes deleted since its last garbage collection, and any read
+    # of one fails ('Trying to access labels on a deleted node') until it collects: FREE MEMORY forces it
+    # (memgraph/memgraph#4975).
     name = quote_string(_vector_index_name(label, property))
     return (
-        f"CALL vector_search.search({name}, $_k, $_vector) YIELD node AS n, similarity AS _raw",
-        "(1 + _raw) / 2.0" if similarity == "COSINE" else "_raw",
+        f"CALL vector_search.search({name}, $_k, $_vector) YIELD node AS n, distance AS _raw",
+        "1 - _raw / 2.0" if similarity == "COSINE" else "1.0 / (1 + _raw)",
     )
 
 

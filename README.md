@@ -715,6 +715,10 @@ found = await gom.load_matching(Chunk, "graph AND database", top_k=10, threshold
 
 - **One scale on every engine.** A nearest score is a similarity, higher nearer: (1 + cos) / 2 for cosine, 1 / (1 + d²)
   for euclidean. A matching score is scaled so that the best hit is 1.
+- **Memgraph's cosine scores are read from its distance**, not its similarity, which is the absolute value of
+  1 - distance (memgraph/memgraph#5199). Earlier releases read the similarity, so a vector more than 90 degrees from
+  the query scored as its mirror image does: a cosine of -0.6 as 0.8, not 0.2. Those scores, and the hits a cosine
+  `threshold` keeps, change; positive cosines and euclidean scores don't.
 - **Filters apply after the search:** `threshold`, `where`, and a view's required relationships. So a search can return
   fewer than `top_k`; `search_k` asks the index for more, and `top_k` trims after the filter.
 - `property` names the field to search when a fragment declares more than one index; `partition_label` searches the

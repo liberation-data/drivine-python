@@ -184,3 +184,28 @@ def test_a_fragment_over_fetches_for_its_labels_beyond_the_first():
 
     assert cut(text) == 8 * FILTERED_OVER_FETCH
     assert "MATCH (n) WHERE n:Article:Reviewed" in text, text
+
+
+class ReviewedArticleView(GraphView):
+    """A view rooted on a fragment of two labels."""
+
+    article: Annotated[ReviewedArticle, Root()]
+    authors: Annotated[list[Author], Relationship("WROTE", Direction.INCOMING)] = []
+
+
+@pytest.mark.parametrize("type_", [ReviewedArticle, ReviewedArticleView], ids=lambda it: it.__name__)
+@pytest.mark.parametrize("grammar", ENGINES, ids=lambda it: it.engine)
+def test_a_root_of_more_labels_is_checked_for_them_before_its_hits_are_cut_or_scaled(
+    type_: type[Any], grammar: CypherGrammar
+):
+    # The best of the scale is a hit the search can return. The check is a WITH of its own: FalkorDB and Memgraph take
+    # no WHERE before an ORDER BY in one.
+    text = search(type_, grammar=grammar)
+
+    assert "YIELD node, score\nWITH node, score WHERE node:Article:Reviewed\nWITH node, score\nORDER BY" in text, text
+    assert cut(text) == 8 * FILTERED_OVER_FETCH
+
+
+@pytest.mark.parametrize("type_", [Article, ArticleView], ids=lambda it: it.__name__)
+def test_a_root_of_one_label_has_its_hits_cut_with_no_label_check(type_: type[Any]):
+    assert "WHERE node:" not in search(type_)

@@ -127,6 +127,93 @@ def test_a_sum_writes_a_side_as_to_string_writes_a_float_only_where_the_statemen
     assert writes("MATCH (c:Claim) RETURN c.a + $n", {"n": float("nan")}) == 2 * once
 
 
+@pytest.mark.parametrize(
+    ("compiler", "written"), [(PostgresCypherCompiler, "to_char("), (OracleCypherCompiler, "TO_CHAR(")]
+)
+def test_a_sum_writes_a_side_the_statement_makes_a_text_as_its_own_text_and_one_that_may_be_a_float_as_to_string(
+    compiler: type[SqlCypherCompiler], written: str
+) -> None:
+    # Written as toString writes a float, a side that is always a text made `count('x' + toString(i))` 2.5 times as slow
+    # on Oracle (drivine4j#268).
+    def writes(cypher: str) -> int:
+        return compiler("g").compile(cypher).sql.count(written)
+
+    # toString writes its float once, and the sum writes the text it gives as it is.
+    once = writes("MATCH (c:Claim) RETURN toString(c.i)")
+    assert once > 0
+    assert writes("MATCH (c:Claim) RETURN 'x' + toString(c.i)") == once
+    assert (
+        writes(
+            "MATCH (c:Claim) RETURN 'a' + toUpper(c.s), trim(c.s) + substring(c.s, 1) + left(c.s, 2) "
+            "+ replace(c.s, 'a', 'b')"
+        )
+        == 0
+    )
+    assert writes("MATCH (c:Claim)-[r]->() RETURN split(c.s, ',')[0] + reverse(toLower(c.s)) + type(r)") == 0
+    # Carried through a WITH, a collect and an UNWIND, still a text.
+    assert (
+        writes(
+            "MATCH (c:Claim) WITH toLower(c.s) AS t, collect(toUpper(c.s)) AS ts UNWIND ts AS u "
+            "RETURN t + u + ts[0] + head(ts)"
+        )
+        == 0
+    )
+    # A property may hold a float: it is written as toString writes it, beside a text or not.
+    assert writes("MATCH (c:Claim) RETURN c.s + 'b'") == once
+    assert writes("MATCH (c:Claim) RETURN toUpper(c.s) + c.f") == once
+    assert writes("MATCH (c:Claim) RETURN 'x' + toString(c.i) + c.f") == 2 * once
+    # A CASE, a coalesce and a list written are a text, or hold texts, where each of theirs is; a text unwound is one.
+    assert (
+        writes(
+            "MATCH (c:Claim) RETURN CASE WHEN c.b THEN toUpper(c.s) ELSE 'n' END + coalesce(toLower(c.s), 'z') "
+            "+ ['a', toUpper(c.s)][1]"
+        )
+        == 0
+    )
+    assert writes("MATCH (c:Claim) RETURN ltrim(c.s) + rtrim(c.s) + right(c.s, 2)") == 0
+    assert writes("MATCH (c:Claim) UNWIND toUpper(c.s) AS u RETURN u + 'x'") == 0
+    # A list of texts kept distinct, sliced, its tail, its last, and an item an expression names, still holds texts.
+    assert (
+        writes(
+            "MATCH (c:Claim) WITH collect(DISTINCT toUpper(c.s)) AS ts "
+            "RETURN last(ts) + ts[1..][0] + tail(ts)[0] + ts[size(ts) - 1]"
+        )
+        == 0
+    )
+    assert (
+        writes(
+            "MATCH (c:Claim) WITH collect(toUpper(c.s)) AS ts "
+            "RETURN reverse(ts)[0] + coalesce(ts, split('a,b', ','))[0]"
+        )
+        == 0
+    )
+    # Joined to texts, too: the join writes its sides as any `+` does, and its item, added to a text, is written as it
+    # is.
+    joined = (
+        "MATCH (c:Claim) WITH collect(toUpper(c.s)) AS ts, collect(c.f) AS fs "
+        "RETURN (ts + ['a'])[0], ('b' + ts)[0], (ts + fs)[0]"
+    )
+    assert writes(joined.replace("[0],", "[0] + 'x',")) == writes(joined)
+    assert writes(f"{joined} + 'x'") == writes(joined) + once
+    # Each query of a CALL's UNION makes it a text, and a write carries it on.
+    assert (
+        writes("MATCH (c:Claim) CALL { WITH c RETURN toUpper(c.s) AS v UNION WITH c RETURN 'n' AS v } RETURN v + 'x'")
+        == 0
+    )
+    assert writes("MATCH (c:Claim) WITH c, toUpper(c.s) AS t SET c.t = t RETURN t + 'x'") == 0
+    # Where any one of them may be a float, it is written as toString writes it.
+    assert writes("MATCH (c:Claim) RETURN CASE WHEN c.b THEN 'a' ELSE c.f END + 'x'") == once
+    assert writes("MATCH (c:Claim) RETURN coalesce(toUpper(c.s), c.f) + 'x'") == once
+    assert writes("MATCH (c:Claim) RETURN ['a', c.f][1] + 'x'") == once
+    assert (
+        writes("MATCH (c:Claim) CALL { WITH c RETURN toUpper(c.s) AS v UNION WITH c RETURN c.f AS v } RETURN v + 'x'")
+        == once
+    )
+    # The least and the greatest of texts are a text; of a property, which may hold a float, not.
+    assert writes("MATCH (c:Claim) WITH min(toUpper(c.s)) AS lo, max(toLower(c.s)) AS hi RETURN lo + hi + 'x'") == 0
+    assert writes("MATCH (c:Claim) WITH max(c.f) AS hi RETURN hi + 'x'") == once
+
+
 def test_a_sort_by_a_property_on_postgres_is_by_its_json_alone_and_only_a_list_the_statement_makes_is_keyed_as_a_list():
     # Keyed as a list, a term costs thousands a row in the planner's estimate, which brings in its JIT for the whole
     # statement past a few dozen rows (drivine4j#223).

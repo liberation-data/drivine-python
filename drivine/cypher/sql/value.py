@@ -25,6 +25,11 @@ class Json:
     """Whether the statement makes it a list, and with `item_lists` a list of lists: a store may sort a list as Cypher
     does only then."""
     item_lists: bool = False
+    text: bool = False
+    """Whether the statement makes it a text or null (a text written, `toString`, a string function, a `+` of texts),
+    and with `texts` a list whose every item is: a `+` writes such a side as its own text, not as `toString` writes a
+    float."""
+    texts: bool = False
 
 
 @dataclass(frozen=True)

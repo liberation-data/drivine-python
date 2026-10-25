@@ -32,6 +32,8 @@ await gom.load_all(RaisedAndAssignedIssue, [q.issue.state.eq("open"), q.raised_b
 
 `sample_refs.py` is drivine's `refs` at run time, and `sample_refs.pyi` types each field from the models, so pyright and
 mypy reject `q.issue.titel` or `q.issue.id.eq("123")`. drivine's stub generator, `python -m drivine.stubs`, writes both.
+It writes the model file too, [`.drivine/model.json`](.drivine/model.json), which Drivine Studio reads: see the
+[model file](../README.md#the-model-file).
 
 The build runs it, so the files always match the models. `pyproject.toml` names `build.py` as Poetry's build script,
 which `poetry install` and `poetry build` both run:

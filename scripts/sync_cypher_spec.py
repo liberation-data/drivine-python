@@ -23,7 +23,16 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 SPEC = ROOT / "tests" / "cypher"
 REPOSITORY = "liberation-data/drivine-cypher-spec"
-FILES = ("queries.yaml", "writes.yaml", "temporal.yaml", "refusals.yaml", "README.md")
+FILES = (
+    "queries.yaml",
+    "writes.yaml",
+    "temporal.yaml",
+    "refusals.yaml",
+    "README.md",
+    "model/schema.json",
+    "model/README.md",
+)
+"""The spec's cases, and the model file's format, which the stubs step writes to."""
 
 
 def fetch(url: str) -> bytes:
@@ -57,6 +66,7 @@ def main() -> int:
     args = parser.parse_args()
 
     for name, content in spec(args.tag).items():
+        (SPEC / name).parent.mkdir(parents=True, exist_ok=True)
         (SPEC / name).write_bytes(content)
     (SPEC / "VERSION").write_text(f"{args.tag}\n")
     print(f"tests/cypher is now {REPOSITORY}@{args.tag}.")

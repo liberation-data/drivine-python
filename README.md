@@ -482,6 +482,25 @@ relationship leads to the fields of the nodes it reaches, with `any` and `none`.
 `refs`, so nothing changes but what the checker knows. Several modules can share one: `python -m drivine.stubs
 myapp.models myapp.billing --out myapp/query_refs.py`.
 
+### The model file
+
+The same step writes `.drivine/model.json` beside your `pyproject.toml`: your fragments, relationship fragments and
+views, and how each is stored, in the [format](https://github.com/liberation-data/drivine-cypher-spec/tree/main/model)
+drivine4j and Drivine (TypeScript) write too. [Drivine Studio](https://github.com/liberation-data/drivine-studio)
+reads it to browse your model and load it, with the Cypher a load runs, without your application running.
+
+It is read from the models ModelRegistry builds of your classes, so it says what a load does: each class's id is its
+module and name (`myapp.models.Person`), each field's stored name is the one a save writes (`created_at` as
+`createdAt`), and its type is read from its annotation. A class the registry refuses is named, and left out.
+
+Keep the file in source control, as you would a lock file: a change to the model shows in review, and `--check` in CI
+fails when it is stale. A class you remove stays in the file, marked `"removed": true`, as the store may still hold
+its nodes; delete the entry by hand once it doesn't. The file is written only when it changes. `--no-model`, or
+`model = false` under `[tool.drivine]` in `pyproject.toml`, writes none; a module in no project, with no
+`pyproject.toml` above it, gets none either.
+
+The sample's file is [`sample/.drivine/model.json`](sample/.drivine/model.json).
+
 ### Grouped reads
 
 Group a fragment's nodes by keys, with numbers about each group, in one statement:

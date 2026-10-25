@@ -1,0 +1,694 @@
+{
+  "$comment": "Drivine model file: this module's fragments, relationship fragments and views, written by the build. Drivine Studio reads it to browse the model and query the data. Keep it in source control: the build rewrites it when the model changes, and CI checks that it is current. Format: https://github.com/liberation-data/drivine-cypher-spec/tree/main/model",
+  "format": "drivine-model/1",
+  "generator": {
+    "library": "drivine-python",
+    "version": "0.1.0",
+    "language": "python"
+  },
+  "module": "drivine-sample",
+  "fragments": [
+    {
+      "id": "drivine_sample.fragment.anonymous_web_user.AnonymousWebUser",
+      "name": "AnonymousWebUser",
+      "labels": [
+        "Anonymous",
+        "WebUser"
+      ],
+      "nodeId": "uuid",
+      "subtypesComplete": false,
+      "properties": [
+        {
+          "name": "anonymous_token",
+          "stored": "anonymousToken",
+          "type": "string",
+          "nullable": false,
+          "source": "str"
+        },
+        {
+          "name": "display_name",
+          "stored": "displayName",
+          "type": "string",
+          "nullable": false,
+          "source": "str"
+        },
+        {
+          "name": "uuid",
+          "stored": "uuid",
+          "type": "string",
+          "nullable": false,
+          "source": "str"
+        }
+      ]
+    },
+    {
+      "id": "drivine_sample.fragment.chunk_node.ChunkNode",
+      "name": "ChunkNode",
+      "labels": [
+        "ContentElement",
+        "Chunk"
+      ],
+      "nodeId": "id",
+      "subtypesComplete": false,
+      "properties": [
+        {
+          "name": "container_section_id",
+          "stored": "container_section_id",
+          "type": "string",
+          "nullable": true,
+          "source": "str"
+        },
+        {
+          "name": "id",
+          "stored": "id",
+          "type": "string",
+          "nullable": false,
+          "source": "str"
+        },
+        {
+          "name": "text",
+          "stored": "text",
+          "type": "string",
+          "nullable": false,
+          "source": "str"
+        }
+      ]
+    },
+    {
+      "id": "drivine_sample.fragment.github_person.GithubPerson",
+      "name": "GithubPerson",
+      "labels": [
+        "Person",
+        "Mapped",
+        "GithubPerson"
+      ],
+      "nodeId": "uuid",
+      "subtypesComplete": false,
+      "properties": [
+        {
+          "name": "bio",
+          "stored": "bio",
+          "type": "string",
+          "nullable": true,
+          "source": "str"
+        },
+        {
+          "name": "github_id",
+          "stored": "githubId",
+          "type": "string",
+          "nullable": false,
+          "source": "str"
+        },
+        {
+          "name": "name",
+          "stored": "name",
+          "type": "string",
+          "nullable": false,
+          "source": "str"
+        },
+        {
+          "name": "uuid",
+          "stored": "uuid",
+          "type": "string",
+          "nullable": false,
+          "source": "str"
+        }
+      ]
+    },
+    {
+      "id": "drivine_sample.fragment.guide_user.GuideUser",
+      "name": "GuideUser",
+      "labels": [
+        "GuideUser"
+      ],
+      "nodeId": "uuid",
+      "subtypesComplete": false,
+      "properties": [
+        {
+          "name": "guide_progress",
+          "stored": "guideProgress",
+          "type": "int",
+          "nullable": false,
+          "source": "int"
+        },
+        {
+          "name": "uuid",
+          "stored": "uuid",
+          "type": "string",
+          "nullable": false,
+          "source": "str"
+        }
+      ]
+    },
+    {
+      "id": "drivine_sample.fragment.issue_core.IssueCore",
+      "name": "IssueCore",
+      "labels": [
+        "Issue"
+      ],
+      "nodeId": "uuid",
+      "subtypesComplete": false,
+      "properties": [
+        {
+          "name": "body",
+          "stored": "body",
+          "type": "string",
+          "nullable": true,
+          "source": "str"
+        },
+        {
+          "name": "id",
+          "stored": "id",
+          "type": "int",
+          "nullable": false,
+          "source": "int"
+        },
+        {
+          "name": "locked",
+          "stored": "locked",
+          "type": "boolean",
+          "nullable": false,
+          "source": "bool"
+        },
+        {
+          "name": "state",
+          "stored": "state",
+          "type": "string",
+          "nullable": true,
+          "source": "str"
+        },
+        {
+          "name": "state_reason",
+          "stored": "stateReason",
+          "type": "enum",
+          "values": [
+            "COMPLETED",
+            "NOT_PLANNED",
+            "REOPENED",
+            "UNKNOWN"
+          ],
+          "nullable": true,
+          "source": "IssueStateReason"
+        },
+        {
+          "name": "title",
+          "stored": "title",
+          "type": "string",
+          "nullable": true,
+          "source": "str"
+        },
+        {
+          "name": "uuid",
+          "stored": "uuid",
+          "type": "string",
+          "nullable": false,
+          "source": "str"
+        }
+      ]
+    },
+    {
+      "id": "drivine_sample.fragment.oddly_stored.OddlyStored",
+      "name": "OddlyStored",
+      "labels": [
+        "OddlyStored"
+      ],
+      "nodeId": "id",
+      "subtypesComplete": false,
+      "properties": [
+        {
+          "name": "greeting",
+          "stored": "say \"hi\"",
+          "type": "string",
+          "nullable": true,
+          "source": "str"
+        },
+        {
+          "name": "id",
+          "stored": "id",
+          "type": "string",
+          "nullable": false,
+          "source": "str"
+        },
+        {
+          "name": "path",
+          "stored": "back\\slash",
+          "type": "string",
+          "nullable": true,
+          "source": "str"
+        },
+        {
+          "name": "price",
+          "stored": "price$usd",
+          "type": "float",
+          "nullable": true,
+          "source": "float"
+        },
+        {
+          "name": "rate",
+          "stored": "rate%",
+          "type": "float",
+          "nullable": true,
+          "source": "float"
+        }
+      ]
+    },
+    {
+      "id": "drivine_sample.fragment.organization.Organization",
+      "name": "Organization",
+      "labels": [
+        "Organization"
+      ],
+      "nodeId": "uuid",
+      "subtypesComplete": false,
+      "properties": [
+        {
+          "name": "name",
+          "stored": "name",
+          "type": "string",
+          "nullable": false,
+          "source": "str"
+        },
+        {
+          "name": "uuid",
+          "stored": "uuid",
+          "type": "string",
+          "nullable": false,
+          "source": "str"
+        }
+      ]
+    },
+    {
+      "id": "drivine_sample.fragment.person.Person",
+      "name": "Person",
+      "labels": [
+        "Person",
+        "Mapped"
+      ],
+      "nodeId": "uuid",
+      "subtypesComplete": false,
+      "properties": [
+        {
+          "name": "bio",
+          "stored": "bio",
+          "type": "string",
+          "nullable": true,
+          "source": "str"
+        },
+        {
+          "name": "name",
+          "stored": "name",
+          "type": "string",
+          "nullable": false,
+          "source": "str"
+        },
+        {
+          "name": "uuid",
+          "stored": "uuid",
+          "type": "string",
+          "nullable": false,
+          "source": "str"
+        }
+      ]
+    },
+    {
+      "id": "drivine_sample.fragment.registered_web_user.RegisteredWebUser",
+      "name": "RegisteredWebUser",
+      "labels": [
+        "Registered",
+        "WebUser"
+      ],
+      "nodeId": "uuid",
+      "subtypesComplete": false,
+      "properties": [
+        {
+          "name": "display_name",
+          "stored": "displayName",
+          "type": "string",
+          "nullable": false,
+          "source": "str"
+        },
+        {
+          "name": "email",
+          "stored": "email",
+          "type": "string",
+          "nullable": false,
+          "source": "str"
+        },
+        {
+          "name": "uuid",
+          "stored": "uuid",
+          "type": "string",
+          "nullable": false,
+          "source": "str"
+        }
+      ]
+    },
+    {
+      "id": "drivine_sample.fragment.sample_article_node.SampleArticleNode",
+      "name": "SampleArticleNode",
+      "labels": [
+        "SampleArticle"
+      ],
+      "nodeId": "id",
+      "subtypesComplete": false,
+      "properties": [
+        {
+          "name": "body",
+          "stored": "body",
+          "type": "string",
+          "nullable": false,
+          "index": "fullText",
+          "source": "str"
+        },
+        {
+          "name": "id",
+          "stored": "id",
+          "type": "string",
+          "nullable": false,
+          "source": "str"
+        }
+      ]
+    },
+    {
+      "id": "drivine_sample.fragment.sample_doc_node.SampleDocNode",
+      "name": "SampleDocNode",
+      "labels": [
+        "SampleDoc"
+      ],
+      "nodeId": "id",
+      "subtypesComplete": false,
+      "properties": [
+        {
+          "name": "embedding",
+          "stored": "embedding",
+          "type": "list",
+          "of": "float",
+          "nullable": true,
+          "vector": {
+            "similarity": "COSINE"
+          },
+          "source": "list[float]"
+        },
+        {
+          "name": "id",
+          "stored": "id",
+          "type": "string",
+          "nullable": false,
+          "source": "str"
+        },
+        {
+          "name": "title",
+          "stored": "title",
+          "type": "string",
+          "nullable": false,
+          "source": "str"
+        }
+      ]
+    },
+    {
+      "id": "drivine_sample.fragment.sample_resolver_node.SampleResolverNode",
+      "name": "SampleResolverNode",
+      "labels": [
+        "SampleResolver"
+      ],
+      "nodeId": "id",
+      "subtypesComplete": false,
+      "bags": [
+        {
+          "field": "metadata",
+          "prefix": "metadata.",
+          "type": "any"
+        }
+      ],
+      "properties": [
+        {
+          "name": "id",
+          "stored": "id",
+          "type": "string",
+          "nullable": false,
+          "source": "str"
+        },
+        {
+          "name": "section_id",
+          "stored": "section_id",
+          "type": "string",
+          "nullable": true,
+          "source": "str"
+        }
+      ]
+    },
+    {
+      "id": "drivine_sample.fragment.stamped_note.StampedNote",
+      "name": "StampedNote",
+      "labels": [
+        "StampedNote"
+      ],
+      "nodeId": "id",
+      "stamp": true,
+      "subtypesComplete": false,
+      "properties": [
+        {
+          "name": "id",
+          "stored": "id",
+          "type": "string",
+          "nullable": false,
+          "source": "str"
+        },
+        {
+          "name": "text",
+          "stored": "text",
+          "type": "string",
+          "nullable": false,
+          "source": "str"
+        }
+      ]
+    },
+    {
+      "id": "drivine_sample.fragment.web_user.WebUser",
+      "name": "WebUser",
+      "labels": [
+        "WebUser"
+      ],
+      "nodeId": "uuid",
+      "subtypes": [
+        "drivine_sample.fragment.anonymous_web_user.AnonymousWebUser",
+        "drivine_sample.fragment.registered_web_user.RegisteredWebUser"
+      ],
+      "subtypesComplete": false,
+      "properties": [
+        {
+          "name": "display_name",
+          "stored": "displayName",
+          "type": "string",
+          "nullable": false,
+          "source": "str"
+        },
+        {
+          "name": "uuid",
+          "stored": "uuid",
+          "type": "string",
+          "nullable": false,
+          "source": "str"
+        }
+      ]
+    }
+  ],
+  "relationshipFragments": [
+    {
+      "id": "drivine_sample.fragment.work_history.WorkHistory",
+      "name": "WorkHistory",
+      "target": {
+        "field": "target",
+        "fragment": "drivine_sample.fragment.organization.Organization"
+      },
+      "properties": [
+        {
+          "name": "role",
+          "stored": "role",
+          "type": "string",
+          "nullable": false,
+          "source": "str"
+        },
+        {
+          "name": "start_date",
+          "stored": "startDate",
+          "type": "string",
+          "nullable": false,
+          "source": "str"
+        },
+        {
+          "name": "tags",
+          "stored": "tags",
+          "type": "list",
+          "of": "string",
+          "nullable": true,
+          "packed": "json",
+          "source": "list[str]"
+        }
+      ]
+    }
+  ],
+  "views": [
+    {
+      "id": "drivine_sample.view.anonymous_guide_user.AnonymousGuideUser",
+      "name": "AnonymousGuideUser",
+      "root": {
+        "field": "core",
+        "fragment": "drivine_sample.fragment.guide_user.GuideUser"
+      },
+      "relationships": [
+        {
+          "field": "web_user",
+          "type": "IS_WEB_USER",
+          "direction": "OUTGOING",
+          "target": "drivine_sample.fragment.anonymous_web_user.AnonymousWebUser",
+          "many": false,
+          "required": true
+        }
+      ]
+    },
+    {
+      "id": "drivine_sample.view.chunk_view.ChunkView",
+      "name": "ChunkView",
+      "root": {
+        "field": "chunk",
+        "fragment": "drivine_sample.fragment.chunk_node.ChunkNode"
+      },
+      "relationships": []
+    },
+    {
+      "id": "drivine_sample.view.guide_user_with_optional_web_user.GuideUserWithOptionalWebUser",
+      "name": "GuideUserWithOptionalWebUser",
+      "root": {
+        "field": "core",
+        "fragment": "drivine_sample.fragment.guide_user.GuideUser"
+      },
+      "relationships": [
+        {
+          "field": "web_user",
+          "type": "IS_WEB_USER",
+          "direction": "OUTGOING",
+          "target": "drivine_sample.fragment.web_user.WebUser",
+          "many": false,
+          "required": false
+        }
+      ]
+    },
+    {
+      "id": "drivine_sample.view.guide_user_with_polymorphic_web_user.GuideUserWithPolymorphicWebUser",
+      "name": "GuideUserWithPolymorphicWebUser",
+      "root": {
+        "field": "core",
+        "fragment": "drivine_sample.fragment.guide_user.GuideUser"
+      },
+      "relationships": [
+        {
+          "field": "web_user",
+          "type": "IS_WEB_USER",
+          "direction": "OUTGOING",
+          "target": "drivine_sample.fragment.web_user.WebUser",
+          "many": false,
+          "required": false
+        }
+      ]
+    },
+    {
+      "id": "drivine_sample.view.guide_user_with_required_web_user.GuideUserWithRequiredWebUser",
+      "name": "GuideUserWithRequiredWebUser",
+      "root": {
+        "field": "core",
+        "fragment": "drivine_sample.fragment.guide_user.GuideUser"
+      },
+      "relationships": [
+        {
+          "field": "web_user",
+          "type": "IS_WEB_USER",
+          "direction": "OUTGOING",
+          "target": "drivine_sample.fragment.web_user.WebUser",
+          "many": false,
+          "required": true
+        }
+      ]
+    },
+    {
+      "id": "drivine_sample.view.person_career.PersonCareer",
+      "name": "PersonCareer",
+      "root": {
+        "field": "person",
+        "fragment": "drivine_sample.fragment.person.Person"
+      },
+      "relationships": [
+        {
+          "field": "employment_history",
+          "type": "WORKS_FOR",
+          "direction": "OUTGOING",
+          "target": "drivine_sample.fragment.work_history.WorkHistory",
+          "many": true,
+          "required": false
+        }
+      ]
+    },
+    {
+      "id": "drivine_sample.view.person_context.PersonContext",
+      "name": "PersonContext",
+      "root": {
+        "field": "person",
+        "fragment": "drivine_sample.fragment.person.Person"
+      },
+      "relationships": [
+        {
+          "field": "works_for",
+          "type": "WORKS_FOR",
+          "direction": "OUTGOING",
+          "target": "drivine_sample.fragment.organization.Organization",
+          "many": true,
+          "required": false
+        }
+      ]
+    },
+    {
+      "id": "drivine_sample.view.raised_and_assigned_issue.RaisedAndAssignedIssue",
+      "name": "RaisedAndAssignedIssue",
+      "root": {
+        "field": "issue",
+        "fragment": "drivine_sample.fragment.issue_core.IssueCore"
+      },
+      "relationships": [
+        {
+          "field": "assigned_to",
+          "type": "ASSIGNED_TO",
+          "direction": "OUTGOING",
+          "target": "drivine_sample.fragment.person.Person",
+          "many": true,
+          "required": false
+        },
+        {
+          "field": "raised_by",
+          "type": "RAISED_BY",
+          "direction": "OUTGOING",
+          "target": "drivine_sample.view.person_context.PersonContext",
+          "many": false,
+          "required": false
+        }
+      ]
+    },
+    {
+      "id": "drivine_sample.view.sample_full_text_view.SampleFullTextView",
+      "name": "SampleFullTextView",
+      "root": {
+        "field": "article",
+        "fragment": "drivine_sample.fragment.sample_article_node.SampleArticleNode"
+      },
+      "relationships": []
+    },
+    {
+      "id": "drivine_sample.view.sample_vector_view.SampleVectorView",
+      "name": "SampleVectorView",
+      "root": {
+        "field": "doc",
+        "fragment": "drivine_sample.fragment.sample_doc_node.SampleDocNode"
+      },
+      "relationships": []
+    }
+  ]
+}

@@ -48,11 +48,8 @@ class StubWriter:
 
     def write(self) -> tuple[str, str]:
         """The runtime module and the stub, as text."""
-        for name in self.modules:
-            module = importlib.import_module(name)
-            for value in list(vars(module).values()):
-                if isinstance(value, type) and value.__module__ == name and self._registry.kind_of(value) is not None:
-                    self._add(value)
+        for type_ in declared(self.modules):
+            self._add(type_)
         if not self._models:
             raise DrivineError(
                 f"{', '.join(self.modules)} declares no NodeFragment, GraphView or RelationshipFragment."
@@ -219,6 +216,20 @@ class StubWriter:
                 line = f"from {module} import (\n" + "".join(f"    {it},\n" for it in sorted(names)) + ")"
             lines.append(line)
         return lines
+
+
+def declared(modules: Sequence[str]) -> list[type]:
+    """
+    The models each module declares, in its own order: a class it imports from elsewhere is that module's, and is
+    reached, if at all, through a model that leads to it.
+    """
+    found: list[type] = []
+    for name in modules:
+        module = importlib.import_module(name)
+        for value in list(vars(module).values()):
+            if isinstance(value, type) and value.__module__ == name and ModelRegistry.kind_of(value) is not None:
+                found.append(value)
+    return found
 
 
 def _prefix(type_: type) -> str:

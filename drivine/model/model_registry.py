@@ -91,6 +91,11 @@ class ModelRegistry:
         self._relationship_fragments: dict[type, RelationshipFragmentModel] = {}
         self._views: dict[type, GraphViewModel] = {}
         self._registered_subtypes: dict[type, list[type]] = {}
+        self._building: list[tuple[dict[type, Any], type]] | None = None
+        """
+        What has been cached since the outermost view being built was asked for: each model's cache and class. A view
+        that fails takes all of them with it, as one built on its account may refer to it.
+        """
 
     # ----- Kinds and subtypes -----
 
@@ -166,22 +171,37 @@ class ModelRegistry:
         if model is None:
             model = self._build_relationship_fragment(type_)
             self._relationship_fragments[type_] = model
+            # It may lead to a view still being built, so it goes if that view fails.
+            if self._building is not None:
+                self._building.append((self._relationship_fragments, type_))
         return model
 
     def view(self, type_: type) -> GraphViewModel:
         model = self._views.get(type_)
-        if model is None:
+        if model is not None:
+            return model
+        outermost = self._building is None
+        building = self._building = [] if outermost else self._building
+        assert building is not None
+        try:
             # Cached before its relationships are resolved, so that a view that refers to itself finds itself.
             model = self._build_view(type_)
             self._views[type_] = model
-            try:
-                for it in model.relationships:
-                    _ = it.related
-                for it in model.paths:
-                    _ = it.target
-            except BaseException:
-                del self._views[type_]
-                raise
+            building.append((self._views, type_))
+            for it in model.relationships:
+                _ = it.related
+            for it in model.paths:
+                _ = it.target
+        except BaseException:
+            # Everything cached while this was built may refer to it: a view that leads back to it, as two views that
+            # refer to each other do. Each is built again, and refused, when it is next asked for.
+            if outermost:
+                for cache, built in building:
+                    cache.pop(built, None)
+            raise
+        finally:
+            if outermost:
+                self._building = None
         return model
 
     # ----- Building -----

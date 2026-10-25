@@ -66,9 +66,10 @@ def _plain_vector(expression: str) -> str:
     return expression
 
 
-def _neo4j_full_text_search(label: str, properties: Sequence[str]) -> str:
+def _neo4j_full_text_search(label: str, properties: Sequence[str], limit: int) -> str:
+    # Asked for its best `limit` hits, so Lucene collects no more than that.
     name = quote_string(_full_text_index_name(label, properties))
-    return f"CALL db.index.fulltext.queryNodes({name}, $_text) YIELD node, score"
+    return f"CALL db.index.fulltext.queryNodes({name}, $_text, {{limit: {limit}}}) YIELD node, score"
 
 
 def _neo4j_vector_search(label: str, property: str, similarity: SimilarityFunction) -> tuple[str, str]:
@@ -77,9 +78,19 @@ def _neo4j_vector_search(label: str, property: str, similarity: SimilarityFuncti
     return f"CALL db.index.vector.queryNodes({name}, $_k, $_vector) YIELD node AS n, score AS _raw", "_raw"
 
 
-def _memgraph_full_text_search(label: str, properties: Sequence[str]) -> str:
+MEMGRAPH_TEXT_SEARCH_LIMIT_CAP = 1_000_000
+"""
+The most hits a full-text call asks Memgraph's `text_search` for. Memgraph allocates the limit up front: 3.14 accepts
+100,000,000 and aborts at 500,000,000, however few hits there are (memgraph/memgraph#5200). A million is far more than a
+search can scale in memory, and far below where the server fails.
+"""
+
+
+def _memgraph_full_text_search(label: str, properties: Sequence[str], limit: int) -> str:
+    # Given the search's index limit, because without one text_search yields its best 1,000 hits and no more.
     name = quote_string(_full_text_index_name(label, properties))
-    return f"CALL text_search.search_all({name}, $_text) YIELD node, score"
+    capped = min(limit, MEMGRAPH_TEXT_SEARCH_LIMIT_CAP)
+    return f"CALL text_search.search_all({name}, $_text, {{limit: {capped}}}) YIELD node, score"
 
 
 def _memgraph_vector_search(label: str, property: str, similarity: SimilarityFunction) -> tuple[str, str]:
@@ -95,8 +106,9 @@ def _memgraph_vector_search(label: str, property: str, similarity: SimilarityFun
     )
 
 
-def _falkordb_full_text_search(label: str, properties: Sequence[str]) -> str:
-    # One full-text index to a label, found by the label.
+def _falkordb_full_text_search(label: str, properties: Sequence[str], limit: int) -> str:
+    # One full-text index to a label, found by the label. The call takes no limit, and has no cap: the hits are cut
+    # after it.
     return f"CALL db.idx.fulltext.queryNodes({quote_string(label)}, $_text) YIELD node, score"
 
 
@@ -148,10 +160,12 @@ class CypherGrammar:
     `n`, and the expression of its score as a similarity, higher nearer, on one scale on every engine: (1 + cos) / 2
     for cosine, 1 / (1 + d²) for euclidean.
     """
-    full_text_search: Callable[[str, Sequence[str]], str]
+    full_text_search: Callable[[str, Sequence[str], int], str]
     """
     The call that asks the full-text index over a label's properties for nodes matching `$_text`, yielding
-    `node, score`.
+    `node, score`. Where the engine's call takes a limit, it is asked for no more than the limit given, so the index
+    stops rather than yield hits the search would drop; the search cuts them to that many after the call on every
+    engine (see CypherBackend.matching).
     """
     orphan_delete_limit: str | None = None
     """Why the engine can't delete with CascadeType.DELETE_ORPHAN; None when it can."""

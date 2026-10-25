@@ -721,6 +721,14 @@ found = await gom.load_matching(Chunk, "graph AND database", top_k=10, threshold
   `threshold` keeps, change; positive cosines and euclidean scores don't.
 - **Filters apply after the search:** `threshold`, `where`, and a view's required relationships. So a search can return
   fewer than `top_k`; `search_k` asks the index for more, and `top_k` trims after the filter.
+- **A full-text search is bounded where the index yields.** A matching score is scaled over every hit the index
+  yields, so on Neo4j, Memgraph and FalkorDB `top_k` bounds the hits too, and an ordinary query that matches most of
+  a corpus costs no more than them. The index is asked for the best `top_k` hits. Where something filters them, it is
+  asked for `top_k × 10` (`FILTERED_OVER_FETCH`), and the filter keeps the best `top_k` of those. Filters are a
+  `where`, a view's required relationships and paths, and a label beyond the first (the index is over the first); a
+  threshold keeps the best hits, so it isn't one. So a filter that passes fewer than one in ten of the best hits can
+  return fewer than `top_k` rows while the index holds more that pass it. The index is asked for no more than 2,147,483,647 hits, and Memgraph's for no more than
+  1,000,000, however large `top_k` is.
 - `property` names the field to search when a fragment declares more than one index; `partition_label` searches the
   vector index of another label. Full-text text is the engine's own query language, passed as it is.
 

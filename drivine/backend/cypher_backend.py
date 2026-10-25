@@ -15,7 +15,7 @@ from drivine.backend.fragment_group import FragmentGroup
 from drivine.backend.graph_statement import GraphStatement
 from drivine.backend.group_statement import GroupStatement
 from drivine.backend.matched_node import MatchedNode
-from drivine.backend.matching_search import MatchingSearch
+from drivine.backend.matching_search import MatchingSearch, index_limit
 from drivine.backend.nearest_search import NearestSearch
 from drivine.backend.page import Page
 from drivine.backend.patch_statements import PatchStatements
@@ -265,15 +265,48 @@ class CypherBackend:
         return self._scored(target, head, search.where, search.threshold, search.limit, search.depth)
 
     def matching(self, target: TargetModel, search: MatchingSearch) -> GraphStatement:
-        """The roots matching `$_text` by the full-text index, each as `{value, score}`, most relevant first."""
-        # Scaled by the best hit, so the scale is [0, 1] on every engine; a best score of 0 (FalkorDB) gives each 1.
+        """
+        The roots matching `$_text` by the full-text index, each as `{value, score}`, most relevant first. Scaled by
+        the best hit, so the scale is [0, 1] on every engine; a best score of 0 (FalkorDB) gives each 1.
+
+        Every hit is collected to find the best, and each row after carries the collection, so the number of hits, not
+        the limit, is what a search costs, and a common word matches most of a corpus. So the hits are cut to the best
+        `index_limit` before they are collected, on every engine, and an engine whose call takes a limit is given it
+        too. The cut keeps the best score, so the scale is the same as with every hit.
+
+        The cut's sort stays even where the call yields its hits best first: `collect` keeps the order it is given and
+        `UNWIND` the order of the list, so the rows come out best first, and a fragment's limit takes no sort of its
+        own.
+        """
+        limit = index_limit(search.limit, self._filters_after_search(target, search.where))
         head = [
-            self.grammar.full_text_search(search.label, search.properties),
+            self.grammar.full_text_search(search.label, search.properties, limit),
+            "WITH node, score",
+            "ORDER BY score DESC",
+            f"LIMIT {limit}",
             "WITH collect({node: node, score: score}) AS _hits, max(score) AS _best",
             "UNWIND _hits AS _hit",
             f"WITH _hit.node AS {NODE_ALIAS}, CASE WHEN _best > 0 THEN _hit.score / _best ELSE 1.0 END AS _score",
         ]
-        return self._scored(target, head, search.where, search.threshold, search.limit, search.depth)
+        return self._scored(
+            target, head, search.where, search.threshold, search.limit, search.depth, limit_before_projection=True
+        )
+
+    def _filters_after_search(self, target: TargetModel, where: str | None) -> bool:
+        """
+        Whether something drops a hit after the search: a caller's `where`, a view's requirements, or a root label
+        beyond the first, which the index is over. A threshold keeps the best hits, as the index's limit does, so it is
+        not counted.
+        """
+        root = target.root if isinstance(target, GraphViewModel) else target
+        return (
+            bool(where)
+            or len(root.labels) > 1
+            or (
+                isinstance(target, GraphViewModel)
+                and bool(ViewProjector(self.grammar).requirements(target, NODE_ALIAS))
+            )
+        )
 
     def save(
         self,
@@ -401,9 +434,16 @@ class CypherBackend:
         threshold: bool,
         limit: int | None,
         depth: Mapping[str, int],
+        limit_before_projection: bool = False,
     ) -> GraphStatement:
-        """The tail of a scored search: filter after the search, project, order by score, trim."""
+        """
+        The tail of a scored search: filter after the search, project, order by score, trim. With
+        `limit_before_projection`, a fragment is trimmed before it is projected, so its properties are read only for
+        the rows returned. That limit takes no sort of its own, so the head must yield its rows best first: a sort there
+        would hold each row, and each row of a full-text search carries the hits the head collected.
+        """
         root = target.root if isinstance(target, GraphViewModel) else target
+        early = limit is not None and limit_before_projection and not isinstance(target, GraphViewModel)
         filters = [
             f"{NODE_ALIAS}{label_expression(root.labels)}",
             *(["_score >= $_threshold"] if threshold else []),
@@ -425,10 +465,11 @@ class CypherBackend:
                     *head,
                     # A MATCH of the bound node holds the filter: Memgraph takes no existence check in a WITH's WHERE.
                     f"MATCH ({NODE_ALIAS}) WHERE {' AND '.join(filters)}",
+                    *([f"WITH {NODE_ALIAS}, _score", f"LIMIT {limit}"] if early else []),
                     *projection.calls,
                     f"RETURN {{value: {projection.expression}, score: _score}} AS result",
                     "ORDER BY result.score DESC",
-                    *([f"LIMIT {limit}"] if limit is not None else []),
+                    *([f"LIMIT {limit}"] if limit is not None and not early else []),
                 ]
             )
         )

@@ -291,6 +291,11 @@ class TestLoadMatchingBound:
         await gom.persistence_manager.execute(QuerySpecification("MATCH (z:MatchStory {id: 'z2'}) SET z:MatchReviewed"))
         reviewed = await gom.load_matching(ReviewedStory, "zebra", top_k=1)
         assert [it.value.id for it in reviewed] == ["z2"]
+        # z1 is dropped before the hits are scaled, so z2 is the best of the scale, as on a store that narrows by labels
+        # first, and a threshold just under 1 keeps it.
+        assert reviewed[0].score == pytest.approx(1.0)
+        kept = await gom.load_matching(ReviewedStory, "zebra", top_k=5, threshold=0.99)
+        assert [it.value.id for it in kept] == ["z2"]
 
 
 LAST = "z-last"

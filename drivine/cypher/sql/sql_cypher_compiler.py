@@ -209,6 +209,9 @@ ROUNDING_MODES = ("CEILING", "FLOOR", "UP", "DOWN", "HALF_EVEN", "HALF_UP", "HAL
 NEGATIVE_PRECISION = "round() takes a precision of 0 or more, as in Neo4j."
 """What `round()` is refused with, as Neo4j refuses it, a precision below 0."""
 
+MAX_COUNT = 2147483647
+"""The greatest start or length `substring()`, `left()` and `right()` take, as Neo4j takes them: Java's greatest int."""
+
 RADIANS_TO_DEGREES = "57.29577951308232"
 DEGREES_TO_RADIANS = "0.017453292519943295"
 """
@@ -4055,16 +4058,28 @@ class SqlCypherCompiler(ABC):
             # A position is counted from 0, as Cypher counts it, and SQL from 1.
             if len(arguments) not in (2, 3):
                 raise DrivineError("substring() takes a text, a start and a length.")
-            text, start = self._text_and_count(arguments)
-            length = f", {self._whole(arguments[2])}" if len(arguments) == 3 else ""
-            return Json(self.scalar(f"SUBSTR({text}, {start} + 1{length})"), text=True)
+
+            def substring(text: str) -> str:
+                start = self._count_of(function, 1, "start", arguments, text)
+                length = f", {self._count_of(function, 2, 'length', arguments, text)}" if len(arguments) == 3 else ""
+                # The greatest start is past any text, so it is kept as it is rather than counted past Postgres's
+                # integer.
+                position = self.shared1(start, lambda s: f"CASE WHEN {s} < {MAX_COUNT} THEN {s} + 1 ELSE {s} END")
+                return f"SUBSTR({text}, {position}{length})"
+
+            return Json(
+                self.scalar(self.shared1(self.text(self.comparable(self.json(arguments[0]))), substring)), text=True
+            )
         if name in ("left", "right"):
             if len(arguments) != 2:
                 raise DrivineError(f"{function.name}() takes a text and a length.")
-            text, count = self._text_and_count(arguments)
+
+            def counted(text: str) -> str:
+                count = self._count_of(function, 1, "length", arguments, text)
+                return f"SUBSTR({text}, 1, {count})" if name == "left" else self.right_text(text, count)
+
             return Json(
-                self.scalar(f"SUBSTR({text}, 1, {count})" if name == "left" else self.right_text(text, count)),
-                text=True,
+                self.scalar(self.shared1(self.text(self.comparable(self.json(arguments[0]))), counted)), text=True
             )
         if name == "replace":
             if len(arguments) != 3:
@@ -4178,13 +4193,53 @@ class SqlCypherCompiler(ABC):
             unsupported("round() by UNNECESSARY")
         return str(name)
 
-    def _text_and_count(self, arguments: list[Value]) -> tuple[str, str]:
-        """A function's text, its first argument, and a whole number, its second."""
-        return self.text(self.comparable(self.json(arguments[0]))), self._whole(arguments[1])
+    def _count_of(self, function: Function, index: int, what: str, arguments: list[Value], text: str) -> str:
+        """
+        The start or length `what` of `substring()`, `left()` or `right()`, its argument `index`, as a SQL whole
+        number, as Neo4j reads it. A float written in the statement, even a whole one such as 2.0, is refused, whatever
+        the text, as Neo4j refuses an argument it knows to be a float; one bound to a parameter or read from data is
+        cut toward zero, as Neo4j cuts it: 2.7 is 2, and -0.5 is 0. A number then below 0 or past 2147483647 is
+        refused where the text, `text` in SQL, is not null: when compiling, where the number and the text are given;
+        and else when the row is read, by the store's `failure`, on every store alike.
+        """
+        out_of_range = f"{function.name}() takes a {what} from 0 to {MAX_COUNT}, as in Neo4j."
+        count = function.arguments[index]
+        negated = isinstance(count, Unary) and count.operator is UnaryOperator.NEGATE
+        written = count.operand if isinstance(count, Unary) and negated else count
+        given = jsonable(self._given(written))
+        if isinstance(written, Literal) and isinstance(given, float):
+            raise DrivineError(f"{function.name}() takes an integer for its {what}, not a float, as in Neo4j.")
+        if _is_number(given):
+            cut = _cut(given)
+            whole = -cut if negated else cut
+            if 0 <= whole <= MAX_COUNT:
+                return f"CAST({whole} AS INTEGER)"
+            subject = function.arguments[0]
+            # Where the text is given, it is null, so the function gives null, or it is refused.
+            if self._is_given(subject):
+                if self._given(subject) is None:
+                    return "CAST(NULL AS INTEGER)"
+                raise DrivineError(out_of_range)
+            # A failure of constants alone may be worked out before any row: this one reads the text.
+            failure = self.failure(out_of_range, f"CASE WHEN {text} IS NOT NULL THEN {whole} END")
+            return f"CASE WHEN {text} IS NOT NULL THEN {failure} END"
+        # Read only beside a text that is not null, so a number past SQL's integer beside a null text is null, and a
+        # constant out of range is not worked out before any row.
+        number = self.number(self.comparable(self.json(arguments[index])))
+        return self.shared1(
+            f"CASE WHEN {text} IS NOT NULL THEN TRUNC({number}) END",
+            lambda n: (
+                f"CASE WHEN {n} < 0 OR {n} > {MAX_COUNT} THEN {self.failure(out_of_range, n)} "
+                f"ELSE CAST({n} AS INTEGER) END"
+            ),
+        )
 
-    def _whole(self, value: Value) -> str:
-        """A value as a SQL whole number."""
-        return f"CAST({self.number(self.comparable(self.json(value)))} AS INTEGER)"
+    @staticmethod
+    def _is_given(expression: Expression) -> bool:
+        """Whether the statement gives the value of the expression, as `_given` reads it, null or not."""
+        return isinstance(expression, (Literal, Parameter)) or (
+            isinstance(expression, Property) and isinstance(expression.subject, Parameter)
+        )
 
     def _truncated_whole(self, value: Value) -> str:
         """A value as a SQL whole number cut toward zero, as Neo4j reads `round()`'s precision."""
@@ -4747,6 +4802,15 @@ def _items_of(listed: Value) -> Temporal | None:
 
 def _is_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _cut(value: float) -> int:
+    """A number cut toward zero, as Java casts a double to a long: NaN is 0, and an infinity the greatest or least."""
+    if math.isnan(value):
+        return 0
+    if math.isinf(value):
+        return (1 << 63) - 1 if value > 0 else -(1 << 63)
+    return math.trunc(value)
 
 
 def _written(value: Any) -> str:

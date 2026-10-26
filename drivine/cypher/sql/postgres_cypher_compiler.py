@@ -550,6 +550,10 @@ class PostgresCypherCompiler(SqlCypherCompiler):
     def raise_(self, message: str) -> str:
         return f"RAISE EXCEPTION USING MESSAGE = {literal(message)};"
 
+    def failure(self, message: str, value: str) -> str:
+        """A text that is no whole number, cast to one: Postgres fails with the text in its message."""
+        return f"CAST({literal(message + ' ')} || CAST({value} AS text) AS integer)"
+
     def id_of(self, json: str, key: str | None) -> str:
         return f"CAST({json} ->> {literal(key)} AS bigint)" if key is not None else f"CAST({json} #>> '{{}}' AS bigint)"
 

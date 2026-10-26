@@ -19,6 +19,7 @@ from pydantic import BaseModel
 
 from drivine.backend.oracle.oracle_graph import OracleGraph
 from drivine.backend.postgres.postgres_graph import PostgresGraph
+from drivine.cypher.sql.sql_cypher_compiler import NEGATIVE_PRECISION
 from drivine.model import stamps
 from drivine.query.statement import cypher_statement
 from drivine.sync import (
@@ -843,7 +844,7 @@ def test_to_string_of_a_double_past_oracles_number_range_writes_its_shortest_dig
 def test_round_reads_a_precision_from_data_or_a_whole_float_as_a_whole_number_toward_zero_and_a_null_as_null(
     cypher_pm: PersistenceManager,
 ):
-    # Not in the spec yet: its round() case takes the precision as written or given. A negative one from data is #148.
+    # Beyond the spec's round() cases: a float, -0.5 and a whole float read from data, and every rounding mode.
     clear(cypher_pm)
     cypher_pm.execute(spec("CREATE (:Round {p: 1.7, q: -0.5, w: 2.0})"))
     assert cypher_pm.query(
@@ -861,6 +862,41 @@ def test_round_reads_a_precision_from_data_or_a_whole_float_as_a_whole_number_to
     assert cypher_pm.query(
         spec("RETURN [round(null, 2), round(2.5, null), round(null, 2, 'UP'), round(2.5, null, 'UP')]")
     ) == [[None, None, None, None]]
+
+
+def test_a_negative_precision_from_data_fails_only_on_a_row_that_reads_it_in_a_where_and_an_aggregate_too(
+    cypher_pm: PersistenceManager,
+):
+    # The spec reads a precision from data since v0.6.4; here, in a WHERE and an aggregate, and on rows filtered out.
+    # Neo4j fails each with 22N03; a SQL store with the compiler's message.
+    clear(cypher_pm)
+    cypher_pm.execute(spec("CREATE (:Round {r: -2, k: 1}), (:Round {r: 1, k: 2})"))
+    message = None if cypher_pm.type is DatabaseType.NEO4J else re.escape(NEGATIVE_PRECISION)
+    for statement in [
+        "MATCH (n:Round) RETURN round(1234.5, n.r)",
+        "MATCH (n:Round) RETURN round(1234.5, n.r, 'HALF_UP')",
+        "MATCH (n:Round) WHERE round(1234.5, n.r) > 0 RETURN n.k",
+        "MATCH (n:Round) RETURN sum(round(1234.5, n.r))",
+        "MATCH (n:Round) RETURN collect(round(1234.5, n.r, 'HALF_UP'))",
+        # A constant the compiler does not read as given is worked out by the store, as one from data.
+        "RETURN round(1234.5, 1 - 3)",
+        "RETURN round(1234.5, toInteger('-2'))",
+    ]:
+        with pytest.raises(Exception, match=message):  # noqa: PT011
+            cypher_pm.query(spec(statement))
+    assert cypher_pm.query(spec("MATCH (n:Round) WHERE n.r >= 0 RETURN round(1234.5, n.r)")) == [1234.5]
+    assert cypher_pm.query(spec("MATCH (n:Nothing) RETURN round(1234.5, 1 - 3)")) == []
+    assert cypher_pm.query(spec("UNWIND [] AS x RETURN round(1234.5, 1 - 3)")) == []
+    assert cypher_pm.query(spec("MATCH (n:Round) WHERE n.k > 5 RETURN round(1234.5, toInteger('-2'))")) == []
+    assert cypher_pm.query(spec("MATCH (n:Round) WHERE n.k = 2 RETURN sum(round(1234.5, n.r))")) == [1234.5]
+    # A null to round is null, whatever the precision, as Neo4j gives it.
+    assert cypher_pm.query(
+        spec("MATCH (n:Round) WHERE n.k = 1 RETURN [round(n.none, n.r), round(n.none, n.r, 'HALF_UP')]")
+    ) == [[None, None]]
+    assert cypher_pm.query(
+        spec("MATCH (n:Round) RETURN CASE WHEN n.r < 0 THEN 0.0 ELSE round(1234.5, n.r) END ORDER BY n.k")
+    ) == [0.0, 1234.5]
+    assert cypher_pm.query(spec("RETURN [round(1234.5, 3 - 1), round(1234.5, toInteger('2'))]")) == [[1234.5, 1234.5]]
 
 
 def test_a_union_in_call_whose_queries_return_a_list_with_an_identity_beside_one_without_compiles(

@@ -206,6 +206,9 @@ MADE_TEXT = MadeText()
 ROUNDING_MODES = ("CEILING", "FLOOR", "UP", "DOWN", "HALF_EVEN", "HALF_UP", "HALF_DOWN", "UNNECESSARY")
 """The modes `round()` takes, as Java's `RoundingMode` names them."""
 
+NEGATIVE_PRECISION = "round() takes a precision of 0 or more, as in Neo4j."
+"""What `round()` is refused with, as Neo4j refuses it, a precision below 0."""
+
 RADIANS_TO_DEGREES = "57.29577951308232"
 DEGREES_TO_RADIANS = "0.017453292519943295"
 """
@@ -997,6 +1000,14 @@ class SqlCypherCompiler(ABC):
     @abstractmethod
     def raise_(self, message: str) -> str:
         """The statement that fails the procedure with the message."""
+
+    @abstractmethod
+    def failure(self, message: str, value: str) -> str:
+        """
+        A whole number that fails the statement when it is worked out, with the message and the SQL value it names:
+        what a compiled statement does where Neo4j fails on a value it reads. It reads the value, so no store works it
+        out before a row that needs it, as one may a failing expression of constants alone.
+        """
 
     @abstractmethod
     def id_of(self, json: str, key: str | None) -> str:
@@ -3993,16 +4004,28 @@ class SqlCypherCompiler(ABC):
                 mode = self._rounding_mode(function.arguments[2])
                 if mode is None:
                     return Json(self.literal_json(None))
-                self._refuse_negative_precision(function.arguments[1])
-                number = self.number(self.comparable(self.json(arguments[0])))
-                return Json(self.scalar(self.float_(self.round_to(number, self._truncated_whole(arguments[1]), mode))))
-            if len(arguments) == 2:
-                self._refuse_negative_precision(function.arguments[1])
                 return Json(
                     self.scalar(
                         self.float_(
-                            f"ROUND({self.number(self.comparable(self.json(arguments[0])))}, "
-                            f"{self._truncated_whole(arguments[1])})"
+                            self._rounded(
+                                arguments[0],
+                                arguments[1],
+                                function.arguments[1],
+                                lambda number, places: self.round_to(number, places, mode),
+                            )
+                        )
+                    )
+                )
+            if len(arguments) == 2:
+                return Json(
+                    self.scalar(
+                        self.float_(
+                            self._rounded(
+                                arguments[0],
+                                arguments[1],
+                                function.arguments[1],
+                                lambda number, places: f"ROUND({number}, {places})",
+                            )
                         )
                     )
                 )
@@ -4167,17 +4190,29 @@ class SqlCypherCompiler(ABC):
         """A value as a SQL whole number cut toward zero, as Neo4j reads `round()`'s precision."""
         return f"CAST(TRUNC({self.number(self.comparable(self.json(value)))}) AS INTEGER)"
 
-    def _refuse_negative_precision(self, precision: Expression) -> None:
+    def _rounded(self, value: Value, precision: Value, written: Expression, body: Callable[[str, str], str]) -> str:
         """
-        Refuses a precision for `round()` that is below 0 as a whole number toward zero, as Neo4j refuses it, where it
-        is written, negated or not, or a parameter's value: -0.5 is 0 places, and -1.2 is refused. One read from data is
-        not known here, so it rounds to tens or hundreds where Neo4j fails (#148).
+        `round()` of the value, by the body over it as a SQL number and the precision, the value written in the
+        statement as `written`, as a whole number toward zero: -0.5 is 0 places. One below 0 is refused, as Neo4j
+        refuses it: when compiling, where it is written, negated or not, or a parameter's value; and else when the row
+        is read, by the store's `failure`, but for a null value, which Neo4j rounds to null whatever the precision.
         """
-        negated = isinstance(precision, Unary) and precision.operator is UnaryOperator.NEGATE
-        given = jsonable(self._given(precision.operand if isinstance(precision, Unary) and negated else precision))
-        # At -1 or less, as below 0 toward zero: math.trunc fails on NaN or an infinity.
-        if _is_number(given) and (-given if negated else given) <= -1:
-            raise DrivineError("round() takes a precision of 0 or more, as in Neo4j.")
+        number = self.number(self.comparable(self.json(value)))
+        negated = isinstance(written, Unary) and written.operator is UnaryOperator.NEGATE
+        given = jsonable(self._given(written.operand if isinstance(written, Unary) and negated else written))
+        if _is_number(given):
+            # At -1 or less, as below 0 toward zero: math.trunc fails on NaN or an infinity.
+            if (-given if negated else given) <= -1:
+                raise DrivineError(NEGATIVE_PRECISION)
+            return body(number, self._truncated_whole(precision))
+        return self.shared(
+            [number, f"TRUNC({self.number(self.comparable(self.json(precision)))})"],
+            lambda it: body(
+                it[0],
+                f"CASE WHEN {it[1]} < 0 AND {it[0]} IS NOT NULL THEN {self.failure(NEGATIVE_PRECISION, it[1])} "
+                f"ELSE CAST({it[1]} AS INTEGER) END",
+            ),
+        )
 
     def _collected(self, value: Value) -> str:
         """The values of a group, gathered as `collect` gathers them, as JSON."""

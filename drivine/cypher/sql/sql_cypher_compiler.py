@@ -230,11 +230,14 @@ MADE_TEXT = MadeText()
 ROUNDING_MODES = ("CEILING", "FLOOR", "UP", "DOWN", "HALF_EVEN", "HALF_UP", "HALF_DOWN", "UNNECESSARY")
 """The modes `round()` takes, as Java's `RoundingMode` names them."""
 
-NEGATIVE_PRECISION = "round() takes a precision of 0 or more, as in Neo4j."
-"""What `round()` is refused with, as Neo4j refuses it, a precision below 0."""
+PRECISION_OUT_OF_RANGE = "round() takes a precision from 0 to 2147483647, as in Neo4j."
+"""What `round()` fails with, as Neo4j fails it, a precision below 0 or past MAX_COUNT."""
 
 MAX_COUNT = 2147483647
-"""The greatest start or length `substring()`, `left()` and `right()` take, as Neo4j takes them: Java's greatest int."""
+"""
+The greatest start or length `substring()`, `left()` and `right()` take, and the greatest precision `round()` takes,
+as Neo4j takes them: Java's greatest int.
+"""
 
 LONG_MAX = (1 << 63) - 1
 """The greatest long, Java's, as `_cut` holds a number to."""
@@ -1118,8 +1121,10 @@ class SqlCypherCompiler(ABC):
     def failure(self, message: str, value: str) -> str:
         """
         A whole number that fails the statement when it is worked out, with the message and the SQL value it names:
-        what a compiled statement does where Neo4j fails on a value it reads. It reads the value, so no store works it
-        out before a row that needs it, as one may a failing expression of constants alone.
+        what a compiled statement does where Neo4j fails on a value it reads. No store works it out before a row that
+        needs it, even where the value is a constant, as a store may work out a failing expression of constants alone.
+        But in a WHERE, one that reads nothing of a row is tested before any row on Postgres, which tests such a
+        condition once, first: as it does any expression that fails, such as `1 / 0`.
         """
 
     @abstractmethod
@@ -4797,13 +4802,13 @@ class SqlCypherCompiler(ABC):
         """
         `round()` of the value, by `places` over it as a SQL number and the precision, the value written in the
         statement as `written`, as a whole number toward zero: -0.5 is 0 places; given `whole`, to 0 places by that.
-        One below 0 is refused, as Neo4j refuses it: when compiling, where it is written, negated or not, or a
-        parameter's value; and else when the row is read, by the store's `failure`, but for a null value, which Neo4j
-        rounds to null whatever the precision.
+        One below 0 or past MAX_COUNT fails, as Neo4j fails it: only on a row that rounds a number by it, by the
+        store's `failure`, whether it is written, negated or not, a parameter's value or read from data. Neo4j reads the
+        precision only when it rounds, so a null value rounds to null by any precision, and with no row, nothing fails.
 
         Places known when compiling pick the rounding then: under an aggregate, where nothing is bound, a CASE of both
         would write the number out in each, at each `round` nested in another. Places from data are told apart as the
-        statement runs, in one CASE over the value and the places, where a negative one is refused before either
+        statement runs, in one CASE over the value and the places, where places out of range fail before either
         rounding, so the precision each rounding writes out, more than once on a store, is the places alone: refused
         inside it, the value was written out with it each time, and a `round` nested 4 deep under an aggregate grew to
         500 MB on Oracle.
@@ -4811,10 +4816,13 @@ class SqlCypherCompiler(ABC):
         negated = isinstance(written, Unary) and written.operator is UnaryOperator.NEGATE
         given = jsonable(self._given(written.operand if isinstance(written, Unary) and negated else written))
         if _is_number(given):
-            # At -1 or less, as below 0 toward zero: math.trunc fails on NaN or an infinity.
             signed = -given if negated else given
-            if signed <= -1:
-                raise DrivineError(NEGATIVE_PRECISION)
+            # At -1 or less, below 0 toward zero, or past MAX_COUNT toward zero: not `0 <= cut <= MAX_COUNT`, which NaN
+            # fails, where Neo4j casts NaN to 0 places as Java casts it to a long; and math.trunc fails on NaN.
+            if signed <= -1 or signed >= MAX_COUNT + 1:
+                # Named as drivine4j names it, an infinity as Java writes one.
+                named = ("Infinity" if signed > 0 else "-Infinity") if math.isinf(signed) else str(math.trunc(signed))
+                return self._out_of_places(self.comparable(self.json(value)), literal(named))
             number = self.number(self.comparable(self.json(value)))
             # Below 1, or NaN, which Neo4j casts to 0 places as Java casts it to a long.
             if whole is not None and not signed >= 1:
@@ -4824,18 +4832,24 @@ class SqlCypherCompiler(ABC):
 
         def rounded(it: list[str]) -> str:
             x, t = it
-            # Asked of its kind, whose test writes the value out fewer times than the number does: a null value, as
-            # anything else that is no number, rounds by its negative places to null.
             to_whole = f"WHEN {t} = 0 THEN {whole(self.number(x))} " if whole is not None else ""
+            # Out of range, places are not cast, which Postgres's integer would fail on beside a null value.
             return (
-                f"CASE {to_whole}WHEN {t} < 0 AND {self.type_of(x)} = 'number' "
-                f"THEN {self.failure(NEGATIVE_PRECISION, t)} "
+                f"CASE {to_whole}WHEN {t} NOT BETWEEN 0 AND {MAX_COUNT} THEN {self._out_of_places(x, t)} "
                 f"ELSE {places(self.number(x), f'CAST({t} AS INTEGER)')} END"
             )
 
         return self.shared(
             [self.comparable(self.json(value)), f"TRUNC({self.number(self.comparable(self.json(precision)))})"], rounded
         )
+
+    def _out_of_places(self, x: str, precision: str) -> str:
+        """
+        `round()` of the JSON value to a precision out of range: it fails where the value is a number, asked of its
+        kind, whose test writes it out fewer times than its number does, and is null where it is not, as a null rounds
+        to null by any precision in Neo4j.
+        """
+        return f"CASE WHEN {self.type_of(x)} = 'number' THEN {self.failure(PRECISION_OUT_OF_RANGE, precision)} END"
 
     def _collected(self, value: Value) -> str:
         """The values of a group, gathered as `collect` gathers them, as JSON."""

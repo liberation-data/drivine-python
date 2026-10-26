@@ -123,19 +123,38 @@ def test_collect_distinct_beside_a_variable_no_other_item_is_outside_its_aggrega
     ("cypher", "parameters"),
     [
         ("RETURN round(1234.5, -2)", {}),
-        ("RETURN round(1234.5, -1.2)", {}),
+        ("RETURN round(1234.5, -1.2, 'UP')", {}),
         ("RETURN round(1234.5, -$p)", {"p": 2}),
         ("RETURN round(1234.5, $p)", {"p": -2.5}),
         ("RETURN round(1234.5, $p)", {"p": Decimal("-1.2")}),
         ("RETURN round(1234.5, $p)", {"p": float("-inf")}),
+        ("RETURN round(1234.5, 2147483648)", {}),
+        ("RETURN round(1234.5, $p, 'HALF_UP')", {"p": float("inf")}),
+        ("RETURN round(1234.5, -9223372036854775808)", {}),
     ],
 )
-def test_round_of_two_arguments_refuses_a_precision_below_0_toward_zero_written_negated_or_given(
+def test_round_compiles_a_precision_below_0_or_past_2147483647_to_fail_on_the_row_that_rounds_a_number_by_it(
     compiler: type[SqlCypherCompiler], cypher: str, parameters: dict[str, Any]
 ) -> None:
-    # Not in the spec's refusals yet, which name the message for three arguments alone.
-    with pytest.raises(DrivineError, match=r"^round\(\) takes a precision of 0 or more, as in Neo4j\.$"):
-        compiler("g").compile(cypher, parameters)
+    # Neo4j reads the precision only when it rounds (drivine4j#305), so none is refused when compiling, in both forms.
+    sql = compiler("g").compile(cypher, parameters).sql
+    assert "round() takes a precision from 0 to 2147483647, as in Neo4j." in sql, sql
+
+
+@pytest.mark.parametrize("compiler", COMPILERS.values(), ids=COMPILERS.keys())
+@pytest.mark.parametrize(
+    ("cypher", "parameters"),
+    [
+        ("RETURN [round(1234.5, -0.5), round(1234.5, $p, 'HALF_UP')]", {"p": -0.9}),
+        ("RETURN [round(1234.5, 2147483647), round(1234.5, $p, 'UP')]", {"p": 2147483647.9}),
+        ("RETURN [round(1234.5, $p), round(1234.5, $p, 'UP')]", {"p": float("nan")}),
+    ],
+)
+def test_round_takes_a_given_precision_from_0_to_2147483647_toward_zero_and_nan_as_0_with_nothing_to_fail(
+    compiler: type[SqlCypherCompiler], cypher: str, parameters: dict[str, Any]
+) -> None:
+    sql = compiler("g").compile(cypher, parameters).sql
+    assert "round() takes a precision" not in sql, sql
 
 
 @pytest.mark.parametrize("compiler", COMPILERS.values(), ids=COMPILERS.keys())

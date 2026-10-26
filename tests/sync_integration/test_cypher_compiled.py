@@ -12,6 +12,7 @@ import re
 import time as time_module
 from collections.abc import Generator
 from datetime import UTC, date, datetime, time, timedelta, timezone
+from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -897,6 +898,169 @@ def test_a_negative_precision_from_data_fails_only_on_a_row_that_reads_it_in_a_w
         spec("MATCH (n:Round) RETURN CASE WHEN n.r < 0 THEN 0.0 ELSE round(1234.5, n.r) END ORDER BY n.k")
     ) == [0.0, 1234.5]
     assert cypher_pm.query(spec("RETURN [round(1234.5, 3 - 1), round(1234.5, toInteger('2'))]")) == [[1234.5, 1234.5]]
+
+
+def _float_count(function: str, what: str) -> str:
+    """What the compiler refuses a written float start or length `what` of the function with."""
+    return re.escape(f"{function}() takes an integer for its {what}, not a float, as in Neo4j.")
+
+
+def _count_out_of_range(function: str, what: str) -> str:
+    """What the compiler refuses a start or length `what` of the function out of range with."""
+    return re.escape(f"{function}() takes a {what} from 0 to 2147483647, as in Neo4j.")
+
+
+def test_substring_left_and_right_refuse_a_written_float_and_a_given_start_or_length_out_of_range(
+    cypher_pm: PersistenceManager,
+):
+    # Not in the spec yet: a start or a length (#263). Neo4j refuses a float it knows to be one whatever the text; a
+    # bound one it cuts toward zero. It refuses one out of range only where the text is not null.
+    compiles = cypher_pm.type is not DatabaseType.NEO4J
+    empty = None if cypher_pm.type is DatabaseType.ORACLE else ""
+    for statement, parameters, message in [
+        ("RETURN left('hello', 2.7)", {}, _float_count("left", "length")),
+        ("RETURN left('hello', 2.0)", {}, _float_count("left", "length")),
+        ("RETURN right('hello', -0.5)", {}, _float_count("right", "length")),
+        ("RETURN substring('hello', 1.0)", {}, _float_count("substring", "start")),
+        ("RETURN substring('hello', 1, 2.6)", {}, _float_count("substring", "length")),
+        ("RETURN left(null, 2.7)", {}, _float_count("left", "length")),
+        ("RETURN left('hello', -1)", {}, _count_out_of_range("left", "length")),
+        ("RETURN right('hello', -1)", {}, _count_out_of_range("right", "length")),
+        ("RETURN substring('hello', -1, 2)", {}, _count_out_of_range("substring", "start")),
+        ("RETURN substring('hello', 1, -1)", {}, _count_out_of_range("substring", "length")),
+        ("RETURN left('hello', 9223372036854775807)", {}, _count_out_of_range("left", "length")),
+        ("RETURN substring($t, $s)", {"t": "hello", "s": -1}, _count_out_of_range("substring", "start")),
+        # Bound, -1.5 is cut to -1, and 1.0E20 is past the greatest.
+        ("RETURN left('hello', $n)", {"n": -1.5}, _count_out_of_range("left", "length")),
+        ("RETURN left('hello', $n)", {"n": 1.0e20}, _count_out_of_range("left", "length")),
+        # Negated, a bound number is negated before it is cut: -2.7 is -2.
+        ("RETURN left('hello', -$n)", {"n": 2.7}, _count_out_of_range("left", "length")),
+    ]:
+        with pytest.raises(Exception, match=message if compiles else None):  # noqa: PT011
+            cypher_pm.query(spec(statement, parameters))
+    assert cypher_pm.query(
+        spec(
+            "RETURN [left('hello', 2), right('hello', 2), substring('hello', 1), substring('hello', 1, 2), "
+            "left('hello', null), substring('hello', null), substring('hello', 1, null), left(null, -1), "
+            "right(null, -1), substring(null, 1, -1), left('hello', 10), left('hello', 0), substring('hello', 10)]"
+        )
+    ) == [["he", "lo", "ello", "el", None, None, None, None, None, None, "hello", empty, empty]]
+    assert cypher_pm.query(
+        spec(
+            "RETURN [left($t, $m), left('hello', $i), left('hello', $f), substring('hello', $s, $l), "
+            "left('hello', $q), right($t, $f), left('hello', $p.f), left($p.none, $m), left('hello', -$m), "
+            "left('hello', -$q)]",
+            {"t": None, "m": -1, "i": 2, "f": 2.7, "s": 1.7, "l": 2.6, "q": -0.5, "p": {"f": 2.7}},
+        )
+    ) == [[None, "he", "he", "el", empty, None, "he", None, "h", empty]]
+    assert cypher_pm.query(spec("UNWIND $xs AS c RETURN left('hello', c)", {"xs": [2.7, None]})) == ["he", None]
+    # The greatest start or length is taken: a start past the text gives the empty text, written, bound or from a list.
+    assert cypher_pm.query(
+        spec(
+            "RETURN [substring('hello', 2147483647), left('hello', 2147483647), right('hello', 2147483647), "
+            "substring('hello', 1, 2147483647), substring('hello', $m)]",
+            {"m": 2147483647},
+        )
+    ) == [[empty, "hello", "hello", "ello", empty]]
+    assert cypher_pm.query(spec("UNWIND $xs AS s RETURN substring('hello', s)", {"xs": [2147483647]})) == [empty]
+
+
+def test_a_bound_start_or_length_that_is_nan_is_0_and_one_that_is_an_infinity_out_of_range_as_java_casts_them(
+    cypher_pm: PersistenceManager,
+):
+    # Not in the spec yet (#143): Neo4j casts a double to a long, as Java does, NaN to 0 and an infinity to the
+    # greatest or least.
+    compiles = cypher_pm.type is not DatabaseType.NEO4J
+    empty = None if cypher_pm.type is DatabaseType.ORACLE else ""
+    assert cypher_pm.query(spec("RETURN [left('hello', $n), substring('hello', $n)]", {"n": float("nan")})) == [
+        [empty, "hello"]
+    ]
+    for n in [float("inf"), float("-inf")]:
+        with pytest.raises(Exception, match=_count_out_of_range("left", "length") if compiles else None):  # noqa: PT011
+            cypher_pm.query(spec("RETURN left('hello', $n)", {"n": n}))
+    if compiles:
+        # A Decimal, which the Neo4j driver does not send, is read as the number it is.
+        assert cypher_pm.query(
+            spec("RETURN [left('hello', $n), substring('hello', $s)]", {"n": Decimal("2.7"), "s": Decimal("1")})
+        ) == [["he", "ello"]]
+
+
+def test_a_start_or_length_from_data_is_cut_toward_zero_and_one_out_of_range_fails_only_on_a_row_that_reads_it(
+    cypher_pm: PersistenceManager,
+):
+    # Not in the spec yet: a start or a length read from data (#263), in a WHERE and an aggregate too, and on rows
+    # filtered out.
+    compiles = cypher_pm.type is not DatabaseType.NEO4J
+    empty = None if cypher_pm.type is DatabaseType.ORACLE else ""
+    clear(cypher_pm)
+    cypher_pm.execute(
+        spec(
+            "CREATE (:Count {k: 1, f: 2.7, w: 2.0, q: -0.5, r: -1.5, m: -1, h: 2147483647.9, hp: 2147483648.5, "
+            "t: 'hello'}), (:Count {k: 2, m: 1, t: 'hello'}), (:Count {k: 3, m: -1, r: -1.5, hp: 2147483648.5})"
+        )
+    )
+    for statement, message in [
+        ("MATCH (n:Count) RETURN left(n.t, n.m)", _count_out_of_range("left", "length")),
+        ("MATCH (n:Count) WHERE left(n.t, n.m) = 'h' RETURN n.k", _count_out_of_range("left", "length")),
+        ("MATCH (n:Count) RETURN collect(right(n.t, n.m))", _count_out_of_range("right", "length")),
+        ("MATCH (n:Count) RETURN substring(n.t, n.m)", _count_out_of_range("substring", "start")),
+        ("MATCH (n:Count) RETURN substring(n.t, 0, n.r)", _count_out_of_range("substring", "length")),
+        # -1.5 is cut to -1, and 2147483648.5 to past the greatest.
+        ("MATCH (n:Count) RETURN left(n.t, n.r)", _count_out_of_range("left", "length")),
+        ("MATCH (n:Count) RETURN left(n.t, n.hp)", _count_out_of_range("left", "length")),
+        # Written, below 0, beside a text from data: it fails on the row whose text is not null.
+        ("MATCH (n:Count) RETURN left(n.t, -1)", _count_out_of_range("left", "length")),
+        # A constant the compiler does not read as given is worked out by the store, as one from data.
+        ("RETURN left('hello', 1 - 3)", _count_out_of_range("left", "length")),
+        ("RETURN substring('hello', toInteger('-2'))", _count_out_of_range("substring", "start")),
+    ]:
+        with pytest.raises(Exception, match=message if compiles else None):  # noqa: PT011
+            cypher_pm.query(spec(statement))
+    assert cypher_pm.query(
+        spec(
+            "MATCH (n:Count) WHERE n.k = 1 RETURN [left(n.t, n.f), right(n.t, n.w), substring(n.t, n.f), "
+            "substring(n.t, n.q, n.f), left(n.t, n.h), left(n.t, n.f * 1), left(n.none, n.f), left(n.t, n.q)]"
+        )
+    ) == [["he", "lo", "llo", "he", "hello", "he", None, empty]]
+    assert cypher_pm.query(
+        spec("MATCH (n:Count) WHERE n.k = 1 RETURN [substring(n.t, n.h), substring(n.t, 0, n.h)]")
+    ) == [[empty, "hello"]]
+    # Grouped by, as a key beside an aggregate.
+    assert cypher_pm.query(spec("MATCH (n:Count) WHERE n.k = 2 RETURN substring(n.t, n.m), count(*)")) == [["ello", 1]]
+    # Out of range beside a null text is null, as in Neo4j, and so is a null start or length.
+    assert cypher_pm.query(
+        spec(
+            "MATCH (n:Count) WHERE n.k = 3 RETURN [left(n.t, n.m), substring(n.t, n.m), left(n.t, -1), right(n.t, n.r)]"
+        )
+    ) == [[None, None, None, None]]
+    # A constant out of range, which the compiler does not read as given, and one past SQL's integer: null beside a
+    # null text, and not refused for the row filtered out.
+    assert cypher_pm.query(
+        spec(
+            "MATCH (n:Count) WHERE n.k = 3 RETURN [left(n.t, 1 - 3), substring(n.t, 0, 1 - 3), left(n.t, n.hp), "
+            "left(n.t, 2147483647 + 1)]"
+        )
+    ) == [[None, None, None, None]]
+    # Out of range beside a text of constants alone, on no row: the failure reads the text, so no store works it out
+    # before a row, given or not.
+    assert (
+        cypher_pm.query(
+            spec(
+                "MATCH (n:Count) WHERE n.k = 99 RETURN [left(toUpper('hello'), -1), left('hello', 1 - 3), "
+                "substring(toUpper('hello'), 0, 1 - 3)]"
+            )
+        )
+        == []
+    )
+    assert cypher_pm.query(
+        spec(
+            "MATCH (n:Count) WHERE n.k = 2 RETURN [left(n.t, n.none), substring(n.t, n.none), "
+            "substring(n.t, 1, n.none)]"
+        )
+    ) == [[None, None, None]]
+    assert cypher_pm.query(
+        spec("MATCH (n:Count) RETURN CASE WHEN n.m < 0 THEN 'none' ELSE left(n.t, n.m) END ORDER BY n.k")
+    ) == ["none", "h", "none"]
 
 
 def test_a_union_in_call_whose_queries_return_a_list_with_an_identity_beside_one_without_compiles(

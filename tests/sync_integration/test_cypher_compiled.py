@@ -1006,6 +1006,16 @@ def test_round_to_0_places_rounds_half_toward_positive_infinity_as_round_of_one_
     assert cypher_pm.query(
         spec("UNWIND [-2.5, -0.5, 0.5, 2.5] AS x WITH x WHERE round(x, 0) >= 0 RETURN collect(x)")
     ) == [[-0.5, 0.5, 2.5]]
+    # Places a parameter gives, picked when compiling: a fraction, -0.5, negated, or NaN is 0 places, as Neo4j casts
+    # NaN to 0, and 1.0 is 1; a mode rounds by it alone.
+    assert cypher_pm.query(
+        spec(
+            "RETURN [round(-2.5, $p), round(-2.5, $q), round(-2.5, -$r), round(-2.5, $z), round(-2.5, $n), "
+            "round(-2.5, $o), round(-2.55, $o), round(-2.5, 0.9999), round(-2.5, 1.0), round(-2.5, $p, 'HALF_UP'), "
+            "round(-2.5, 0, 'HALF_UP')]",
+            {"p": 0.7, "q": -0.5, "r": 0.5, "z": 0, "n": float("nan"), "o": 1.0},
+        )
+    ) == [[-2.0, -2.0, -2.0, -2.0, -2.0, -2.5, -2.6, -2.0, -2.5, -3.0, -3.0]]
 
 
 def test_round_of_zero_gives_zero_or_null_to_a_null_precision_and_fails_on_a_negative_one(

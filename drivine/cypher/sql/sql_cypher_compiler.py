@@ -4285,7 +4285,8 @@ class SqlCypherCompiler(ABC):
             signed = -given if negated else given
             if signed <= -1:
                 raise DrivineError(NEGATIVE_PRECISION)
-            if whole is not None and signed < 1:
+            # Below 1, or NaN, which Neo4j casts to 0 places as Java casts it to a long.
+            if whole is not None and not signed >= 1:
                 return whole(number)
             return (places or body)(number, self._truncated_whole(precision))
         return self.shared(

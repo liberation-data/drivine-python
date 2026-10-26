@@ -1553,6 +1553,69 @@ def test_in_compares_a_value_with_each_item_as_equality_does(cypher_pm: Persiste
     assert cypher_pm.query(spec("RETURN [x IN [1] WHERE null IN $l OR $m.x IN $l]", nulls)) == [[]]
 
 
+def test_quantifiers_are_three_valued_over_parameters_nodes_relationships_and_empty_lists_and_in_each_where(
+    cypher_pm: PersistenceManager,
+):
+    # Beyond the spec's cases (#159): a list given, an empty or null one of nodes or relationships, one of them that
+    # holds a null, quantifiers nested and under an aggregate, and a WHERE of a comprehension or a subquery, which keeps
+    # what a quantifier is true of, read through a NOT that keeps no more where it is null.
+    seeded(cypher_pm)
+
+    def rows(cypher: str, parameters: dict[str, Any] | None = None) -> list[Any]:
+        return cypher_pm.query(spec(cypher, parameters))
+
+    quantified = (
+        "RETURN [any(x IN $xs WHERE x = 2), all(x IN $xs WHERE x = 1), none(x IN $xs WHERE x = 2), "
+        "single(x IN $xs WHERE x = 1)]"
+    )
+    assert rows(quantified, {"xs": [1, None]}) == [[None, None, None, None]]
+    assert rows(quantified, {"xs": None}) == [[None, None, None, None]]
+    assert rows(quantified, {"xs": []}) == [[False, True, True, False]]
+    assert rows(
+        "MATCH (p:Person {name: 'Nope'}) WITH collect(p) AS ps RETURN [any(x IN ps WHERE x.born > 1), "
+        "all(x IN ps WHERE x.born > 1), none(x IN ps WHERE x.born > 1), single(x IN ps WHERE x.born > 1)]"
+    ) == [[False, True, True, False]]
+    assert rows(
+        "MATCH (k:Person {name: 'Keanu'}), (h:Person {name: 'Hugo'}) RETURN [any(x IN [k, h] WHERE x.born > 1960), "
+        "all(x IN [k, h] WHERE x.born > 1960), none(x IN [k, h] WHERE x.born < 1960), "
+        "single(x IN [k, h] WHERE x.born > 1960), all(x IN [k, null] WHERE x.born > 1960), "
+        "any(x IN [h, null] WHERE x.born > 1960)]"
+    ) == [[True, None, None, None, None, None]]
+    # Keanu's KNOWS have no role.
+    assert rows(
+        "MATCH (k:Person {name: 'Keanu'}) WITH [(k)-[r]-() | r] AS rs RETURN [any(r IN rs WHERE r.role = 'Neo'), "
+        "all(r IN rs WHERE r.role STARTS WITH 'N'), single(r IN rs WHERE r.role = 'Johnny'), "
+        "none(r IN rs WHERE r.role = 'X')]"
+    ) == [[True, False, None, None]]
+    assert rows(
+        "RETURN [any(y IN [1, 2] WHERE all(x IN [y, null] WHERE x > 0)), "
+        "any(y IN [1, 2] WHERE single(x IN [1, 2, null] WHERE x = y)), all(y IN [1, 2] WHERE none(x IN [3, y] WHERE "
+        "x = y + 1)), [y IN [1, 2, 3] WHERE NOT any(x IN [null, 2] WHERE x = y) | y], "
+        "[y IN [1, 2, 3] WHERE any(x IN [null, 2] WHERE x = y) OR y = 1 | y]]"
+    ) == [[None, None, False, [], [1, 2]]]
+    assert rows(
+        "MATCH (k:Person {name: 'Keanu'}) RETURN [[(k)-[:ACTED_IN]->(m) WHERE NOT any(x IN [1] WHERE m.nope > 1) | "
+        "m.title], [(k)-[:ACTED_IN]->(m) WHERE NOT all(x IN [null, 1] WHERE x = 1) OR m.title = 'X' | m.title], "
+        "[(k)-[:ACTED_IN]->(m) WHERE none(x IN [m.nope] WHERE x = 1) | m.title]]"
+    ) == [[[], [], []]]
+    assert rows(
+        "MATCH (p:Person) WHERE EXISTS { MATCH (p)-[r]->() WHERE NOT all(x IN [1] WHERE r.role > 'N') } "
+        "RETURN p.name ORDER BY p.name"
+    ) == ["Keanu", "Laurence"]
+    assert rows(
+        "MATCH (p:Person) WHERE any(x IN $xs WHERE x = 2) IS NULL AND NOT none(x IN $xs WHERE x = 1) "
+        "RETURN p.name ORDER BY p.name",
+        {"xs": [1, None]},
+    ) == ["Carrie", "Hugo", "Keanu", "Laurence"]
+    assert rows(
+        "MATCH (p:Person) WHERE NOT (any(x IN [1] WHERE p.born > 1966) OR p.name = 'Laurence') RETURN p.name"
+    ) == ["Keanu"]
+    assert rows(
+        "MATCH (p:Person) RETURN [any(x IN collect(p.born) WHERE x > 1966), all(x IN collect(p.born) WHERE x > 1960), "
+        "none(x IN [n IN collect(p) | n.born] WHERE x > 1970)]"
+    ) == [[True, True, None]]
+
+
 def test_values_that_hold_a_null_compare_item_by_item_where_neither_side_is_written_out(
     cypher_pm: PersistenceManager,
 ):

@@ -6,7 +6,6 @@ from enum import Enum
 
 import pytest
 
-from drivine import DrivineError
 from drivine.cypher.sql.oracle_cypher_compiler import OracleCypherCompiler
 from drivine.cypher.sql.parameters import Parameters, cypher_json
 from drivine.cypher.sql.postgres_cypher_compiler import PostgresCypherCompiler
@@ -303,7 +302,7 @@ def test_an_enum_of_ints_given_to_a_text_sum_is_written_as_its_number(compiler: 
 
 @pytest.mark.parametrize("compiler", [PostgresCypherCompiler, OracleCypherCompiler])
 def test_round_takes_a_mode_and_a_precision_bound_as_any_parameter_is(compiler: type[SqlCypherCompiler]):
-    # A mode of a str Enum is its value, as it would be bound; a Decimal precision below 0 is refused as an int is.
+    # A mode of a str Enum is its value, as it would be bound; a Decimal precision below 0 fails as an int does.
     assert compiler("g").compile("RETURN round(2.345, 2, $m)", {"m": _Mode.HALF_UP}).sql
-    with pytest.raises(DrivineError, match=r"^round\(\) takes a precision of 0 or more"):
-        compiler("g").compile("RETURN round(2.345, $p, 'UP')", {"p": Decimal(-1)})
+    sql = compiler("g").compile("RETURN round(2.345, $p, 'UP')", {"p": Decimal(-1)}).sql
+    assert "round() takes a precision from 0 to 2147483647, as in Neo4j." in sql

@@ -897,12 +897,12 @@ class OracleCypherCompiler(SqlCypherCompiler):
         most, so rounding it to places past its last digit changes nothing; a number Oracle holds to more digits is a
         double again once rounded. Oracle works out only the branch of a CASE a row takes, so the overflowing one is
         never reached. The precision is read first, in a WHEN of its own, as a CASE tests its WHENs in order: so a null
-        one gives null for 0 too, not the 0. One below 0 from data is refused before a number is rounded, and reaches
-        here only for a null. The digits are compared in decimal, not by `LOG(10, ABS(n))`, which fails (ORA-01428) on 0
-        and on the least numbers NUMBER holds, near 1.0E-130; zero is given back where `10^(17 - p)` underflows to it,
-        and rounded to 0 short of that. Short of its digits, a tiny number may still take more than _MOST_PLACES places,
-        as 1.0E-120 to 130 does: it is rounded moved that many places fewer to the right, then moved back, which is
-        exact in decimal.
+        one gives null for 0 too, not the 0. Places below 0 or past MAX_COUNT never reach here: they fail on a number
+        first, and give null for anything else. The digits are compared in decimal, not by `LOG(10, ABS(n))`, which
+        fails (ORA-01428) on 0 and on the least numbers NUMBER holds, near 1.0E-130; zero is given back where
+        `10^(17 - p)` underflows to it, and rounded to 0 short of that. Short of its digits, a tiny number may still
+        take more than _MOST_PLACES places, as 1.0E-120 to 130 does: it is rounded moved that many places fewer to the
+        right, then moved back, which is exact in decimal.
         """
 
         def rounded(values: list[str]) -> str:

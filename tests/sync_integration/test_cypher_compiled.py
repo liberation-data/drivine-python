@@ -391,6 +391,59 @@ def test_a_text_past_32_kb_in_a_map_parameter_read_and_set_on_two_nodes_leaves_t
                 assert rows == [{"id": it, **written} for it in (1, 2)]
 
 
+@pytest.mark.skipif(not ORACLE, reason="Oracle isn't configured: set ORACLE_TESTS=true.")
+def test_a_property_past_32_kb_read_on_two_nodes_leaves_the_session_open_on_oracle(
+    factory: PersistenceManagerFactory, registry: DatabaseRegistry
+):
+    # Oracle crashed the session where a statement took a text past 32 KB from the properties with JSON_QUERY as JSON,
+    # and fed it on into further SQL, for each of two rows (#144, drivine4j#255). The compiler reads a property a RETURN
+    # or a WITH gives through its text to work round it: see OracleCypherCompiler.item_property. As above, each
+    # statement is new, and the session is asked again after it, on one connection: not a transaction's, which a
+    # refused statement would make rollback-only.
+    clear(factory.get("oracle"))
+    provider = registry.connection_provider("oracle")
+    assert provider is not None
+    connection = provider.connect()
+
+    def query(cypher: str, parameters: dict[str, Any] | None = None) -> list[Any]:
+        return connection.query(spec(cypher, parameters))
+
+    try:
+        texts = [it * 40_000 for it in ("x", "y", "z")]
+        query("UNWIND range(1, 3) AS id CREATE (:CyWrite {id: id})")
+        # Each set by a statement of its own: a write that reads a long text from an unwound parameter, for each of two
+        # rows, is not what this test is about.
+        for i, a in enumerate(texts):
+            query("MATCH (n:CyWrite {id: $id}) SET n.a = $a", {"id": i + 1, "a": a})
+        query(
+            "MATCH (a:CyWrite {id: 1}), (b:CyWrite {id: 2}) "
+            "CREATE (a)-[:CY_LONG {a: $a}]->(b), (b)-[:CY_LONG {a: $a}]->(a)",
+            {"a": texts[0]},
+        )
+        for i in range(3):
+            assert sorted(query(f"MATCH (n:CyWrite) WHERE n.id > -{i} RETURN n.a")) == texts
+            assert query(f"MATCH (n:CyWrite) WHERE n.id > -{i} RETURN n.a ORDER BY n.id") == texts
+            # Not worked around: Oracle sorts and groups JSON only up to about 32 KB. It refuses the statement
+            # (ORA-40180), and the session stays open for the statements after it.
+            for rest in ("RETURN n.a ORDER BY n.a", "RETURN DISTINCT n.a"):
+                with pytest.raises(Exception) as refused:
+                    query(f"MATCH (n:CyWrite) WHERE n.id > -{i} {rest}")
+                causes: list[BaseException] = []
+                error: BaseException | None = refused.value
+                while error is not None and error not in causes:
+                    causes.append(error)
+                    error = error.__cause__ or error.__context__
+                assert any("ORA-40180" in str(it) for it in causes), repr(refused.value)
+            assert query(f"MATCH (n:CyWrite) WITH n.id AS id, n.a AS a WHERE id > -{i} RETURN [id, a] ORDER BY id") == [
+                [j + 1, a] for j, a in enumerate(texts)
+            ]
+            assert query(f"MATCH ()-[r:CY_LONG]->() RETURN r.a AS a{i}") == [texts[0], texts[0]]
+            assert query(f"MATCH (n:CyWrite) RETURN count(n) AS c{i}") == [3]
+    finally:
+        connection.release()
+        clear(factory.get("oracle"))
+
+
 def seeded(pm: PersistenceManager) -> None:
     """The graph queries.yaml reads, written again."""
     clear(pm)

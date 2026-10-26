@@ -677,6 +677,13 @@ class SqlCypherCompiler(ABC):
     def property_of(self, json: str, key: str) -> str:
         """The value of the key in the JSON map; null where there is none."""
 
+    def item_property(self, props: str, key: str) -> str:
+        """
+        The property `key` of the node or relationship whose properties are `props`, where it is an item of a `RETURN`
+        or a `WITH`, returned or passed on: as `property_of` reads it, but on a store that must read such an item apart.
+        """
+        return self.property_of(props, key)
+
     @abstractmethod
     def element(self, json: str, index: str) -> str:
         """The item of the JSON list at the JSON index, counted from the end where it is negative."""
@@ -2464,7 +2471,7 @@ class SqlCypherCompiler(ABC):
         compiled = [
             (
                 item.name,
-                self._aggregating(item.expression, functools.partial(self._expression, item.expression, select.scope)),
+                self._aggregating(item.expression, functools.partial(self._item, item.expression, select)),
             )
             for item in items
         ]
@@ -3369,6 +3376,22 @@ class SqlCypherCompiler(ABC):
         if where is not None:
             inner.where.append(self._condition(where, inner.scope))
         return Bool("EXISTS (" + " ".join(["SELECT 1", *inner.from_(), *_present(inner.where_clause())]) + ")")
+
+    def _item(self, expression: Expression, select: _Select) -> Value:
+        """
+        The item `expression` of a `RETURN` or a `WITH` over `select`: a property of a node or a relationship, the item
+        itself, read as `item_property` reads it, but beside a variable-length walk; anything else as elsewhere. A node
+        or a relationship is compiled once here: compiling the item over it again lost the rows of statements that match
+        a relationship.
+        """
+        if isinstance(expression, Property) and not select.walks:
+            # A property of a node or a relationship holds no null in a list, as _expression marks it (see _flat).
+            subject = self._expression(expression.subject, select.scope)
+            if isinstance(subject, Node) and expression.key != stamps.PROPERTY:
+                return Json(self.item_property(subject.props, expression.key), flat=True)
+            if isinstance(subject, Relationship):
+                return Json(self.item_property(subject.props, expression.key), flat=True)
+        return self._expression(expression, select.scope)
 
     def _property(self, subject: Value, key: str) -> Value:
         if isinstance(subject, Entities):

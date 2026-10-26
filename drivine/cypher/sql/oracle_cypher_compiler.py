@@ -46,6 +46,78 @@ _PLAIN_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _JSON_WORDS = ("true", "false", "null")
 """The words a JSON path reads as values, not keys."""
 
+NULLS_EQUAL = "cy_nulls_equal"
+"""The function a query declares that compares two values that may hold a null: see `nulls_equal`."""
+
+_QUOTED = r"""'"([^"\\]|\\.)*"'"""
+"""A JSON text, quoted, as an Oracle pattern: its quotes, and what is between them, an escape whole."""
+
+_NULL_HELD = "'[[,:]null[],}]'"
+"""A null in a list or a map, as an Oracle pattern over JSON's text whose texts are taken out."""
+
+_NULLS_EQUAL_BODY = (
+    f"FUNCTION {NULLS_EQUAL}(cy_x JSON, cy_y JSON) RETURN NUMBER IS",
+    "    FUNCTION eq(a JSON_ELEMENT_T, b JSON_ELEMENT_T) RETURN NUMBER IS",
+    "        r NUMBER := 1;",
+    "        e NUMBER;",
+    "        la JSON_ARRAY_T;",
+    "        lb JSON_ARRAY_T;",
+    "        oa JSON_OBJECT_T;",
+    "        ob JSON_OBJECT_T;",
+    "        ks JSON_KEY_LIST;",
+    "        too_long EXCEPTION;",
+    "        PRAGMA EXCEPTION_INIT(too_long, -40478);",
+    "    BEGIN",
+    "        IF a.is_Null OR b.is_Null THEN RETURN NULL; END IF;",
+    "        IF a.is_Array AND b.is_Array THEN",
+    "            la := TREAT(a AS JSON_ARRAY_T);",
+    "            lb := TREAT(b AS JSON_ARRAY_T);",
+    "            IF la.get_Size <> lb.get_Size THEN RETURN 0; END IF;",
+    "            FOR i IN 0 .. la.get_Size - 1 LOOP",
+    "                e := eq(la.get(i), lb.get(i));",
+    "                IF e = 0 THEN RETURN 0; END IF;",
+    "                IF e IS NULL THEN r := NULL; END IF;",
+    "            END LOOP;",
+    "            RETURN r;",
+    "        END IF;",
+    "        IF a.is_Object AND b.is_Object THEN",
+    "            oa := TREAT(a AS JSON_OBJECT_T);",
+    "            ob := TREAT(b AS JSON_OBJECT_T);",
+    "            IF oa.get_Size <> ob.get_Size THEN RETURN 0; END IF;",
+    "            ks := oa.get_Keys;",
+    "            FOR i IN 1 .. ks.COUNT LOOP",
+    "                IF NOT ob.has(ks(i)) THEN RETURN 0; END IF;",
+    "                e := eq(oa.get(ks(i)), ob.get(ks(i)));",
+    "                IF e = 0 THEN RETURN 0; END IF;",
+    "                IF e IS NULL THEN r := NULL; END IF;",
+    "            END LOOP;",
+    "            RETURN r;",
+    "        END IF;",
+    "        IF a.is_Number AND b.is_Number THEN RETURN CASE WHEN a.to_Number = b.to_Number THEN 1 ELSE 0 END; END IF;",
+    # As VARCHAR2s, three times as fast as CLOBs; as CLOBs where one is past 32 KB, which to_String raises on
+    # (ORA-40478).
+    "        IF a.is_String AND b.is_String THEN",
+    "            BEGIN",
+    "                RETURN CASE WHEN a.to_String = b.to_String THEN 1 ELSE 0 END;",
+    "            EXCEPTION WHEN too_long THEN",
+    "                RETURN CASE WHEN DBMS_LOB.COMPARE(a.to_Clob, b.to_Clob) = 0 THEN 1 ELSE 0 END;",
+    "            END;",
+    "        END IF;",
+    "        IF a.is_Boolean AND b.is_Boolean THEN",
+    "            RETURN CASE WHEN a.to_Boolean = b.to_Boolean THEN 1 ELSE 0 END;",
+    "        END IF;",
+    "        RETURN 0;",
+    "    END;",
+    "BEGIN",
+    "    RETURN eq(JSON_ELEMENT_T.parse(JSON_SERIALIZE(cy_x RETURNING CLOB)), "
+    "JSON_ELEMENT_T.parse(JSON_SERIALIZE(cy_y RETURNING CLOB)));",
+    "END;",
+)
+"""
+NULLS_EQUAL, which walks two values together, item by item and key by key, as Cypher compares them: 0 where a pair
+differs, else null where a pair holds a null, else 1.
+"""
+
 
 class OracleCypherCompiler(SqlCypherCompiler):
     """
@@ -66,6 +138,8 @@ class OracleCypherCompiler(SqlCypherCompiler):
         super().__init__(graph)
         self._folding = False
         """Whether the step of a `reduce` is being written, as its function's own: see `reduce`."""
+        self._nulls_compared = False
+        """Whether the query declares NULLS_EQUAL: see `nulls_equal`."""
         self._extended: dict[int, str] = {}
         """
         The parameters' texts that hold a float as Oracle's extended JSON writes one, by identity: see `parameter_text`.
@@ -368,6 +442,42 @@ class OracleCypherCompiler(SqlCypherCompiler):
     def identity_equals(self, x: str, y: str) -> str:
         """`JSON_EQUAL`, which compares values larger than `=` does, with ORA-40180 past about 32 KB."""
         return f"JSON_EQUAL({x}, {y})"
+
+    def item_at(self, json: str, index: int) -> str:
+        return f"JSON_QUERY({json}, '$[{index}]' RETURNING JSON)"
+
+    def list_size(self, json: str) -> str:
+        return f"JSON_VALUE({json}, '$.size()' RETURNING NUMBER)"
+
+    def holds_null(self, json: str) -> str | None:
+        """
+        A null as JSON's text writes one in a list or a map, its texts and keys taken out first, so a text that holds a
+        null's text (`"a,null]"`) does not say so: Oracle's JSON path walks no descendants. Read as a `VARCHAR2`,
+        faster than as a `CLOB`, which a value whose text is past 4,000 bytes is read as instead. It is exact, as a
+        procedure's `nulls_equal` needs.
+        """
+
+        def nulls(text: str) -> str:
+            return f"REGEXP_LIKE(REGEXP_REPLACE({text}, {_QUOTED}, '\"\"'), {_NULL_HELD})"
+
+        short = f"JSON_SERIALIZE({json} RETURNING VARCHAR2(4000) NULL ON ERROR)"
+        long = f"JSON_SERIALIZE({json} RETURNING CLOB)"
+        return f"({short} IS NOT NULL AND {nulls(short)} OR {short} IS NULL AND {nulls(long)})"
+
+    def nulls_equal(self, x: str, y: str, equals: Callable[[str, str], str]) -> str:
+        """
+        By a function the query declares (see `reduce`), which walks the two together: Oracle's recursive queries take
+        no `JSON`. A procedure's queries call no function it declares, nor do a `reduce`'s step's: there, two values
+        equal as JSON are null, as each holds a null, and any other two false, as before null was compared item by
+        item: `a = [1]`, of `[null] AS a`, is false there, where Cypher's is null. Lists and maps written out are
+        compared item by item without it (see `_itemwise`), so `[null] = [1]` is null there.
+        """
+        if self.procedural or self._folding:
+            return f"CASE WHEN {equals(x, y)} THEN NULL ELSE FALSE END"
+        if not self._nulls_compared:
+            self._nulls_compared = True
+            self.declare("\n".join(_NULLS_EQUAL_BODY))
+        return f"({NULLS_EQUAL}({x}, {y}) = 1)"
 
     def id_tokens(self, ids: str, key: str) -> str:
         token = literal('{"' + key + '": \\1}')

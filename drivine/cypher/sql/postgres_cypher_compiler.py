@@ -162,6 +162,46 @@ class PostgresCypherCompiler(SqlCypherCompiler):
     def elements(self, json: str, alias: str) -> str:
         return f"jsonb_array_elements({json}) WITH ORDINALITY {alias} (item, item_no)"
 
+    def item_at(self, json: str, index: int) -> str:
+        return f"({json} -> {index})"
+
+    def list_size(self, json: str) -> str:
+        return f"jsonb_array_length({json})"
+
+    def holds_null(self, json: str) -> str | None:
+        return f"jsonb_path_exists({json}, '$.** ? (@ == null)')"
+
+    def nulls_equal(self, x: str, y: str, equals: Callable[[str, str], str]) -> str:
+        """
+        The pairs of `x`'s and `y`'s items, and of their items', at any depth, walked together: a list's by place, a
+        map's by key, where the two are lists or maps both. A place or a key that one has and the other has not pairs a
+        value with SQL's null. Each one's items and keys are arrays unnested, as `_list_key`'s are, so the planner's
+        estimate brings in no JIT.
+        """
+
+        def entries(json: str, alias: str) -> str:
+            return (
+                f"SELECT CAST({alias}e.n AS text) AS k, {alias}e.v FROM unnest(ARRAY(SELECT jsonb_array_elements("
+                f"CASE WHEN jsonb_typeof({json}) = 'array' THEN {json} END))) WITH ORDINALITY {alias}e (v, n) "
+                f"UNION ALL SELECT {alias}o.key, {json} -> {alias}o.key FROM unnest(ARRAY(SELECT jsonb_object_keys("
+                f"CASE WHEN jsonb_typeof({json}) = 'object' THEN {json} END))) {alias}o (key)"
+            )
+
+        pair = (
+            "CASE WHEN eqw.a IS NULL OR eqw.b IS NULL THEN FALSE "
+            "WHEN jsonb_typeof(eqw.a) = 'null' OR jsonb_typeof(eqw.b) = 'null' THEN NULL "
+            "WHEN jsonb_typeof(eqw.a) <> jsonb_typeof(eqw.b) THEN FALSE "
+            f"WHEN jsonb_typeof(eqw.a) IN ('array', 'object') THEN TRUE ELSE {equals('eqw.a', 'eqw.b')} END"
+        )
+        return (
+            f"(WITH RECURSIVE eqw (a, b) AS (SELECT {x}, {y} UNION ALL "
+            "SELECT eqp.a, eqp.b FROM eqw CROSS JOIN LATERAL (SELECT eqa.v AS a, eqb.v AS b FROM "
+            f"({entries('eqw.a', 'eqa')}) eqa FULL JOIN ({entries('eqw.b', 'eqb')}) eqb ON eqa.k = eqb.k) eqp "
+            "WHERE jsonb_typeof(eqw.a) = jsonb_typeof(eqw.b) AND jsonb_typeof(eqw.a) IN ('array', 'object')) "
+            "SELECT CASE WHEN bool_or(NOT eqt.v) THEN FALSE WHEN bool_or(eqt.v IS NULL) THEN NULL ELSE TRUE END "
+            f"FROM (SELECT {pair} AS v FROM eqw) eqt)"
+        )
+
     def aggregate_list(self, value: str, order: str | None = None) -> str:
         ordered = f" ORDER BY {order}" if order is not None else ""
         return f"COALESCE(json_agg({value}{ordered}), '[]'::json)"

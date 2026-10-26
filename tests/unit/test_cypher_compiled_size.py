@@ -4,7 +4,9 @@ than once, to test its kind and then its value, is bound once where it is long. 
 compiled to 650 KB on Oracle. drivine4j's CompiledSizeTest, ported.
 """
 
+import math
 import re
+from typing import Any
 
 import pytest
 
@@ -240,3 +242,94 @@ def test_a_sort_by_a_property_on_postgres_is_by_its_json_alone_and_only_a_list_t
     # Its items as arrays unnested, which the planner takes for 10 items, not a set-returning function's 100: a 150th
     # of the cost.
     assert "FROM jsonb_array_elements(" not in listed and "unnest(ARRAY(SELECT jsonb_array_elements(" in listed, listed
+
+
+@COMPILERS
+def test_an_equality_of_values_that_hold_no_null_in_a_list_or_a_map_compiles_with_no_test_for_one(
+    compiler: type[SqlCypherCompiler],
+) -> None:
+    # #116: a null a list or a map holds is tested for, and the two walked, only where one may hold one.
+    test = {OracleCypherCompiler: "[[,:]null[],}]", PostgresCypherCompiler: "jsonb_path_exists("}[compiler]
+
+    def tests(cypher: str, parameters: dict[str, Any] | None = None) -> bool:
+        return test in compiler("g").compile(cypher, parameters).sql
+
+    assert not tests("MATCH (c:Claim) WHERE c.list = $p RETURN c.id", {"p": [1, 2]})
+    assert not tests(
+        "MATCH (c:Claim) WITH c, c.list AS l RETURN [1, 2] = [1, 2], c.a = c.b, l = c.b, c.list IN $ls, "
+        "{x: 1} <> {x: 2}, size(l) = 2",
+        {"ls": [[1]]},
+    )
+    # Lists and maps written out are compared item by item.
+    assert not tests("MATCH (c:Claim) WITH c.a AS a, c.b AS b RETURN [a, b] = [b, a], {x: a} = {x: b}, a IN [b, null]")
+    # A parameter's list that holds a null is compared item by item as the statement is compiled; a map is walked.
+    assert not tests("MATCH (c:Claim) WHERE c.list = $p RETURN c.id", {"p": [1, None, [None, 2]]})
+    assert tests("MATCH (c:Claim) WHERE c.map = $p RETURN c.id", {"p": {"x": None}})
+    assert tests("MATCH (c:Claim) WITH c, [c.a] AS l RETURN l = [c.b]")
+    # As is a parameter's list with an item too long to write in the statement.
+    assert tests("MATCH (c:Claim) WHERE c.list = $p RETURN c.id", {"p": ["x" * 2000, None]})
+    # Read from what the parameter is bound as: an iterator is read once, and NaN is a value, bound as a text.
+    assert not tests("MATCH (c:Claim) WHERE c.list = $p RETURN c.id", {"p": iter([1, 2])})
+    assert not tests("MATCH (c:Claim) WHERE c.list = $p RETURN c.id", {"p": [math.nan]})
+
+
+@COMPILERS
+def test_a_where_that_searches_a_list_that_holds_no_null_compiles_to_the_search_alone(
+    compiler: type[SqlCypherCompiler],
+) -> None:
+    # #116: null and false keep no row alike, so a WHERE needs no test of the value being null.
+    def compiled(cypher: str, parameters: dict[str, Any] | None = None) -> str:
+        return compiler("g").compile(cypher, parameters).sql
+
+    def tested(sql: str) -> bool:
+        return "ELSE FALSE" in sql or "THEN FALSE" in sql
+
+    sql = compiled("MATCH (c:Claim) WHERE c.a IN $l AND (c.b IN [1, 2] OR c.c > 1) RETURN c.id", {"l": [1, 2]})
+    assert not tested(sql), sql
+    # Nor of the list being null or holding a null, beside a value that holds none.
+    nullable = compiled("MATCH (c:Claim) WHERE 'a' IN c.tags AND c.a IN $l RETURN c.id", {"l": [1, None]})
+    assert not tested(nullable), nullable
+    # Nor in a quantified path pattern's WHERE, which keeps a step where it is true.
+    stepped = compiled("MATCH (a:Claim) ((x)-[:R]->(y) WHERE y.a IN [1, 2]){1,3} (b) RETURN b.id")
+    assert not tested(stepped), stepped
+    returned = compiled("MATCH (c:Claim) RETURN c.a IN $l", {"l": [1, 2]})
+    assert "THEN FALSE" in returned, returned
+
+
+@COMPILERS
+def test_an_in_of_an_in_compiles_to_a_statement_that_grows_with_each_not_exponentially(
+    compiler: type[SqlCypherCompiler],
+) -> None:
+    def nested(times: int, list_: str) -> str:
+        return "MATCH (c:Claim) RETURN " + "(" * times + "c.a" + f" IN {list_})" * times
+
+    for list_ in ("[true]", "c.list"):
+        two, four = (len(compiler("g").compile(nested(it, list_)).sql) for it in (2, 4))
+        assert four < 3 * two, (list_, two, four)
+
+
+def test_values_that_may_hold_a_null_are_walked_on_postgres_over_arrays_unnested_which_the_planner_costs_low():
+    # As the sort key's walk is: a set-returning function's 100 rows, multiplied through the walk, bring in its JIT.
+    sql = PostgresCypherCompiler("g").compile("MATCH (c:Claim) WITH [c.a] AS l, [c.b] AS m RETURN l = m").sql
+    assert "WITH RECURSIVE" in sql and "FROM jsonb_array_elements(" not in sql and "jsonb_each(" not in sql, sql
+
+
+@COMPILERS
+@pytest.mark.parametrize("equality", ["[a, b] = [b, a]", "{x: a} = {x: b}"])
+def test_lists_and_maps_written_out_that_may_hold_a_null_are_compared_item_by_item_not_built_and_compared_whole(
+    compiler: type[SqlCypherCompiler], equality: str
+) -> None:
+    built = {OracleCypherCompiler: ("JSON_ARRAY(", "JSON_OBJECT("), PostgresCypherCompiler: ("json_build_",)}[compiler]
+    sql = compiler("g").compile(f"MATCH (c:Claim) WITH c.a AS a, c.b AS b RETURN {equality} AS e").sql
+    assert not any(it in sql for it in built), sql
+
+
+def test_oracle_declares_the_function_that_compares_values_that_may_hold_a_null_once_and_none_in_a_procedure():
+    # A procedure's queries call no function it declares: there, two values equal as JSON are null, as each holds one.
+    def compiled(cypher: str) -> str:
+        return OracleCypherCompiler("g").compile(cypher).sql
+
+    read = compiled("WITH [1, null] AS a, [2, null] AS b RETURN [a = b, b = a]")
+    assert read.count("FUNCTION cy_nulls_equal(") == 1 and "too_long" in read, read
+    written = compiled("CREATE (n:X) WITH n, [1, null] AS a, [2, null] AS b SET n.e = a = b")
+    assert "cy_nulls_equal" not in written and "THEN NULL ELSE FALSE END" in written, written

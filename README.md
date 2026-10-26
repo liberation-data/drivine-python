@@ -376,7 +376,8 @@ people = await pm.query(spec.bind({"city": "Sydney"}))
 - Parameters are named, `$name`: a statement bound to a list of them is refused.
 - A row of one item is its value, and a row of several a list of them. A node is its properties.
 - A value is compared as JSON, so `'7'` is not `7`, and a missing property is null. A map keeps its keys in the order
-  written.
+  written. Two lists or maps that may hold a null are compared item by item, as Cypher compares them: `[null] = [null]`
+  is null, and `[1, null] = [2, null]` false. `IN` compares the value with each item as `=` does.
 - A map or a list that holds a node or a relationship (`{x: r}`, `[r, 1]`) compares by what it holds, not by its
   properties, through a `WITH` or a `CALL { … }` too, as on a graph engine. Unwound by `UNWIND`, as a comprehension's
   or a reduce's variable, or carried past a write in the statement, it compares by its properties.
@@ -402,7 +403,9 @@ people = await pm.query(spec.bind({"city": "Sydney"}))
   float's text carries no trailing zeros: `toString(4.0 / 2)` is `"2.0"`.
 - On Oracle a text read out of JSON is at most 4,000 bytes, and an empty one is null; `reduce` doesn't run in a
   statement that writes, in the step of a `reduce`, or where its step reads a path; and `map[key]` reads null where an
-  expression gives the key.
+  expression gives the key. Lists or maps that may hold a null are compared by a function the query declares too; in a
+  statement that writes, or the step of a `reduce`, two that are equal as JSON compare as null and any other two as
+  false, so `[null] = [1]` is false there, where Cypher's comparison is null.
 - What each statement gives is the [Cypher spec](https://github.com/liberation-data/drivine-cypher-spec), which the
   three Drivine libraries run alike.
 

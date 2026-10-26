@@ -927,6 +927,20 @@ async def test_round_reads_a_precision_from_data_or_a_whole_float_as_a_whole_num
             "round(99.99, 16, 'UP'), round(0.1, 17, 'UP')]"
         )
     ) == [[123.456, 123.456, 123.456, -123.456, 1234.5678901234567, 1234.567890123457, 99.99, 0.1]]
+    # Near 10^17, whose digits all come before the point, and negatives past their digits.
+    assert await cypher_pm.query(
+        spec(
+            "RETURN [round(123456789012345678, 2), round(99999999999999999.0, 1, 'UP'), round(12345678901234567.0, 1), "
+            "round(-9.87654321E16, 3, 'FLOOR'), round(-1234.5678, 400), round(-1234.5678, 2)]"
+        )
+    ) == [[1.2345678901234568e17, 1.0e17, 1.2345678901234568e16, -9.87654321e16, -1234.5678, -1234.57]]
+    # Over an aggregate, where no value is shared, and so the number is written out where it is read.
+    assert await cypher_pm.query(
+        spec(
+            "UNWIND [1.0, 2.0, 2.5] AS x RETURN [round(avg(x), 2), round(avg(x), 400), round(avg(x), 400, 'HALF_UP'), "
+            "round(round(avg(x), 400), 1, 'DOWN')]"
+        )
+    ) == [[1.83, 1.8333333333333333, 1.8333333333333333, 1.8]]
     # A negative precision from data fails on zero too, whose places Oracle gives back without rounding.
     message = None if cypher_pm.type is DatabaseType.NEO4J else re.escape(NEGATIVE_PRECISION)
     for statement in ["MATCH (n:Round) RETURN round(n.z, n.r, 'HALF_UP')", "MATCH (n:Round) RETURN round(n.z, n.r)"]:
@@ -941,6 +955,73 @@ async def test_round_reads_a_precision_from_data_or_a_whole_float_as_a_whole_num
                 "round(4.9E-324, 324, 'UP'), round(4.9E-324, 323, 'UP')]"
             )
         ) == [[2.225073858507201e-308, 2.2250738585072014e-308, 5e-324, 1e-323]]
+
+
+async def test_round_of_zero_gives_zero_or_null_to_a_null_precision_and_fails_on_a_negative_one(
+    cypher_pm: PersistenceManager,
+):
+    # Zero, which Oracle gives back without rounding, gives zero wherever it is read, among rows that are not zero too.
+    await clear(cypher_pm)
+    await cypher_pm.execute(spec("UNWIND [0.0, 1.25, 0.0, -2.5] AS x CREATE (:Round {x: x})"))
+    assert await cypher_pm.query(spec("MATCH (n:Round) WHERE round(n.x, 400) = 0 RETURN count(*)")) == [2]
+    assert await cypher_pm.query(
+        spec("MATCH (n:Round) WHERE round(n.x, 2) = 0 AND round(n.x, 1, 'UP') = 0 RETURN count(*)")
+    ) == [2]
+    assert await cypher_pm.query(spec("MATCH (n:Round) RETURN round(n.x, 1) AS r, count(*) AS c ORDER BY r")) == [
+        [-2.5, 1],
+        [0.0, 2],
+        [1.3, 1],
+    ]
+    assert await cypher_pm.query(spec("MATCH (n:Round) RETURN n.x ORDER BY round(n.x, 1, 'UP') DESC")) == [
+        1.25,
+        0.0,
+        0.0,
+        -2.5,
+    ]
+    assert await cypher_pm.query(
+        spec(
+            "UNWIND [0.0, 0.0] AS x RETURN [round(sum(x), 2), round(avg(x), 400), round(min(x), 2, 'HALF_UP'), "
+            "round(sum(x), 1, 'CEILING')]"
+        )
+    ) == [[0.0, 0.0, 0.0, 0.0]]
+    assert await cypher_pm.query(
+        spec(
+            "MATCH (n:Round) WITH n.x AS x WHERE round(x, 2) = 0 "
+            "RETURN [round(sum(x), 2), round(avg(x), 400), round(sum(x), 1, 'CEILING')]"
+        )
+    ) == [[0.0, 0.0, 0.0]]
+    assert await cypher_pm.query(
+        spec(
+            "UNWIND range(0, 2999) AS i WITH toFloat(i % 3) * 0.5 AS x "
+            "RETURN [sum(round(x, 400)), sum(round(x, 0)), sum(round(x, 0, 'UP')), count(*)]"
+        )
+    ) == [[1500.0, 2000.0, 2000.0, 3000]]
+    assert await cypher_pm.query(
+        spec(
+            "UNWIND range(0, 2999) AS i WITH toFloat(i % 3) * 0.5 AS x "
+            "WHERE round(x, 2) = 0 OR round(x, 400, 'UP') > 0 RETURN count(*)"
+        )
+    ) == [3000]
+    assert await cypher_pm.query(spec("RETURN [x IN [0.0, 1.55, 0.0] | round(x, 1)]")) == [[0.0, 1.6, 0.0]]
+    assert await cypher_pm.query(
+        spec("RETURN [round($z, 2), round($z, 400, 'FLOOR'), round(0, 2), round(0.0, 2, 'UP')]", {"z": 0.0})
+    ) == [[0.0, 0.0, 0.0, 0.0]]
+    # The precision is read before zero is given back: a null one gives null, and a negative one from data fails, under
+    # an aggregate too, where it is written out where it is read.
+    assert await cypher_pm.query(
+        spec(
+            "MATCH (n:Round) WHERE n.x = 0 RETURN [round(0.0, null), round(0, null, 'HALF_UP'), round(n.x, n.none), "
+            "round(n.x, n.none, 'UP')]"
+        )
+    ) == [[None, None, None, None], [None, None, None, None]]
+    await cypher_pm.execute(spec("CREATE (:Round {x: 0.0, r: -2})"))
+    message = None if cypher_pm.type is DatabaseType.NEO4J else re.escape(NEGATIVE_PRECISION)
+    for statement in [
+        "MATCH (n:Round) WHERE n.r IS NOT NULL WITH n.x AS x, n.r AS r RETURN r, round(sum(x), r)",
+        "MATCH (n:Round) WHERE n.r IS NOT NULL WITH n.x AS x, n.r AS r RETURN r, round(min(x), r, 'HALF_UP')",
+    ]:
+        with pytest.raises(Exception, match=message):  # noqa: PT011
+            await cypher_pm.query(spec(statement))
 
 
 async def test_a_negative_precision_from_data_fails_only_on_a_row_that_reads_it_in_a_where_and_an_aggregate_too(

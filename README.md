@@ -414,6 +414,15 @@ people = await pm.query(spec.bind({"city": "Sydney"}))
   statement that writes, or the step of a `reduce`, two that are equal as JSON compare as null and any other two as
   false, so `a = [1]`, of `[null] AS a`, is false there, where Cypher's comparison is null. Lists and maps written out
   are compared item by item there too, so `[null] = [1]` is null.
+- On Oracle a property that a `RETURN` or a `WITH` returns or passes on (`RETURN n.name`) is read through its text,
+  which costs about 2.4 to 3.8 times a plain read: 100,000 rows of `RETURN n.name` take about 490 ms, against 150 ms.
+  This works around an Oracle bug, seen on 23.26.3: a string past about 32 KB taken from JSON as JSON, returned or fed
+  on into more SQL, crashes the session (ORA-03113, with ORA-00600 [17114] or ORA-07445 in the alert log) over two or
+  more rows. Only an item that is the property itself is read so: one inside an item (`RETURN [n.name]`,
+  `collect(n.name)`) is read as JSON, as before, and isn't worked around. It goes once an Oracle release no longer
+  crashes on the repro in [docs/oracle-long-json-string-crash.md](docs/oracle-long-json-string-crash.md). Such a text
+  still can't be sorted by, grouped by or made `DISTINCT`: Oracle sorts and groups JSON only up to about 32 KB, and
+  refuses the statement (ORA-40180), leaving the session open.
 - What each statement gives is the [Cypher spec](https://github.com/liberation-data/drivine-cypher-spec), which the
   three Drivine libraries run alike.
 

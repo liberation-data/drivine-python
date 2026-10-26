@@ -289,6 +289,41 @@ class OracleCypherCompiler(SqlCypherCompiler):
             return f"JSON(JSON_QUERY({PARAMS}, {_path(key)} RETURNING CLOB) EXTENDED)"
         return f"JSON_QUERY({json}, {_path(key)} RETURNING JSON)"
 
+    def item_property(self, props: str, key: str) -> str:
+        """
+        A property returned or passed on by a `RETURN` or a `WITH`, read through its text: only the key is kept
+        (`JSON_TRANSFORM … KEEP`), written out as extended JSON, then read back from that text as extended JSON, so a
+        float that is a whole number stays a float.
+
+        **A workaround for an Oracle server bug (#144, drivine4j#255), to be removed once Oracle fixes it.** Seen on
+        Oracle 23.26.3 (gvenzl/oracle-free 23). Where a statement takes a string value past about 32 KB from a node's
+        properties with `JSON_QUERY(props, '$.a' RETURNING JSON)` over two or more rows, as the compiled SQL does and
+        then feeds it on (an outer `SELECT`, an `ORDER BY`, a `JSON_ARRAY`), the long value is written over the server
+        process's heap and the process dies: the client sees ORA-03113 (end-of-file on communication channel), and the
+        alert log shows ORA-00600 `[17114]` and `[kghfrh1]`, and ORA-07445 in `kghalo`, `kghsrch_new` or
+        `kxsFreePages`, faulting at `0x78787878787878`, the bytes of the string. One row doesn't crash it, nor 30,000
+        characters, nor a long list, nor a map that holds the long string. A plain-SQL repro is in
+        `docs/oracle-long-json-string-crash.md`.
+
+        It costs about 2.4 to 3.8 times the plain read on short values: 100,000 rows of `RETURN n.name` took 493 ms
+        against 147 ms. Cheaper forms were tried and rejected: each crashed, read a CLOB column back as text (5.0 as 5),
+        or, as a `CASE` on `$.a.type()` or on the value's length that reads the properties twice, made Oracle drop the
+        row's label test and return nodes it had ruled out. Beside a variable-length walk the plain read is kept: Oracle
+        has closed the session over this form in the more involved statements a walk writes. Only an item that is the
+        property itself is read so: a property inside an item (`[n.a]`, `collect(n.a)`) is read as `property_of` reads
+        it, and isn't worked around. Read so, a text past 32 KB still can't be sorted by, grouped by or made `DISTINCT`:
+        Oracle refuses it (ORA-40180), as it does any JSON that large, and the session stays open.
+
+        To remove it, delete this override, so the item is read as `property_of` reads it, `JSON_QUERY … RETURNING
+        JSON`, once an Oracle release no longer crashes on the repro, and the "a property past 32 KB read on two nodes"
+        Oracle test still passes without it. `tests/unit/test_oracle_item_property.py`, which pins this SQL, goes
+        with it.
+        """
+        return (
+            f"JSON(JSON_QUERY(JSON_SERIALIZE(JSON_TRANSFORM({props}, KEEP {_path(key)}) RETURNING CLOB EXTENDED), "
+            f"{_path(key)} RETURNING CLOB) EXTENDED)"
+        )
+
     def element(self, json: str, index: str) -> str:
         """Counted from the end where negative: a JSON path counts from the start."""
 

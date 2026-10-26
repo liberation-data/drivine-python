@@ -826,10 +826,20 @@ class SqlCypherCompiler(ABC):
 
         return self.shared([x, y], body)
 
-    def list_sort_key(self, json: str) -> str:
-        """What an order sorts the JSON by where the statement makes it a list (Json.list): as any value, where the
-        store orders lists as Cypher does."""
+    def ordered(self, x: str, operator: str, y: str) -> str:
+        """Whether the JSON values `x` and `y`, of one kind, a number, a text or a truth value, stand as `operator`
+        says (`<`, `>=`…)."""
+        return f"{x} {operator} {y}"
+
+    def sort_key(self, json: str) -> str:
+        """What an order sorts the JSON value by: JSON's null as SQL's, which comes last, as a graph engine orders
+        null."""
         return self.null_if_json_null(json)
+
+    def list_sort_key(self, json: str) -> str:
+        """What an order sorts the JSON by where the statement makes it a list (Json.list): as `sort_key`, where the
+        store orders lists as Cypher does."""
+        return self.sort_key(json)
 
     @abstractmethod
     def add(self, a: str, b: str, given: tuple[Any, Any] = (None, None)) -> str:
@@ -3669,7 +3679,7 @@ class SqlCypherCompiler(ABC):
                 return (
                     f"CASE WHEN {self.type_of(x)} = {self.type_of(y)} "
                     f"AND {self.type_of(x)} IN ('number', 'string', 'boolean') "
-                    f"THEN {x} {sql} {y} END"
+                    f"THEN {self.ordered(x, sql, y)} END"
                 )
 
             return Bool(self.shared([a, b], ordered))
@@ -4834,11 +4844,10 @@ class SqlCypherCompiler(ABC):
         temporal = value.temporal if isinstance(value, Json) else None
         if isinstance(value, Json) and temporal is not None and temporal.zoned:
             return self.comparable(value), lambda it: self.temporals.moment(self.text(it), temporal)
-        # A list the statement makes sorts as Cypher sorts lists, item by item; any other value as the store sorts its
-        # JSON.
+        # A list the statement makes sorts as Cypher sorts lists, item by item; any other value as the store sorts it.
         if _is_list(value):
             return self.comparable(self.json(value)), self.list_sort_key
-        return self.comparable(self.json(value)), self.null_if_json_null
+        return self.comparable(self.json(value)), self.sort_key
 
 
 # ----- What a statement holds -----

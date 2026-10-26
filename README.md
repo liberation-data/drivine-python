@@ -207,7 +207,8 @@ applied whole or not at all.
 - A number is compared as a number only where one is stored: `'7'` is not `7`, as on the graph engines.
 - Text is ordered by the database's collation, so a page of mixed-case text may not be in the order Neo4j gives
   (`a, b, B` rather than `B, a, b`). The range indexes are made in that collation, so an order and a seek are read
-  through them.
+  through them. Compiled Cypher orders text by its code points instead
+  ([Cypher on Postgres and Oracle](#cypher-on-postgres-and-oracle)).
 - A save checks the stamp, as on the graph engines. A save turned away by a serialization failure (`40001`) or a
   deadlock (`40P01`) is run again.
 - Index the id of each class you save: a range index or a uniqueness constraint is a partial index over the label's
@@ -322,9 +323,10 @@ database.
 - Parameters are named, `$name`, and not a list; values are compared as JSON, so `'7'` is not `7`; dates and times
   come back as ISO 8601 text; on Oracle a cursor over a write is refused: see
   [Cypher on Postgres and Oracle](#cypher-on-postgres-and-oracle).
-- On Postgres, float arithmetic is exact decimal ([Cypher on Postgres and Oracle](#cypher-on-postgres-and-oracle)),
-  text is ordered by the database's collation, and the tables are made by the object manager or a schema catalog
-  ([Postgres](#postgres)).
+- On Postgres, float arithmetic is exact decimal, and a list or a map read from a property orders the texts in it by
+  the database's collation, where other text is ordered by its code points, as Cypher does
+  ([Cypher on Postgres and Oracle](#cypher-on-postgres-and-oracle)); the tables are made by the object manager or a
+  schema catalog ([Postgres](#postgres)).
 - On Oracle, a text read out of JSON is at most 4,000 bytes, and an empty one is null; a quantified path pattern's
   `WHERE`, `reduce` and `map[key]` take less than on Postgres
   ([Cypher on Postgres and Oracle](#cypher-on-postgres-and-oracle)); the graph's tables are made on the first
@@ -401,6 +403,11 @@ people = await pm.query(spec.bind({"city": "Sydney"}))
 - On Postgres, compiled Cypher works float arithmetic out in exact decimal (`numeric`), not as a double, so a result
   can differ from a graph engine's in its last digits: `0.1 * 3` is `0.3`, where Neo4j gives `0.30000000000000004`. A
   float's text carries no trailing zeros: `toString(4.0 / 2)` is `"2.0"`.
+- On Postgres, text is compared and sorted by its code points, as Cypher does (`B, a, b`), not by the database's
+  collation: in the `C` collation, whose byte order is code point order in a UTF-8 database, as `initdb` and Postgres's
+  images make one. In a list the statement makes, such as `ORDER BY [n.last, n.first]`, a text is ordered by its code
+  points over its first 500 characters, and past them by the database's collation. A list read from a property, and a
+  map, still order the texts in them by the database's collation (`ORDER BY n.tags`).
 - On Oracle a text read out of JSON is at most 4,000 bytes, and an empty one is null; `reduce` doesn't run in a
   statement that writes, in the step of a `reduce`, or where its step reads a path; and `map[key]` reads null where an
   expression gives the key. Lists or maps that may hold a null are compared by a function the query declares too; in a

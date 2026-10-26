@@ -1,10 +1,11 @@
 """
-drivine4j's store on Postgres, as an object manager makes and keeps it: made at its first statement, cascades, its
+drivine4j's store on Postgres, as Drivine makes and keeps it: made at the provider's first connection, cascades, its
 catalog of indexes, and search, with an index and without. TypeScript's PostgresStore.spec, ported.
 """
 
 import dataclasses
 import json
+import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from enum import Enum
@@ -30,6 +31,7 @@ from drivine import (
     StatelessGraphObjectManager,
     VectorIndex,
     case_of,
+    cypher_statement,
     equal_to,
     full_text_index,
     range_index,
@@ -81,7 +83,6 @@ class Doc(NodeFragment, labels=["PgStore", "Doc"]):
 @pytest.fixture
 async def seed(pm: PersistenceManager) -> AsyncIterator[SqlSeed]:
     seed = SqlSeed(pm, "PgStore")
-    await seed.prepare()
     await seed.clear()
     await pm.execute(QuerySpecification[Any](f"DELETE FROM {GRAPH.catalog} WHERE label LIKE 'PgStore%'"))
     yield seed
@@ -93,7 +94,7 @@ async def exists(pm: PersistenceManager, table: str) -> bool:
     return row["made"]
 
 
-async def test_makes_a_graphs_tables_at_an_object_managers_first_statement_and_not_at_a_connection(
+async def test_makes_a_graphs_tables_at_its_providers_first_connection_whatever_is_sent_first(
     pm: PersistenceManager, registry: DatabaseRegistry, factory: PersistenceManagerFactory
 ):
     name = "pgstore_lazy"
@@ -103,12 +104,12 @@ async def test_makes_a_graphs_tables_at_an_object_managers_first_statement_and_n
         properties = dataclasses.replace(ConnectionProperties.from_env("postgres"), default_graph_path=name)
         registry.builder().with_properties(properties).register("postgres_lazy")
     lazy_pm = factory.get("postgres_lazy")
-    assert await lazy_pm.query(QuerySpecification[Any]("SELECT 1 AS one")) == [{"one": 1}]
     assert not await exists(pm, f"{name}_node")
-    lazy = StatelessGraphObjectManager(lazy_pm)
-    assert await lazy.count(Ticket) == 0
+    # Plain SQL, through a persistence manager alone.
+    assert await lazy_pm.query(QuerySpecification[Any]("SELECT 1 AS one")) == [{"one": 1}]
     for table in ("node", "edge", "schema"):
         assert await exists(pm, f"{name}_{table}")
+    assert await StatelessGraphObjectManager(lazy_pm).count(Ticket) == 0
     # drivine4j's store, as its node table's comment says: a manager on the JVM finds it made.
     comment = await pm.get_one(
         QuerySpecification[Any](f"SELECT obj_description(to_regclass('{name}_node'), 'pg_class') AS version")
@@ -345,3 +346,37 @@ async def test_patches_where_a_raw_condition_holds_with_each_kind_of_value_writt
         True, True, True
     )
     assert (await gom.load(Ticket, "t1")).title == "Shut"
+
+
+async def test_a_user_who_may_only_read_the_graphs_tables_reads_them_with_cypher_once_they_are_made(
+    pm: PersistenceManager, factory: PersistenceManagerFactory
+):
+    name, role = "pgstore_read_only", f"drivine_reader_{uuid.uuid4().hex[:8]}"
+    drop = f"DROP TABLE IF EXISTS {name}_edge, {name}_node, {name}_schema CASCADE"
+    await pm.execute(QuerySpecification[Any](drop))
+    owner = DatabaseRegistry()
+    properties = dataclasses.replace(ConnectionProperties.from_env("postgres"), default_graph_path=name)
+    owner.builder().with_properties(properties).register("owner")
+    reader = DatabaseRegistry()
+    reader.builder().with_properties(dataclasses.replace(properties, user_name=role, password="reader")).register(
+        "reader"
+    )
+    try:
+        await (
+            PersistenceManagerFactory(owner)
+            .get("owner")
+            .execute(QuerySpecification[Any](cypher_statement("CREATE (:PgStore:Reader {id: 'r1'})")))
+        )
+        await pm.execute(QuerySpecification[Any](f"CREATE ROLE {role} LOGIN PASSWORD 'reader'"))
+        await pm.execute(QuerySpecification[Any](f"GRANT SELECT ON {name}_node, {name}_edge, {name}_schema TO {role}"))
+        found = (
+            await PersistenceManagerFactory(reader)
+            .get("reader")
+            .query(QuerySpecification[Any](cypher_statement("MATCH (n:Reader) RETURN n.id")))
+        )
+        assert found == ["r1"]
+    finally:
+        await owner.close()
+        await reader.close()
+        await pm.execute(QuerySpecification[Any](drop))
+        await pm.execute(QuerySpecification[Any](f"DROP ROLE IF EXISTS {role}"))

@@ -52,7 +52,6 @@ class Conversation(GraphView):
 @pytest.fixture(autouse=True)
 async def cleared(pm: PersistenceManager) -> AsyncIterator[None]:
     seed = SqlSeed(pm, "SqlWrite")
-    await seed.prepare()
     await seed.clear()
     yield
     await seed.clear()

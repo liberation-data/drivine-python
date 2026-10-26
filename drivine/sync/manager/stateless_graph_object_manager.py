@@ -52,7 +52,6 @@ from drivine.store.store_identity import StoreIdentity
 from drivine.sync.dsl.query_index_advisor import QueryIndexAdvisor
 from drivine.sync.manager.contention import when_not_contended
 from drivine.sync.manager.edge_operations import EdgeOperations
-from drivine.sync.manager.ensured_store import EnsuredStore, ensure_store
 from drivine.sync.manager.group_operations import GroupOperations
 from drivine.sync.manager.persistence_manager import PersistenceManager
 from drivine.sync.schema.constraint_manager import ConstraintManager
@@ -87,9 +86,11 @@ class StatelessGraphObjectManager:
         self.registry = registry or ModelRegistry()
         provider = getattr(persistence_manager, "provider", None)
         self.backend = backend_for(persistence_manager.type, getattr(provider, "graph_name", None))
-        ensuring: str | None = getattr(self.backend, "ensuring", None)
-        self.persistence_manager = EnsuredStore(persistence_manager, ensuring) if ensuring else persistence_manager
-        """The manager's statements run through it, once the backend's store is made where it has one to make."""
+        self.persistence_manager = persistence_manager
+        """
+        The manager's statements run through it. On a SQL store, the provider's first connection makes the graph's
+        tables (see GraphTables), whichever manager asks first.
+        """
         self.mapper = GraphObjectMapper(self.registry)
         self._warned_non_atomic = False
         self._identity: StoreIdentity | None = None
@@ -129,15 +130,7 @@ class StatelessGraphObjectManager:
         provider = getattr(self.persistence_manager, "provider", None)
         if provider is None:
             raise DrivineError("Schema management needs a persistence manager that names its connection provider.")
-        ensuring: str | None = getattr(self.backend, "ensuring", None)
-        if not ensuring:
-            return SchemaExecutor(provider)
-        persistence_manager = self.persistence_manager
-
-        def prepare() -> None:
-            ensure_store(persistence_manager, ensuring)
-
-        return SchemaExecutor(provider, prepare)
+        return SchemaExecutor(provider)
 
     def _schema_grammar(self) -> SchemaGrammar:
         return schema_grammar_for(self.persistence_manager.type, getattr(self.backend, "graph", None))

@@ -7,7 +7,6 @@ import json
 from typing import Any, Literal
 
 from drivine import DatabaseType, PersistenceManager, QuerySpecification
-from drivine.backend.postgres.postgres_graph import PostgresGraph
 
 
 def raw_property(pm: PersistenceManager, property: str, as_: Literal["TEXT", "NUMBER"] = "TEXT") -> str:
@@ -42,11 +41,6 @@ class SqlSeed:
         self.scope = scope
         self.key = key
         self.oracle = pm.type is DatabaseType.ORACLE
-
-    async def prepare(self) -> None:
-        """Makes the store where it is not there: Oracle's connection makes it; on Postgres, an object manager does."""
-        if not self.oracle:
-            await self.pm.execute(QuerySpecification[Any](PostgresGraph().ensuring))
 
     async def clear(self) -> None:
         await self.pm.execute(QuerySpecification[Any](f"DELETE FROM drivine_node n WHERE {self._carries('n')}"))

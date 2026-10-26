@@ -19,8 +19,6 @@ from typing import Any
 import pytest
 from pydantic import BaseModel
 
-from drivine.backend.oracle.oracle_graph import OracleGraph
-from drivine.backend.postgres.postgres_graph import PostgresGraph
 from drivine.cypher.sql.sql_cypher_compiler import NEGATIVE_PRECISION
 from drivine.model import stamps
 from drivine.query.statement import cypher_statement
@@ -305,7 +303,7 @@ def test_a_cypher_statement_is_compiled_against_the_tables_of_the_graph_its_data
         properties = dataclasses.replace(ConnectionProperties.from_env(store), default_graph_path=name)
         registry.builder().with_properties(properties).register(f"{store}_{name}")
     pm = factory.get(f"{store}_{name}")
-    pm.execute(QuerySpecification((PostgresGraph(name) if store == "postgres" else OracleGraph(name)).ensuring))
+    # The provider's first connection makes the graph's tables where they aren't there.
     pm.execute(QuerySpecification(f"DELETE FROM {name}_edge"))
     pm.execute(QuerySpecification(f"DELETE FROM {name}_node"))
     pm.query(spec("CREATE (:CyWrite {name: 'Ada'})"))
@@ -756,8 +754,6 @@ def hub(
             properties = dataclasses.replace(ConnectionProperties.from_env(store), default_graph_path=HUB_GRAPH)
             registry.builder().with_properties(properties).register(name)
         apart = factory.get(name)
-        graph = PostgresGraph(HUB_GRAPH) if store == "postgres" else OracleGraph(HUB_GRAPH)
-        apart.execute(QuerySpecification(graph.ensuring))
         nodes, edges = f"{HUB_GRAPH}_node", f"{HUB_GRAPH}_edge"
 
     def cleared() -> None:

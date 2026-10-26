@@ -81,7 +81,6 @@ class Team(GraphView):
 @pytest.fixture(autouse=True)
 async def cleared(pm: PersistenceManager) -> AsyncIterator[None]:
     seed = SqlSeed(pm, "SqlSave")
-    await seed.prepare()
     await seed.clear()
     yield
     await seed.clear()

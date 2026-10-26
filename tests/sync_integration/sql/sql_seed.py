@@ -8,7 +8,6 @@ Postgres and on Oracle, each in its own SQL.
 import json
 from typing import Any, Literal
 
-from drivine.backend.postgres.postgres_graph import PostgresGraph
 from drivine.sync import DatabaseType, PersistenceManager, QuerySpecification
 
 
@@ -44,11 +43,6 @@ class SqlSeed:
         self.scope = scope
         self.key = key
         self.oracle = pm.type is DatabaseType.ORACLE
-
-    def prepare(self) -> None:
-        """Makes the store where it is not there: Oracle's connection makes it; on Postgres, an object manager does."""
-        if not self.oracle:
-            self.pm.execute(QuerySpecification[Any](PostgresGraph().ensuring))
 
     def clear(self) -> None:
         self.pm.execute(QuerySpecification[Any](f"DELETE FROM drivine_node n WHERE {self._carries('n')}"))

@@ -4,7 +4,6 @@ from collections.abc import AsyncIterator
 import pytest
 
 from drivine import DatabaseRegistry, DatabaseType, PersistenceManager, PersistenceManagerFactory, QuerySpecification
-from drivine.backend.postgres.postgres_graph import PostgresGraph
 from tests.integration.sql_cypher_fixtures import for_store
 
 ORACLE = os.environ.get("ORACLE_DATABASE_TYPE") == "ORACLE"
@@ -45,12 +44,8 @@ def factory(registry: DatabaseRegistry) -> PersistenceManagerFactory:
 @pytest.fixture(params=ENGINES)
 async def pm(request: pytest.FixtureRequest, factory: PersistenceManagerFactory) -> AsyncIterator[PersistenceManager]:
     manager = factory.get(request.param)
-    if manager.type is DatabaseType.ORACLE:
+    if manager.type in (DatabaseType.ORACLE, DatabaseType.POSTGRES):
         # A node's relationships go with it: the relationship table cascades.
-        await manager.execute(QuerySpecification("DELETE FROM drivine_node"))
-    elif manager.type is DatabaseType.POSTGRES:
-        # The store is made by an object manager, so it may not be there yet.
-        await manager.execute(QuerySpecification(PostgresGraph().ensuring))
         await manager.execute(QuerySpecification("DELETE FROM drivine_node"))
     else:
         await manager.execute(QuerySpecification("MATCH (n) DETACH DELETE n"))
@@ -66,13 +61,9 @@ is compiled for, as the tests' environment has them.
 
 
 @pytest.fixture(params=CYPHER_STORES)
-async def cypher_pm(request: pytest.FixtureRequest, factory: PersistenceManagerFactory) -> PersistenceManager:
+def cypher_pm(request: pytest.FixtureRequest, factory: PersistenceManagerFactory) -> PersistenceManager:
     """A manager of each store a Cypher statement is checked on: its graph is the test's to clear."""
-    manager = factory.get(request.param)
-    if manager.type is DatabaseType.POSTGRES:
-        # The store is made by an object manager, so it may not be there yet.
-        await manager.execute(QuerySpecification(PostgresGraph().ensuring))
-    return manager
+    return factory.get(request.param)
 
 
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:

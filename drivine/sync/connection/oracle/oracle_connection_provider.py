@@ -6,16 +6,17 @@ from typing import Any
 
 from drivine.backend.oracle.oracle_graph import DEFAULT_GRAPH, OracleGraph
 from drivine.connection.database_type import DatabaseType
-from drivine.sync import concurrency
 from drivine.sync.connection.connection import Connection
 from drivine.sync.connection.connection_provider import ConnectionProvider
+from drivine.sync.connection.graph_tables import GraphTables
 from drivine.sync.connection.oracle.oracle_connection import OracleConnection
 
 
 class OracleConnectionProvider(ConnectionProvider):
     """
     Connections to Oracle, from a pool of its own, through python-oracledb in thin mode (no Instant Client). The
-    graph's tables are made on the first connection when they aren't there.
+    graph's tables are made on the first connection when they aren't there (see GraphTables), so Cypher or SQL sent
+    through a persistence manager alone finds them, as an object manager's statements do.
     """
 
     def __init__(
@@ -40,18 +41,16 @@ class OracleConnectionProvider(ConnectionProvider):
         self.graph = OracleGraph(graph or DEFAULT_GRAPH)
         self.graph_name = self.graph.name
         self._pool: Any = None
-        self._ensuring = concurrency.Lock()
-        self._ensured = False
+        self._tables = GraphTables(self.graph.ensuring)
 
     def connect(self) -> Connection:
-        """A connection, the graph's tables made first if this is the first (schema statements commit on their own)."""
+        """
+        A connection, the graph's tables made first if this is the pool's first (schema statements commit on their own).
+        """
         pool = self._pool_of()
         connection = pool.acquire()
         try:
-            with self._ensuring:
-                if not self._ensured:
-                    self._ensure(connection)
-                    self._ensured = True
+            self._tables.ensure(lambda statement: self._run(connection, statement))
             cursor = connection.cursor()
             cursor.execute("SELECT SYS_CONTEXT('USERENV', 'SID') FROM dual")
             row = cursor.fetchone()
@@ -64,14 +63,14 @@ class OracleConnectionProvider(ConnectionProvider):
     def end(self) -> None:
         # Cleared before waiting, so a second call made meanwhile doesn't close the pool again.
         pool, self._pool = self._pool, None
-        self._ensured = False
+        self._tables.forget()
         if pool is not None:
             pool.close(force=True)
 
-    def _ensure(self, connection: Any) -> None:
+    def _run(self, connection: Any, statement: str) -> None:
         cursor = connection.cursor()
         try:
-            cursor.execute(self.graph.ensuring)
+            cursor.execute(statement)
         finally:
             cursor.close()
 

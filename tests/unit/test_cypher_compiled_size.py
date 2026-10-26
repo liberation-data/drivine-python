@@ -240,3 +240,21 @@ def test_a_sort_by_a_property_on_postgres_is_by_its_json_alone_and_only_a_list_t
     # Its items as arrays unnested, which the planner takes for 10 items, not a set-returning function's 100: a 150th
     # of the cost.
     assert "FROM jsonb_array_elements(" not in listed and "unnest(ARRAY(SELECT jsonb_array_elements(" in listed, listed
+
+
+@COMPILERS
+def test_a_round_whose_places_the_statement_gives_writes_only_the_rounding_of_those_places(
+    compiler: type[SqlCypherCompiler],
+) -> None:
+    # Both roundings, and a CASE to pick one when the row is read, made a nested round of an aggregate, which shares
+    # nothing, grow by both at each level: on Postgres, four deep, ten times as long.
+    def nested(rounded: str) -> str:
+        term = "sum(x)"
+        for _ in range(4):
+            term = rounded.format(term)
+        return compiler("g").compile(f"UNWIND [1.5, -2.5] AS x RETURN {term}").sql
+
+    assert nested("round({}, 0)") == nested("round({})")
+    assert nested("round({}, -0.5)") == nested("round({})")
+    assert "FLOOR(" not in nested("round({}, 1)")
+    assert "FLOOR(" in nested("round({}, toInteger('0'))")

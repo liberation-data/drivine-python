@@ -4041,6 +4041,8 @@ class SqlCypherCompiler(ABC):
                                 arguments[1],
                                 function.arguments[1],
                                 self._round_whole_or_places,
+                                self.round_whole,
+                                self.round_places,
                             )
                         )
                     )
@@ -4258,21 +4260,34 @@ class SqlCypherCompiler(ABC):
         """A value as a SQL whole number cut toward zero, as Neo4j reads `round()`'s precision."""
         return f"CAST(TRUNC({self.number(self.comparable(self.json(value)))}) AS INTEGER)"
 
-    def _rounded(self, value: Value, precision: Value, written: Expression, body: Callable[[str, str], str]) -> str:
+    def _rounded(
+        self,
+        value: Value,
+        precision: Value,
+        written: Expression,
+        body: Callable[[str, str], str],
+        whole: Callable[[str], str] | None = None,
+        places: Callable[[str, str], str] | None = None,
+    ) -> str:
         """
         `round()` of the value, by the body over it as a SQL number and the precision, the value written in the
         statement as `written`, as a whole number toward zero: -0.5 is 0 places. One below 0 is refused, as Neo4j
         refuses it: when compiling, where it is written, negated or not, or a parameter's value; and else when the row
         is read, by the store's `failure`, but for a null value, which Neo4j rounds to null whatever the precision.
+        Given `whole` and `places`, a precision known when compiling rounds by the one it picks, `whole` to 0 places and
+        `places` to more, so the body does not write out a branch no row takes: each would grow a nested `round` more.
         """
         number = self.number(self.comparable(self.json(value)))
         negated = isinstance(written, Unary) and written.operator is UnaryOperator.NEGATE
         given = jsonable(self._given(written.operand if isinstance(written, Unary) and negated else written))
         if _is_number(given):
             # At -1 or less, as below 0 toward zero: math.trunc fails on NaN or an infinity.
-            if (-given if negated else given) <= -1:
+            signed = -given if negated else given
+            if signed <= -1:
                 raise DrivineError(NEGATIVE_PRECISION)
-            return body(number, self._truncated_whole(precision))
+            if whole is not None and signed < 1:
+                return whole(number)
+            return (places or body)(number, self._truncated_whole(precision))
         return self.shared(
             [number, f"TRUNC({self.number(self.comparable(self.json(precision)))})"],
             lambda it: body(

@@ -981,6 +981,21 @@ def test_round_to_0_places_rounds_half_toward_positive_infinity_as_round_of_one_
         -2.5,
         None,
     ]
+    # Zero and just below a half below it, past 2^52, and near the largest Oracle's NUMBER holds: places the statement
+    # gives, and places the store works out.
+    rounded = [0.0, 0.0, 0.0, -4503599627370497.0, 9.0e125, -9.0e125]
+    assert cypher_pm.query(
+        spec(
+            "RETURN [round(-0.0, 0), round(-0.4, 0), round(-0.49999999999999994, 0), round(-4503599627370497.0, 0), "
+            "round(9.0E125, 0), round(-9.0E125, 0)]"
+        )
+    ) == [rounded]
+    assert cypher_pm.query(
+        spec(
+            "RETURN [x IN [-0.0, -0.4, -0.49999999999999994, -4503599627370497.0, 9.0E125, -9.0E125] "
+            "| round(x, toInteger('0'))]"
+        )
+    ) == [rounded]
     # Over an aggregate, where nothing is shared, with the precision written or read from a row, and in a WHERE.
     assert cypher_pm.query(
         spec(

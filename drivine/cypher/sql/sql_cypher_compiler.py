@@ -212,6 +212,12 @@ NEGATIVE_PRECISION = "round() takes a precision of 0 or more, as in Neo4j."
 MAX_COUNT = 2147483647
 """The greatest start or length `substring()`, `left()` and `right()` take, as Neo4j takes them: Java's greatest int."""
 
+LONG_MAX = (1 << 63) - 1
+"""The greatest long, Java's, as `_cut` holds a number to."""
+
+LONG_MIN = -(1 << 63)
+"""The least long, Java's, as `_cut` holds a number to."""
+
 RADIANS_TO_DEGREES = "57.29577951308232"
 DEGREES_TO_RADIANS = "0.017453292519943295"
 """
@@ -4848,16 +4854,19 @@ def _is_number(value: Any) -> bool:
 
 def _cut(value: float) -> int:
     """
-    A number cut toward zero, as Java casts a double to a long: NaN is 0, and an infinity the greatest or least. A
-    whole number is kept as it is, however large: no float holds one past 1.8E308.
+    A number cut toward zero, as Java casts a double to a long and Neo4j so reads a start or length: NaN is 0, and a
+    number past a long, an infinity too, the greatest or least long, so no store is given a literal past its number. A
+    whole number is kept as it is within a long.
     """
     if isinstance(value, int):
-        return value
-    if math.isnan(value):
+        cut = value
+    elif math.isnan(value):
         return 0
-    if math.isinf(value):
-        return (1 << 63) - 1 if value > 0 else -(1 << 63)
-    return math.trunc(value)
+    elif math.isinf(value):
+        return LONG_MAX if value > 0 else LONG_MIN
+    else:
+        cut = math.trunc(value)
+    return max(LONG_MIN, min(LONG_MAX, cut))
 
 
 def _written(value: Any) -> str:

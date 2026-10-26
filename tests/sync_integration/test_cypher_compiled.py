@@ -1244,6 +1244,11 @@ def test_a_start_or_length_from_data_is_cut_toward_zero_and_one_out_of_range_fai
     ]:
         with pytest.raises(Exception, match=message if compiles else None):  # noqa: PT011
             cypher_pm.query(spec(statement))
+    # Bound past what a long holds, beside a text from data: cut to the greatest or least long, as Java casts a double,
+    # so no store is given a literal past its number (#169).
+    for n in [1.0e300, -1.0e300, 10**400]:
+        with pytest.raises(Exception, match=_count_out_of_range("left", "length") if compiles else None):  # noqa: PT011
+            cypher_pm.query(spec("MATCH (n:Count) RETURN left(n.t, $n)", {"n": n}))
     assert cypher_pm.query(
         spec(
             "MATCH (n:Count) WHERE n.k = 1 RETURN [left(n.t, n.f), right(n.t, n.w), substring(n.t, n.f), "

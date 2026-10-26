@@ -268,9 +268,25 @@ def test_an_equality_of_values_that_hold_no_null_in_a_list_or_a_map_compiles_wit
     assert tests("MATCH (c:Claim) WITH c, [c.a] AS l RETURN l = [c.b]")
     # As is a parameter's list with an item too long to write in the statement.
     assert tests("MATCH (c:Claim) WHERE c.list = $p RETURN c.id", {"p": ["x" * 2000, None]})
+    # Up to LITERAL_BYTES of JSON's text, its quotes and each character's UTF-8 bytes counted, an item is written.
+    for text, walked in (("x" * 998, False), ("x" * 999, True), ("é" * 499, False), ("é" * 500, True)):
+        assert tests("MATCH (c:Claim) WHERE c.list = $p RETURN c.id", {"p": [[text], None]}) is walked, len(text)
     # Read from what the parameter is bound as: an iterator is read once, and NaN is a value, bound as a text.
     assert not tests("MATCH (c:Claim) WHERE c.list = $p RETURN c.id", {"p": iter([1, 2])})
     assert not tests("MATCH (c:Claim) WHERE c.list = $p RETURN c.id", {"p": [math.nan]})
+
+
+@COMPILERS
+def test_a_value_that_holds_no_null_carried_past_a_write_compiles_with_no_test_for_one(
+    compiler: type[SqlCypherCompiler],
+) -> None:
+    # A row carried between a statement's writes holds each value as its JSON, which holds no null where the value held
+    # none (drivine#340).
+    test = {OracleCypherCompiler: "[[,:]null[],}]", PostgresCypherCompiler: "jsonb_path_exists("}[compiler]
+    compiled = compiler("g").compile(
+        "MATCH (c:Claim) WITH c, c.list AS l SET c.b = 1 WITH c, l WHERE l = c.other RETURN c.id"
+    )
+    assert not any(test in it for it in (compiled.sql, compiled.prelude or "")), compiled.sql
 
 
 @COMPILERS

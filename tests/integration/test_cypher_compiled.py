@@ -1487,6 +1487,14 @@ async def test_values_that_hold_a_null_compare_item_by_item_where_neither_side_i
             "RETURN [a = b, m = n, m = m, m = o, n = n]"
         )
     ) == [[False, None, None, False, True]]
+    # Walked by the store: an empty list or map, a list beside a map, and maps of one size with different keys.
+    assert await cypher_pm.query(
+        spec(
+            "WITH [] AS e, {} AS o, [null] AS a, {x: null} AS m, {x: 1} AS p, {x: null, y: 1} AS r, "
+            "{x: null, z: 1} AS s, [{}, null] AS f, [[], null] AS g "
+            "RETURN [e = a, a = e, o = m, a = m, m = a, m = p, r = s, f = f, g = g, [{}] = f, [[]] = g]"
+        )
+    ) == [[False, False, False, False, False, None, False, None, None, False, False]]
     assert await cypher_pm.query(
         spec(
             "UNWIND [[1, null], [2, null]] AS l WITH collect(l) AS ls "
@@ -1530,7 +1538,7 @@ async def test_a_parameter_that_holds_a_null_given_as_an_iterator_or_holding_nan
     ) == [[False, False, False, False, 2]]
 
 
-async def test_a_text_that_holds_a_nulls_text_and_a_value_too_long_for_a_short_text_compare_as_values_without_one(
+async def test_a_text_that_holds_a_nulls_text_holds_no_null_and_a_value_past_4000_bytes_is_read_whole_for_one(
     cypher_pm: PersistenceManager,
 ):
     # Beyond the spec's cases (#116): Oracle reads whether a value holds a null from its JSON's text.
@@ -1558,7 +1566,16 @@ async def test_a_text_that_holds_a_nulls_text_and_a_value_too_long_for_a_short_t
             "RETURN [v = w, v IN l, v <> w, v = u]"
         )
     ) == [[None, None, None, False]]
-    # In the step of a reduce, as in a statement that writes, on Oracle.
+    # Either side of 4,000 bytes of JSON's text, `["x…x",null]` and `["x…x","y"]`: the short text read, then the
+    # long.
+    for size in (3990, 3991, 3992):
+        assert await cypher_pm.query(
+            spec(
+                "WITH [$s, null] AS v, [$s, null] AS w, [$s, $m.k] AS u, [$s + 'z', null] AS d "
+                "RETURN [v = w, u = u, v = u, v = d]",
+                {"s": "x" * size, "m": {"k": "y"}},
+            )
+        ) == [[None, True, None, False]], size
     assert await cypher_pm.query(
         spec(
             "WITH [1, null] AS a, [2, null] AS c RETURN reduce(acc = [], x IN [a, c] | acc + [coalesce(x = a, 'null')])"
@@ -1614,10 +1631,10 @@ async def test_a_statement_that_writes_compares_a_list_that_holds_a_null_as_null
     assert await cypher_pm.query(
         spec(
             "CREATE (n:CyNullEquality) WITH n, [1, null] AS a, [1, null] AS b, [2, null] AS c "
-            "SET n.same = coalesce(a = b, 'null'), n.other = a = c, n.unequal = a <> c "
-            "RETURN [n.same, n.other, n.unequal]"
+            "SET n.same = coalesce(a = b, 'null'), n.other = a = c, n.unequal = a <> c, "
+            "n.written = coalesce([null] = [1], 'null') RETURN [n.same, n.other, n.unequal, n.written]"
         )
-    ) == [["null", False, True]]
+    ) == [["null", False, True, "null"]]
     # Values that hold no null compare as before, a text that holds a null's text and a long value among them.
     long = "[x IN range(1, 600) | 'abcdefghij']"
     assert await cypher_pm.query(

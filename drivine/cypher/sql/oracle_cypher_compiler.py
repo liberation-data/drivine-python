@@ -469,7 +469,8 @@ class OracleCypherCompiler(SqlCypherCompiler):
         By a function the query declares (see `reduce`), which walks the two together: Oracle's recursive queries take
         no `JSON`. A procedure's queries call no function it declares, nor do a `reduce`'s step's: there, two values
         equal as JSON are null, as each holds a null, and any other two false, as before null was compared item by
-        item: `[null] = [1]` is false there, where Cypher's is null.
+        item: `a = [1]`, of `[null] AS a`, is false there, where Cypher's is null. Lists and maps written out are
+        compared item by item without it (see `_itemwise`), so `[null] = [1]` is null there.
         """
         if self.procedural or self._folding:
             return f"CASE WHEN {equals(x, y)} THEN NULL ELSE FALSE END"

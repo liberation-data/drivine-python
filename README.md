@@ -405,7 +405,8 @@ people = await pm.query(spec.bind({"city": "Sydney"}))
   statement that writes, in the step of a `reduce`, or where its step reads a path; and `map[key]` reads null where an
   expression gives the key. Lists or maps that may hold a null are compared by a function the query declares too; in a
   statement that writes, or the step of a `reduce`, two that are equal as JSON compare as null and any other two as
-  false, so `[null] = [1]` is false there, where Cypher's comparison is null.
+  false, so `a = [1]`, of `[null] AS a`, is false there, where Cypher's comparison is null. Lists and maps written out
+  are compared item by item there too, so `[null] = [1]` is null.
 - What each statement gives is the [Cypher spec](https://github.com/liberation-data/drivine-cypher-spec), which the
   three Drivine libraries run alike.
 

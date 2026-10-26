@@ -4288,7 +4288,8 @@ class SqlCypherCompiler(ABC):
             # Below 1, or NaN, which Neo4j casts to 0 places as Java casts it to a long.
             if whole is not None and not signed >= 1:
                 return whole(number)
-            return places(number, self._truncated_whole(precision))
+            # NaN is no SQL number, so its places are written as the 0 Neo4j casts it to.
+            return places(number, "0" if math.isnan(signed) else self._truncated_whole(precision))
 
         def rounded(it: list[str]) -> str:
             x, t = it

@@ -870,6 +870,19 @@ async def test_round_reads_a_precision_from_data_or_a_whole_float_as_a_whole_num
     assert await cypher_pm.query(
         spec("RETURN [round(null, 2), round(2.5, null), round(null, 2, 'UP'), round(2.5, null, 'UP')]")
     ) == [[None, None, None, None]]
+    # To 0 places, as round(x) rounds (drivine4j#278): an integer as a float, a huge or tiny number, a precision from
+    # data, and the doubles that a binary sum with a half rounds up, the last below a half and the first odd past 2^52;
+    # round(x) likewise.
+    assert await cypher_pm.query(
+        spec(
+            "MATCH (n:Round) RETURN [round(3, 0), round(-3, 0), round(1.0E20, 0), round(-1.0E100, 0), "
+            "round(1.0E-120, 0), round(-1.0E-120, 0), round(-2.5, n.q), round(-2.5, n.z), "
+            "round(0.49999999999999994, 0), round(4503599627370497.0, 0), round(0.49999999999999994), "
+            "round(4503599627370497.0), round(-0.5), round(-2.5)]"
+        )
+    ) == [
+        [3.0, -3.0, 1.0e20, -1.0e100, 0.0, 0.0, -2.0, -2.0, 0.0, 4503599627370497.0, 0.0, 4503599627370497.0, 0.0, -2.0]
+    ]
     # Places past a number's digits give it back, where Oracle's NUMBER would overflow (drivine4j#266); short of them,
     # it rounds.
     assert await cypher_pm.query(
@@ -956,6 +969,60 @@ async def test_round_reads_a_precision_from_data_or_a_whole_float_as_a_whole_num
                 "round(4.9E-324, 324, 'UP'), round(4.9E-324, 323, 'UP')]"
             )
         ) == [[2.225073858507201e-308, 2.2250738585072014e-308, 5e-324, 1e-323]]
+
+
+async def test_round_to_0_places_rounds_half_toward_positive_infinity_as_round_of_one_argument_does(
+    cypher_pm: PersistenceManager,
+):
+    # The spec's v0.6.8 steps for drivine4j#278, until the spec is synced past the cases of open issues: to 0 places
+    # Neo4j rounds as Java's Math.round does, half toward +infinity; to more, half away from 0.
+    assert await cypher_pm.query(
+        spec(
+            "RETURN [round(-2.5, 0), round(-1.5, 0), round(-0.5, 0), round(2.5, 0), round(-2.6, 0), round(-2.55, 1), "
+            "round(-2.5, 0.7)]"
+        )
+    ) == [[-2.0, -1.0, 0.0, 3.0, -3.0, -2.6, -2.0]]
+    assert await cypher_pm.query(spec("UNWIND [0, -0.5, 1, null] AS p RETURN round(-2.5, p)")) == [
+        -2.0,
+        -2.0,
+        -2.5,
+        None,
+    ]
+    # Zero and just below a half below it, past 2^52, and near the largest Oracle's NUMBER holds: places the statement
+    # gives, and places the store works out.
+    rounded = [0.0, 0.0, 0.0, -4503599627370497.0, 9.0e125, -9.0e125]
+    assert await cypher_pm.query(
+        spec(
+            "RETURN [round(-0.0, 0), round(-0.4, 0), round(-0.49999999999999994, 0), round(-4503599627370497.0, 0), "
+            "round(9.0E125, 0), round(-9.0E125, 0)]"
+        )
+    ) == [rounded]
+    assert await cypher_pm.query(
+        spec(
+            "RETURN [x IN [-0.0, -0.4, -0.49999999999999994, -4503599627370497.0, 9.0E125, -9.0E125] "
+            "| round(x, toInteger('0'))]"
+        )
+    ) == [rounded]
+    # Over an aggregate, where nothing is shared, with the precision written or read from a row, and in a WHERE.
+    assert await cypher_pm.query(
+        spec(
+            "UNWIND [-1.0, -1.5] AS x WITH x, 0 AS p "
+            "RETURN p, [round(sum(x), 0), round(sum(x), p), round(sum(x), 1), round(avg(x) * 2, p)]"
+        )
+    ) == [[0, [-2.0, -2.0, -2.5, -2.0]]]
+    assert await cypher_pm.query(
+        spec("UNWIND [-2.5, -0.5, 0.5, 2.5] AS x WITH x WHERE round(x, 0) >= 0 RETURN collect(x)")
+    ) == [[-0.5, 0.5, 2.5]]
+    # Places a parameter gives, picked when compiling: a fraction, -0.5, negated, or NaN is 0 places, as Neo4j casts
+    # NaN to 0, and 1.0 is 1; a mode rounds by it alone.
+    assert await cypher_pm.query(
+        spec(
+            "RETURN [round(-2.5, $p), round(-2.5, $q), round(-2.5, -$r), round(-2.5, $z), round(-2.5, $n), "
+            "round(-2.5, $o), round(-2.55, $o), round(-2.5, 0.9999), round(-2.5, 1.0), round(-2.5, $p, 'HALF_UP'), "
+            "round(-2.5, 0, 'HALF_UP')]",
+            {"p": 0.7, "q": -0.5, "r": 0.5, "z": 0, "n": float("nan"), "o": 1.0},
+        )
+    ) == [[-2.0, -2.0, -2.0, -2.0, -2.0, -2.5, -2.6, -2.0, -2.5, -3.0, -3.0]]
 
 
 async def test_round_of_zero_gives_zero_or_null_to_a_null_precision_and_fails_on_a_negative_one(

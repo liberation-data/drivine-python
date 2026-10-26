@@ -40,6 +40,9 @@ from drivine.cypher.sql.temporal_sql import TemporalSql
 from drivine.cypher.sql.value import Json, Node
 from drivine.model import stamps
 
+_MOST_PLACES = 400
+"""The most places `round()` rounds to: past them, a double, the least of which is near 4.9E-324, has no digit."""
+
 _NUMERIC_TEXT = r"^\s*[+-]?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][+-]?[0-9]+)?\s*$"
 """A text Postgres reads as a `numeric`, spaces around it allowed."""
 
@@ -549,6 +552,20 @@ class PostgresCypherCompiler(SqlCypherCompiler):
 
     def raise_(self, message: str) -> str:
         return f"RAISE EXCEPTION USING MESSAGE = {literal(message)};"
+
+    def round_places(self, number: str, precision: str) -> str:
+        return super().round_places(number, self._held_places(precision))
+
+    def round_to(self, number: str, precision: str, mode: str) -> str:
+        return super().round_to(number, self._held_places(precision), mode)
+
+    def _held_places(self, precision: str) -> str:
+        """
+        Places past _MOST_PLACES change no double, the least of which is near 4.9E-324, and Postgres's `numeric`
+        overflows on a precision as large as a billion: so a precision is held to them, as Neo4j gives the number back.
+        A CASE, not `LEAST`, which passes over a null where a null precision rounds to null.
+        """
+        return self.shared1(precision, lambda p: f"CASE WHEN {p} > {_MOST_PLACES} THEN {_MOST_PLACES} ELSE {p} END")
 
     def failure(self, message: str, value: str) -> str:
         """A text that is no whole number, cast to one: Postgres fails with the text in its message."""

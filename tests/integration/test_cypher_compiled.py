@@ -853,7 +853,7 @@ async def test_round_reads_a_precision_from_data_or_a_whole_float_as_a_whole_num
 ):
     # Beyond the spec's round() cases: a float, -0.5 and a whole float read from data, and every rounding mode.
     await clear(cypher_pm)
-    await cypher_pm.execute(spec("CREATE (:Round {p: 1.7, q: -0.5, w: 2.0})"))
+    await cypher_pm.execute(spec("CREATE (:Round {p: 1.7, q: -0.5, w: 2.0, r: -2, z: 0.0, b: 400, g: 1000000000})"))
     assert await cypher_pm.query(
         spec(
             "MATCH (n:Round) RETURN [round(2.555, n.p), round(2.55, n.p, 'UP'), round(2.5, n.q), "
@@ -869,6 +869,159 @@ async def test_round_reads_a_precision_from_data_or_a_whole_float_as_a_whole_num
     assert await cypher_pm.query(
         spec("RETURN [round(null, 2), round(2.5, null), round(null, 2, 'UP'), round(2.5, null, 'UP')]")
     ) == [[None, None, None, None]]
+    # Places past a number's digits give it back, where Oracle's NUMBER would overflow (drivine4j#266); short of them,
+    # it rounds.
+    assert await cypher_pm.query(
+        spec("RETURN [round(2.5, 400), round(1.5, 400), round(2.5, 400, 'HALF_UP'), round(2.5, 400, 'CEILING')]")
+    ) == [[2.5, 1.5, 2.5, 2.5]]
+    # Read from data, and so far past the digits that writing them all out would not finish, where Postgres's numeric
+    # would overflow; a null still rounds to null.
+    assert await cypher_pm.query(
+        spec(
+            "MATCH (n:Round) RETURN [round(2.5, n.b), round(2.5, n.b, 'FLOOR'), round(2.5, n.g), "
+            "round(2.5, n.g, 'CEILING'), round(null, n.g), round(n.none, n.g, 'UP'), round(2.5, n.none)]"
+        )
+    ) == [[2.5, 2.5, 2.5, 2.5, None, None, None]]
+    assert await cypher_pm.query(
+        spec("RETURN [round(2.5, 1000000000), round(2.5, 1000000000, 'HALF_UP'), round(5, 400)]")
+    ) == [[2.5, 2.5, 5.0]]
+    assert await cypher_pm.query(
+        spec(
+            "RETURN [round(1.0E-100, 120), round(123.456, 200, 'HALF_UP'), round(1.0E100, 30), round(1.0 / 3, 20), "
+            "round(1.0E-100, 99), round(-2.5, 300, 'FLOOR')]"
+        )
+    ) == [[1.0e-100, 123.456, 1.0e100, 0.3333333333333333, 0.0, -2.5]]
+    # Zero, whose digits Oracle cannot count by its logarithm, and a precision short of a tiny number's digits but past
+    # NUMBER's range.
+    assert await cypher_pm.query(
+        spec(
+            "MATCH (n:Round) RETURN [round(0.0, 400), round(0, 400, 'HALF_UP'), round(n.z, 2), round(n.z, 400), "
+            "round(n.z, 2, 'UP'), round(1.0E-120, 130), round(1.0E-120, 130, 'HALF_UP'), "
+            "round(-1.0E-120, 136, 'CEILING')]"
+        )
+    ) == [[0.0, 0.0, 0.0, 0.0, 0.0, 1.0e-120, 1.0e-120, -1.0e-120]]
+    # The least numbers Oracle's NUMBER holds, whose logarithm it refuses (ORA-01428), and zero to the most places.
+    assert await cypher_pm.query(
+        spec(
+            "RETURN [round(1.0E-130, 2), round(1.0E-130, 140), round(-1.5E-130, 2, 'UP'), round(1.0E-129, 140, 'UP'), "
+            "round(1.0E-129, 2), round(-1.0E-129, 2, 'FLOOR'), round(-1.0E-125, 141, 'HALF_EVEN'), "
+            "round(1.2345678901234567E-130, 145), round(5.5E-128, 128, 'HALF_EVEN'), round(0.0, 1000000000)]"
+        )
+    ) == [[0.0, 1.0e-130, -0.01, 1.0e-129, 0.0, -0.01, -1.0e-125, 1.234567890123457e-130, 6.0e-128, 0.0]]
+    # A null number past its digits is null.
+    assert await cypher_pm.query(
+        spec("MATCH (n:Round) RETURN [round(null, 400), round(n.none, 400, 'UP'), round(n.none, n.b)]")
+    ) == [[None, None, None]]
+    # Zero to a null precision is null, not the zero Oracle gives back without rounding.
+    assert await cypher_pm.query(
+        spec(
+            "MATCH (n:Round) RETURN [round(n.z, n.none), round(n.z, n.none, 'UP'), round(0.0, null), "
+            "round(0, null, 'HALF_UP')]"
+        )
+    ) == [[None, None, None, None]]
+    # Either side of the last place a double holds, and short of it, where a mode still rounds.
+    assert await cypher_pm.query(
+        spec(
+            "RETURN [round(123.456, 14, 'UP'), round(123.456, 15, 'UP'), round(123.456, 16, 'UP'), "
+            "round(-123.456, 14, 'FLOOR'), round(1234.5678901234567, 13), round(1234.5678901234567, 12, 'HALF_EVEN'), "
+            "round(99.99, 16, 'UP'), round(0.1, 17, 'UP')]"
+        )
+    ) == [[123.456, 123.456, 123.456, -123.456, 1234.5678901234567, 1234.567890123457, 99.99, 0.1]]
+    # Near 10^17, whose digits all come before the point, and negatives past their digits.
+    assert await cypher_pm.query(
+        spec(
+            "RETURN [round(123456789012345678, 2), round(99999999999999999.0, 1, 'UP'), round(12345678901234567.0, 1), "
+            "round(-9.87654321E16, 3, 'FLOOR'), round(-1234.5678, 400), round(-1234.5678, 2)]"
+        )
+    ) == [[1.2345678901234568e17, 1.0e17, 1.2345678901234568e16, -9.87654321e16, -1234.5678, -1234.57]]
+    # Over an aggregate, where no value is shared, and so the number is written out where it is read.
+    assert await cypher_pm.query(
+        spec(
+            "UNWIND [1.0, 2.0, 2.5] AS x RETURN [round(avg(x), 2), round(avg(x), 400), round(avg(x), 400, 'HALF_UP'), "
+            "round(round(avg(x), 400), 1, 'DOWN')]"
+        )
+    ) == [[1.83, 1.8333333333333333, 1.8333333333333333, 1.8]]
+    # A negative precision from data fails on zero too, whose places Oracle gives back without rounding.
+    message = None if cypher_pm.type is DatabaseType.NEO4J else re.escape(NEGATIVE_PRECISION)
+    for statement in ["MATCH (n:Round) RETURN round(n.z, n.r, 'HALF_UP')", "MATCH (n:Round) RETURN round(n.z, n.r)"]:
+        with pytest.raises(Exception, match=message):  # noqa: PT011
+            await cypher_pm.query(spec(statement))
+    # The least doubles, whose last digits are short of the 400 places Postgres holds a precision to. Oracle's NUMBER
+    # holds none of them.
+    if cypher_pm.type is not DatabaseType.ORACLE:
+        assert await cypher_pm.query(
+            spec(
+                "RETURN [round(2.2250738585072014E-308, 323), round(2.2250738585072014E-308, 400), "
+                "round(4.9E-324, 324, 'UP'), round(4.9E-324, 323, 'UP')]"
+            )
+        ) == [[2.225073858507201e-308, 2.2250738585072014e-308, 5e-324, 1e-323]]
+
+
+async def test_round_of_zero_gives_zero_or_null_to_a_null_precision_and_fails_on_a_negative_one(
+    cypher_pm: PersistenceManager,
+):
+    # Zero, which Oracle gives back without rounding, gives zero wherever it is read, among rows that are not zero too.
+    await clear(cypher_pm)
+    await cypher_pm.execute(spec("UNWIND [0.0, 1.25, 0.0, -2.5] AS x CREATE (:Round {x: x})"))
+    assert await cypher_pm.query(spec("MATCH (n:Round) WHERE round(n.x, 400) = 0 RETURN count(*)")) == [2]
+    assert await cypher_pm.query(
+        spec("MATCH (n:Round) WHERE round(n.x, 2) = 0 AND round(n.x, 1, 'UP') = 0 RETURN count(*)")
+    ) == [2]
+    assert await cypher_pm.query(spec("MATCH (n:Round) RETURN round(n.x, 1) AS r, count(*) AS c ORDER BY r")) == [
+        [-2.5, 1],
+        [0.0, 2],
+        [1.3, 1],
+    ]
+    assert await cypher_pm.query(spec("MATCH (n:Round) RETURN n.x ORDER BY round(n.x, 1, 'UP') DESC")) == [
+        1.25,
+        0.0,
+        0.0,
+        -2.5,
+    ]
+    assert await cypher_pm.query(
+        spec(
+            "UNWIND [0.0, 0.0] AS x RETURN [round(sum(x), 2), round(avg(x), 400), round(min(x), 2, 'HALF_UP'), "
+            "round(sum(x), 1, 'CEILING')]"
+        )
+    ) == [[0.0, 0.0, 0.0, 0.0]]
+    assert await cypher_pm.query(
+        spec(
+            "MATCH (n:Round) WITH n.x AS x WHERE round(x, 2) = 0 "
+            "RETURN [round(sum(x), 2), round(avg(x), 400), round(sum(x), 1, 'CEILING')]"
+        )
+    ) == [[0.0, 0.0, 0.0]]
+    assert await cypher_pm.query(
+        spec(
+            "UNWIND range(0, 2999) AS i WITH toFloat(i % 3) * 0.5 AS x "
+            "RETURN [sum(round(x, 400)), sum(round(x, 0)), sum(round(x, 0, 'UP')), count(*)]"
+        )
+    ) == [[1500.0, 2000.0, 2000.0, 3000]]
+    assert await cypher_pm.query(
+        spec(
+            "UNWIND range(0, 2999) AS i WITH toFloat(i % 3) * 0.5 AS x "
+            "WHERE round(x, 2) = 0 OR round(x, 400, 'UP') > 0 RETURN count(*)"
+        )
+    ) == [3000]
+    assert await cypher_pm.query(spec("RETURN [x IN [0.0, 1.55, 0.0] | round(x, 1)]")) == [[0.0, 1.6, 0.0]]
+    assert await cypher_pm.query(
+        spec("RETURN [round($z, 2), round($z, 400, 'FLOOR'), round(0, 2), round(0.0, 2, 'UP')]", {"z": 0.0})
+    ) == [[0.0, 0.0, 0.0, 0.0]]
+    # The precision is read before zero is given back: a null one gives null, and a negative one from data fails, under
+    # an aggregate too, where it is written out where it is read.
+    assert await cypher_pm.query(
+        spec(
+            "MATCH (n:Round) WHERE n.x = 0 RETURN [round(0.0, null), round(0, null, 'HALF_UP'), round(n.x, n.none), "
+            "round(n.x, n.none, 'UP')]"
+        )
+    ) == [[None, None, None, None], [None, None, None, None]]
+    await cypher_pm.execute(spec("CREATE (:Round {x: 0.0, r: -2})"))
+    message = None if cypher_pm.type is DatabaseType.NEO4J else re.escape(NEGATIVE_PRECISION)
+    for statement in [
+        "MATCH (n:Round) WHERE n.r IS NOT NULL WITH n.x AS x, n.r AS r RETURN r, round(sum(x), r)",
+        "MATCH (n:Round) WHERE n.r IS NOT NULL WITH n.x AS x, n.r AS r RETURN r, round(min(x), r, 'HALF_UP')",
+    ]:
+        with pytest.raises(Exception, match=message):  # noqa: PT011
+            await cypher_pm.query(spec(statement))
 
 
 async def test_a_negative_precision_from_data_fails_only_on_a_row_that_reads_it_in_a_where_and_an_aggregate_too(
@@ -888,6 +1041,14 @@ async def test_a_negative_precision_from_data_fails_only_on_a_row_that_reads_it_
         # A constant the compiler does not read as given is worked out by the store, as one from data.
         "RETURN round(1234.5, 1 - 3)",
         "RETURN round(1234.5, toInteger('-2'))",
+        # Of an aggregate, where nothing is shared and the check is written inline, and of zero, which Oracle gives
+        # back unrounded: the precision is still read first.
+        "UNWIND [0.0, 0.0] AS x WITH x, -2 AS r RETURN r, round(sum(x), r)",
+        "UNWIND [0.0, 0.0] AS x WITH x, -2 AS r RETURN r, round(sum(x), r, 'HALF_UP')",
+        "MATCH (n:Round) UNWIND [0.0, 0.0] AS x WITH n.r AS r, x RETURN r, round(sum(x), r)",
+        "MATCH (n:Round) UNWIND [0.0, 0.0] AS x WITH n.r AS r, x RETURN r, round(sum(x), r, 'HALF_UP')",
+        "UNWIND [0.0, 0.0] AS x RETURN round(sum(x), -2)",
+        "UNWIND [0.0, 0.0] AS x RETURN round(sum(x), -2, 'HALF_UP')",
     ]:
         with pytest.raises(Exception, match=message):  # noqa: PT011
             await cypher_pm.query(spec(statement))

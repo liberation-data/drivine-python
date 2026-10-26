@@ -936,6 +936,10 @@ class SqlCypherCompiler(ABC):
         store fails.
         """
 
+    def round_places(self, number: str, precision: str) -> str:
+        """`round(x, p)` of two arguments: the SQL number to `precision` places, half away from 0, as SQL's `ROUND`."""
+        return f"ROUND({number}, {precision})"
+
     def round_to(self, number: str, precision: str, mode: str) -> str:
         """
         `round(value, precision, mode)`: the SQL number rounded to `precision` decimal places by `mode`, one of
@@ -4027,7 +4031,7 @@ class SqlCypherCompiler(ABC):
                                 arguments[0],
                                 arguments[1],
                                 function.arguments[1],
-                                lambda number, places: f"ROUND({number}, {places})",
+                                self.round_places,
                             )
                         )
                     )

@@ -728,6 +728,40 @@ class OracleCypherCompiler(SqlCypherCompiler):
     def raise_(self, message: str) -> str:
         return f"RAISE_APPLICATION_ERROR(-20000, {literal(message)});"
 
+    def round_places(self, number: str, precision: str) -> str:
+        return self._past_its_digits(number, precision, super().round_places)
+
+    def round_to(self, number: str, precision: str, mode: str) -> str:
+        base = super().round_to
+        return self._past_its_digits(number, precision, lambda n, p: base(n, p, mode))
+
+    def _past_its_digits(self, number: str, precision: str, round_: Callable[[str, str], str]) -> str:
+        """
+        `round` of the SQL number to `precision` places, or the number itself where those places are past its digits:
+        Oracle's NUMBER stops near 10^126, so `ROUND(n, 400)`, and the scale `10^p` a mode rounds by, overflow
+        (ORA-01426) where Neo4j gives the number back. Neo4j rounds a double, of _DOUBLE_DIGITS significant digits at
+        most, so rounding it to places past its last digit changes nothing; a number Oracle holds to more digits is a
+        double again once rounded. Oracle works out only the branch of a CASE a row takes, so the overflowing one is
+        never reached. The precision is read first, in a WHEN of its own, as a CASE tests its WHENs in order: so one
+        below 0 fails on 0 too, and a null one gives null, not the 0. The digits are compared in decimal, not by
+        `LOG(10, ABS(n))`, which fails (ORA-01428) on 0 and on the least numbers NUMBER holds, near 1.0E-130; zero is
+        given back where `10^(17 - p)` underflows to it, and rounded to 0 short of that. Short of its digits, a tiny
+        number may still take more than _MOST_PLACES places, as 1.0E-120 to 130 does: it is rounded moved that many
+        places fewer to the right, then moved back, which is exact in decimal.
+        """
+
+        def rounded(values: list[str]) -> str:
+            n, p = values
+            past = f"GREATEST({p} - {_MOST_PLACES}, 0)"
+            shift = f"POWER(10, {past})"
+            return (
+                f"CASE WHEN {p} IS NULL THEN NULL "
+                f"WHEN ABS({n}) >= POWER(10, {_DOUBLE_DIGITS} - {p}) THEN {n} "
+                f"ELSE {round_(f'({n} * {shift})', f'({p} - {past})')} / {shift} END"
+            )
+
+        return self.shared([number, precision], rounded)
+
     def failure(self, message: str, value: str) -> str:
         """A text that is no number, read as one: Oracle fails with ORA-01722, the text in its detail."""
         return f"TO_NUMBER({literal(message + ' ')} || TO_CHAR({value}))"
@@ -779,6 +813,12 @@ def _keyed_as_extended(value: Any) -> bool:
         return any(_keyed_as_extended(it) for it in cast(list[Any], value))
     return False
 
+
+_DOUBLE_DIGITS = 17
+"""How many significant digits a double holds at most, as Neo4j rounds one."""
+
+_MOST_PLACES = 100
+"""The most places `round()` rounds to on Oracle, whose scale `10^p` is well inside NUMBER's range."""
 
 _DOUBLE = "$numberDouble"
 """The key of a double in Oracle's extended JSON."""

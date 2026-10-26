@@ -873,6 +873,15 @@ class OracleCypherCompiler(SqlCypherCompiler):
     def raise_(self, message: str) -> str:
         return f"RAISE_APPLICATION_ERROR(-20000, {literal(message)});"
 
+    def sign_of(self, number: str) -> str:
+        """
+        Oracle's `SIGN` gives 0 for a positive number under 1.0E-128, from 1.0E-130 up, which NUMBER holds and compares
+        as greater than 0, and is right from 1.0E-128 up, for a negative number, 0, and null. So the number is held to
+        between -1 and 1, where a thousand times it cannot overflow, and that is signed, past 1.0E-128 where it is not
+        0: the number is read once, so a sign of a sign does not write it out twice at each level.
+        """
+        return f"SIGN(GREATEST(LEAST({number}, 1), -1) * 1000)"
+
     def round_places(self, number: str, precision: str) -> str:
         return self._past_its_digits(number, precision, super().round_places)
 

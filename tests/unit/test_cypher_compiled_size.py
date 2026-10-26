@@ -258,3 +258,16 @@ def test_a_round_whose_places_the_statement_gives_writes_only_the_rounding_of_th
     assert nested("round({}, -0.5)") == nested("round({})")
     assert "FLOOR(" not in nested("round({}, 1)")
     assert "FLOOR(" in nested("round({}, toInteger('0'))")
+
+
+@COMPILERS
+@pytest.mark.parametrize("mode", ["", ", 'HALF_UP'"], ids=["two-arguments", "a-mode"])
+def test_a_round_whose_places_come_from_data_reads_the_value_once_more_for_its_kind_not_in_the_places(
+    compiler: type[SqlCypherCompiler], mode: str
+) -> None:
+    # A null value rounds to null by negative places, so the value is read where they are refused. Read in the places,
+    # it was written out again at each place a store writes them, under an aggregate, which shares nothing: three
+    # rounds deep made up to 26 MB on Oracle and 550 KB on Postgres, now 1.3 MB and 48 KB.
+    nested = "UNWIND [1.5] AS x WITH x, 1 AS p RETURN p, " + "round(" * 3 + "sum(x)" + f", p{mode})" * 3
+    sql = compiler("g").compile(nested).sql
+    assert len(sql) < (2_000_000 if compiler is OracleCypherCompiler else 100_000), len(sql)

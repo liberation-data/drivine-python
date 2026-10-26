@@ -4037,12 +4037,7 @@ class SqlCypherCompiler(ABC):
                     self.scalar(
                         self.float_(
                             self._rounded(
-                                arguments[0],
-                                arguments[1],
-                                function.arguments[1],
-                                self._round_whole_or_places,
-                                self.round_whole,
-                                self.round_places,
+                                arguments[0], arguments[1], function.arguments[1], self.round_places, self.round_whole
                             )
                         )
                     )
@@ -4265,19 +4260,23 @@ class SqlCypherCompiler(ABC):
         value: Value,
         precision: Value,
         written: Expression,
-        body: Callable[[str, str], str],
+        places: Callable[[str, str], str],
         whole: Callable[[str], str] | None = None,
-        places: Callable[[str, str], str] | None = None,
     ) -> str:
         """
-        `round()` of the value, by the body over it as a SQL number and the precision, the value written in the
-        statement as `written`, as a whole number toward zero: -0.5 is 0 places. One below 0 is refused, as Neo4j
-        refuses it: when compiling, where it is written, negated or not, or a parameter's value; and else when the row
-        is read, by the store's `failure`, but for a null value, which Neo4j rounds to null whatever the precision.
-        Given `whole` and `places`, a precision known when compiling rounds by the one it picks, `whole` to 0 places and
-        `places` to more, so the body does not write out a branch no row takes: each would grow a nested `round` more.
+        `round()` of the value, by `places` over it as a SQL number and the precision, the value written in the
+        statement as `written`, as a whole number toward zero: -0.5 is 0 places; given `whole`, to 0 places by that.
+        One below 0 is refused, as Neo4j refuses it: when compiling, where it is written, negated or not, or a
+        parameter's value; and else when the row is read, by the store's `failure`, but for a null value, which Neo4j
+        rounds to null whatever the precision.
+
+        Places known when compiling pick the rounding then: under an aggregate, where nothing is bound, a CASE of both
+        would write the number out in each, at each `round` nested in another. Places from data are told apart as the
+        statement runs, in one CASE over the value and the places, where a negative one is refused before either
+        rounding, so the precision each rounding writes out, more than once on a store, is the places alone: refused
+        inside it, the value was written out with it each time, and a `round` nested 4 deep under an aggregate grew to
+        500 MB on Oracle.
         """
-        number = self.number(self.comparable(self.json(value)))
         negated = isinstance(written, Unary) and written.operator is UnaryOperator.NEGATE
         given = jsonable(self._given(written.operand if isinstance(written, Unary) and negated else written))
         if _is_number(given):
@@ -4285,30 +4284,25 @@ class SqlCypherCompiler(ABC):
             signed = -given if negated else given
             if signed <= -1:
                 raise DrivineError(NEGATIVE_PRECISION)
+            number = self.number(self.comparable(self.json(value)))
             # Below 1, or NaN, which Neo4j casts to 0 places as Java casts it to a long.
             if whole is not None and not signed >= 1:
                 return whole(number)
-            return (places or body)(number, self._truncated_whole(precision))
-        return self.shared(
-            [number, f"TRUNC({self.number(self.comparable(self.json(precision)))})"],
-            lambda it: body(
-                it[0],
-                f"CASE WHEN {it[1]} < 0 AND {it[0]} IS NOT NULL THEN {self.failure(NEGATIVE_PRECISION, it[1])} "
-                f"ELSE CAST({it[1]} AS INTEGER) END",
-            ),
-        )
+            return places(number, self._truncated_whole(precision))
 
-    def _round_whole_or_places(self, number: str, precision: str) -> str:
-        """
-        `round(x, p)` of two arguments: to 0 places as `round(x)` rounds, half toward +infinity, as Neo4j rounds with
-        Java's `Math.round`, so -2.5 is -2; to more, half away from 0, so -2.55 to 1 place is -2.6. The precision may
-        come from data, so the store picks when the row is read.
-        """
+        def rounded(it: list[str]) -> str:
+            x, t = it
+            # Asked of its kind, whose test writes the value out fewer times than the number does: a null value, as
+            # anything else that is no number, rounds by its negative places to null.
+            to_whole = f"WHEN {t} = 0 THEN {whole(self.number(x))} " if whole is not None else ""
+            return (
+                f"CASE {to_whole}WHEN {t} < 0 AND {self.type_of(x)} = 'number' "
+                f"THEN {self.failure(NEGATIVE_PRECISION, t)} "
+                f"ELSE {places(self.number(x), f'CAST({t} AS INTEGER)')} END"
+            )
+
         return self.shared(
-            [number, precision],
-            lambda it: (
-                f"CASE WHEN {it[1]} = 0 THEN {self.round_whole(it[0])} ELSE {self.round_places(it[0], it[1])} END"
-            ),
+            [self.comparable(self.json(value)), f"TRUNC({self.number(self.comparable(self.json(precision)))})"], rounded
         )
 
     def _collected(self, value: Value) -> str:

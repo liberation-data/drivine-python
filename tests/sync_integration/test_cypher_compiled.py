@@ -1091,7 +1091,7 @@ def test_a_negative_precision_from_data_fails_only_on_a_row_that_reads_it_in_a_w
     # The spec reads a precision from data since v0.6.4; here, in a WHERE and an aggregate, and on rows filtered out.
     # Neo4j fails each with 22N03; a SQL store with the compiler's message.
     clear(cypher_pm)
-    cypher_pm.execute(spec("CREATE (:Round {r: -2, k: 1}), (:Round {r: 1, k: 2})"))
+    cypher_pm.execute(spec("CREATE (:Round {r: -2, k: 1, x: 1234.5, i: 1234}), (:Round {r: 1, k: 2})"))
     message = None if cypher_pm.type is DatabaseType.NEO4J else re.escape(NEGATIVE_PRECISION)
     for statement in [
         "MATCH (n:Round) RETURN round(1234.5, n.r)",
@@ -1110,9 +1110,20 @@ def test_a_negative_precision_from_data_fails_only_on_a_row_that_reads_it_in_a_w
         "MATCH (n:Round) UNWIND [0.0, 0.0] AS x WITH n.r AS r, x RETURN r, round(sum(x), r, 'HALF_UP')",
         "UNWIND [0.0, 0.0] AS x RETURN round(sum(x), -2)",
         "UNWIND [0.0, 0.0] AS x RETURN round(sum(x), -2, 'HALF_UP')",
+        # A number to round, by a precision from data: -0.0, an integer, which Oracle's JSON holds as a number
+        # of another kind than a float's, and of an aggregate, where nothing is shared.
+        "MATCH (n:Round) WHERE n.k = 1 RETURN round(-0.0, n.r)",
+        "MATCH (n:Round) WHERE n.k = 1 RETURN round(n.x, n.r)",
+        "MATCH (n:Round) WHERE n.k = 1 RETURN round(n.i, n.r)",
+        "MATCH (n:Round) WHERE n.k = 1 RETURN round(n.x, n.r, 'HALF_UP')",
+        "MATCH (n:Round) WITH n.x AS x, n.r AS r RETURN r, round(min(x), r)",
+        "MATCH (n:Round) WITH n.x AS x, n.r AS r RETURN r, round(max(x), r, 'HALF_UP')",
+        "MATCH (n:Round) RETURN collect(round(n.x, n.r))",
     ]:
         with pytest.raises(Exception, match=message):  # noqa: PT011
             cypher_pm.query(spec(statement))
+    with pytest.raises(Exception, match=message):  # noqa: PT011
+        cypher_pm.query(spec("MATCH (n:Round) WHERE n.k = 1 RETURN round($v, n.r)", {"v": 1.5}))
     assert cypher_pm.query(spec("MATCH (n:Round) WHERE n.r >= 0 RETURN round(1234.5, n.r)")) == [1234.5]
     assert cypher_pm.query(spec("MATCH (n:Nothing) RETURN round(1234.5, 1 - 3)")) == []
     assert cypher_pm.query(spec("UNWIND [] AS x RETURN round(1234.5, 1 - 3)")) == []
@@ -1122,6 +1133,22 @@ def test_a_negative_precision_from_data_fails_only_on_a_row_that_reads_it_in_a_w
     assert cypher_pm.query(
         spec("MATCH (n:Round) WHERE n.k = 1 RETURN [round(n.none, n.r), round(n.none, n.r, 'HALF_UP')]")
     ) == [[None, None]]
+    assert cypher_pm.query(spec("MATCH (n:Round) RETURN round(round(n.none, n.r), n.r)")) == [None, None]
+    # Of an aggregate, where nothing is shared.
+    assert cypher_pm.query(
+        spec(
+            "MATCH (n:Round) WITH n.none AS x, n.r AS r "
+            "WITH r, [round(min(x), r), round(max(x), r, 'HALF_UP')] AS v RETURN v"
+        )
+    ) == [[None, None], [None, None]]
+    assert cypher_pm.query(spec("MATCH (n:Round) RETURN collect(round(n.none, n.r))")) == [[]]
+    # A null written in the statement, or a parameter's.
+    assert cypher_pm.query(
+        spec(
+            "MATCH (n:Round) WHERE n.k = 1 RETURN [round(null, n.r), round(null, n.r, 'UP'), round($v, n.r)]",
+            {"v": None},
+        )
+    ) == [[None, None, None]]
     assert cypher_pm.query(
         spec("MATCH (n:Round) RETURN CASE WHEN n.r < 0 THEN 0.0 ELSE round(1234.5, n.r) END ORDER BY n.k")
     ) == [0.0, 1234.5]

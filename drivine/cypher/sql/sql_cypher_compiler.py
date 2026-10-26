@@ -3948,15 +3948,28 @@ class SqlCypherCompiler(ABC):
                 mode = self._rounding_mode(function.arguments[2])
                 if mode is None:
                     return Json(self.literal_json(None))
-                number = self.number(self.comparable(self.json(arguments[0])))
-                precision = self._precision(arguments[1], function.arguments[1])
-                return Json(self.scalar(self.float_(self.round_to(number, precision, mode))))
+                return Json(
+                    self.scalar(
+                        self.float_(
+                            self._rounded(
+                                arguments[0],
+                                arguments[1],
+                                function.arguments[1],
+                                lambda number, places: self.round_to(number, places, mode),
+                            )
+                        )
+                    )
+                )
             if len(arguments) == 2:
                 return Json(
                     self.scalar(
                         self.float_(
-                            f"ROUND({self.number(self.comparable(self.json(arguments[0])))}, "
-                            f"{self._precision(arguments[1], function.arguments[1])})"
+                            self._rounded(
+                                arguments[0],
+                                arguments[1],
+                                function.arguments[1],
+                                lambda number, places: f"ROUND({number}, {places})",
+                            )
                         )
                     )
                 )
@@ -4117,24 +4130,27 @@ class SqlCypherCompiler(ABC):
         """A value as a SQL whole number cut toward zero, as Neo4j reads `round()`'s precision."""
         return f"CAST(TRUNC({self.number(self.comparable(self.json(value)))}) AS INTEGER)"
 
-    def _precision(self, value: Value, written: Expression) -> str:
+    def _rounded(self, value: Value, precision: Value, written: Expression, body: Callable[[str, str], str]) -> str:
         """
-        `round()`'s precision, the value written in the statement as `written`, as a whole number toward zero: -0.5 is 0
-        places. One below 0 is refused, as Neo4j refuses it: when compiling, where it is written, negated or not, or a
-        parameter's value; and else when the row is read, by the store's `failure`.
+        `round()` of the value, by the body over it as a SQL number and the precision, the value written in the
+        statement as `written`, as a whole number toward zero: -0.5 is 0 places. One below 0 is refused, as Neo4j
+        refuses it: when compiling, where it is written, negated or not, or a parameter's value; and else when the row
+        is read, by the store's `failure`, but for a null value, which Neo4j rounds to null whatever the precision.
         """
+        number = self.number(self.comparable(self.json(value)))
         negated = isinstance(written, Unary) and written.operator is UnaryOperator.NEGATE
         given = jsonable(self._given(written.operand if isinstance(written, Unary) and negated else written))
         if _is_number(given):
             # At -1 or less, as below 0 toward zero: math.trunc fails on NaN or an infinity.
             if (-given if negated else given) <= -1:
                 raise DrivineError(NEGATIVE_PRECISION)
-            return self._truncated_whole(value)
-        return self.shared1(
-            f"TRUNC({self.number(self.comparable(self.json(value)))})",
-            lambda places: (
-                f"CASE WHEN {places} < 0 THEN {self.failure(NEGATIVE_PRECISION, places)} "
-                f"ELSE CAST({places} AS INTEGER) END"
+            return body(number, self._truncated_whole(precision))
+        return self.shared(
+            [number, f"TRUNC({self.number(self.comparable(self.json(precision)))})"],
+            lambda it: body(
+                it[0],
+                f"CASE WHEN {it[1]} < 0 AND {it[0]} IS NOT NULL THEN {self.failure(NEGATIVE_PRECISION, it[1])} "
+                f"ELSE CAST({it[1]} AS INTEGER) END",
             ),
         )
 

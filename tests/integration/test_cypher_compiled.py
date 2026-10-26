@@ -861,6 +861,10 @@ async def test_a_negative_precision_from_data_fails_only_on_a_row_that_reads_it_
     assert await cypher_pm.query(spec("UNWIND [] AS x RETURN round(1234.5, 1 - 3)")) == []
     assert await cypher_pm.query(spec("MATCH (n:Round) WHERE n.k > 5 RETURN round(1234.5, toInteger('-2'))")) == []
     assert await cypher_pm.query(spec("MATCH (n:Round) WHERE n.k = 2 RETURN sum(round(1234.5, n.r))")) == [1234.5]
+    # A null to round is null, whatever the precision, as Neo4j gives it.
+    assert await cypher_pm.query(
+        spec("MATCH (n:Round) WHERE n.k = 1 RETURN [round(n.none, n.r), round(n.none, n.r, 'HALF_UP')]")
+    ) == [[None, None]]
     assert await cypher_pm.query(
         spec("MATCH (n:Round) RETURN CASE WHEN n.r < 0 THEN 0.0 ELSE round(1234.5, n.r) END ORDER BY n.k")
     ) == [0.0, 1234.5]

@@ -1628,6 +1628,73 @@ async def test_quantifiers_are_three_valued_over_parameters_nodes_relationships_
     ) == [[True, True, None]]
 
 
+async def test_quantifiers_are_three_valued_in_a_projection_a_comparison_an_order_and_a_case_and_over_long_texts(
+    cypher_pm: PersistenceManager,
+):
+    # Beyond the spec's cases (#159): quantifiers read for their value, not by a WHERE, over lists and maps that hold a
+    # null, keys and labels, a path's relationships, and texts past Oracle's 4000 bytes, for a value and in a WHERE.
+    await seeded(cypher_pm)
+
+    async def rows(cypher: str, parameters: dict[str, Any] | None = None) -> list[Any]:
+        return await cypher_pm.query(spec(cypher, parameters))
+
+    assert await rows(
+        "RETURN [l IN [[1, null], [2], [3], null] | [any(x IN l WHERE x = 2), all(x IN l WHERE x = 3), "
+        "none(x IN l WHERE x = 2), single(x IN l WHERE x > 1)]]"
+    ) == [[[None, False, None, None], [True, False, False, True], [False, True, True, True], [None, None, None, None]]]
+    assert await rows(
+        "RETURN [any(x IN [[1], null] WHERE x[0] = 1), all(x IN [[1], null] WHERE x[0] = 1), "
+        "none(x IN [[2], null] WHERE x[0] = 1), single(x IN [[1], [1], null] WHERE x[0] = 1), "
+        "single(x IN [[1], null] WHERE x[0] = 1), any(x IN [{a: 1}, {a: null}, null] WHERE x.a = 2), "
+        "single(m IN [{a: 1}, {a: 1}, {a: null}] WHERE m.a = 1)]"
+    ) == [[True, None, None, False, None, None, False]]
+    assert await rows(
+        "RETURN [any(x IN [1, null] WHERE x = 2) = false, any(x IN [1, null] WHERE x = 2) IS NULL, "
+        "all(x IN [] WHERE x = 1) = true, any(x IN [1, 'a'] WHERE x > 0), all(x IN [1, 'a'] WHERE x > 0)]"
+    ) == [[None, True, True, True, None]]
+    assert await rows(
+        "UNWIND [[1, null], [2], [3], null, []] AS l WITH l ORDER BY all(x IN l WHERE x > 1), size(l) RETURN collect(l)"
+    ) == [[[1, None], [], [2], [3]]]
+    assert await rows(
+        "UNWIND [[1, null], [2], [3]] AS l RETURN CASE WHEN any(x IN l WHERE x = 2) THEN 'y' "
+        "WHEN all(x IN l WHERE x = 1) IS NULL THEN 'n' ELSE 'e' END"
+    ) == ["n", "y", "e"]
+    assert await rows(
+        "MATCH (k:Person {name: 'Keanu'}) RETURN [any(x IN keys(k) WHERE x = 'born'), "
+        "all(x IN keys(k) WHERE x = 'name'), single(x IN labels(k) WHERE x = 'Person')]"
+    ) == [[True, False, True]]
+    assert await rows(
+        "MATCH p = (:Person {name: 'Laurence'})-[:KNOWS*]->(b) RETURN [b.name, any(r IN relationships(p) WHERE "
+        "r.role = 'x'), none(r IN relationships(p) WHERE r.role = 'x')] ORDER BY b.name"
+    ) == [["Carrie", None, None], ["Keanu", None, None]]
+    texts = {"t": "a" * 5000 + "b", "u": "a" * 5000}
+    assert await rows(
+        "UNWIND [$t, $u] AS t WITH collect(t) AS ts RETURN [any(x IN ts WHERE x = $t), all(x IN ts WHERE x = $t), "
+        "single(x IN ts + [null] WHERE x = $u), single(x IN ts + ts WHERE x = $u)]",
+        texts,
+    ) == [[True, False, None, False]]
+    # Compared by equality: STARTS WITH reads a text past 4000 bytes as null on Oracle, as size() does (#168).
+    assert await rows(
+        "UNWIND [$t, $u] AS t WITH collect(t) AS ts WITH ts WHERE any(x IN ts WHERE x = $t) "
+        "AND none(x IN ts WHERE x = 'c') AND all(x IN ts WHERE x <> 'c') RETURN size(ts)",
+        texts,
+    ) == [2]
+    # A list long enough to be bound once in a subquery, of values and of nodes, read for a value and in a WHERE.
+    comprehended = "[y IN l WHERE y > 0 | y * 2]"
+    assert await rows(
+        f"UNWIND [[1, null], [2], [3], null] AS l "
+        f"RETURN [any(x IN {comprehended} WHERE x = 4), all(x IN {comprehended} WHERE x = 4)]"
+    ) == [[False, False], [True, True], [False, False], [None, None]]
+    assert await rows(
+        f"UNWIND [[1, null], [2], [3], null] AS l WITH l WHERE any(x IN {comprehended} WHERE x = 4) "
+        f"OR NOT all(x IN {comprehended} WHERE x = 6) RETURN collect(l)"
+    ) == [[[1, None], [2]]]
+    assert await rows(
+        "MATCH (p:Person) WITH collect(p) AS ps WHERE all(x IN [n IN ps WHERE n.born > 0] WHERE x.born > 1960) "
+        "RETURN [size(ps), any(x IN [n IN ps WHERE n.born > 0] WHERE x.born > 1966)]"
+    ) == [[4, True]]
+
+
 async def test_values_that_hold_a_null_compare_item_by_item_where_neither_side_is_written_out(
     cypher_pm: PersistenceManager,
 ):

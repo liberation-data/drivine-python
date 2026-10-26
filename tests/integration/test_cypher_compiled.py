@@ -1023,20 +1023,8 @@ async def test_round_reads_a_precision_from_data_or_a_whole_float_as_a_whole_num
 async def test_round_to_0_places_rounds_half_toward_positive_infinity_as_round_of_one_argument_does(
     cypher_pm: PersistenceManager,
 ):
-    # The spec's v0.6.8 steps for drivine4j#278, until the spec is synced past the cases of open issues: to 0 places
-    # Neo4j rounds as Java's Math.round does, half toward +infinity; to more, half away from 0.
-    assert await cypher_pm.query(
-        spec(
-            "RETURN [round(-2.5, 0), round(-1.5, 0), round(-0.5, 0), round(2.5, 0), round(-2.6, 0), round(-2.55, 1), "
-            "round(-2.5, 0.7)]"
-        )
-    ) == [[-2.0, -1.0, 0.0, 3.0, -3.0, -2.6, -2.0]]
-    assert await cypher_pm.query(spec("UNWIND [0, -0.5, 1, null] AS p RETURN round(-2.5, p)")) == [
-        -2.0,
-        -2.0,
-        -2.5,
-        None,
-    ]
+    # To 0 places Neo4j rounds as Java's Math.round does, half toward +infinity (drivine4j#278), as the spec's steps
+    # for a number the statement gives and places from data have it; to more, half away from 0.
     # Zero and just below a half below it, past 2^52, and near the largest Oracle's NUMBER holds: places the statement
     # gives, and places the store works out.
     rounded = [0.0, 0.0, 0.0, -4503599627370497.0, 9.0e125, -9.0e125]
@@ -1078,29 +1066,8 @@ async def test_round_by_a_mode_and_sign_take_the_least_positive_numbers_as_posit
     cypher_pm: PersistenceManager,
 ):
     # Oracle's SIGN gives 0 for a positive number from 1.0E-130 to under 1.0E-128 (#163); UP, DOWN and the HALF_ modes
-    # round by the sign.
-    assert await cypher_pm.query(
-        spec(
-            "RETURN [round(1.0E-129, 2, 'UP'), round(1.0E-129, 0, 'UP'), round(-1.0E-129, 2, 'UP'), "
-            "round(1.0E-129, 2, 'DOWN'), round(-1.0E-129, 2, 'DOWN'), round(1.0E-130, 2, 'UP'), "
-            "round(1.0E-129, 2, 'CEILING'), round(1.0E-129, 129, 'UP')]"
-        )
-    ) == [[0.01, 1.0, -0.01, 0.0, 0.0, 0.01, 0.01, 1.0e-129]]
-    assert await cypher_pm.query(
-        spec(
-            "RETURN [round(5.0E-130, 129, 'HALF_UP'), round(5.0E-130, 129, 'HALF_DOWN'), "
-            "round(5.0E-130, 129, 'HALF_EVEN'), round(1.5E-129, 129, 'HALF_EVEN'), round(-5.0E-130, 129, 'HALF_UP'), "
-            "round(9.0E-129, 128, 'HALF_UP')]"
-        )
-    ) == [[1.0e-129, 0.0, 0.0, 2.0e-129, -1.0e-129, 1.0e-128]]
-    assert await cypher_pm.query(
-        spec(
-            "RETURN [sign(1.0E-129), sign(-1.0E-129), sign(0.0), sign(null), sign(1.0E-130), sign(9.99E-129), "
-            "sign($x)]",
-            {"x": 1.0e-129},
-        )
-    ) == [[1, -1, 0, None, 1, 1, 1]]
-    # Read from a row, beside 0, -0.0 and null, whose sign the rounding does not ask, and under an aggregate.
+    # round by the sign. The spec holds them written and bound; here they are read from a row, beside 0, -0.0 and
+    # null, whose sign the rounding does not ask, and under an aggregate.
     assert await cypher_pm.query(
         spec(
             "UNWIND [1.0E-129, -1.0E-129, 0.0, -0.0, null] AS x "
@@ -1285,8 +1252,8 @@ def _count_out_of_range(function: str, what: str) -> str:
 async def test_substring_left_and_right_refuse_a_written_float_and_a_given_start_or_length_out_of_range(
     cypher_pm: PersistenceManager,
 ):
-    # Not in the spec yet: a start or a length (#263). Neo4j refuses a float it knows to be one whatever the text; a
-    # bound one it cuts toward zero. It refuses one out of range only where the text is not null.
+    # A start or a length (#263), past the spec's steps of them. Neo4j refuses a float it knows to be one whatever the
+    # text; a bound one it cuts toward zero. It refuses one out of range only where the text is not null.
     compiles = cypher_pm.type is not DatabaseType.NEO4J
     empty = None if cypher_pm.type is DatabaseType.ORACLE else ""
     for statement, parameters, message in [
@@ -1360,8 +1327,8 @@ async def test_a_bound_start_or_length_that_is_nan_is_0_and_one_that_is_an_infin
 async def test_a_start_or_length_from_data_is_cut_toward_zero_and_one_out_of_range_fails_only_on_a_row_that_reads_it(
     cypher_pm: PersistenceManager,
 ):
-    # Not in the spec yet: a start or a length read from data (#263), in a WHERE and an aggregate too, and on rows
-    # filtered out.
+    # A start or a length read from data (#263), past the spec's steps of them: in a WHERE and an aggregate too, and
+    # on rows filtered out.
     compiles = cypher_pm.type is not DatabaseType.NEO4J
     empty = None if cypher_pm.type is DatabaseType.ORACLE else ""
     await clear(cypher_pm)
@@ -1792,113 +1759,7 @@ async def test_a_statement_that_writes_compares_a_list_that_holds_a_null_as_null
 
 
 # Texts compared and sorted by their code points, as Cypher has them, on every store: drivine4j's own tests of
-# liberation-data/drivine4j#273, ported for #161. Not in the spec this library runs yet: its cases are in v0.6.10, past
-# the quantifiers of v0.6.7 (#159), which this library has not ported.
-
-
-async def test_texts_compare_and_sort_by_their_code_points_not_by_a_locale_collation(cypher_pm: PersistenceManager):
-    # Postgres compared and sorted texts by the database's collation.
-    await seeded(cypher_pm)
-
-    async def rows(cypher: str, parameters: dict[str, Any] | None = None) -> list[Any]:
-        return await cypher_pm.query(spec(cypher, parameters))
-
-    assert await rows(
-        "UNWIND ['John Wick', 'Johnny Mnemonic', 'b', 'B', 'a', 'A', 'é', 'e', 'z', 'Z', '~', '_', '-', ' ', 'a b', "
-        "'ab', 'a-c'] AS t RETURN t ORDER BY t"
-    ) == [
-        " ",
-        "-",
-        "A",
-        "B",
-        "John Wick",
-        "Johnny Mnemonic",
-        "Z",
-        "_",
-        "a",
-        "a b",
-        "a-c",
-        "ab",
-        "b",
-        "e",
-        "z",
-        "~",
-        "é",
-    ]
-    assert await rows(
-        "UNWIND ['John Wick', 'Johnny Mnemonic', 'b', 'B', 'a', 'é'] AS t WITH t ORDER BY t DESC RETURN collect(t)"
-    ) == [["é", "b", "a", "Johnny Mnemonic", "John Wick", "B"]]
-    assert await rows("UNWIND ['b', 'B', 'b', 'a', 'B'] AS t RETURN DISTINCT t ORDER BY t") == ["B", "a", "b"]
-    assert await rows(
-        "RETURN ['a' < 'B', 'John Wick' < 'Johnny Mnemonic', 'é' > 'f', 'Z' < '_', 'a' >= 'B', 'ab' <= 'a b']"
-    ) == [[False, True, True, True, True, False]]
-    assert await rows("UNWIND ['b', 'B', 'a', 'é'] AS t RETURN min(t), max(t)") == [["B", "é"]]
-    assert await rows(
-        "UNWIND $ts AS t RETURN t ORDER BY t", {"ts": ["b", "B", "John Wick", "Johnny Mnemonic", "a"]}
-    ) == ["B", "John Wick", "Johnny Mnemonic", "a", "b"]
-    # A property compared with a text, and sorted: 'The Matrix' is before 'The matrix', which a locale puts first.
-    assert await rows("MATCH (m:Movie) WHERE m.title < $t RETURN m.title ORDER BY m.title", {"t": "The matrix"}) == [
-        "Johnny Mnemonic",
-        "The Matrix",
-        "The Matrix Reloaded",
-    ]
-    assert await rows("MATCH (m:Movie) WHERE m.title >= 'the' RETURN m.title") == []
-    assert await rows("MATCH (m:Movie) WITH m.title AS t ORDER BY toLower(t) + 'A' DESC RETURN collect(t)") == [
-        ["The Matrix", "The Matrix Reloaded", "Johnny Mnemonic"]
-    ]
-    assert await rows(
-        "MATCH (m:Movie) WITH CASE WHEN m.released < 1996 THEN toLower(m.title) ELSE m.title END AS t "
-        "RETURN min(t), max(t)"
-    ) == [["The Matrix", "johnny mnemonic"]]
-    assert await rows("MATCH (p:Person), (q:Person) WHERE toLower(p.name) < q.name RETURN count(*)") == [0]
-    # A sort by a list, and min and max of lists, compare the texts in them so too.
-    assert await rows(
-        "UNWIND [['a', 'b'], ['a', 'B'], ['B'], ['b'], ['John Wick'], ['Johnny Mnemonic'], ['a', 'é'], ['a', '~']] "
-        "AS l RETURN l ORDER BY l"
-    ) == [["B"], ["John Wick"], ["Johnny Mnemonic"], ["a", "B"], ["a", "b"], ["a", "~"], ["a", "é"], ["b"]]
-    assert await rows("UNWIND [['a', 'b'], ['a', 'B'], ['B'], ['b']] AS l RETURN min(l), max(l)") == [[["B"], ["b"]]]
-    # Long texts too: Postgres keys the first 500 characters of a text in a list by their code points.
-    a499, a600 = "a" * 499, "a" * 600
-    assert await rows(
-        "UNWIND $ls AS g WITH [g[0], g[1]] AS l RETURN l[1] ORDER BY l",
-        {"ls": [[a499 + "b", "3"], [a499 + "B", "2"], [a499, "1"], [a600 + "b", "5"], [a600, "4"]]},
-    ) == ["1", "2", "4", "5", "3"]
-    assert await rows(
-        "MATCH (m:Movie) WITH m ORDER BY m.released WITH collect(toLower(m.title)) + ['The Matrix'] AS ts "
-        "UNWIND [ts, ['the matrix'], ['The matrix']] AS l RETURN l ORDER BY l DESC"
-    ) == [
-        ["the matrix"],
-        ["johnny mnemonic", "the matrix", "the matrix reloaded", "The Matrix"],
-        ["The matrix"],
-    ]
-
-
-async def test_a_character_above_u_ffff_sorts_after_every_one_below_it_as_its_code_point_says(
-    cypher_pm: PersistenceManager,
-):
-    # UTF-16 puts such a character before U+E000 to U+FFFF, as Neo4j compares a text given.
-    smile, tilde, private_use, below = "\U0001f600", "～", "", "퟿"
-
-    async def rows(cypher: str, parameters: dict[str, Any] | None = None) -> list[Any]:
-        return await cypher_pm.query(spec(cypher, parameters))
-
-    assert await rows(f"UNWIND ['{smile}', '{tilde}', '{private_use}', 'a', '{below}'] AS t RETURN t ORDER BY t") == [
-        "a",
-        below,
-        private_use,
-        tilde,
-        smile,
-    ]
-    assert await rows(f"RETURN ['{smile}' < '{tilde}', '{smile}' > '{private_use}', '{smile}' > '{below}']") == [
-        [False, True, True]
-    ]
-    assert await rows(f"UNWIND [['{smile}'], ['{tilde}']] AS l RETURN l ORDER BY l") == [[tilde], [smile]]
-    # Neo4j compares a text given by its UTF-16 code units, where it compares one written or stored by its code points
-    # (neo4j/neo4j#13997).
-    if cypher_pm.type is not DatabaseType.NEO4J:
-        assert await rows("UNWIND $ts AS t RETURN min(t), max(t)", {"ts": [smile, tilde, private_use]}) == [
-            [private_use, smile]
-        ]
+# liberation-data/drivine4j#273, ported for #161, where the spec's cases of them do not hold the same.
 
 
 async def test_a_text_in_a_list_sorts_by_its_code_points_up_to_and_across_its_500th_character(
@@ -1911,8 +1772,8 @@ async def test_a_text_in_a_list_sorts_by_its_code_points_up_to_and_across_its_50
     texts = [s499, s499 + "a", s499 + "～", s500, s500 + "a", s500 + "b"]
     written = ", ".join(f"['{it}']" for it in reversed(texts))
 
-    async def rows(cypher: str) -> list[Any]:
-        return await cypher_pm.query(spec(cypher))
+    async def rows(cypher: str, parameters: dict[str, Any] | None = None) -> list[Any]:
+        return await cypher_pm.query(spec(cypher, parameters))
 
     assert await rows(f"UNWIND [{written}] AS l RETURN l ORDER BY l") == [[it] for it in texts]
     assert await rows(f"UNWIND [{written}] AS l RETURN l ORDER BY l DESC") == [[it] for it in reversed(texts)]
@@ -1928,44 +1789,9 @@ async def test_a_text_in_a_list_sorts_by_its_code_points_up_to_and_across_its_50
             ["B"],
             ["b"],
         ]
-
-
-async def test_a_text_sorts_beside_a_null_and_a_number_as_before_and_by_its_code_points_among_the_texts(
-    cypher_pm: PersistenceManager,
-):
-    # Postgres sorts by a row of the value, each text blanked, and of the text by its code points.
-    async def rows(cypher: str) -> list[Any]:
-        return await cypher_pm.query(spec(cypher))
-
-    assert await rows("UNWIND ['b', null, 'B'] AS t RETURN t ORDER BY t") == ["B", "b", None]
-    assert await rows("UNWIND ['b', null, 'B', 'b'] AS t RETURN DISTINCT t ORDER BY t DESC") == [None, "b", "B"]
-    # Oracle sorts a number before a text, by its own order of kinds.
-    if cypher_pm.type is not DatabaseType.ORACLE:
-        assert await rows("UNWIND [2, 'b', null, 1, 'B'] AS t RETURN t ORDER BY t") == ["B", "b", 1, 2, None]
-        assert await rows("UNWIND [2, 'b', null, 1, 'B'] AS t RETURN t ORDER BY t DESC") == [None, 2, 1, "b", "B"]
-    # A text compared with a value of another kind is null, and min and max of several kinds take the least text by
-    # its code points.
+    # Long texts given: Postgres keys the first 500 characters of a text in a list by their code points.
+    a600 = "a" * 600
     assert await rows(
-        "RETURN ['a' < 1, 'B' > null, 1 >= 'a', coalesce(null, 'a') < 'B', CASE WHEN true THEN 'a' END < 'B']"
-    ) == [[None, None, None, False, False]]
-    assert await rows("UNWIND ['b', 1, 'B', true] AS t WITH t WHERE t < 'a' RETURN t") == ["B"]
-    assert await rows("UNWIND ['b', 1, 'B', true] AS t WITH t WHERE t > 0 RETURN t") == [1]
-    assert await rows("UNWIND ['b', 'B', 'a', 'B'] AS t RETURN min(DISTINCT t), max(DISTINCT t)") == [["B", "b"]]
-    assert await rows("UNWIND ['b', 1, 'B', 2, true] AS t RETURN min(t), max(t)") == [["B", 2]]
-
-
-async def test_a_text_sorts_by_its_code_points_where_its_sort_key_is_long_enough_to_be_worked_out_in_a_subquery(
-    cypher_pm: PersistenceManager,
-):
-    # Postgres binds a long term once in a subquery, which gives its sort key as a row.
-    key = "coalesce(toLower(toUpper(trim(t))), toUpper(t), 'zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz') + t"
-    assert await cypher_pm.query(spec(f"UNWIND ['b', 'B', 'a'] AS t RETURN DISTINCT t ORDER BY {key}")) == [
-        "a",
-        "B",
-        "b",
-    ]
-    assert await cypher_pm.query(spec(f"UNWIND ['b', 'B', 'a'] AS t RETURN DISTINCT t ORDER BY {key} DESC")) == [
-        "b",
-        "B",
-        "a",
-    ]
+        "UNWIND $ls AS g WITH [g[0], g[1]] AS l RETURN l[1] ORDER BY l",
+        {"ls": [[a499 + "b", "3"], [a499 + "B", "2"], [a499, "1"], [a600 + "b", "5"], [a600, "4"]]},
+    ) == ["1", "2", "4", "5", "3"]

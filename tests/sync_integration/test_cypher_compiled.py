@@ -847,7 +847,7 @@ def test_round_reads_a_precision_from_data_or_a_whole_float_as_a_whole_number_to
 ):
     # Beyond the spec's round() cases: a float, -0.5 and a whole float read from data, and every rounding mode.
     clear(cypher_pm)
-    cypher_pm.execute(spec("CREATE (:Round {p: 1.7, q: -0.5, w: 2.0})"))
+    cypher_pm.execute(spec("CREATE (:Round {p: 1.7, q: -0.5, w: 2.0, r: -2, z: 0.0, b: 400, g: 1000000000})"))
     assert cypher_pm.query(
         spec(
             "MATCH (n:Round) RETURN [round(2.555, n.p), round(2.55, n.p, 'UP'), round(2.5, n.q), "
@@ -863,6 +863,59 @@ def test_round_reads_a_precision_from_data_or_a_whole_float_as_a_whole_number_to
     assert cypher_pm.query(
         spec("RETURN [round(null, 2), round(2.5, null), round(null, 2, 'UP'), round(2.5, null, 'UP')]")
     ) == [[None, None, None, None]]
+    # Places past a number's digits give it back, where Oracle's NUMBER would overflow (drivine4j#266); short of them,
+    # it rounds.
+    assert cypher_pm.query(
+        spec("RETURN [round(2.5, 400), round(1.5, 400), round(2.5, 400, 'HALF_UP'), round(2.5, 400, 'CEILING')]")
+    ) == [[2.5, 1.5, 2.5, 2.5]]
+    # Read from data, and so far past the digits that writing them all out would not finish, where Postgres's numeric
+    # would overflow; a null still rounds to null.
+    assert cypher_pm.query(
+        spec(
+            "MATCH (n:Round) RETURN [round(2.5, n.b), round(2.5, n.b, 'FLOOR'), round(2.5, n.g), "
+            "round(2.5, n.g, 'CEILING'), round(null, n.g), round(n.none, n.g, 'UP'), round(2.5, n.none)]"
+        )
+    ) == [[2.5, 2.5, 2.5, 2.5, None, None, None]]
+    assert cypher_pm.query(
+        spec("RETURN [round(2.5, 1000000000), round(2.5, 1000000000, 'HALF_UP'), round(5, 400)]")
+    ) == [[2.5, 2.5, 5.0]]
+    assert cypher_pm.query(
+        spec(
+            "RETURN [round(1.0E-100, 120), round(123.456, 200, 'HALF_UP'), round(1.0E100, 30), round(1.0 / 3, 20), "
+            "round(1.0E-100, 99), round(-2.5, 300, 'FLOOR')]"
+        )
+    ) == [[1.0e-100, 123.456, 1.0e100, 0.3333333333333333, 0.0, -2.5]]
+    # Zero, whose digits Oracle cannot count by its logarithm, and a precision short of a tiny number's digits but past
+    # NUMBER's range.
+    assert cypher_pm.query(
+        spec(
+            "MATCH (n:Round) RETURN [round(0.0, 400), round(0, 400, 'HALF_UP'), round(n.z, 2), round(n.z, 400), "
+            "round(n.z, 2, 'UP'), round(1.0E-120, 130), round(1.0E-120, 130, 'HALF_UP'), "
+            "round(-1.0E-120, 136, 'CEILING')]"
+        )
+    ) == [[0.0, 0.0, 0.0, 0.0, 0.0, 1.0e-120, 1.0e-120, -1.0e-120]]
+    # Either side of the last place a double holds, and short of it, where a mode still rounds.
+    assert cypher_pm.query(
+        spec(
+            "RETURN [round(123.456, 14, 'UP'), round(123.456, 15, 'UP'), round(123.456, 16, 'UP'), "
+            "round(-123.456, 14, 'FLOOR'), round(1234.5678901234567, 13), round(1234.5678901234567, 12, 'HALF_EVEN'), "
+            "round(99.99, 16, 'UP'), round(0.1, 17, 'UP')]"
+        )
+    ) == [[123.456, 123.456, 123.456, -123.456, 1234.5678901234567, 1234.567890123457, 99.99, 0.1]]
+    # A negative precision from data fails on zero too, whose places Oracle gives back without rounding.
+    message = None if cypher_pm.type is DatabaseType.NEO4J else re.escape(NEGATIVE_PRECISION)
+    for statement in ["MATCH (n:Round) RETURN round(n.z, n.r, 'HALF_UP')", "MATCH (n:Round) RETURN round(n.z, n.r)"]:
+        with pytest.raises(Exception, match=message):  # noqa: PT011
+            cypher_pm.query(spec(statement))
+    # The least doubles, whose last digits are short of the 400 places Postgres holds a precision to. Oracle's NUMBER
+    # holds none of them.
+    if cypher_pm.type is not DatabaseType.ORACLE:
+        assert cypher_pm.query(
+            spec(
+                "RETURN [round(2.2250738585072014E-308, 323), round(2.2250738585072014E-308, 400), "
+                "round(4.9E-324, 324, 'UP'), round(4.9E-324, 323, 'UP')]"
+            )
+        ) == [[2.225073858507201e-308, 2.2250738585072014e-308, 5e-324, 1e-323]]
 
 
 def test_a_negative_precision_from_data_fails_only_on_a_row_that_reads_it_in_a_where_and_an_aggregate_too(

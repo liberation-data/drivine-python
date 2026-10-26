@@ -1078,6 +1078,57 @@ async def test_round_to_0_places_rounds_half_toward_positive_infinity_as_round_o
     ) == [[-2.0, -2.0, -2.0, -2.0, -2.0, -2.5, -2.6, -2.0, -2.5, -3.0, -3.0, -3.0, -3.0]]
 
 
+async def test_round_by_a_mode_and_sign_take_the_least_positive_numbers_as_positive_where_oracles_sign_gives_0(
+    cypher_pm: PersistenceManager,
+):
+    # Oracle's SIGN gives 0 for a positive number from 1.0E-130 to under 1.0E-128 (#163); UP, DOWN and the HALF_ modes
+    # round by the sign.
+    assert await cypher_pm.query(
+        spec(
+            "RETURN [round(1.0E-129, 2, 'UP'), round(1.0E-129, 0, 'UP'), round(-1.0E-129, 2, 'UP'), "
+            "round(1.0E-129, 2, 'DOWN'), round(-1.0E-129, 2, 'DOWN'), round(1.0E-130, 2, 'UP'), "
+            "round(1.0E-129, 2, 'CEILING'), round(1.0E-129, 129, 'UP')]"
+        )
+    ) == [[0.01, 1.0, -0.01, 0.0, 0.0, 0.01, 0.01, 1.0e-129]]
+    assert await cypher_pm.query(
+        spec(
+            "RETURN [round(5.0E-130, 129, 'HALF_UP'), round(5.0E-130, 129, 'HALF_DOWN'), "
+            "round(5.0E-130, 129, 'HALF_EVEN'), round(1.5E-129, 129, 'HALF_EVEN'), round(-5.0E-130, 129, 'HALF_UP'), "
+            "round(9.0E-129, 128, 'HALF_UP')]"
+        )
+    ) == [[1.0e-129, 0.0, 0.0, 2.0e-129, -1.0e-129, 1.0e-128]]
+    assert await cypher_pm.query(
+        spec(
+            "RETURN [sign(1.0E-129), sign(-1.0E-129), sign(0.0), sign(null), sign(1.0E-130), sign(9.99E-129), "
+            "sign($x)]",
+            {"x": 1.0e-129},
+        )
+    ) == [[1, -1, 0, None, 1, 1, 1]]
+    # Read from a row, beside 0, -0.0 and null, whose sign the rounding does not ask, and under an aggregate.
+    assert await cypher_pm.query(
+        spec(
+            "UNWIND [1.0E-129, -1.0E-129, 0.0, -0.0, null] AS x "
+            "RETURN [sign(x), round(x, 2, 'UP'), round(x, 129, 'HALF_EVEN'), round(x, 0, 'DOWN')]"
+        )
+    ) == [
+        [1, 0.01, 1.0e-129, 0.0],
+        [-1, -0.01, -1.0e-129, 0.0],
+        [0, 0.0, 0.0, 0.0],
+        [0, 0.0, 0.0, 0.0],
+        [None, None, None, None],
+    ]
+    assert await cypher_pm.query(
+        spec(
+            "UNWIND [1.0E-129, 5.0E-130] AS x "
+            "RETURN [sign(sum(x)), sum(sign(x)), sign(min(x)), round(max(x), 2, 'UP'), sign(sign(sign(min(x))))]"
+        )
+    ) == [[1, 2, 1, 0.01, 1]]
+    # Numbers near NUMBER's greatest, which a sign told by a multiple of them would overflow.
+    assert await cypher_pm.query(spec("RETURN [sign(9.0E125), sign(-9.0E125), sign(7), sign(-0.5), sign(0.5)]")) == [
+        [1, -1, 1, -1, 1]
+    ]
+
+
 async def test_round_of_zero_gives_zero_or_null_to_a_null_precision_and_fails_on_a_negative_one(
     cypher_pm: PersistenceManager,
 ):

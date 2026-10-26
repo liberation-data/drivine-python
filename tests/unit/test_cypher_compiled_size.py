@@ -384,3 +384,16 @@ def test_a_round_whose_places_come_from_data_reads_the_value_once_more_for_its_k
     nested = "UNWIND [1.5] AS x WITH x, 1 AS p RETURN p, " + "round(" * 3 + "sum(x)" + f", p{mode})" * 3
     sql = compiler("g").compile(nested).sql
     assert len(sql) < (2_000_000 if compiler is OracleCypherCompiler else 100_000), len(sql)
+
+
+@COMPILERS
+def test_a_sign_nested_under_an_aggregate_compiles_to_about_the_statement_a_ceil_does_reading_its_number_once(
+    compiler: type[SqlCypherCompiler],
+) -> None:
+    # Under an aggregate nothing is bound, so a sign that read its number twice wrote it out twice at each level: on
+    # Oracle, where a sign is not SIGN alone (#163), four deep was 14 times the statement a ceil() is.
+    def nested(function: str) -> int:
+        return len(compiler("g").compile("UNWIND [1.5] AS x RETURN " + f"{function}(" * 4 + "sum(x)" + ")" * 4).sql)
+
+    sign, ceil = nested("sign"), nested("ceil")
+    assert sign < ceil * 1.1, f"sign {sign}, ceil {ceil} characters"

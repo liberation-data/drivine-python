@@ -1042,6 +1042,10 @@ class SqlCypherCompiler(ABC):
         """`round(x, p)` of two arguments: the SQL number to `precision` places, half away from 0, as SQL's `ROUND`."""
         return f"ROUND({number}, {precision})"
 
+    def sign_of(self, number: str) -> str:
+        """The sign of the SQL number: 1, -1 or 0, as SQL's `SIGN` gives it, and null where it is null."""
+        return f"SIGN({number})"
+
     def round_to(self, number: str, precision: str, mode: str) -> str:
         """
         `round(value, precision, mode)`: the SQL number rounded to `precision` decimal places by `mode`, one of
@@ -1070,7 +1074,7 @@ class SqlCypherCompiler(ABC):
                     f"ELSE FLOOR({scaled} + 0.5) END"
                 ),
             }[mode]
-            return f"(SIGN({n}) * {magnitude} / {scale})"
+            return f"({self.sign_of(n)} * {magnitude} / {scale})"
 
         return self.shared([number, precision], rounded)
 
@@ -4541,7 +4545,7 @@ class SqlCypherCompiler(ABC):
                 raise DrivineError(f"{function.name}() takes no argument.")
             return Json(self.literal_json(math.e if name == "e" else math.pi))
         if name == "sign":
-            return Json(self.scalar(f"SIGN({self.number(self.comparable(self.json(one())))})"))
+            return Json(self.scalar(self.sign_of(self.number(self.comparable(self.json(one()))))))
         if name in ("ltrim", "rtrim"):
             return Json(self.scalar(f"{name.upper()}({self.text(self.comparable(self.json(one())))})"), text=True)
         if name == "randomuuid":

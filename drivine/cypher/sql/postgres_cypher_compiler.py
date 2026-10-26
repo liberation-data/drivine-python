@@ -58,6 +58,12 @@ _SCIENTIFIC = "9.9999999999999999EEEE"
 _PROPERTY = re.compile(r"^\(([\w.]+) -> ('(?:[^']|'')*')\)$")
 """A property as `property_of` reads it from a column: `(n1.props -> 'name')`."""
 
+_CODE_POINT_PREFIX = 500
+"""
+The characters of a text in a list that `_code_points` orders by their code points: at most 4 bytes each, 32 bits,
+which are 16,000 places, and Postgres holds 16,383 after a number's point.
+"""
+
 
 class PostgresCypherCompiler(SqlCypherCompiler):
     """
@@ -159,6 +165,28 @@ class PostgresCypherCompiler(SqlCypherCompiler):
         match = _PROPERTY.fullmatch(property)
         return f"({match.group(1)} ->> {match.group(2)}) = ({value} #>> '{{}}')" if match else None
 
+    def ordered(self, x: str, operator: str, y: str) -> str:
+        """Texts by their code points (`_code_point_text`); values of any other kind as `jsonb` compares them."""
+        return (
+            f"CASE WHEN jsonb_typeof({x}) = 'string' THEN {self._text_of(x)} COLLATE \"C\" {operator} "
+            f"{self._text_of(y)} ELSE {x} {operator} {y} END"
+        )
+
+    def sort_key(self, json: str) -> str:
+        """
+        A value as `jsonb` orders it, but a text after the other texts by its code points (`_code_point_text`): a row
+        of the value, each text in it the empty text, which comes where texts come among the other kinds, then its text
+        by its code points, null for any other kind. A row of nulls, a null's, comes after every other ascending, and
+        before them descending, as null does.
+        """
+        return self.shared1(
+            json,
+            lambda x: (
+                f"ROW(CASE WHEN jsonb_typeof({x}) = 'string' THEN '\"\"'::jsonb ELSE {self.null_if_json_null(x)} END, "
+                f"{self._code_point_text(x)})"
+            ),
+        )
+
     def elements(self, json: str, alias: str) -> str:
         return f"jsonb_array_elements({json}) WITH ORDINALITY {alias} (item, item_no)"
 
@@ -224,11 +252,14 @@ class PostgresCypherCompiler(SqlCypherCompiler):
         )
 
     def extreme(self, value: str, min_: bool, key: str | None = None) -> str:
-        # Postgres has no min or max of jsonb, which orders: the first of the values in order is the least.
+        # Postgres has no min or max of jsonb, which orders: the first of the values in order is the least. Texts are
+        # first ordered by their code points (`_code_point_text`), as Cypher orders them, where `jsonb` orders them by
+        # the database's collation.
         direction = "ASC" if min_ else "DESC"
+        terms = [self.kind_order(value), *([self._code_point_text(value)] if key is None else []), key or value]
+        order = ", ".join(f"{it} {direction}" for it in terms)
         return (
-            f"(array_agg({value} ORDER BY {self.kind_order(value)} {direction}, {key or value} {direction}) "
-            f"FILTER (WHERE COALESCE(jsonb_typeof({value}), 'null') <> 'null'))[1]"
+            f"(array_agg({value} ORDER BY {order}) FILTER (WHERE COALESCE(jsonb_typeof({value}), 'null') <> 'null'))[1]"
         )
 
     def add(self, a: str, b: str, given: tuple[Any, Any] = (None, None)) -> str:
@@ -268,7 +299,8 @@ class PostgresCypherCompiler(SqlCypherCompiler):
     def list_sort_key(self, json: str) -> str:
         """
         A list as `jsonb` that Postgres orders as Cypher orders lists, item by item: each item, from the first, a list
-        of three, of where its kind comes (`item_rank`), the item, and what follows it so written, the end an empty
+        of three, of where its kind comes (`item_rank`), the item (a text by its code points, as `_code_points` writes
+        it), and what follows it so written, the end an empty
         list. `jsonb` orders the shorter of two lists first, and every list here but the last is of three. An item that
         is a list is followed by its own items, at any depth, then by its end, which comes before any item. Any other
         value sorts as itself, as before. Only a value the statement makes a list sorts so: the planner costs the walk
@@ -303,15 +335,53 @@ class PostgresCypherCompiler(SqlCypherCompiler):
             "SELECT kn.place || CAST(jsonb_array_length(kn.item) + 1 AS bigint), 0, 'null' FROM kn "
             "WHERE jsonb_typeof(kn.item) = 'array'"
         )
+        text = "(kn.item #>> '{}')"
         tokens = (
             f"SELECT kn.place, {self.item_rank('kn.item')} AS rank, "
-            "CASE WHEN jsonb_typeof(kn.item) = 'array' THEN 'null' ELSE CAST(kn.item AS text) END AS item "
+            f"CASE jsonb_typeof(kn.item) WHEN 'array' THEN 'null' WHEN 'string' THEN {self._code_points(text)} "
+            "ELSE CAST(kn.item AS text) END AS item "
             f"FROM kn UNION ALL {ends}"
         )
         return (
             f"(WITH RECURSIVE kn (place, item) AS ({walked}) "
             "SELECT COALESCE(string_agg('[' || kt.rank || ', ' || kt.item || ', ', '' ORDER BY kt.place), '') "
             f"|| '[]' || repeat(']', COUNT(*)::int) FROM ({tokens}) kt)"
+        )
+
+    def _text_of(self, json: str) -> str:
+        """The JSON's text, where it is a text: a property's read with `->>`, which costs less than `#>>`."""
+        match = _PROPERTY.fullmatch(json)
+        return f"({match.group(1)} ->> {match.group(2)})" if match else f"({json} #>> '{{}}')"
+
+    def _code_point_text(self, json: str) -> str:
+        """
+        The JSON's text, where it is one, by its code points, as Cypher compares texts: `jsonb`, and text of the
+        database's collation, compare them as the locale does (`'a' < 'B'`, and `'John Wick'` after
+        `'Johnny Mnemonic'`). The `C` collation compares a text's bytes in the database's encoding: in a UTF-8
+        database, as `initdb` and Postgres's images make one, they order as its code points do; in another, as that
+        encoding's bytes do. Null where the JSON is not a text.
+        """
+        return f"(CASE WHEN jsonb_typeof({json}) = 'string' THEN {self._text_of(json)} END) COLLATE \"C\""
+
+    def _code_points(self, text: str) -> str:
+        """
+        The text as JSON text that `jsonb` orders as Cypher orders texts, by their code points, where `jsonb` orders a
+        text by the database's collation: a list of a number and what follows it. The number is 0, a point, and the
+        bits of the UTF-8 bytes of the text's first _CODE_POINT_PREFIX characters, which order as its code points do;
+        a text that is the start of another comes first, as the other's next byte has a bit set. What follows is an
+        empty list, or one of the rest of the text, which `jsonb` orders by the collation: past _CODE_POINT_PREFIX
+        characters, where a number would have more places than Postgres holds. Of strings, not a subquery a
+        character: the planner costs a subquery for each item, and so brings in its JIT for the sort, and `jsonb`
+        compares lists nested a character deep ten times slower.
+        """
+        bits = (
+            f"CAST(CAST('x' || encode(convert_to(left({text}, {_CODE_POINT_PREFIX}), 'UTF8'), 'hex') AS varbit) "
+            "AS text)"
+        )
+        return (
+            f"'[' || CASE WHEN {text} = '' THEN '0' ELSE '0.' || {bits} END || ', ' || "
+            f"CASE WHEN length({text}) > {_CODE_POINT_PREFIX} THEN '[' || CAST(to_jsonb(substr({text}, "
+            f"{_CODE_POINT_PREFIX + 1})) AS text) || ']' ELSE '[]' END || ']'"
         )
 
     def id_tokens(self, ids: str, key: str) -> str:

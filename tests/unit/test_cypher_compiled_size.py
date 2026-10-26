@@ -230,13 +230,17 @@ def test_a_sum_writes_a_side_the_statement_makes_a_text_as_its_own_text_and_one_
     assert writes("MATCH (c:Claim) WITH max(c.f) AS hi RETURN hi + 'x'") == once
 
 
-def test_a_sort_by_a_property_on_postgres_is_by_its_json_alone_and_only_a_list_the_statement_makes_is_keyed_as_a_list():
+def test_a_sort_by_a_property_on_postgres_is_by_json_and_text_and_only_a_list_the_statement_makes_is_keyed_as_a_list():
     # Keyed as a list, a term costs thousands a row in the planner's estimate, which brings in its JIT for the whole
-    # statement past a few dozen rows (drivine4j#223).
+    # statement past a few dozen rows (drivine4j#223). A text sorts by its code points (#161), in the same row, with no
+    # subquery.
     def ordered(cypher: str) -> str:
         return PostgresCypherCompiler("g").compile(cypher).sql.split("ORDER BY ", 1)[1]
 
-    assert ordered("MATCH (c:Claim) RETURN c.name ORDER BY c.name") == "NULLIF(p2.s1, 'null'::jsonb)"
+    assert ordered("MATCH (c:Claim) RETURN c.name ORDER BY c.name") == (
+        "ROW(CASE WHEN jsonb_typeof(p2.s1) = 'string' THEN '\"\"'::jsonb ELSE NULLIF(p2.s1, 'null'::jsonb) END, "
+        "(CASE WHEN jsonb_typeof(p2.s1) = 'string' THEN (p2.s1 #>> '{}') END) COLLATE \"C\")"
+    )
     listed = ordered("MATCH (c:Claim) WITH c.name AS n, collect(c.id) AS ids RETURN n ORDER BY ids")
     assert "WITH RECURSIVE" in listed, listed
     # Its items as arrays unnested, which the planner takes for 10 items, not a set-returning function's 100: a 150th

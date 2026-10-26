@@ -1117,6 +1117,14 @@ def test_round_by_a_mode_and_sign_take_the_least_positive_numbers_as_positive_wh
             "RETURN [sign(sum(x)), sum(sign(x)), sign(min(x)), round(max(x), 2, 'UP'), sign(sign(sign(min(x))))]"
         )
     ) == [[1, 2, 1, 0.01, 1]]
+    # A sign is an integer, as on Neo4j, which the comparisons above, where 1 == 1.0, don't tell.
+    signs = cypher_pm.query(
+        spec(
+            "UNWIND [1.0E-129, -1.5] AS x WITH collect(x) AS xs, sum(x) AS total "
+            "RETURN [sign(xs[0]), sign(xs[1]), sign(total), sign(sign(xs[0])), sign(0.0), sign(7)]"
+        )
+    )
+    assert [[type(sign) for sign in row] for row in signs] == [[int] * 6]
     # Numbers near NUMBER's greatest, which a sign told by a multiple of them would overflow.
     assert cypher_pm.query(spec("RETURN [sign(9.0E125), sign(-9.0E125), sign(7), sign(-0.5), sign(0.5)]")) == [
         [1, -1, 1, -1, 1]

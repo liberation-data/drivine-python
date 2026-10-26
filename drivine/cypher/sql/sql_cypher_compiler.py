@@ -4805,7 +4805,12 @@ def _is_number(value: Any) -> bool:
 
 
 def _cut(value: float) -> int:
-    """A number cut toward zero, as Java casts a double to a long: NaN is 0, and an infinity the greatest or least."""
+    """
+    A number cut toward zero, as Java casts a double to a long: NaN is 0, and an infinity the greatest or least. A
+    whole number is kept as it is, however large: no float holds one past 1.8E308.
+    """
+    if isinstance(value, int):
+        return value
     if math.isnan(value):
         return 0
     if math.isinf(value):

@@ -139,6 +139,38 @@ def test_round_of_two_arguments_refuses_a_precision_below_0_toward_zero_written_
 
 
 @pytest.mark.parametrize("compiler", COMPILERS.values(), ids=COMPILERS.keys())
+@pytest.mark.parametrize(
+    "n",
+    [
+        pytest.param(10**400, id="10**400"),
+        pytest.param(-(10**400), id="-10**400"),
+        2147483648,
+        float("inf"),
+        float("-inf"),
+        Decimal("-1.5"),
+        Decimal("2147483648.5"),
+    ],
+)
+def test_a_bound_length_out_of_range_is_refused_however_large_and_of_whatever_kind(
+    compiler: type[SqlCypherCompiler], n: Any
+) -> None:
+    # Not in the spec yet (#143): a Python int has no bound, and is past the greatest as a Java long is.
+    with pytest.raises(DrivineError, match=r"^left\(\) takes a length from 0 to 2147483647, as in Neo4j\.$"):
+        compiler("g").compile("RETURN left('hello', $n)", {"n": n})
+
+
+@pytest.mark.parametrize("compiler", COMPILERS.values(), ids=COMPILERS.keys())
+@pytest.mark.parametrize(
+    ("n", "cut"), [(float("nan"), 0), (Decimal("2.7"), 2), (Decimal("-0.5"), 0), (2147483647, 2147483647)]
+)
+def test_a_bound_length_is_cut_toward_zero_as_java_casts_it_nan_to_0(
+    compiler: type[SqlCypherCompiler], n: Any, cut: int
+) -> None:
+    # Not in the spec yet (#143): a Decimal is read as the number it is, and NaN as Java casts a double to a long.
+    assert f"CAST({cut} AS INTEGER)" in compiler("g").compile("RETURN left('hello', $n)", {"n": n}).sql
+
+
+@pytest.mark.parametrize("compiler", COMPILERS.values(), ids=COMPILERS.keys())
 @pytest.mark.parametrize("p", [-0.9, Decimal("-0.5"), float("nan")])
 def test_round_takes_a_precision_above_minus_1_as_0_places_and_compiles_one_that_is_nan(
     compiler: type[SqlCypherCompiler], p: Any

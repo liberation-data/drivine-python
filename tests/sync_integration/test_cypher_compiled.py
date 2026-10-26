@@ -12,6 +12,7 @@ import re
 import time as time_module
 from collections.abc import Generator
 from datetime import UTC, date, datetime, time, timedelta, timezone
+from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -964,6 +965,26 @@ def test_substring_left_and_right_refuse_a_written_float_and_a_given_start_or_le
     assert cypher_pm.query(spec("UNWIND $xs AS s RETURN substring('hello', s)", {"xs": [2147483647]})) == [empty]
 
 
+def test_a_bound_start_or_length_that_is_nan_is_0_and_one_that_is_an_infinity_out_of_range_as_java_casts_them(
+    cypher_pm: PersistenceManager,
+):
+    # Not in the spec yet (#143): Neo4j casts a double to a long, as Java does, NaN to 0 and an infinity to the
+    # greatest or least.
+    compiles = cypher_pm.type is not DatabaseType.NEO4J
+    empty = None if cypher_pm.type is DatabaseType.ORACLE else ""
+    assert cypher_pm.query(spec("RETURN [left('hello', $n), substring('hello', $n)]", {"n": float("nan")})) == [
+        [empty, "hello"]
+    ]
+    for n in [float("inf"), float("-inf")]:
+        with pytest.raises(Exception, match=_count_out_of_range("left", "length") if compiles else None):  # noqa: PT011
+            cypher_pm.query(spec("RETURN left('hello', $n)", {"n": n}))
+    if compiles:
+        # A Decimal, which the Neo4j driver does not send, is read as the number it is.
+        assert cypher_pm.query(
+            spec("RETURN [left('hello', $n), substring('hello', $s)]", {"n": Decimal("2.7"), "s": Decimal("1")})
+        ) == [["he", "ello"]]
+
+
 def test_a_start_or_length_from_data_is_cut_toward_zero_and_one_out_of_range_fails_only_on_a_row_that_reads_it(
     cypher_pm: PersistenceManager,
 ):
@@ -1020,6 +1041,17 @@ def test_a_start_or_length_from_data_is_cut_toward_zero_and_one_out_of_range_fai
             "left(n.t, 2147483647 + 1)]"
         )
     ) == [[None, None, None, None]]
+    # Out of range beside a text of constants alone, on no row: the failure reads the text, so no store works it out
+    # before a row, given or not.
+    assert (
+        cypher_pm.query(
+            spec(
+                "MATCH (n:Count) WHERE n.k = 99 RETURN [left(toUpper('hello'), -1), left('hello', 1 - 3), "
+                "substring(toUpper('hello'), 0, 1 - 3)]"
+            )
+        )
+        == []
+    )
     assert cypher_pm.query(
         spec(
             "MATCH (n:Count) WHERE n.k = 2 RETURN [left(n.t, n.none), substring(n.t, n.none), "

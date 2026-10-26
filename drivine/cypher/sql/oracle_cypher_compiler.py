@@ -742,9 +742,11 @@ class OracleCypherCompiler(SqlCypherCompiler):
         (ORA-01426) where Neo4j gives the number back. Neo4j rounds a double, of _DOUBLE_DIGITS significant digits at
         most, so rounding it to places past its last digit changes nothing; a number Oracle holds to more digits is a
         double again once rounded. Oracle works out only the branch of a CASE a row takes, so the overflowing one is
-        never reached. The precision is read first, so one below 0 fails on 0 too, whose digits are not counted. Short
-        of its digits, a tiny number may still take more than _MOST_PLACES places, as 1.0E-120 to 130 does: it is
-        rounded moved that many places fewer to the right, then moved back, which is exact in decimal.
+        never reached. The precision is read first, so one below 0 fails on 0 too, and a null one gives null, not the 0.
+        Zero, whose digits are not counted, has a WHEN of its own: a CASE tests its WHENs in order, where OR may test
+        either side first, and `LOG(10, 0)` fails (ORA-01428). Short of its digits, a tiny number may still take more
+        than _MOST_PLACES places, as 1.0E-120 to 130 does: it is rounded moved that many places fewer to the right,
+        then moved back, which is exact in decimal.
         """
 
         def rounded(values: list[str]) -> str:
@@ -752,8 +754,9 @@ class OracleCypherCompiler(SqlCypherCompiler):
             past = f"GREATEST({p} - {_MOST_PLACES}, 0)"
             shift = f"POWER(10, {past})"
             return (
-                f"CASE WHEN {p} IS NULL THEN NULL WHEN {n} = 0 OR {p} >= {_DOUBLE_DIGITS} - FLOOR(LOG(10, ABS({n}))) "
-                f"THEN {n} ELSE {round_(f'({n} * {shift})', f'({p} - {past})')} / {shift} END"
+                f"CASE WHEN {p} IS NULL THEN NULL WHEN {n} = 0 THEN {n} "
+                f"WHEN {p} >= {_DOUBLE_DIGITS} - FLOOR(LOG(10, ABS({n}))) THEN {n} "
+                f"ELSE {round_(f'({n} * {shift})', f'({p} - {past})')} / {shift} END"
             )
 
         return self.shared([number, precision], rounded)

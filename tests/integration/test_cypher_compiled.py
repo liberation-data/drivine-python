@@ -900,6 +900,13 @@ async def test_round_reads_a_precision_from_data_or_a_whole_float_as_a_whole_num
             "round(-1.0E-120, 136, 'CEILING')]"
         )
     ) == [[0.0, 0.0, 0.0, 0.0, 0.0, 1.0e-120, 1.0e-120, -1.0e-120]]
+    # Zero to a null precision is null, not the zero Oracle gives back without rounding.
+    assert await cypher_pm.query(
+        spec(
+            "MATCH (n:Round) RETURN [round(n.z, n.none), round(n.z, n.none, 'UP'), round(0.0, null), "
+            "round(0, null, 'HALF_UP')]"
+        )
+    ) == [[None, None, None, None]]
     # Either side of the last place a double holds, and short of it, where a mode still rounds.
     assert await cypher_pm.query(
         spec(

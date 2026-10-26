@@ -195,6 +195,30 @@ MATH_FUNCTIONS = frozenset(
 TEXT_FUNCTIONS = frozenset({"tostring", "toupper", "tolower", "trim"})
 """The functions of one value a store writes (`function`) whose result is a text, or null: see Json.text."""
 
+SCALAR_FUNCTIONS = (
+    frozenset(
+        {
+            "size", "length", "count", "sum", "avg", "tostring", "tointeger", "tofloat", "toboolean", "tolower",
+            "toupper", "trim", "ltrim", "rtrim", "substring", "left", "right", "replace", "id", "elementid", "type",
+            "round", "floor", "ceil", "sign", "atan2", "e", "pi", "randomuuid", "timestamp", "isempty", "date",
+            "localtime", "time", "localdatetime", "datetime", "duration", "duration.between", "duration.inmonths",
+            "duration.indays", "duration.inseconds",
+        }
+    )
+    | MATH_FUNCTIONS
+    | TEMPORAL_NOW
+    | TEMPORAL_TRUNCATE
+)  # fmt: skip
+"""The functions whose value, null aside, is a number, a text, a truth value or a temporal value: no list or map."""
+
+FLAT_FUNCTIONS = SCALAR_FUNCTIONS | {"labels", "keys", "nodes", "relationships", "range", "split"}
+"""The functions whose value holds no null in a list or a map: see Json.flat."""
+
+CARRYING_FUNCTIONS = frozenset(
+    {"collect", "min", "max", "coalesce", "head", "last", "tail", "reverse", "properties", DISTINCT_ITEMS}
+)
+"""The functions whose value holds a null in a list or a map only where an argument does: see Json.flat."""
+
 
 class MadeText:
     """A side of a `+` the statement makes a text, or null, though it does not give it: see Json.text."""
@@ -755,6 +779,53 @@ class SqlCypherCompiler(ABC):
         """
         return f"{x} = {y}"
 
+    def json_equals(self, x: str, y: str) -> str:
+        """Whether the JSON values, neither of them null, are equal as JSON: `'7'` is not `7`, and `1` is `1.0`."""
+        return f"{x} = {y}"
+
+    @abstractmethod
+    def holds_null(self, json: str) -> str | None:
+        """
+        Whether the JSON value, not null, holds a null in a list or a map, at any depth: exactly, as an `IN` takes a
+        value that holds one to be equal to no item. None where the store's `json_equals` is already null for a value
+        that holds one, as Cypher's comparison is, so no test is needed.
+        """
+
+    @abstractmethod
+    def nulls_equal(self, x: str, y: str, equals: Callable[[str, str], str]) -> str:
+        """
+        Whether the JSON values, neither of them null, are equal, as Cypher compares values that may hold a null: item
+        by item and key by key, at any depth, false where a pair differs (a list's length, a map's keys, a value's kind
+        among them), else null where a pair holds a null, else true. Called where `holds_null` says one of them holds
+        one; `equals` compares two that hold none, as `json_equals` or `identity_equals` does.
+        """
+
+    @abstractmethod
+    def item_at(self, json: str, index: int) -> str:
+        """The item at the index, counted from 0, of the JSON list: null where it has none."""
+
+    @abstractmethod
+    def list_size(self, json: str) -> str:
+        """How many items the JSON list holds, as a SQL number."""
+
+    def _nullable_equals(self, x: str, y: str, equals: Callable[[str, str], str]) -> str:
+        """
+        Whether the JSON values are equal, as Cypher compares values that may hold a null: null where either is null,
+        and as `nulls_equal` compares them where one holds one; else as `equals` compares them.
+        """
+
+        def body(values: list[str]) -> str:
+            a, b = values
+            held = [it for it in (self.holds_null(a), self.holds_null(b)) if it is not None]
+            equal = (
+                f"CASE WHEN {' OR '.join(held)} THEN {self.nulls_equal(a, b, equals)} ELSE {equals(a, b)} END"
+                if held
+                else equals(a, b)
+            )
+            return f"CASE WHEN NOT {self.is_json_null(a)} AND NOT {self.is_json_null(b)} THEN {equal} END"
+
+        return self.shared([x, y], body)
+
     def list_sort_key(self, json: str) -> str:
         """What an order sorts the JSON by where the statement makes it a list (Json.list): as any value, where the
         store orders lists as Cypher does."""
@@ -1087,6 +1158,11 @@ class SqlCypherCompiler(ABC):
         """
         self._stepping = False
         """Whether a quantified path pattern's conditions are being compiled: what they hold is in its walk's step."""
+        self._filtering = False
+        """Whether the expression being compiled is read by a `WHERE` for its truth alone: see `_condition`."""
+        self._filtered = False
+        """Whether the expression `_value_of` has begun is read by a `WHERE` for its truth alone, as `_filtering` said
+        as it began."""
 
     def _alias(self, prefix: str) -> str:
         self._counter += 1
@@ -1136,7 +1212,7 @@ class SqlCypherCompiler(ABC):
         for column, descending in projected.order:
             next_.order.append((f"{name}.{column}", descending))
         if with_.where is not None:
-            next_.where.append(self.bool(self._expression(with_.where, next_.scope)))
+            next_.where.append(self._condition(with_.where, next_.scope))
         return next_
 
     def _match(self, select: _Select, match: Match) -> None:
@@ -1147,13 +1223,13 @@ class SqlCypherCompiler(ABC):
         if not match.optional:
             self._patterns(select, match.patterns, shortest_where)
             if where is not None:
-                select.where.append(self.bool(self._expression(where, select.scope)))
+                select.where.append(self._condition(where, select.scope))
             return
         # What is found is read by a lateral query, joined to keep the row when it finds nothing.
         inner = _Select(select.scope)
         self._patterns(inner, match.patterns, shortest_where)
         if where is not None:
-            inner.where.append(self.bool(self._expression(where, inner.scope)))
+            inner.where.append(self._condition(where, inner.scope))
         scope = select.scope
         found = {variable: value for variable, value in inner.bound.items() if variable not in scope}
         if not found and not inner.sources:
@@ -1314,7 +1390,7 @@ class SqlCypherCompiler(ABC):
 
         items = self.shared1(self.comparable(self.json(listed)), items_of)
         select.source(self.elements(items, name))
-        # An item of a list of texts, or of a text, is a text.
+        # An item of a list of texts, or of a text, is a text; an item of a list that holds no null holds none.
         select.bind(
             unwind.variable,
             Json(
@@ -1322,6 +1398,7 @@ class SqlCypherCompiler(ABC):
                 temporal=_items_of(listed),
                 list=_holds_lists(listed),
                 text=_holds_texts(listed) or _is_text(listed),
+                flat=self._is_flat(listed),
             ),
         )
         select.order.append((f"{name}.item_no", False))
@@ -1468,7 +1545,7 @@ class SqlCypherCompiler(ABC):
         )
         self._pattern(inner, named, hops)
         if where is not None:
-            inner.where.append(self.bool(self._expression(where, inner.scope)))
+            inner.where.append(self._condition(where, inner.scope))
         scope = select.scope
         found = [
             (variable, value, self._alias("v"))
@@ -1658,7 +1735,7 @@ class SqlCypherCompiler(ABC):
                         else None,
                     )
                 ),
-                *([self.bool(self._expression(group.where, within))] if group.where is not None else []),
+                *([self._condition(group.where, within)] if group.where is not None else []),
             ]
         finally:
             self._stepping = stepping
@@ -1766,10 +1843,13 @@ class SqlCypherCompiler(ABC):
     def _properties_match(self, props: str, properties: Expression, scope: Scope) -> str:
         """A pattern's properties: each key equal to its value, or every key of a parameter's map."""
         if isinstance(properties, MapLiteral):
-            return " AND ".join(
-                self._equality(Json(self.property_of(props, key)), self._expression(value, scope), value)
-                for key, value in properties.entries
-            )
+            # A property holds no null, as a graph engine stores none in a list.
+            def equal(key: str, value: Expression) -> str:
+                compiled = self._expression(value, scope)
+                plain = self._scalar_valued(value, scope) or self._is_flat(compiled)
+                return self._equality(Json(self.property_of(props, key), flat=True), compiled, value, plain)
+
+            return " AND ".join(equal(key, value) for key, value in properties.entries)
         return self.contains_all(props, self.comparable(self.json(self._expression(properties, scope))))
 
     # ----- A statement that writes -----
@@ -1904,6 +1984,8 @@ class SqlCypherCompiler(ABC):
                         item_lists=carried.item_lists if carried else False,
                         text=carried.text if carried else False,
                         texts=carried.texts if carried else False,
+                        # The row holds the value it was carried as, which holds a null only where that did.
+                        flat=carried.flat if carried else False,
                     ),
                 )
             elif kind in (_Kind.NODES, _Kind.RELATIONSHIPS):
@@ -2789,7 +2871,39 @@ class SqlCypherCompiler(ABC):
 
     # ----- Expressions -----
 
+    def _condition(self, where: Expression, scope: Scope) -> str:
+        """
+        The condition, which keeps the rows it is true of, as SQL: within it, a comparison whose truth is all a `WHERE`
+        reads (one of its conditions joined by `AND` or `OR`) may be false where Cypher's is null, as neither keeps a
+        row.
+        """
+        self._filtering = True
+        try:
+            return self.bool(self._expression(where, scope))
+        finally:
+            self._filtering = False
+
     def _expression(self, expression: Expression, scope: Scope) -> Value:
+        """
+        The value the expression gives in the scope: see `_value_of`. Marked Json.flat where it is known to hold no
+        null in a list or a map.
+        """
+        outer = self._filtering
+        # Only a condition joined by AND or OR is read for its truth alone: NOT, a CASE or a function reads null apart
+        # from false.
+        self._filtering = (
+            outer and isinstance(expression, Binary) and expression.operator in (BinaryOperator.AND, BinaryOperator.OR)
+        )
+        self._filtered = outer
+        try:
+            value = self._value_of(expression, scope)
+        finally:
+            self._filtering = outer
+        if isinstance(value, (Json, Entities)) and not value.flat and self._flat(expression, scope):
+            return dataclasses.replace(value, flat=True)
+        return value
+
+    def _value_of(self, expression: Expression, scope: Scope) -> Value:
         if isinstance(expression, Literal):
             return Json(self.literal_json(expression.value), text=isinstance(expression.value, str))
         if isinstance(expression, Parameter):
@@ -3033,9 +3147,7 @@ class SqlCypherCompiler(ABC):
             inner = {**scope, expression.variable: item}
             projected = self._expression(expression.projection, inner) if expression.projection is not None else item
             kinds.append(projected)
-            filter_ = (
-                f" WHERE {self.bool(self._expression(expression.where, inner))}" if expression.where is not None else ""
-            )
+            filter_ = f" WHERE {self._condition(expression.where, inner)}" if expression.where is not None else ""
             if isinstance(projected, Node):
                 value = self.scalar(projected.nid)
             elif isinstance(projected, Relationship):
@@ -3071,9 +3183,7 @@ class SqlCypherCompiler(ABC):
         inner = {**scope, expression.variable: Json(f"{name}.item", temporal=_items_of(listed))}
         projected = self._expression(expression.projection, inner) if expression.projection is not None else None
         projection = self.json(projected).sql if projected is not None else f"{name}.item"
-        filter_ = (
-            f" WHERE {self.bool(self._expression(expression.where, inner))}" if expression.where is not None else ""
-        )
+        filter_ = f" WHERE {self._condition(expression.where, inner)}" if expression.where is not None else ""
 
         # Of null, null, as in Cypher, and not an empty list.
         def comprehended(items: str) -> str:
@@ -3147,7 +3257,7 @@ class SqlCypherCompiler(ABC):
         inner = _Select(scope)
         self._patterns(inner, [expression.pattern])
         if expression.where is not None:
-            inner.where.append(self.bool(self._expression(expression.where, inner.scope)))
+            inner.where.append(self._condition(expression.where, inner.scope))
         projected = self._expression(expression.projection, inner.scope)
 
         def gathered(value: str) -> str:
@@ -3175,7 +3285,9 @@ class SqlCypherCompiler(ABC):
 
         def quantified(from_: str, item: Value) -> str:
             inner = {**scope, expression.variable: item}
-            condition = self.bool(self._expression(expression.where, inner)) if expression.where is not None else "TRUE"
+            # Each item is kept where the condition is true, as a WHERE keeps a row, so an IN in it is false where it is
+            # null.
+            condition = self._condition(expression.where, inner) if expression.where is not None else "TRUE"
             if expression.kind is QuantifierKind.ANY:
                 return f"EXISTS (SELECT 1 {from_} WHERE {condition})"
             if expression.kind is QuantifierKind.ALL:
@@ -3255,7 +3367,7 @@ class SqlCypherCompiler(ABC):
         inner = _Select(scope)
         self._patterns(inner, patterns)
         if where is not None:
-            inner.where.append(self.bool(self._expression(where, inner.scope)))
+            inner.where.append(self._condition(where, inner.scope))
         return Bool("EXISTS (" + " ".join(["SELECT 1", *inner.from_(), *_present(inner.where_clause())]) + ")")
 
     def _property(self, subject: Value, key: str) -> Value:
@@ -3473,7 +3585,8 @@ class SqlCypherCompiler(ABC):
         hold one without it (an item taken from a list, a collect, a variable), both by their properties, as before
         identities: only a value the statement writes out or is given, all the way down (a literal, a parameter, a map,
         a list or a map projection of such, a `CASE` that gives one), holds none where it carries no identity, so
-        `[{x: r}][0] = {x: r}` is true, and `{x: r} = {x: {}}` false.
+        `[{x: r}][0] = {x: r}` is true, and `{x: r} = {x: {}}` false. A node or a relationship compared with such a
+        value is compared by its identity, so `r = {}` is false.
         """
 
         # Written all the way down: `{a: ms[0]}` and `n {.*, x: r}` hold what may be a node without its identity.
@@ -3501,6 +3614,16 @@ class SqlCypherCompiler(ABC):
         def plain(value: Value) -> Value:
             return dataclasses.replace(value, identity=None) if isinstance(value, Json) else value
 
+        def entity(value: Value) -> bool:
+            return isinstance(value, (Node, Relationship))
+
+        def identity(value: Value) -> Json:
+            return Json(self.json(value).sql, identity=self._identity_of(value), flat=True)
+
+        if entity(left) and isinstance(right, Json) and not held(right) and written(binary.right):
+            return identity(left), right
+        if entity(right) and isinstance(left, Json) and not held(left) and written(binary.left):
+            return left, identity(right)
         if held(left) and isinstance(right, Json) and not held(right) and not written(binary.right):
             return plain(left), right
         if held(right) and isinstance(left, Json) and not held(left) and not written(binary.left):
@@ -3508,7 +3631,12 @@ class SqlCypherCompiler(ABC):
         return left, right
 
     def _binary(self, binary: Binary, scope: Scope) -> Value:
+        filter_ = self._filtered
         operator = binary.operator
+        if operator in (BinaryOperator.EQUALS, BinaryOperator.NOT_EQUALS, BinaryOperator.IN):
+            itemwise = self._itemwise(binary, scope)
+            if itemwise is not None:
+                return Bool(f"(NOT {itemwise})" if operator is BinaryOperator.NOT_EQUALS else itemwise)
         if operator in (BinaryOperator.AND, BinaryOperator.OR, BinaryOperator.XOR):
             left = self.bool(self._expression(binary.left, scope))
             right = self.bool(self._expression(binary.right, scope))
@@ -3526,10 +3654,12 @@ class SqlCypherCompiler(ABC):
             return temporal
         a = self.comparable(self.json(left_value))
         b = self.comparable(self.json(right_value))
-        if operator is BinaryOperator.EQUALS:
-            return Bool(self._equality(left_value, right_value, binary.right))
-        if operator is BinaryOperator.NOT_EQUALS:
-            return Bool(f"NOT ({self._equality(left_value, right_value, binary.right)})")
+        if operator in (BinaryOperator.EQUALS, BinaryOperator.NOT_EQUALS):
+            plain = self._plain(binary.left, binary.right, left_value, right_value, scope)
+            equal = (
+                None if plain else self._given_itemwise(binary.left, left_value, binary.right, right_value)
+            ) or self._equality(left_value, right_value, binary.right, plain, self._stored(binary.left, scope))
+            return Bool(equal if operator is BinaryOperator.EQUALS else f"NOT ({equal})")
         if operator in _COMPARED:
             # Values of two kinds are not ordered, as in Cypher: the comparison is null.
             sql = _COMPARED[operator]
@@ -3597,24 +3727,7 @@ class SqlCypherCompiler(ABC):
         if operator is BinaryOperator.POWER:
             return Json(self.scalar(self.float_(f"power({self.number(a)}, {self.number(b)})")))
         if operator is BinaryOperator.IN:
-            i = self._alias("i")
-            # A node or a relationship is in a list of them where its id is.
-            if isinstance(right_value, Entities):
-                id_ = None
-                if isinstance(left_value, Node) and not right_value.relationships:
-                    id_ = self.scalar(left_value.nid)
-                elif isinstance(left_value, Relationship) and right_value.relationships:
-                    id_ = self.scalar(left_value.eid)
-                if id_ is not None:
-                    return Bool(f"EXISTS (SELECT 1 FROM {self.elements(right_value.ids, i)} WHERE {i}.item = {id_})")
-            # A map or a list that holds a node or a relationship is in a list where an item holds the same, by
-            # identity.
-            if (isinstance(left_value, Json) and left_value.identity is not None) or (
-                isinstance(right_value, Json) and right_value.identity is not None
-            ):
-                found = self.identity_equals(f"{i}.item", self._identified(left_value))
-                return Bool(f"EXISTS (SELECT 1 FROM {self.elements(self._identified(right_value), i)} WHERE {found})")
-            return Bool(f"EXISTS (SELECT 1 FROM {self.elements(b, i)} WHERE {i}.item = {a})")
+            return Bool(self._membership(binary, left_value, right_value, scope, filter_))
         if operator is BinaryOperator.STARTS_WITH:
             return Bool(self.shared([self.text(a), self.text(b)], lambda it: self.starts_with(it[0], it[1])))
         if operator is BinaryOperator.MATCHES:
@@ -3623,12 +3736,21 @@ class SqlCypherCompiler(ABC):
             return Bool(self.shared([self.text(a), self.text(b)], lambda it: self.ends_with(it[0], it[1])))
         return Bool(self.contains_text(self.text(a), self.text(b)))
 
-    def _equality(self, left: Value, right: Value, written: Expression | None = None) -> str:
+    def _equality(
+        self,
+        left: Value,
+        right: Value,
+        written: Expression | None = None,
+        plain: bool = True,
+        stored: bool = True,
+    ) -> str:
         """
         Whether two values are equal: as JSON, so `'7'` is not `7` and `1` is `1.0`. A node is equal to a node by its
         row. Where a property is compared with a value written, a text or a truth value the statement is given, a test
         an index answers stands beside it, where the store has one: such a value's text is equal where its JSON is, and
-        a number's is not (`1` and `1.0`).
+        a number's is not (`1` and `1.0`). `left` is `stored` where it is a property read from the store, which is SQL's
+        null where it is not there, and so needs no test of its own beside such a value. Where neither is `plain`,
+        either may hold a null: see `_plain`.
         """
         temporal = self._temporal_binary(BinaryOperator.EQUALS, left, right)
         if isinstance(temporal, Bool):
@@ -3641,6 +3763,8 @@ class SqlCypherCompiler(ABC):
         if (isinstance(left, Json) and left.identity is not None) or (
             isinstance(right, Json) and right.identity is not None
         ):
+            if not plain:
+                return self._nullable_equals(self._identified(left), self._identified(right), self.identity_equals)
             return self.shared(
                 [self._identified(left), self._identified(right)],
                 lambda it: (
@@ -3654,21 +3778,340 @@ class SqlCypherCompiler(ABC):
         else:
             a = self.comparable(self.json(left))
             b = self.comparable(self.json(right))
+        # Either may hold a null, which makes the comparison null where no item or entry differs.
+        if not plain:
+            return self._nullable_equals(a, b, self.json_equals)
         given = self._given(written) if written is not None else None
         indexed = self.indexed_equality(a, b) if isinstance(given, (str, bool)) else None
         # Null is equal to nothing, itself included: the comparison is null, as in Cypher. A value the statement is
-        # given that is not null needs no test of its own, and a property that is not there is SQL's null.
+        # given that is not null needs no test of its own, and a property that is not there is SQL's null; any other
+        # value is tested.
         if given is not None:
-            equal = f"{a} = {b}"
+            equal = self.json_equals(a, b)
+            if not stored:
+                equal = f"CASE WHEN NOT {self.is_json_null(a)} THEN {equal} END"
         else:
             equal = self.shared(
                 [a, b],
                 lambda it: (
                     f"CASE WHEN NOT {self.is_json_null(it[0])} AND NOT {self.is_json_null(it[1])} "
-                    f"THEN {it[0]} = {it[1]} END"
+                    f"THEN {self.json_equals(it[0], it[1])} END"
                 ),
             )
         return f"({indexed} AND {equal})" if indexed is not None else equal
+
+    def _plain(
+        self, left_written: Expression, right_written: Expression, left: Value, right: Value, scope: Scope
+    ) -> bool:
+        """
+        Whether the sides of a comparison, written as `left_written` and `right_written` and compiled as `left` and
+        `right`, compare as JSON, as `json_equals` compares them: where one is no list or map, or neither holds a null
+        in one (see Json.flat). Else a null they hold makes the comparison null where no item or entry differs, as in
+        Cypher.
+        """
+        return (
+            self._scalar_valued(left_written, scope)
+            or self._scalar_valued(right_written, scope)
+            or (self._is_flat(left) and self._is_flat(right))
+        )
+
+    @staticmethod
+    def _stored(expression: Expression, scope: Scope) -> bool:
+        """Whether the expression is a property of a node or a relationship in the scope, read from the store: SQL's
+        null where it is not there."""
+        return (
+            isinstance(expression, Property)
+            and isinstance(expression.subject, Variable)
+            and isinstance(scope.get(expression.subject.name), (Node, Relationship))
+        )
+
+    @staticmethod
+    def _is_flat(value: Value) -> bool:
+        """Whether the value is known to hold no null in a list or a map: see Json.flat. A node or a relationship is
+        compared by its id."""
+        if isinstance(value, (Json, Entities)):
+            return value.flat
+        return not isinstance(value, Path)
+
+    def _never_null(self, expression: Expression) -> bool:
+        """Whether the expression is never null: a value the statement writes, a list or a map among them, or a
+        parameter bound to one."""
+        if isinstance(expression, Literal):
+            return expression.value is not None
+        if isinstance(expression, Parameter):
+            return self._parameters.tree(expression.name) is not None
+        return isinstance(expression, (ListLiteral, MapLiteral))
+
+    def _never_null_scalar(self, expression: Expression, scope: Scope) -> bool:
+        """Whether the expression is a number, a text or a truth value the statement writes, or a parameter bound to
+        one: never null, and no list or map."""
+        return self._never_null(expression) and self._scalar_valued(expression, scope)
+
+    def _scalar_valued(self, expression: Expression, scope: Scope) -> bool:
+        """Whether the value the expression gives in the scope is known to be no list or map: it may be null."""
+        if isinstance(expression, _SCALAR_KINDS):
+            return True
+        if isinstance(expression, Parameter):
+            return not isinstance(self._parameters.tree(expression.name), (list, dict))
+        if isinstance(expression, Variable):
+            return isinstance(scope.get(expression.name), Bool)
+        if isinstance(expression, Binary):
+            # A sum is a list where either side is; every other operator gives a number, a text, a temporal value or a
+            # truth value.
+            return expression.operator is not BinaryOperator.ADD or (
+                self._scalar_valued(expression.left, scope) and self._scalar_valued(expression.right, scope)
+            )
+        if isinstance(expression, Function):
+            return expression.name.lower() in SCALAR_FUNCTIONS
+        return False
+
+    def _flat(self, expression: Expression, scope: Scope) -> bool:
+        """
+        Whether the value the expression gives in the scope is known to hold no null in a list or a map, at any depth:
+        see Json.flat. Read from what is written, and what the scope holds, so it compiles nothing.
+        """
+        if isinstance(expression, _SCALAR_KINDS):
+            return True
+        if isinstance(expression, Parameter):
+            return _holds_no_null(self._parameters.tree(expression.name))
+        if isinstance(expression, Variable):
+            value = scope.get(expression.name)
+            return value is not None and self._is_flat(value)
+        if isinstance(expression, Property):
+            # A property of a node or a relationship holds no null, as a graph engine stores none in a list; a
+            # parameter's map's, as it is bound.
+            if isinstance(expression.subject, Parameter):
+                tree = self._parameters.tree(expression.subject.name)
+                return not isinstance(tree, dict) or _holds_no_null(cast(dict[str, Any], tree).get(expression.key))
+            return self._flat(expression.subject, scope)
+        if isinstance(expression, ListLiteral):
+            return all(self._never_null(it) and self._flat(it, scope) for it in expression.items)
+        if isinstance(expression, MapLiteral):
+            return all(self._never_null(value) and self._flat(value, scope) for _, value in expression.entries)
+        if isinstance(expression, Binary):
+            # A list and an item that may be null are a list that holds it.
+            left, right = expression.left, expression.right
+            return expression.operator is not BinaryOperator.ADD or (
+                self._flat(left, scope)
+                and self._flat(right, scope)
+                and (self._never_null(left) or self._never_null_scalar(right, scope))
+                and (self._never_null(right) or self._never_null_scalar(left, scope))
+            )
+        if isinstance(expression, (Index, Slice)):
+            return self._flat(expression.subject, scope)
+        if isinstance(expression, Function):
+            name = expression.name.lower()
+            return name in FLAT_FUNCTIONS or (
+                name in CARRYING_FUNCTIONS and all(self._flat(it, scope) for it in expression.arguments)
+            )
+        if isinstance(expression, Case):
+            results = [*(it[1] for it in expression.alternatives), *_present(expression.otherwise)]
+            return all(self._flat(it, scope) for it in results)
+        return False
+
+    def _itemwise(self, binary: Binary, scope: Scope) -> str | None:
+        """
+        The binary, an equality or an `IN`, compared item by item where its sides are lists or maps the statement writes
+        out, `[a, b] = [c, d]`, `{x: a} = {x: b}`, `x IN [a, b]`, and one of them may hold a null: each pair compared,
+        and the comparisons taken together as SQL's `AND` (`OR` for an `IN`) takes them, which is as Cypher takes them:
+        false where one is false, else null where one is null. Lists of different lengths, and maps of different keys,
+        are not equal. None where the sides are not so written, or hold no null, and so compare whole, as JSON.
+        """
+        left, right = binary.left, binary.right
+        if self._flat(left, scope) and self._flat(right, scope):
+            return None
+
+        def joined(pairs: Iterable[tuple[Expression, Expression]]) -> str:
+            compared = (self.bool(self._binary(Binary(BinaryOperator.EQUALS, a, b), scope)) for a, b in pairs)
+            return "(" + " AND ".join(compared) + ")"
+
+        if binary.operator is BinaryOperator.IN:
+            if not isinstance(right, ListLiteral) or not right.items:
+                return None
+            # The item compiled once, and compared with each of the list's.
+            item = self._expression(left, scope)
+            stored = self._stored(left, scope)
+            compared: list[str] = []
+            for listed in right.items:
+                equals = Binary(BinaryOperator.EQUALS, left, listed)
+                a, b = self._compared(item, self._expression(listed, scope), equals)
+                compared.append(self._equality(a, b, listed, self._plain(left, listed, a, b, scope), stored))
+            return "(" + " OR ".join(compared) + ")"
+        if isinstance(left, ListLiteral) and isinstance(right, ListLiteral):
+            if len(left.items) != len(right.items):
+                return "FALSE"
+            return joined(zip(left.items, right.items, strict=True))
+        if isinstance(left, MapLiteral) and isinstance(right, MapLiteral):
+            ls, rs = dict(left.entries), dict(right.entries)
+            if ls.keys() != rs.keys():
+                return "FALSE"
+            return joined((value, rs[key]) for key, value in ls.items())
+        return None
+
+    def _given_itemwise(
+        self, left_written: Expression, left: Value, right_written: Expression, right: Value
+    ) -> str | None:
+        """
+        An equality of the values, written as `left_written` and `right_written`, where one is a parameter bound to a
+        list that holds a null, lists within it among its items and no map: the other compared with it item by item,
+        each item as the statement is compiled with it, as `_itemwise` compares a list written out, so no store walks
+        the two. None where neither is such a parameter, or the store's own comparison compares a null as Cypher does.
+        Nor where an item is too long to write in the statement (see `_short`): such a list is walked as any other.
+        """
+        if self.holds_null("x") is None:
+            return None
+
+        def given(expression: Expression) -> list[Any] | None:
+            if not isinstance(expression, Parameter):
+                return None
+            tree = self._parameters.tree(expression.name)
+            if isinstance(tree, list) and not _holds_no_null(tree) and _arrays(tree) and _short(tree):
+                return cast(list[Any], tree)
+            return None
+
+        def other(value: Value) -> Json | None:
+            return value if isinstance(value, Json) and value.identity is None and value.temporal is None else None
+
+        for written, value in ((right_written, left), (left_written, right)):
+            listed, compared = given(written), other(value)
+            if listed is not None and compared is not None:
+                return self._items_equal(self.comparable(compared), listed)
+        return None
+
+    def _items_equal(self, json: str, given: Any) -> str:
+        """
+        Whether the JSON value is equal to `given`, a list that may hold a null and lists, as Cypher compares them: the
+        same length, and each item equal, false where one is not, else null where one is null. A text, a number or a
+        truth value is compared as JSON.
+        """
+
+        def body(x: str) -> str:
+            if not isinstance(given, list):
+                equal = self.json_equals(x, self.literal_json(_scalar_of(given)))
+                return f"CASE WHEN NOT {self.is_json_null(x)} THEN {equal} END"
+            items = cast(list[Any], given)
+            checks = [self._items_equal(self.item_at(x, i), it) for i, it in enumerate(items) if it is not None]
+            nulls = any(it is None for it in items)
+            # A null item makes the whole null where every other item is equal.
+            if not nulls:
+                equal = "(" + " AND ".join(checks) + ")" if checks else "TRUE"
+            elif not checks:
+                equal = "NULL"
+            else:
+                equal = f"CASE WHEN NOT ({' AND '.join(checks)}) THEN FALSE END"
+            # Its size read only of a list, in the order a CASE reads its conditions.
+            return (
+                f"CASE WHEN {self.is_json_null(x)} THEN NULL WHEN {self.type_of(x)} <> 'array' THEN FALSE "
+                f"WHEN {self.list_size(x)} <> {len(items)} THEN FALSE ELSE {equal} END"
+            )
+
+        return self.shared1(json, body)
+
+    def _membership(self, binary: Binary, left: Value, right: Value, scope: Scope, filter_: bool) -> str:
+        """
+        `x IN list`, of the values `left` and `right`, the sides of the binary, as Cypher has it: null where the list is
+        null; else true where an item is equal to the value, else null where a comparison with one is null (the value is
+        null, an item is, or holds a null where the value holds another), else false. A value that holds no null, in a
+        list that holds none, is in it where an item is equal to it; read by a `WHERE` for its truth alone (`filter_`),
+        it is not in it where it is null, as before.
+        """
+        # A node or a relationship is in a list of them where its id is.
+        id_: str | None = None
+        if isinstance(right, Entities):
+            if isinstance(left, Node) and not right.relationships:
+                id_ = self.scalar(left.nid)
+            elif isinstance(left, Relationship) and right.relationships:
+                id_ = self.scalar(left.eid)
+        identities = (isinstance(left, Json) and left.identity is not None) or (
+            isinstance(right, Json) and right.identity is not None
+        )
+        if id_ is not None:
+            list_, x = cast(Entities, right).ids, id_
+        elif identities:
+            # A map or a list that holds a node or a relationship is in a list where an item holds the same, by
+            # identity.
+            list_, x = self._identified(right), self._identified(left)
+        else:
+            list_, x = self.comparable(self.json(right)), self.comparable(self.json(left))
+        equals = self.identity_equals if identities else self.json_equals
+
+        def matches(item: str, value: str) -> str:
+            return f"{item} = {value}" if id_ is not None else equals(item, value)
+
+        within = self._is_flat(right)
+        # A node, a relationship or a value of one kind holds no null; nor does an item of a list that holds none.
+        whole = id_ is not None or self._scalar_valued(binary.left, scope) or self._is_flat(left)
+        listed = binary.right
+        given = self._parameters.tree(listed.name) if isinstance(listed, Parameter) else None
+        filled = (isinstance(listed, ListLiteral) and bool(listed.items)) or (
+            isinstance(given, (list, dict)) and bool(cast(Any, given))
+        )
+        present_left, present_right = self._never_null(binary.left), self._never_null(listed)
+        # Null and false keep no row alike, and a value that holds no null is null beside such a list only where it is
+        # null: beside any list, read by a WHERE for its truth alone, it is equal as JSON only to an item Cypher finds
+        # equal.
+        if whole and (filter_ or (present_left and present_right and within)):
+            i = self._alias("i")
+            # But JSON's null is equal as JSON to an item that is, so a value that may be JSON's null (not a property
+            # read from the store, which is SQL's null where it is not there) is in a list that may hold a null only
+            # where it is not null.
+            nullable = (
+                not within
+                and id_ is None
+                and not present_left
+                and not self._stored(binary.left, scope)
+                and self.holds_null("x") is not None
+            )
+            if not nullable:
+                return f"EXISTS (SELECT 1 FROM {self.elements(list_, i)} WHERE {matches(f'{i}.item', x)})"
+            return self.shared(
+                [list_, x],
+                lambda it: (
+                    f"(EXISTS (SELECT 1 FROM {self.elements(it[0], i)} WHERE {matches(f'{i}.item', it[1])}) "
+                    f"AND NOT {self.is_json_null(it[1])})"
+                ),
+            )
+        # A value that may be null, in a list that is not and holds none: in where an item is equal, null where the
+        # value is null, else not, written so the store still answers the first as it did, as a semi-join.
+        if present_right and within and whole and filled:
+            i = self._alias("i")
+            return self.shared(
+                [list_, x],
+                lambda it: (
+                    f"(EXISTS (SELECT 1 FROM {self.elements(it[0], i)} WHERE {matches(f'{i}.item', it[1])}) "
+                    f"OR CASE WHEN NOT {self.is_json_null(it[1])} THEN FALSE END)"
+                ),
+            )
+
+        def body(values: list[str]) -> str:
+            l_, v = values
+            i, j = self._alias("i"), self._alias("i")
+            cases: list[str] = []
+            if not present_right:
+                cases.append(f"WHEN {self.is_json_null(l_)} THEN NULL")
+            # Null is compared with each item, and is in no empty list.
+            if not present_left:
+                empty = (
+                    "NULL"
+                    if filled
+                    else f"CASE WHEN EXISTS (SELECT 1 FROM {self.elements(l_, j)}) THEN NULL ELSE FALSE END"
+                )
+                cases.append(f"WHEN {self.is_json_null(v)} THEN {empty}")
+            # A value that holds a null is equal to no item.
+            held = None if whole else self.holds_null(v)
+            found = f"EXISTS (SELECT 1 FROM {self.elements(l_, i)} WHERE {matches(f'{i}.item', v)})"
+            cases.append(f"WHEN {f'NOT ({held}) AND ' if held is not None else ''}{found} THEN TRUE")
+            if not (within and whole):
+                k = self._alias("i")
+                undecided = (
+                    self.is_json_null(f"{k}.item")
+                    if id_ is not None
+                    else f"({self._nullable_equals(f'{k}.item', v, equals)}) IS NULL"
+                )
+                cases.append(f"WHEN EXISTS (SELECT 1 FROM {self.elements(l_, k)} WHERE {undecided}) THEN NULL")
+            return f"CASE {' '.join(cases)} ELSE FALSE END"
+
+        return self.shared([list_, x], body)
 
     def _identity_of(self, value: Value) -> str | None:
         """
@@ -3773,8 +4216,10 @@ class SqlCypherCompiler(ABC):
         results = [(it, self._expression(it, scope)) for it in written]
         conditions: list[str] = []
         for key, _ in case.alternatives:
-            if subject is not None:
-                conditions.append(self._equality(subject, self._expression(key, scope)))
+            if case.subject is not None and subject is not None:
+                value = self._expression(key, scope)
+                plain = self._plain(case.subject, key, subject, value, scope)
+                conditions.append(self._equality(subject, value, plain=plain))
             else:
                 conditions.append(self.bool(self._expression(key, scope)))
 
@@ -4043,12 +4488,7 @@ class SqlCypherCompiler(ABC):
                     self.scalar(
                         self.float_(
                             self._rounded(
-                                arguments[0],
-                                arguments[1],
-                                function.arguments[1],
-                                self._round_whole_or_places,
-                                self.round_whole,
-                                self.round_places,
+                                arguments[0], arguments[1], function.arguments[1], self.round_places, self.round_whole
                             )
                         )
                     )
@@ -4271,19 +4711,23 @@ class SqlCypherCompiler(ABC):
         value: Value,
         precision: Value,
         written: Expression,
-        body: Callable[[str, str], str],
+        places: Callable[[str, str], str],
         whole: Callable[[str], str] | None = None,
-        places: Callable[[str, str], str] | None = None,
     ) -> str:
         """
-        `round()` of the value, by the body over it as a SQL number and the precision, the value written in the
-        statement as `written`, as a whole number toward zero: -0.5 is 0 places. One below 0 is refused, as Neo4j
-        refuses it: when compiling, where it is written, negated or not, or a parameter's value; and else when the row
-        is read, by the store's `failure`, but for a null value, which Neo4j rounds to null whatever the precision.
-        Given `whole` and `places`, a precision known when compiling rounds by the one it picks, `whole` to 0 places and
-        `places` to more, so the body does not write out a branch no row takes: each would grow a nested `round` more.
+        `round()` of the value, by `places` over it as a SQL number and the precision, the value written in the
+        statement as `written`, as a whole number toward zero: -0.5 is 0 places; given `whole`, to 0 places by that.
+        One below 0 is refused, as Neo4j refuses it: when compiling, where it is written, negated or not, or a
+        parameter's value; and else when the row is read, by the store's `failure`, but for a null value, which Neo4j
+        rounds to null whatever the precision.
+
+        Places known when compiling pick the rounding then: under an aggregate, where nothing is bound, a CASE of both
+        would write the number out in each, at each `round` nested in another. Places from data are told apart as the
+        statement runs, in one CASE over the value and the places, where a negative one is refused before either
+        rounding, so the precision each rounding writes out, more than once on a store, is the places alone: refused
+        inside it, the value was written out with it each time, and a `round` nested 4 deep under an aggregate grew to
+        500 MB on Oracle.
         """
-        number = self.number(self.comparable(self.json(value)))
         negated = isinstance(written, Unary) and written.operator is UnaryOperator.NEGATE
         given = jsonable(self._given(written.operand if isinstance(written, Unary) and negated else written))
         if _is_number(given):
@@ -4291,30 +4735,26 @@ class SqlCypherCompiler(ABC):
             signed = -given if negated else given
             if signed <= -1:
                 raise DrivineError(NEGATIVE_PRECISION)
+            number = self.number(self.comparable(self.json(value)))
             # Below 1, or NaN, which Neo4j casts to 0 places as Java casts it to a long.
             if whole is not None and not signed >= 1:
                 return whole(number)
-            return (places or body)(number, self._truncated_whole(precision))
-        return self.shared(
-            [number, f"TRUNC({self.number(self.comparable(self.json(precision)))})"],
-            lambda it: body(
-                it[0],
-                f"CASE WHEN {it[1]} < 0 AND {it[0]} IS NOT NULL THEN {self.failure(NEGATIVE_PRECISION, it[1])} "
-                f"ELSE CAST({it[1]} AS INTEGER) END",
-            ),
-        )
+            # NaN is no SQL number, so its places are written as the 0 Neo4j casts it to.
+            return places(number, "0" if math.isnan(signed) else self._truncated_whole(precision))
 
-    def _round_whole_or_places(self, number: str, precision: str) -> str:
-        """
-        `round(x, p)` of two arguments: to 0 places as `round(x)` rounds, half toward +infinity, as Neo4j rounds with
-        Java's `Math.round`, so -2.5 is -2; to more, half away from 0, so -2.55 to 1 place is -2.6. The precision may
-        come from data, so the store picks when the row is read.
-        """
+        def rounded(it: list[str]) -> str:
+            x, t = it
+            # Asked of its kind, whose test writes the value out fewer times than the number does: a null value, as
+            # anything else that is no number, rounds by its negative places to null.
+            to_whole = f"WHEN {t} = 0 THEN {whole(self.number(x))} " if whole is not None else ""
+            return (
+                f"CASE {to_whole}WHEN {t} < 0 AND {self.type_of(x)} = 'number' "
+                f"THEN {self.failure(NEGATIVE_PRECISION, t)} "
+                f"ELSE {places(self.number(x), f'CAST({t} AS INTEGER)')} END"
+            )
+
         return self.shared(
-            [number, precision],
-            lambda it: (
-                f"CASE WHEN {it[1]} = 0 THEN {self.round_whole(it[0])} ELSE {self.round_places(it[0], it[1])} END"
-            ),
+            [self.comparable(self.json(value)), f"TRUNC({self.number(self.comparable(self.json(precision)))})"], rounded
         )
 
     def _collected(self, value: Value) -> str:
@@ -4947,6 +5387,52 @@ def _columns(value: Value, name: str, identities: bool = True) -> list[str]:
     return [f"{value.nids} AS {name}_nids", f"{value.eids} AS {name}_eids"]
 
 
+_SCALAR_KINDS = (Literal, Unary, HasLabels, CountStar, PatternPredicate, Exists, Subquery, Quantifier)
+"""The kinds of expression whose value, null aside, is a number, a text, a truth value or a temporal value: no list or
+map."""
+
+
+def _holds_no_null(tree: Any) -> bool:
+    """Whether the value, of JSON's own kinds (see `jsonable`), holds no null in a list or a map, at any depth."""
+    if isinstance(tree, list):
+        return all(it is not None and _holds_no_null(it) for it in cast(list[Any], tree))
+    if isinstance(tree, dict):
+        return all(it is not None and _holds_no_null(it) for it in cast(dict[str, Any], tree).values())
+    return True
+
+
+def _arrays(tree: Any) -> bool:
+    """Whether the value, of JSON's own kinds, holds no map, at any depth."""
+    if isinstance(tree, dict):
+        return False
+    return not isinstance(tree, list) or all(_arrays(it) for it in cast(list[Any], tree))
+
+
+LITERAL_BYTES = 1000
+"""
+The most bytes of JSON's text an item of a parameter's list is written in the statement in, as `_given_itemwise` writes
+it: Oracle takes no text literal past 4,000 bytes (ORA-01704), and a text's JSON is written in a literal of its own.
+"""
+
+
+def _short(tree: Any) -> bool:
+    """Whether each text, number and truth value the value, of JSON's own kinds, holds is short enough to write in the
+    statement: see LITERAL_BYTES."""
+    if isinstance(tree, list):
+        return all(_short(it) for it in cast(list[Any], tree))
+    return len(cypher_json(_scalar_of(tree)).encode()) <= LITERAL_BYTES
+
+
+def _scalar_of(value: Any) -> Any:
+    """
+    The text, the number or the truth value, of JSON's own kinds, as the statement would write it: NaN and the
+    infinities as the texts they are bound as, `"NaN"`, `"Infinity"`, `"-Infinity"`, as no JSON number holds them.
+    """
+    if isinstance(value, float) and not math.isfinite(value):
+        return "NaN" if math.isnan(value) else "Infinity" if value > 0 else "-Infinity"
+    return value
+
+
 def _columns_of(value: Value, alias: str, name: str | None = None, identities: bool = True) -> Value:
     """
     The value, read from the columns `_columns` gave it under the name in the query named `alias`, with `identities` its
@@ -4960,7 +5446,7 @@ def _columns_of(value: Value, alias: str, name: str | None = None, identities: b
         identity = f"{p}_identity" if value.identity is not None and identities else None
         return dataclasses.replace(value, sql=p, identity=identity)
     if isinstance(value, Entities):
-        return Entities(p, value.relationships)
+        return Entities(p, value.relationships, flat=value.flat)
     if isinstance(value, Bool):
         return Bool(p)
     if isinstance(value, Node):

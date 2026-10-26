@@ -6,6 +6,7 @@ needs a transaction of its own. drivine4j keeps the same in its Cypher*CrossEngi
 
 import contextlib
 import dataclasses
+import math
 import re
 import time as time_module
 from collections.abc import AsyncGenerator
@@ -1018,10 +1019,10 @@ async def test_round_to_0_places_rounds_half_toward_positive_infinity_as_round_o
         spec(
             "RETURN [round(-2.5, $p), round(-2.5, $q), round(-2.5, -$r), round(-2.5, $z), round(-2.5, $n), "
             "round(-2.5, $o), round(-2.55, $o), round(-2.5, 0.9999), round(-2.5, 1.0), round(-2.5, $p, 'HALF_UP'), "
-            "round(-2.5, 0, 'HALF_UP')]",
+            "round(-2.5, 0, 'HALF_UP'), round(-2.5, $n, 'HALF_UP'), round(-2.55, $n, 'UP')]",
             {"p": 0.7, "q": -0.5, "r": 0.5, "z": 0, "n": float("nan"), "o": 1.0},
         )
-    ) == [[-2.0, -2.0, -2.0, -2.0, -2.0, -2.5, -2.6, -2.0, -2.5, -3.0, -3.0]]
+    ) == [[-2.0, -2.0, -2.0, -2.0, -2.0, -2.5, -2.6, -2.0, -2.5, -3.0, -3.0, -3.0, -3.0]]
 
 
 async def test_round_of_zero_gives_zero_or_null_to_a_null_precision_and_fails_on_a_negative_one(
@@ -1097,7 +1098,7 @@ async def test_a_negative_precision_from_data_fails_only_on_a_row_that_reads_it_
     # The spec reads a precision from data since v0.6.4; here, in a WHERE and an aggregate, and on rows filtered out.
     # Neo4j fails each with 22N03; a SQL store with the compiler's message.
     await clear(cypher_pm)
-    await cypher_pm.execute(spec("CREATE (:Round {r: -2, k: 1}), (:Round {r: 1, k: 2})"))
+    await cypher_pm.execute(spec("CREATE (:Round {r: -2, k: 1, x: 1234.5, i: 1234}), (:Round {r: 1, k: 2})"))
     message = None if cypher_pm.type is DatabaseType.NEO4J else re.escape(NEGATIVE_PRECISION)
     for statement in [
         "MATCH (n:Round) RETURN round(1234.5, n.r)",
@@ -1116,9 +1117,20 @@ async def test_a_negative_precision_from_data_fails_only_on_a_row_that_reads_it_
         "MATCH (n:Round) UNWIND [0.0, 0.0] AS x WITH n.r AS r, x RETURN r, round(sum(x), r, 'HALF_UP')",
         "UNWIND [0.0, 0.0] AS x RETURN round(sum(x), -2)",
         "UNWIND [0.0, 0.0] AS x RETURN round(sum(x), -2, 'HALF_UP')",
+        # A number to round, by a precision from data: -0.0, an integer, which Oracle's JSON holds as a number
+        # of another kind than a float's, and of an aggregate, where nothing is shared.
+        "MATCH (n:Round) WHERE n.k = 1 RETURN round(-0.0, n.r)",
+        "MATCH (n:Round) WHERE n.k = 1 RETURN round(n.x, n.r)",
+        "MATCH (n:Round) WHERE n.k = 1 RETURN round(n.i, n.r)",
+        "MATCH (n:Round) WHERE n.k = 1 RETURN round(n.x, n.r, 'HALF_UP')",
+        "MATCH (n:Round) WITH n.x AS x, n.r AS r RETURN r, round(min(x), r)",
+        "MATCH (n:Round) WITH n.x AS x, n.r AS r RETURN r, round(max(x), r, 'HALF_UP')",
+        "MATCH (n:Round) RETURN collect(round(n.x, n.r))",
     ]:
         with pytest.raises(Exception, match=message):  # noqa: PT011
             await cypher_pm.query(spec(statement))
+    with pytest.raises(Exception, match=message):  # noqa: PT011
+        await cypher_pm.query(spec("MATCH (n:Round) WHERE n.k = 1 RETURN round($v, n.r)", {"v": 1.5}))
     assert await cypher_pm.query(spec("MATCH (n:Round) WHERE n.r >= 0 RETURN round(1234.5, n.r)")) == [1234.5]
     assert await cypher_pm.query(spec("MATCH (n:Nothing) RETURN round(1234.5, 1 - 3)")) == []
     assert await cypher_pm.query(spec("UNWIND [] AS x RETURN round(1234.5, 1 - 3)")) == []
@@ -1128,6 +1140,22 @@ async def test_a_negative_precision_from_data_fails_only_on_a_row_that_reads_it_
     assert await cypher_pm.query(
         spec("MATCH (n:Round) WHERE n.k = 1 RETURN [round(n.none, n.r), round(n.none, n.r, 'HALF_UP')]")
     ) == [[None, None]]
+    assert await cypher_pm.query(spec("MATCH (n:Round) RETURN round(round(n.none, n.r), n.r)")) == [None, None]
+    # Of an aggregate, where nothing is shared.
+    assert await cypher_pm.query(
+        spec(
+            "MATCH (n:Round) WITH n.none AS x, n.r AS r "
+            "WITH r, [round(min(x), r), round(max(x), r, 'HALF_UP')] AS v RETURN v"
+        )
+    ) == [[None, None], [None, None]]
+    assert await cypher_pm.query(spec("MATCH (n:Round) RETURN collect(round(n.none, n.r))")) == [[]]
+    # A null written in the statement, or a parameter's.
+    assert await cypher_pm.query(
+        spec(
+            "MATCH (n:Round) WHERE n.k = 1 RETURN [round(null, n.r), round(null, n.r, 'UP'), round($v, n.r)]",
+            {"v": None},
+        )
+    ) == [[None, None, None]]
     assert await cypher_pm.query(
         spec("MATCH (n:Round) RETURN CASE WHEN n.r < 0 THEN 0.0 ELSE round(1234.5, n.r) END ORDER BY n.k")
     ) == [0.0, 1234.5]
@@ -1396,3 +1424,260 @@ async def test_a_walk_read_through_a_with_then_sorted_by_to_string_in_a_second_w
         "The Matrix Reloaded",
         "The Matrix Reloaded",
     ]
+
+
+async def test_lists_and_maps_that_hold_a_null_compare_item_by_item_null_where_no_pair_differs(
+    cypher_pm: PersistenceManager,
+):
+    # Beyond the spec's cases (#116, drivine4j#225): Cypher compares a list or a map item by item, so a null it holds
+    # makes the comparison null.
+    async def rows(cypher: str) -> list[Any]:
+        return await cypher_pm.query(spec(cypher))
+
+    assert await rows("RETURN [[null] = [null], {x: null} = {x: null}, [null, 1] = [null, 1]]") == [[None, None, None]]
+    assert await rows("RETURN [[1, null] = [2, null], [1, 2] = [1], [null] = [null, null], [] = []]") == [
+        [False, False, False, True]
+    ]
+    assert await rows("RETURN [[null] <> [null], [1, null] <> [2, null], [null, 1] <> [null, 1]]") == [
+        [None, True, None]
+    ]
+    assert await rows(
+        "RETURN [{x: null} = {y: null}, {x: 1, y: null} = {x: 2, y: null}, {x: null} = {x: 1}, {x: null} = {}, "
+        "{a: 1} = {a: 1, b: null}]"
+    ) == [[False, False, None, False, False]]
+    assert await rows(
+        "RETURN [[[null]] = [[null]], [[1, null]] = [[2, null]], [{x: null}] = [{x: null}], {a: [null]} = {a: [null]}, "
+        "[1, [null]] = [2, [null]], [[null], 1] = [[null], 2]]"
+    ) == [[None, False, None, None, False, False]]
+    assert await rows(
+        "RETURN [[1] = ['1'], [null] = [1], [[1]] = [1], [null, 'a'] = [1, 'b'], [1] = [1.0], [null] = [[1]], "
+        "[null] = [{x: 1}], [null, 1] = [1, null]]"
+    ) == [[False, None, False, False, True, None, None, None]]
+    assert await rows("RETURN CASE [null] WHEN [null] THEN 'y' ELSE 'n' END") == ["n"]
+    # Lists that hold no null compare as before.
+    assert await rows(
+        "RETURN [[1, 2] = [1, 2], [1, 2] <> [1, 3], {x: 1} = {x: 1}, 'a' IN ['a', 'b'], 'c' IN ['a', 'b']]"
+    ) == [[True, True, True, True, False]]
+
+
+async def test_in_compares_a_value_with_each_item_as_equality_does(cypher_pm: PersistenceManager):
+    # Beyond the spec's cases (#116): true where an item is equal, else null where a comparison is null, else false.
+    await seeded(cypher_pm)
+    # A node with no name is in no list of names, nor out of one: NOT keeps it no more than the IN does.
+    counted = (
+        "MATCH (n:CyTest) WHERE NOT (n.name IN ['Keanu']) RETURN count(*) UNION ALL "
+        "MATCH (n:CyTest) WHERE n.name IN ['Keanu'] AND n.born > 0 OR n.name IN $x RETURN count(*)"
+    )
+    assert await cypher_pm.query(spec(counted, {"x": []})) == [3, 1]
+    # A quantifier keeps an item where its condition is true, so one with no name is in all of no list of names.
+    quantified = "MATCH (n:CyTest) WHERE all(x IN [1] WHERE n.name IN ['Keanu']) RETURN count(*)"
+    assert await cypher_pm.query(spec(quantified)) == [1]
+    written = (
+        "RETURN [null IN [null], [null] IN [[null]], 1 IN [null], 1 IN [1, null], 2 IN [1, null], null IN [], "
+        "[null] IN [[1, 2]], [null] IN [[1]], [1, null] IN [[2, null]], [1] IN [[1], null], {x: null} IN [{x: null}], "
+        "[1] IN [[2], null], [1] IN [[null]], null IN [1]]"
+    )
+    assert await cypher_pm.query(spec(written)) == [
+        [None, None, None, True, None, False, False, None, False, True, None, None, None, None]
+    ]
+    given = {"x": None, "l": [1, 2], "a": [1, None], "ls": [[1, None], [3]], "n": None}
+    assert await cypher_pm.query(spec("RETURN [$x IN $l, 2 IN $l, $a IN $ls, $a IN [[2, null]], 1 IN $n]", given)) == [
+        [None, True, None, False, None]
+    ]
+    # Read by a WHERE, a null is in no list that holds one: JSON's null is equal to such an item as JSON.
+    nulls = {"l": [None, 2], "m": {"x": None}}
+    assert await cypher_pm.query(spec("UNWIND [1] AS i WITH i WHERE null IN $l OR $m.x IN $l RETURN i", nulls)) == []
+    assert await cypher_pm.query(spec("RETURN [x IN [1] WHERE null IN $l OR $m.x IN $l]", nulls)) == [[]]
+
+
+async def test_values_that_hold_a_null_compare_item_by_item_where_neither_side_is_written_out(
+    cypher_pm: PersistenceManager,
+):
+    # Beyond the spec's cases (#116): parameters, values carried by a WITH and collected lists are compared as they are
+    # at run time.
+    given = {
+        "a": [1, None],
+        "b": [1, None],
+        "c": [2, None],
+        "l": [[1, None], [3]],
+        "m": {"x": None},
+        "n": {"x": 1},
+        "p": [1, 2],
+    }
+    assert await cypher_pm.query(spec("RETURN [$a = $b, $a = $c, $a IN [$b], $a IN $l, $m = $n, $p = $p]", given)) == [
+        [None, False, None, None, None, True]
+    ]
+    assert await cypher_pm.query(
+        spec(
+            "WITH [1, null] AS a, [1, null] AS b, [2, null] AS c, [null, 1] AS d "
+            "RETURN [a = b, a = c, a <> c, a = d, a IN [b, c], a IN [c]]"
+        )
+    ) == [[None, False, True, None, None, False]]
+    assert await cypher_pm.query(
+        spec(
+            "WITH [[null], 1] AS a, [[null], 2] AS b, {k: [null]} AS m, {k: [1]} AS n, {k: [1], j: 2} AS o "
+            "RETURN [a = b, m = n, m = m, m = o, n = n]"
+        )
+    ) == [[False, None, None, False, True]]
+    # Walked by the store: an empty list or map, a list beside a map, and maps of one size with different keys.
+    assert await cypher_pm.query(
+        spec(
+            "WITH [] AS e, {} AS o, [null] AS a, {x: null} AS m, {x: 1} AS p, {x: null, y: 1} AS r, "
+            "{x: null, z: 1} AS s, [{}, null] AS f, [[], null] AS g "
+            "RETURN [e = a, a = e, o = m, a = m, m = a, m = p, r = s, f = f, g = g, [{}] = f, [[]] = g]"
+        )
+    ) == [[False, False, False, False, False, None, False, None, None, False, False]]
+    assert await cypher_pm.query(
+        spec(
+            "UNWIND [[1, null], [2, null]] AS l WITH collect(l) AS ls "
+            "RETURN [ls = [[1, null], [2, null]], ls[0] = ls[1], ls[0] IN ls]"
+        )
+    ) == [[None, False, None]]
+    assert await cypher_pm.query(
+        spec("UNWIND [[1, null], [2, null], [3]] AS l WITH l WHERE l = [1, null] OR l = [3] RETURN l")
+    ) == [[3]]
+    # A parameter's list compared item by item as the statement is compiled, at any depth.
+    assert await cypher_pm.query(
+        spec(
+            "UNWIND [[1, [2, 3]], [1, [2]], 5] AS l WITH collect(l) AS ls "
+            "RETURN [ls[0] = $p, ls[1] = $p, ls[2] = $p, $p = ls[0], ls[0] <> $q, $q = ls[1]]",
+            {"p": [None, [2, 3]], "q": [1, [None, 4]]},
+        )
+    ) == [[None, False, False, None, True, False]]
+
+
+async def test_a_parameter_that_holds_a_null_given_as_an_iterator_or_holding_nan_is_bound_as_it_was_compared(
+    cypher_pm: PersistenceManager,
+):
+    # Whether a parameter holds a null is read from what it is bound as, so an iterator is read once (drivine#340), and
+    # NaN, bound as a text, is a value that is not null.
+    if cypher_pm.type is not DatabaseType.NEO4J:
+        # The Neo4j driver takes no iterator.
+        given = {"g": iter([1, None]), "h": iter([1, None]), "m": {"l": iter([1, None])}}
+        assert await cypher_pm.query(
+            spec(
+                "RETURN [$g = [1, null], $g IN [[1, null]], $m.l = [1, null], $m.l IN [[2, null]], $g, $h IN [$g]]",
+                given,
+            )
+        ) == [[None, None, None, False, [1, None], None]]
+    nan = {"p": [math.nan, None], "q": [math.nan]}
+    assert await cypher_pm.query(
+        spec(
+            "UNWIND [[1, null]] AS l WITH collect(l) AS ls "
+            "RETURN [ls[0] = $p, $p IN [[1, null]], ls[0] IN [$p], [1] = $q, size($p)]",
+            nan,
+        )
+    ) == [[False, False, False, False, 2]]
+
+
+async def test_a_text_that_holds_a_nulls_text_holds_no_null_and_a_value_past_4000_bytes_is_read_whole_for_one(
+    cypher_pm: PersistenceManager,
+):
+    # Beyond the spec's cases (#116): Oracle reads whether a value holds a null from its JSON's text.
+    assert (
+        await cypher_pm.query(
+            spec(
+                "UNWIND ['a,null]', 'x:null}', 'null', 'a\\\",null]', 'é😀\\\",null]', 'a\\\\'] AS s "
+                "WITH s, [s] AS v, [[s]] AS l, {k: s} AS m, [{k: s}] AS ms RETURN [v IN l, v = [s], m IN ms]"
+            )
+        )
+        == [[True, True, True]] * 6
+    )
+    # A text that ends in a backslash ends where its quote does.
+    assert await cypher_pm.query(
+        spec("UNWIND ['a\\\\'] AS s WITH s, [s, ',null]'] AS v RETURN [v = [s, ',null]'], v IN [[s, ',null]']]]")
+    ) == [[True, True]]
+    long = "[x IN range(1, 600) | 'abcdefghij']"
+    assert await cypher_pm.query(
+        spec(f"WITH {long} AS v, {long} AS w, [{long}] AS l RETURN [v = w, v IN l, v <> w]")
+    ) == [[True, True, False]]
+    # A long value that holds a null is read whole, so the null is found.
+    assert await cypher_pm.query(
+        spec(
+            f"WITH {long} + [null] AS v, {long} + [null] AS w, [{long} + [null]] AS l, ['z'] + {long} + [null] AS u "
+            "RETURN [v = w, v IN l, v <> w, v = u]"
+        )
+    ) == [[None, None, None, False]]
+    # Either side of 4,000 bytes of JSON's text, `["x…x",null]` and `["x…x","y"]`: the short text read, then the
+    # long.
+    for size in (3990, 3991, 3992):
+        assert await cypher_pm.query(
+            spec(
+                "WITH [$s, null] AS v, [$s, null] AS w, [$s, $m.k] AS u, [$s + 'z', null] AS d "
+                "RETURN [v = w, u = u, v = u, v = d]",
+                {"s": "x" * size, "m": {"k": "y"}},
+            )
+        ) == [[None, True, None, False]], size
+    assert await cypher_pm.query(
+        spec(
+            "WITH [1, null] AS a, [2, null] AS c RETURN reduce(acc = [], x IN [a, c] | acc + [coalesce(x = a, 'null')])"
+        )
+    ) == [["null", False]]
+    assert await cypher_pm.query(
+        spec(
+            "UNWIND ['a,null]'] AS s WITH s, [s] AS v, [[s]] AS l "
+            "RETURN reduce(acc = [], x IN [v] | acc + [x = [s], x IN l])"
+        )
+    ) == [[True, True]]
+
+
+async def test_texts_past_32_kb_in_lists_that_hold_a_null_compare_as_texts(cypher_pm: PersistenceManager):
+    # On Oracle a text past 32 KB is compared as a CLOB, which to_String raises on (ORA-40478) (drivine#340); and a
+    # parameter's list with such a text is walked, not written in the statement item by item, past the literal Oracle
+    # takes (ORA-01704).
+    text = "x" * 40_000
+    given = {"a": [text, None], "b": [text, None], "c": [text + "y", None]}
+    assert await cypher_pm.query(spec("RETURN [$a = $b, $a = $c, $a IN [$b], $a IN [$c]]", given)) == [
+        [None, False, None, False]
+    ]
+    assert await cypher_pm.query(
+        spec("WITH $a AS a, $b AS b, $c AS c RETURN [a = b, a = c, {k: a} = {k: b}]", given)
+    ) == [[None, False, None]]
+
+
+async def test_a_null_node_or_relationship_in_a_list_or_a_map_makes_its_comparison_null(cypher_pm: PersistenceManager):
+    # Beyond the spec's cases (#116): a node or a relationship OPTIONAL MATCH finds none of is null in what holds it.
+    await seeded(cypher_pm)
+    assert await cypher_pm.query(
+        spec(
+            "OPTIONAL MATCH (x:Nope)-[r]->() RETURN [[r] = [r], {x: r} = {x: r}, [r] <> [r], r IN [r], [r] IN [[r]], "
+            "x IN [x], [x] = [x], {x: x} = {x: x}, [r, 1] = [r, 2]]"
+        )
+    ) == [[None, None, None, None, None, None, None, None, False]]
+    assert await cypher_pm.query(
+        spec(
+            "MATCH (:Person {name: 'Keanu'})-[r1:KNOWS]->() OPTIONAL MATCH (:Person {name: 'Hugo'})-[r2:KNOWS]->() "
+            "WITH r1, r2, [r1, r2] AS a, {x: r2} AS m "
+            "RETURN [[r1, r2] = [r1, r2], {a: r1, b: r2} = {a: r1, b: r2}, a = a, m = m, a = [r1, r1], r1 IN [r2], "
+            "a = [r1]]"
+        )
+    ) == [[None, None, None, None, None, None, False]]
+
+
+async def test_a_statement_that_writes_compares_a_list_that_holds_a_null_as_null_where_it_is_equal_as_json(
+    cypher_pm: PersistenceManager,
+):
+    # Beyond the spec's cases (#116): on Oracle a procedure calls no function of its own, so values that differ as JSON
+    # are false there.
+    await clear(cypher_pm)
+    assert await cypher_pm.query(
+        spec(
+            "CREATE (n:CyNullEquality) WITH n, [1, null] AS a, [1, null] AS b, [2, null] AS c "
+            "SET n.same = coalesce(a = b, 'null'), n.other = a = c, n.unequal = a <> c, "
+            "n.written = coalesce([null] = [1], 'null') RETURN [n.same, n.other, n.unequal, n.written]"
+        )
+    ) == [["null", False, True, "null"]]
+    # Values that hold no null compare as before, a text that holds a null's text and a long value among them.
+    long = "[x IN range(1, 600) | 'abcdefghij']"
+    assert await cypher_pm.query(
+        spec(
+            f"UNWIND ['a,null]'] AS s WITH s, [s] AS v, [[s]] AS l, {long} AS w, [{long}] AS ws "
+            f"CREATE (n:CyNullEquality) SET n.eq = v = [s], n.in = v IN l, n.longEq = w = {long}, n.longIn = w IN ws "
+            "RETURN [n.eq, n.in, n.longEq, n.longIn]"
+        )
+    ) == [[True, True, True, True]]
+    if cypher_pm.type is DatabaseType.ORACLE:
+        return
+    assert await cypher_pm.query(
+        spec("CREATE (n:CyNullEquality) WITH n, [null] AS a, [1] AS b SET n.eq = coalesce(a = b, 'null') RETURN n.eq")
+    ) == ["null"]

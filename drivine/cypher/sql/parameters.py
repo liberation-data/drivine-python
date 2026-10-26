@@ -95,6 +95,14 @@ class Parameters:
         self._bound[key] = written
         return read(f"${key}", written, keys, value)
 
+    def tree(self, name: str) -> Any:
+        """
+        The parameter as JSON's own kinds, as it is bound (see `_tree`): what the statement reads of a parameter's
+        value to compile it, as whether it holds a null, reads it here, so an iterator in it is read once, and bound as
+        what was read.
+        """
+        return self._tree(name)
+
     def _tree(self, name: str) -> Any:
         """
         The parameter as JSON's own kinds (see `jsonable`), worked out once, and its text written from it, which

@@ -1804,6 +1804,14 @@ def test_a_text_in_a_list_sorts_by_its_code_points_up_to_and_across_its_500th_ch
     assert rows(
         f"UNWIND [['{a500}B'], ['{a500}'], ['{a499}é'], ['{a499}b'], ['{a499}B']] AS l RETURN l ORDER BY l"
     ) == [[a499 + "B"], [a500], [a500 + "B"], [a499 + "b"], [a499 + "é"]]
+    # Postgres keys an empty text, which has no bits, as 0: before every other. Oracle reads an empty text as null.
+    if cypher_pm.type is not DatabaseType.ORACLE:
+        assert rows("UNWIND [['b'], ['', 'a'], ['B'], ['']] AS l RETURN l ORDER BY l") == [
+            [""],
+            ["", "a"],
+            ["B"],
+            ["b"],
+        ]
 
 
 def test_a_text_sorts_beside_a_null_and_a_number_as_before_and_by_its_code_points_among_the_texts(

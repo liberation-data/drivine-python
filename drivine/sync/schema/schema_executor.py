@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from typing import Any
 
 from drivine.backend.cypher_grammar import FALKORDB_GRAMMAR, NEO4J_GRAMMAR
@@ -39,20 +39,13 @@ class SchemaExecutor:
     Runs schema statements on a connection of their own, in auto-commit: schema DDL can't run inside a data transaction.
     """
 
-    def __init__(self, provider: ConnectionProvider, prepare: Callable[[], None] | None = None) -> None:
-        """
-        `prepare` is what is done once before a statement runs, as an object manager makes its store first: a listing
-        reads the catalog the store keeps.
-        """
+    def __init__(self, provider: ConnectionProvider) -> None:
         self.provider = provider
-        self.prepare = prepare
 
     def run(self, statement: str | NativeOperation, bindings: Mapping[str, Any] | None = None) -> list[Any]:
         """
         Runs a statement, again after a pause when the engine turned it away because another write was in progress.
         """
-        if self.prepare is not None:
-            self.prepare()
         return when_not_contended(lambda: self._run_once(statement, bindings or {}), _contended)
 
     def _run_once(self, statement: str | NativeOperation, bindings: Mapping[str, Any]) -> list[Any]:

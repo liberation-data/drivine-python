@@ -2,18 +2,19 @@ from __future__ import annotations
 
 from typing import Any
 
-from drivine import concurrency
 from drivine.backend.oracle.oracle_graph import DEFAULT_GRAPH, OracleGraph
 from drivine.connection.connection import Connection
 from drivine.connection.connection_provider import ConnectionProvider
 from drivine.connection.database_type import DatabaseType
+from drivine.connection.graph_tables import GraphTables
 from drivine.connection.oracle.oracle_connection import OracleConnection
 
 
 class OracleConnectionProvider(ConnectionProvider):
     """
     Connections to Oracle, from a pool of its own, through python-oracledb in thin mode (no Instant Client). The
-    graph's tables are made on the first connection when they aren't there.
+    graph's tables are made on the first connection when they aren't there (see GraphTables), so Cypher or SQL sent
+    through a persistence manager alone finds them, as an object manager's statements do.
     """
 
     def __init__(
@@ -38,18 +39,16 @@ class OracleConnectionProvider(ConnectionProvider):
         self.graph = OracleGraph(graph or DEFAULT_GRAPH)
         self.graph_name = self.graph.name
         self._pool: Any = None
-        self._ensuring = concurrency.Lock()
-        self._ensured = False
+        self._tables = GraphTables(self.graph.ensuring)
 
     async def connect(self) -> Connection:
-        """A connection, the graph's tables made first if this is the first (schema statements commit on their own)."""
+        """
+        A connection, the graph's tables made first if this is the pool's first (schema statements commit on their own).
+        """
         pool = self._pool_of()
         connection = await pool.acquire()
         try:
-            async with self._ensuring:
-                if not self._ensured:
-                    await self._ensure(connection)
-                    self._ensured = True
+            await self._tables.ensure(lambda statement: self._run(connection, statement))
             cursor = connection.cursor()
             await cursor.execute("SELECT SYS_CONTEXT('USERENV', 'SID') FROM dual")
             row = await cursor.fetchone()
@@ -62,14 +61,14 @@ class OracleConnectionProvider(ConnectionProvider):
     async def end(self) -> None:
         # Cleared before waiting, so a second call made meanwhile doesn't close the pool again.
         pool, self._pool = self._pool, None
-        self._ensured = False
+        self._tables.forget()
         if pool is not None:
             await pool.close(force=True)
 
-    async def _ensure(self, connection: Any) -> None:
+    async def _run(self, connection: Any, statement: str) -> None:
         cursor = connection.cursor()
         try:
-            await cursor.execute(self.graph.ensuring)
+            await cursor.execute(statement)
         finally:
             cursor.close()
 

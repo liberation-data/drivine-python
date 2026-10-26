@@ -31,9 +31,8 @@ class GraphBackend(Protocol):
     Oracle another, Postgres a third. A `where` given as a string is a predicate in the store's own language over the
     root, `n`; a query over references is written by the backend.
 
-    Where the store is tables an object manager makes (Postgres), the backend has `ensuring` too: the statement that
-    makes them when they are not there and does nothing when they are, which a manager runs once, before its first
-    statement, outside any transaction. A backend without it has nothing to make, or its connection makes it (Oracle).
+    Where the store is tables (Oracle, Postgres), the connection provider makes them on its first connection (see
+    GraphTables), so a backend has nothing to make.
     """
 
     def render_query(

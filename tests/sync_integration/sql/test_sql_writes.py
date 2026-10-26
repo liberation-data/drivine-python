@@ -54,7 +54,6 @@ class Conversation(GraphView):
 @pytest.fixture(autouse=True)
 def cleared(pm: PersistenceManager) -> Iterator[None]:
     seed = SqlSeed(pm, "SqlWrite")
-    seed.prepare()
     seed.clear()
     yield
     seed.clear()

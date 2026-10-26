@@ -24,7 +24,6 @@ class UrgentTicket(Ticket, labels=["Urgent"]):
 @pytest.fixture
 def seed(pm: PersistenceManager) -> Iterator[SqlSeed]:
     seed = SqlSeed(pm, "SqlTest")
-    seed.prepare()
     seed.clear()
     seed.node(["Ticket"], {"id": "t1", "title": "Crash", "ticket_no": 101}, "aaaa:bbbb")
     seed.node(["Ticket", "Urgent"], {"id": "t2", "title": "Outage", "ticket_no": 102})

@@ -115,7 +115,6 @@ class Category(GraphView):
 @pytest.fixture(scope="module")
 def seeded(factory: PersistenceManagerFactory, store: str) -> Iterator[None]:
     seed = SqlSeed(factory.get(store), "SqlView")
-    seed.prepare()
     seed.clear()
     for labels, props in [
         (["Person"], {"id": "ava", "name": "Ada"}),

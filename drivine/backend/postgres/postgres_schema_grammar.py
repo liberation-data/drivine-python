@@ -36,8 +36,8 @@ def postgres_schema_grammar(graph: PostgresGraph) -> SchemaGrammar:
       whose text holds a term's words.
 
     What is made is recorded in the graph's catalog, as drivine4j records it, and read back from there: an index's
-    expression does not say which label and properties it was made for. The object manager makes the store before it
-    runs a statement of its schema, so the catalog is there.
+    expression does not say which label and properties it was made for. The provider's first connection makes the
+    store (see GraphTables), so the catalog is there before a statement of the schema runs.
     """
     grammar = _PostgresSchema(graph)
     return SchemaGrammar(

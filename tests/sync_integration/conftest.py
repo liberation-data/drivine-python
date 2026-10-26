@@ -5,7 +5,6 @@ from collections.abc import Iterator
 
 import pytest
 
-from drivine.backend.postgres.postgres_graph import PostgresGraph
 from drivine.sync import (
     DatabaseRegistry,
     DatabaseType,
@@ -53,12 +52,8 @@ def factory(registry: DatabaseRegistry) -> PersistenceManagerFactory:
 @pytest.fixture(params=ENGINES)
 def pm(request: pytest.FixtureRequest, factory: PersistenceManagerFactory) -> Iterator[PersistenceManager]:
     manager = factory.get(request.param)
-    if manager.type is DatabaseType.ORACLE:
+    if manager.type in (DatabaseType.ORACLE, DatabaseType.POSTGRES):
         # A node's relationships go with it: the relationship table cascades.
-        manager.execute(QuerySpecification("DELETE FROM drivine_node"))
-    elif manager.type is DatabaseType.POSTGRES:
-        # The store is made by an object manager, so it may not be there yet.
-        manager.execute(QuerySpecification(PostgresGraph().ensuring))
         manager.execute(QuerySpecification("DELETE FROM drivine_node"))
     else:
         manager.execute(QuerySpecification("MATCH (n) DETACH DELETE n"))
@@ -76,11 +71,7 @@ is compiled for, as the tests' environment has them.
 @pytest.fixture(params=CYPHER_STORES)
 def cypher_pm(request: pytest.FixtureRequest, factory: PersistenceManagerFactory) -> PersistenceManager:
     """A manager of each store a Cypher statement is checked on: its graph is the test's to clear."""
-    manager = factory.get(request.param)
-    if manager.type is DatabaseType.POSTGRES:
-        # The store is made by an object manager, so it may not be there yet.
-        manager.execute(QuerySpecification(PostgresGraph().ensuring))
-    return manager
+    return factory.get(request.param)
 
 
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:

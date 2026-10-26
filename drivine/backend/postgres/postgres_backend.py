@@ -60,16 +60,11 @@ class PostgresBackend:
     from Node and from Python is one. A load returns the rows the graph engines do, `{props, labels}` for a fragment,
     as `jsonb`. A raw `where` is an SQL predicate over the node's row, `n` (its `labels`, `props` and `stamp`).
 
-    The store is made by the object manager, before its first statement: see `ensuring`.
+    The store is made by the connection provider, on its first connection (see GraphTables).
     """
 
     def __init__(self, graph: PostgresGraph | None = None) -> None:
         self.graph = graph or PostgresGraph()
-
-    @property
-    def ensuring(self) -> str:
-        """The statement that makes the store, which the object manager runs once, before its first statement."""
-        return self.graph.ensuring
 
     def render_query(
         self,

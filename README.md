@@ -186,9 +186,10 @@ DATABASE_DEFAULT_GRAPH_PATH=drivine   # names the graph's tables; this is the de
 ```
 
 The graph's name names tables, so it is letters, digits and underscores, begins with a letter, and is at most 49
-characters; Postgres folds it to lower case. The tables are made when an object manager first runs a statement.
-Postgres is a graph store like the others, so a schema catalog that names no database applies to it too, and makes its
-tables at startup: to keep a database you use only for plain SQL as it is, narrow the catalog with `.for_database(...)`.
+characters; Postgres folds it to lower case. The tables are made on the first connection when they aren't there, as on
+Oracle, whatever is sent first: Cypher or SQL through the persistence manager, a statement of the object manager, or a
+schema change. A user who may read the tables but not make them works once they are made. Postgres is a graph store
+like the others, so a schema catalog that names no database applies to it too, and makes its indexes at startup.
 
 **How a graph is stored.** drivine4j's store, byte for byte, so the JVM, Node and Python read and write one graph:
 `<graph>_node (nid, labels, props, stamp)` and `<graph>_edge (eid, src, dst, type, props)`, with `labels` and `props`
@@ -264,14 +265,7 @@ taken for SQL on these stores, as it is taken for Cypher on a graph engine:
 ```python
 import asyncio
 
-from drivine import (
-    DatabaseRegistry,
-    PersistenceManagerFactory,
-    QuerySpecification,
-    StatelessGraphObjectManager,
-    cypher_statement,
-    range_index,
-)
+from drivine import DatabaseRegistry, PersistenceManagerFactory, QuerySpecification, cypher_statement
 
 
 async def main() -> None:
@@ -279,10 +273,6 @@ async def main() -> None:
     registry.build_or_resolve_from_env()
     pm = PersistenceManagerFactory(registry).get()
     try:
-        # Index the key the write merges on. On Postgres this also makes the graph's tables, which the object
-        # manager makes before its first statement and the persistence manager alone does not.
-        await StatelessGraphObjectManager(pm).indexes.ensure(range_index("Person", "uuid"))
-
         await pm.execute(
             QuerySpecification(
                 cypher_statement(
@@ -308,7 +298,8 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-A write is one statement, applied whole or not at all. The same program runs unchanged on Neo4j, Memgraph and
+A write is one statement, applied whole or not at all. The graph's tables are made on the first connection when they
+aren't there, so the program runs on a new database as it is. The same program runs unchanged on Neo4j, Memgraph and
 FalkorDB.
 
 **What compiles.** What each statement gives, on each store, is the
@@ -325,12 +316,10 @@ database.
   [Cypher on Postgres and Oracle](#cypher-on-postgres-and-oracle).
 - On Postgres, float arithmetic is exact decimal, and a list or a map read from a property orders the texts in it by
   the database's collation, where other text is ordered by its code points, as Cypher does
-  ([Cypher on Postgres and Oracle](#cypher-on-postgres-and-oracle)); the tables are made by the object manager or a
-  schema catalog ([Postgres](#postgres)).
+  ([Cypher on Postgres and Oracle](#cypher-on-postgres-and-oracle)).
 - On Oracle, a text read out of JSON is at most 4,000 bytes, and an empty one is null; a quantified path pattern's
   `WHERE`, `reduce` and `map[key]` take less than on Postgres
-  ([Cypher on Postgres and Oracle](#cypher-on-postgres-and-oracle)); the graph's tables are made on the first
-  connection ([Connecting](#connecting)).
+  ([Cypher on Postgres and Oracle](#cypher-on-postgres-and-oracle)).
 
 The object manager needs no Cypher at all, on any store: [the quick start](#quick-start) runs as written on Postgres and
 Oracle.

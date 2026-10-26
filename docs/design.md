@@ -137,7 +137,7 @@ registry.build_or_resolve_from_env("analytics") # ANALYTICS_DATABASE_TYPE, ...
   - Default ports: Neo4j and Memgraph 7687, Neptune 8182, FalkorDB 6379 with graph `"graph"`.
   - Pool max 40, connection timeout 5 s.
   - Neptune uses a dummy auth token, TLS and a pool of one.
-  - Oracle runs its graph-table DDL on first connection.
+  - Oracle and Postgres run their graph-table DDL on first connection.
 - `await registry.close()` ends every provider, at application shutdown.
 
 ## Transactions

@@ -149,6 +149,7 @@ def test_round_of_two_arguments_refuses_a_precision_below_0_toward_zero_written_
         float("-inf"),
         Decimal("-1.5"),
         Decimal("2147483648.5"),
+        Decimal("Infinity"),
     ],
 )
 def test_a_bound_length_out_of_range_is_refused_however_large_and_of_whatever_kind(
@@ -168,6 +169,26 @@ def test_a_bound_length_is_cut_toward_zero_as_java_casts_it_nan_to_0(
 ) -> None:
     # Not in the spec yet (#143): a Decimal is read as the number it is, and NaN as Java casts a double to a long.
     assert f"CAST({cut} AS INTEGER)" in compiler("g").compile("RETURN left('hello', $n)", {"n": n}).sql
+
+
+@pytest.mark.parametrize("compiler", COMPILERS.values(), ids=COMPILERS.keys())
+@pytest.mark.parametrize(
+    ("n", "cut"),
+    [
+        (1.0e300, 9223372036854775807),
+        (-1.0e300, -9223372036854775808),
+        pytest.param(10**400, 9223372036854775807, id="10**400"),
+        pytest.param(-(10**400), -9223372036854775808, id="-10**400"),
+        (Decimal("1E+400"), 9223372036854775807),
+        (Decimal("-Infinity"), -9223372036854775808),
+    ],
+)
+def test_a_bound_length_past_a_long_beside_a_text_from_data_is_cut_to_the_greatest_or_least_long(
+    compiler: type[SqlCypherCompiler], n: Any, cut: int
+) -> None:
+    # Not in the spec yet (#169): as Java casts a double to a long, so no store is given a literal past its number.
+    sql = compiler("g").compile("MATCH (n:Count) RETURN left(n.t, $n)", {"n": n}).sql
+    assert f"THEN {cut} END" in sql and str(abs(cut) + 1) not in sql
 
 
 @pytest.mark.parametrize("compiler", COMPILERS.values(), ids=COMPILERS.keys())

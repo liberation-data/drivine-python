@@ -156,7 +156,8 @@ def _jsonable(value: Any) -> Any:
     if isinstance(value, Enum):
         return _jsonable(value.value)
     if isinstance(value, Decimal):
-        return int(value) if value == value.to_integral_value() else float(value)
+        # An infinity is equal to its integral value, but no int holds it: it is the float infinity.
+        return int(value) if value.is_finite() and value == value.to_integral_value() else float(value)
     if isinstance(value, Mapping):
         return {str(key): _jsonable(it) for key, it in value.items()}  # pyright: ignore[reportUnknownVariableType, reportUnknownArgumentType]
     if isinstance(value, (bytes, bytearray)):

@@ -397,3 +397,21 @@ def test_a_sign_nested_under_an_aggregate_compiles_to_about_the_statement_a_ceil
 
     sign, ceil = nested("sign"), nested("ceil")
     assert sign < ceil * 1.1, f"sign {sign}, ceil {ceil} characters"
+
+
+@COMPILERS
+@pytest.mark.parametrize("kind", ["any", "all", "none", "single"])
+def test_quantifiers_nested_twice_as_deep_over_lists_that_may_be_null_compile_to_about_twice_the_statement(
+    compiler: type[SqlCypherCompiler], kind: str
+) -> None:
+    # Three-valued (#159), each one reads its list twice, to test it for null and then for its items: bound once where
+    # it is long, as drivine4j binds it, so it is not written out again at each depth.
+    def nested(depth: int) -> str:
+        condition = f"x{depth} = 1"
+        for it in range(depth, 0, -1):
+            condition = f"{kind}(x{it} IN x{it - 1} WHERE {condition})"
+        return f"MATCH (c:Claim) WITH c.lists AS x0 RETURN {condition}"
+
+    short, long = (len(compiler("g").compile(nested(it)).sql) for it in (4, 8))
+    assert short < 20_000, short
+    assert long < 3 * short, (short, long)

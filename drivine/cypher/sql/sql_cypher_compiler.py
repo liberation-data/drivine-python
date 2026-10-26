@@ -3301,32 +3301,75 @@ class SqlCypherCompiler(ABC):
         )
 
     def _quantifier(self, expression: Quantifier, scope: Scope) -> Value:
+        # Read by a WHERE for its truth alone, a quantifier that is null may be false, as neither keeps a row.
+        filter_ = self._filtered
         listed = self._expression(expression.list, scope)
         name = self._alias("q")
+        kind = expression.kind
 
-        def quantified(from_: str, item: Value) -> str:
+        def quantified(from_: str, item: Value, list_null: str) -> str:
             inner = {**scope, expression.variable: item}
-            # Each item is kept where the condition is true, as a WHERE keeps a row, so an IN in it is false where it is
-            # null.
-            condition = self._condition(expression.where, inner) if expression.where is not None else "TRUE"
-            if expression.kind is QuantifierKind.ANY:
+
+            def exists(condition: str) -> str:
                 return f"EXISTS (SELECT 1 {from_} WHERE {condition})"
-            if expression.kind is QuantifierKind.ALL:
-                return f"NOT EXISTS (SELECT 1 {from_} WHERE NOT ({condition}))"
-            if expression.kind is QuantifierKind.NONE:
-                return f"NOT EXISTS (SELECT 1 {from_} WHERE {condition})"
-            return f"(SELECT count(*) {from_} WHERE {condition}) = 1"
+
+            if filter_ and kind is not QuantifierKind.SINGLE:
+                # any() is true where an item's condition is true, and all() where each one's is: each is kept where its
+                # condition is true, as a WHERE keeps a row, so an IN in it is false where it is null. none() is true
+                # where each one's is false.
+                if expression.where is None:
+                    condition = "TRUE"
+                elif kind is QuantifierKind.NONE:
+                    condition = self.bool(self._expression(expression.where, inner))
+                else:
+                    condition = self._condition(expression.where, inner)
+                if kind is QuantifierKind.ANY:
+                    value = exists(condition)
+                elif kind is QuantifierKind.ALL:
+                    value = f"NOT {exists(f'CASE WHEN {condition} THEN 0 ELSE 1 END = 1')}"
+                else:
+                    value = f"NOT {exists(f'CASE WHEN NOT ({condition}) THEN 0 ELSE 1 END = 1')}"
+            else:
+                # Cypher's quantifiers are three-valued: an item whose condition is null decides nothing, and leaves
+                # null one no item decides. Each item's is read once, in one pass, and counted: 1 is true, 0 false, and
+                # null null.
+                condition = (
+                    self.bool(self._expression(expression.where, inner)) if expression.where is not None else "TRUE"
+                )
+                counts = self._alias("q")
+                t, f, u = (
+                    f"count(CASE WHEN {it} THEN 1 END)"
+                    for it in (f"{counts}.v", f"NOT {counts}.v", f"{counts}.v IS NULL")
+                )
+                if kind is QuantifierKind.ANY:
+                    counted = f"WHEN {t} > 0 THEN 1 WHEN {u} > 0 THEN NULL ELSE 0"
+                elif kind is QuantifierKind.ALL:
+                    counted = f"WHEN {f} > 0 THEN 0 WHEN {u} > 0 THEN NULL ELSE 1"
+                elif kind is QuantifierKind.NONE:
+                    counted = f"WHEN {t} > 0 THEN 0 WHEN {u} > 0 THEN NULL ELSE 1"
+                else:
+                    # Two items whose condition is true make single() false, whatever the others' are.
+                    counted = f"WHEN {t} > 1 THEN 0 WHEN {u} > 0 THEN NULL WHEN {t} = 1 THEN 1 ELSE 0"
+                value = f"(SELECT CASE {counted} END FROM (SELECT {condition} AS v {from_}) {counts}) = 1"
+            # Of a null list, null, as in Cypher, and its items are not read, where it may be one.
+            return value if self._never_null(expression.list) else f"CASE WHEN NOT ({list_null}) THEN {value} END"
 
         # Over a list of nodes or relationships, each item is the node or the relationship, read from its table.
         if isinstance(listed, Entities):
             entities = listed
             return Bool(
                 self.shared1(
-                    entities.ids, lambda ids: quantified(*self._entity_items(ids, entities.relationships, name))
+                    entities.ids,
+                    lambda ids: quantified(*self._entity_items(ids, entities.relationships, name), f"{ids} IS NULL"),
                 )
             )
         item = Json(f"{name}.item", temporal=_items_of(listed))
-        return Bool(quantified(f"FROM {self.elements(self.comparable(self.json(listed)), name)}", item))
+        return Bool(
+            self.shared1(
+                self.comparable(self.json(listed)),
+                lambda items: quantified(f"FROM {self.elements(items, name)}", item, self.is_json_null(items)),
+            )
+        )
 
     def _slice(self, slice_: Slice, scope: Scope) -> Value:
         """

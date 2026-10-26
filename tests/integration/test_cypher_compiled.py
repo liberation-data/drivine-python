@@ -900,6 +900,18 @@ async def test_round_reads_a_precision_from_data_or_a_whole_float_as_a_whole_num
             "round(-1.0E-120, 136, 'CEILING')]"
         )
     ) == [[0.0, 0.0, 0.0, 0.0, 0.0, 1.0e-120, 1.0e-120, -1.0e-120]]
+    # The least numbers Oracle's NUMBER holds, whose logarithm it refuses (ORA-01428), and zero to the most places.
+    assert await cypher_pm.query(
+        spec(
+            "RETURN [round(1.0E-130, 2), round(1.0E-130, 140), round(-1.5E-130, 2, 'UP'), round(1.0E-129, 140, 'UP'), "
+            "round(1.0E-129, 2), round(-1.0E-129, 2, 'FLOOR'), round(-1.0E-125, 141, 'HALF_EVEN'), "
+            "round(1.2345678901234567E-130, 145), round(5.5E-128, 128, 'HALF_EVEN'), round(0.0, 1000000000)]"
+        )
+    ) == [[0.0, 1.0e-130, -0.01, 1.0e-129, 0.0, -0.01, -1.0e-125, 1.234567890123457e-130, 6.0e-128, 0.0]]
+    # A null number past its digits is null.
+    assert await cypher_pm.query(
+        spec("MATCH (n:Round) RETURN [round(null, 400), round(n.none, 400, 'UP'), round(n.none, n.b)]")
+    ) == [[None, None, None]]
     # Zero to a null precision is null, not the zero Oracle gives back without rounding.
     assert await cypher_pm.query(
         spec(
@@ -948,6 +960,14 @@ async def test_a_negative_precision_from_data_fails_only_on_a_row_that_reads_it_
         # A constant the compiler does not read as given is worked out by the store, as one from data.
         "RETURN round(1234.5, 1 - 3)",
         "RETURN round(1234.5, toInteger('-2'))",
+        # Of an aggregate, where nothing is shared and the check is written inline, and of zero, which Oracle gives
+        # back unrounded: the precision is still read first.
+        "UNWIND [0.0, 0.0] AS x WITH x, -2 AS r RETURN r, round(sum(x), r)",
+        "UNWIND [0.0, 0.0] AS x WITH x, -2 AS r RETURN r, round(sum(x), r, 'HALF_UP')",
+        "MATCH (n:Round) UNWIND [0.0, 0.0] AS x WITH n.r AS r, x RETURN r, round(sum(x), r)",
+        "MATCH (n:Round) UNWIND [0.0, 0.0] AS x WITH n.r AS r, x RETURN r, round(sum(x), r, 'HALF_UP')",
+        "UNWIND [0.0, 0.0] AS x RETURN round(sum(x), -2)",
+        "UNWIND [0.0, 0.0] AS x RETURN round(sum(x), -2, 'HALF_UP')",
     ]:
         with pytest.raises(Exception, match=message):  # noqa: PT011
             await cypher_pm.query(spec(statement))

@@ -1971,3 +1971,157 @@ def test_a_text_in_a_list_sorts_by_its_code_points_up_to_and_across_its_500th_ch
         "UNWIND $ls AS g WITH [g[0], g[1]] AS l RETURN l[1] ORDER BY l",
         {"ls": [[a499 + "b", "3"], [a499 + "B", "2"], [a499, "1"], [a600 + "b", "5"], [a600, "4"]]},
     ) == ["1", "2", "4", "5", "3"]
+
+
+# Values of several kinds sorted as Cypher orders their kinds, a map, a list, a text, a truth value, a number, then
+# null: drivine4j's tests of liberation-data/drivine4j#299, and Drivine for TypeScript's port of them
+# (liberation-data/drivine#371), ported for #175. Postgres takes `jsonb`'s order for every kind but a text: a number
+# before a truth value, a map and a list last (liberation-data/drivine4j#307).
+
+KIND_ORDER_ON_POSTGRES = "Postgres takes jsonb's order of kinds (liberation-data/drivine4j#307)."
+
+
+def typed(value: Any) -> Any:
+    """The value in a form that compares by kind as well: true is not 1, and 2 is not 2.0."""
+    if isinstance(value, bool):
+        return ("bool", value)
+    if isinstance(value, int):
+        return ("int", value)
+    if isinstance(value, float):
+        return ("float", value)
+    if isinstance(value, dict):
+        return {key: typed(it) for key, it in value.items()}  # pyright: ignore[reportUnknownVariableType]
+    if isinstance(value, list):
+        return [typed(it) for it in value]  # pyright: ignore[reportUnknownVariableType]
+    return value
+
+
+def test_a_text_sorts_before_a_number_and_after_one_descending(cypher_pm: PersistenceManager):
+    # Not in the spec yet (#299): the steps of "Texts beside nulls and other kinds" that skip Oracle in v0.6.13.
+    if cypher_pm.type is DatabaseType.POSTGRES:
+        pytest.skip(KIND_ORDER_ON_POSTGRES)
+
+    def rows(cypher: str) -> Any:
+        return typed(cypher_pm.query(spec(cypher)))
+
+    assert rows("UNWIND [2, 'b', null, 1, 'B'] AS t RETURN t ORDER BY t") == typed(["B", "b", 1, 2, None])
+    assert rows("UNWIND [2, 'b', null, 1, 'B'] AS t RETURN t ORDER BY t DESC") == typed([None, 2, 1, "b", "B"])
+
+
+def test_values_of_several_kinds_sort_as_cypher_orders_their_kinds_a_map_a_list_a_text_a_truth_value_a_number(
+    cypher_pm: PersistenceManager,
+):
+    # Not in the spec yet (#299): Oracle sorts first by where a value's kind comes, then by the value.
+    if cypher_pm.type is DatabaseType.POSTGRES:
+        pytest.skip(KIND_ORDER_ON_POSTGRES)
+
+    def rows(cypher: str) -> Any:
+        return typed(cypher_pm.query(spec(cypher)))
+
+    values = "[1, {a: 1}, 'b', true, [2], 2.5, null, false, 'A', [1, 2], -1]"
+    ascending: list[Any] = [{"a": 1}, [1, 2], [2], "A", "b", False, True, -1, 1, 2.5, None]
+    assert rows(f"UNWIND {values} AS t RETURN t ORDER BY t") == typed(ascending)
+    assert rows(f"UNWIND {values} AS t RETURN t ORDER BY t DESC") == typed(ascending[::-1])
+    # Carried out of a WITH that pages them, kept distinct, and beside another term.
+    assert rows(f"UNWIND {values} AS t WITH t ORDER BY t SKIP 3 LIMIT 4 RETURN t") == typed(["A", "b", False, True])
+    assert rows("UNWIND [2, 'b', true, 2, 'b'] AS t RETURN DISTINCT t ORDER BY t") == typed(["b", True, 2])
+    assert rows("UNWIND [[2, 0], [1, 3], [2, false], [1, 'a']] AS p RETURN p ORDER BY p[0], p[1]") == typed(
+        [[1, "a"], [1, 3], [2, False], [2, 0]]
+    )
+    # A truth value before a number.
+    assert rows("UNWIND [1, true, 0, false] AS t RETURN t ORDER BY t") == typed([False, True, 0, 1])
+    assert rows("UNWIND [true, 1, 'b', [1], {a: 1}] AS t RETURN min(t), max(t)") == typed([[{"a": 1}, 1]])
+    # Carried out of a CALL { … }, grouped by, kept distinct by another name, and sorted by when it is not returned.
+    assert rows(f"CALL {{ UNWIND {values} AS t RETURN t ORDER BY t LIMIT 4 }} RETURN t") == typed(
+        [{"a": 1}, [1, 2], [2], "A"]
+    )
+    assert rows("UNWIND [2, 'b', true, 2, 'b', [1]] AS t RETURN t, count(*) ORDER BY t") == typed(
+        [[[1], 1], ["b", 2], [True, 1], [2, 2]]
+    )
+    assert rows("UNWIND [2, 'b', true, 2] AS t RETURN DISTINCT t AS u ORDER BY u DESC") == typed([2, True, "b"])
+    assert rows("UNWIND [2, 'b', true] AS t RETURN toString(t) AS s ORDER BY t") == ["b", "true", "2"]
+    # Among their own kind: texts by their code points, and whole and floating-point numbers as numbers.
+    assert rows("UNWIND ['😀', '～', 1, 'a'] AS t RETURN t ORDER BY t") == typed(["a", "～", "😀", 1])
+    assert rows("UNWIND [1, 0.5, true, 1.5, 0] AS t RETURN t ORDER BY t") == typed([True, 0, 0.5, 1, 1.5])
+    # Paged by the query that returns them, and nulls first descending, carried out of a CALL { … }.
+    assert rows(f"UNWIND {values} AS t RETURN t ORDER BY t SKIP 2 LIMIT 5") == typed([[2], "A", "b", False, True])
+    assert rows(f"UNWIND {values} AS t RETURN t ORDER BY t DESC SKIP 1 LIMIT 4") == typed([2.5, 1, -1, True])
+    assert rows(
+        "CALL { UNWIND [1, null, 'a', true, null, [1]] AS t RETURN t ORDER BY t DESC LIMIT 3 } RETURN t"
+    ) == typed([None, None, 1])
+    # Collected in the order a WITH gives them, and indexed or iterated there.
+    assert rows(f"UNWIND {values} AS t WITH t ORDER BY t DESC WITH collect(t) AS xs RETURN xs") == typed(
+        [ascending[:-1][::-1]]
+    )
+    assert rows(f"UNWIND {values} AS t WITH t ORDER BY t RETURN [x IN collect(t) | x][0..3]") == typed([ascending[:3]])
+    assert rows(f"UNWIND {values} AS t WITH t ORDER BY t SKIP 2 LIMIT 5 RETURN collect(t)") == typed(
+        [[[2], "A", "b", False, True]]
+    )
+    # The last query of a UNION sorted, and a UNION carried out of a CALL { … } sorted and paged.
+    assert rows(
+        "UNWIND [2, 'b', true] AS t RETURN t UNION UNWIND [[1], {a: 1}, null, 'a'] AS t RETURN t ORDER BY t"
+    ) == typed([2, "b", True, {"a": 1}, [1], "a", None])
+    assert rows(
+        "CALL { UNWIND [2, 'b'] AS t RETURN t UNION UNWIND [true, [1], null] AS t RETURN t } RETURN t ORDER BY t"
+    ) == typed([[1], "b", True, 2, None])
+    assert rows(
+        "CALL { UNWIND [2, 'b'] AS t RETURN t UNION UNWIND [true, [1], null] AS t RETURN t } "
+        "WITH t ORDER BY t DESC SKIP 1 LIMIT 3 RETURN t"
+    ) == typed([2, True, "b"])
+
+
+def test_a_property_stored_as_several_kinds_sorts_as_cypher_orders_their_kinds(cypher_pm: PersistenceManager):
+    # Not in the spec yet (#299): a property read from the store may be of any kind, so its kind is ranked first.
+    if cypher_pm.type is DatabaseType.POSTGRES:
+        pytest.skip(KIND_ORDER_ON_POSTGRES)
+
+    def rows(cypher: str) -> Any:
+        return typed(cypher_pm.query(spec(cypher)))
+
+    clear(cypher_pm)
+    cypher_pm.query(
+        spec(
+            "CREATE (:Kind {v: 2}), (:Kind {v: 'b'}), (:Kind {v: true}), (:Kind {v: [1]}), (:Kind {v: 1.5}), "
+            "(:Kind {v: 'B'}), (:Kind {v: false}), (:Kind)"
+        )
+    )
+    ascending: list[Any] = [[1], "B", "b", False, True, 1.5, 2, None]
+    assert rows("MATCH (k:Kind) RETURN k.v ORDER BY k.v") == typed(ascending)
+    assert rows("MATCH (k:Kind) RETURN k.v ORDER BY k.v DESC") == typed(ascending[::-1])
+    assert rows("MATCH (k:Kind) WITH k ORDER BY k.v SKIP 2 LIMIT 2 RETURN k.v") == typed(["b", False])
+    assert rows("CALL { MATCH (k:Kind) RETURN k.v AS v ORDER BY v DESC LIMIT 2 } RETURN v") == typed([None, 2])
+    assert rows("MATCH (k:Kind) WITH k ORDER BY k.v WITH collect(k.v) AS vs RETURN vs") == typed([ascending[:-1]])
+    assert rows("MATCH (k:Kind) RETURN k.v ORDER BY k.v DESC SKIP 1 LIMIT 3") == typed([2, 1.5, True])
+
+
+def test_lists_of_several_kinds_of_item_nested_sort_item_by_item_among_values_of_other_kinds(
+    cypher_pm: PersistenceManager,
+):
+    # Not in the spec yet (#299): a list sorts first among values of other kinds, and among lists item by item, the
+    # items of each as Cypher orders their kinds at any depth.
+    if cypher_pm.type is DatabaseType.POSTGRES:
+        pytest.skip(KIND_ORDER_ON_POSTGRES)
+    if cypher_pm.type is DatabaseType.ORACLE:
+        pytest.skip(
+            "Oracle puts a number before a text and a null first within a list (liberation-data/drivine4j#205)."
+        )
+
+    def rows(cypher: str) -> Any:
+        return typed(cypher_pm.query(spec(cypher)))
+
+    values = "[[1, 'a'], 'x', [[2], 1], [[2], 'b'], [1, null], 3, [1], [[2], [1]], [{a: 1}], [true]]"
+    ascending: list[Any] = [
+        [{"a": 1}],
+        [[2], [1]],
+        [[2], "b"],
+        [[2], 1],
+        [True],
+        [1],
+        [1, "a"],
+        [1, None],
+        "x",
+        3,
+    ]
+    assert rows(f"UNWIND {values} AS t RETURN t ORDER BY t") == typed(ascending)
+    assert rows(f"UNWIND {values} AS t RETURN t ORDER BY t DESC") == typed(ascending[::-1])
+    assert rows(f"CALL {{ UNWIND {values} AS t RETURN t ORDER BY t LIMIT 4 }} RETURN t") == typed(ascending[:4])

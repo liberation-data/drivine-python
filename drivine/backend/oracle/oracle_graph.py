@@ -14,6 +14,9 @@ class OracleGraph(SqlGraph):
     through.
     """
 
+    DDL_WAIT_SECONDS = 60
+    """How long a statement of `ensuring` waits on a lock another session making the store holds."""
+
     def __init__(self, name: str = DEFAULT_GRAPH) -> None:
         super().__init__(name, "Oracle", 128)
 
@@ -79,6 +82,12 @@ class OracleGraph(SqlGraph):
         made gains them. A user who may not make a function (ORA-01031: making one takes `CREATE PROCEDURE`, which the
         `RESOURCE` role grants) still has the store made: a statement then compares as it would without them (see
         OracleStoredFunctions).
+
+        Two sessions that each find the store missing, as two pools or processes first connecting at once do, make it
+        together: a statement of one waits on the lock the other's holds, rather than being turned away at once
+        (ORA-00054), for up to `DDL_WAIT_SECONDS`, and then finds what the other made. The wait is the session's
+        DDL_LOCK_TIMEOUT, set back to Oracle's default, no wait, when the block ends, failed or not, so the session's
+        later statements are as they were.
         """
         statements = "\n".join(
             f"    BEGIN EXECUTE IMMEDIATE {sql_text(it)}; EXCEPTION WHEN e_exists THEN NULL; END;" for it in self.ddl
@@ -97,13 +106,19 @@ class OracleGraph(SqlGraph):
 BEGIN
     SELECT COUNT(*) INTO v_made FROM user_property_graphs WHERE graph_name = '{self.name.upper()}';
     IF v_made = 0 THEN
+    EXECUTE IMMEDIATE 'ALTER SESSION SET DDL_LOCK_TIMEOUT = {self.DDL_WAIT_SECONDS}';
 {statements}
+    EXECUTE IMMEDIATE 'ALTER SESSION SET DDL_LOCK_TIMEOUT = 0';
     END IF;
     SELECT COUNT(*) INTO v_made FROM user_objects
         WHERE object_type = 'FUNCTION' AND object_name = '{function}' AND status = 'VALID';
     IF v_made = 0 THEN
 {functions}
     END IF;
+EXCEPTION
+    WHEN OTHERS THEN
+        EXECUTE IMMEDIATE 'ALTER SESSION SET DDL_LOCK_TIMEOUT = 0';
+        RAISE;
 END;"""
 
     def ensured(self) -> None:

@@ -19,6 +19,8 @@ from drivine.backend.oracle.oracle_stored_functions import OracleStoredFunctions
 from drivine.backend.sql.sql_graph import sql_text
 from drivine.connection.oracle.oracle_connection import OracleConnection
 from drivine.connection.oracle.oracle_connection_provider import OracleConnectionProvider
+from drivine.cursor.cursor_specification import CursorSpecification
+from drivine.sync.connection.oracle.oracle_connection import OracleConnection as SyncOracleConnection
 
 # The lines of drivine4j's `OracleCypherCompiler.nullsEqualFunction`, copied verbatim from drivine4j's main at ae870884
 # (liberation-data/drivine4j#323), its Kotlin comment and `$name` too: Kotlin's `"$name"` is the function's name, and
@@ -289,3 +291,59 @@ async def test_a_statement_is_compiled_to_call_the_function_where_the_session_ma
         QuerySpecification[Any](cypher_statement("MATCH (c:Claim) SET c.e = c.a = c.b"))
     )
     assert flat.checks == []
+    # Nor does a statement that is not Cypher, which is not compiled.
+    plain = Session()
+    await OracleConnection(plain, None, "s", a_graph(), "db|me").query(QuerySpecification[Any]("UPDATE t SET v = 1"))
+    assert plain.checks == [] and plain.statements == ["UPDATE t SET v = 1"], plain.run
+
+
+async def test_a_cursor_is_compiled_to_call_the_function_where_the_session_may_and_to_declare_it_where_it_may_not(now):
+    read = "WITH [1, null] AS c RETURN c = [2, null]"
+    g = a_graph()
+    found = Session("found")
+    await OracleConnection(found, None, "s", g, "db|me").open_cursor(CursorSpecification[Any](cypher_statement(read)))
+    (opened,) = found.statements
+    assert f"{g}_nulls_equal(" in opened and not opened.startswith("WITH\nFUNCTION"), opened
+    absent = Session(904)
+    await OracleConnection(absent, None, "s", a_graph(), "db|me").open_cursor(
+        CursorSpecification[Any](cypher_statement(read))
+    )
+    (declared,) = absent.statements
+    assert declared.startswith("WITH\nFUNCTION") and "cy_nulls_equal(" in declared, declared
+
+
+class SyncCursor(Cursor):
+    def execute(self, statement: str, parameters: Any = None, **_: Any) -> None:  # type: ignore[override]
+        self.session.run.append(statement)
+        if "_nulls_equal(JSON('[1]'), JSON('[1]')) FROM DUAL" in statement:
+            outcome = self.session.outcomes.pop(0)
+            if outcome != "found":
+                raise ora(outcome)
+
+    def fetchall(self) -> list[Any]:  # type: ignore[override]
+        return []
+
+
+class SyncSession(Session):
+    def cursor(self) -> Cursor:
+        return SyncCursor(self)
+
+
+async def test_the_sync_api_shares_what_the_async_one_found_and_its_warning(now, caplog: pytest.LogCaptureFixture):
+    g = a_graph()
+    caplog.set_level(logging.WARNING, logger="drivine.oracle")
+    assert not await calls(Session(904), g)
+    asked = SyncSession("found")
+    assert not SyncOracleConnection(asked, None, "s", g, "db|me")._calls_nulls_equal()
+    assert asked.checks == []
+    now[0] += OracleStoredFunctions.ABSENT_FOR
+    missing = SyncSession(904)
+    assert not SyncOracleConnection(missing, None, "s", g, "db|me")._calls_nulls_equal()
+    assert len(missing.checks) == 1
+    warnings = [it for it in caplog.records if f"has no function {g}_nulls_equal" in it.getMessage()]
+    assert len(warnings) == 1, caplog.records
+    # And a yes the sync API finds is the async one's too.
+    other = a_graph()
+    assert SyncOracleConnection(SyncSession("found"), None, "s", other, "db|me")._calls_nulls_equal()
+    unasked = Session()
+    assert await calls(unasked, other) and unasked.checks == []

@@ -31,7 +31,7 @@ from drivine import (
 from drivine.cypher.sql.sql_cypher_compiler import PRECISION_OUT_OF_RANGE
 from drivine.model import stamps
 from drivine.query.statement import cypher_statement
-from tests.cypher.cypher_spec import Step, canonical, load
+from tests.cypher.cypher_spec import load
 from tests.integration.conftest import ORACLE, POSTGRES, SQL_STORES
 
 UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
@@ -482,7 +482,7 @@ async def test_a_text_past_32_kb_set_from_an_unwound_parameter_on_two_nodes_leav
         await query("UNWIND $items AS t MATCH (n:CyWrite {id: t.id}) SET n += t", items)
         assert await query("MATCH (n:CyWrite) RETURN n.a ORDER BY n.id") == texts
         floats = await query("MATCH (n:CyWrite) RETURN n.f ORDER BY n.id")
-        assert canonically(floats) == canonically([5.0, 5.0, 5.0]), floats
+        assert typed(floats) == typed([5.0, 5.0, 5.0]), floats
     finally:
         await connection.release()
         await clear(factory.get("oracle"))
@@ -588,12 +588,7 @@ async def test_an_unwound_parameters_items_are_written_as_they_are_given_by_set_
         {"id": 12, "f": -0.5, "m": "v"},
         {"id": 20, "f": 6.0},
     ]
-    assert canonically(rows) == canonically(expected), rows
-
-
-def canonically(value: Any) -> Any:
-    """The value in a form that compares by kind too: 5.0 is not 5."""
-    return canonical(value, Step(""))
+    assert typed(rows) == typed(expected), rows
 
 
 async def seeded(pm: PersistenceManager) -> None:

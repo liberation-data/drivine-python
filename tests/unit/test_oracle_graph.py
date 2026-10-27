@@ -1,10 +1,24 @@
-"""How Oracle's node rows are tested for labels: the first through the index over labels, the rest by their text."""
+"""
+How Oracle's store is made, and how its node rows are tested for labels: the first through the index over labels, the
+rest by their text.
+"""
 
-from drivine.backend.oracle.oracle_graph import has_labels, holds_label, serialized_label
+from drivine.backend.oracle.oracle_graph import OracleGraph, has_labels, holds_label, serialized_label
 from drivine.cypher.sql.oracle_cypher_compiler import OracleCypherCompiler
 
 HELD = "INSTR(',' || LTRIM(RTRIM(JSON_SERIALIZE(n.labels), ']'), '[') || ',\"',"
 """The start of the test of a later label, up to its needle."""
+
+
+def test_oracle_ensuring_waits_on_the_locks_of_another_session_making_the_store_and_sets_the_wait_back_failed_or_not():
+    ensuring = OracleGraph("tenant_a").ensuring
+    waits = f"EXECUTE IMMEDIATE 'ALTER SESSION SET DDL_LOCK_TIMEOUT = {OracleGraph.DDL_WAIT_SECONDS}';"
+    resets = "EXECUTE IMMEDIATE 'ALTER SESSION SET DDL_LOCK_TIMEOUT = 0';"
+    first = ensuring.index("CREATE TABLE IF NOT EXISTS tenant_a_node")
+    graph = ensuring.index("CREATE OR REPLACE PROPERTY GRAPH tenant_a")
+    assert ensuring.index("IF v_made = 0 THEN") < ensuring.index(waits) < first
+    assert ensuring.index(resets) > graph
+    assert f"WHEN OTHERS THEN\n        {resets}\n        RAISE;" in ensuring
 
 
 def test_tests_the_first_label_through_the_index_over_labels_and_the_rest_by_their_text_as_drivine4j_does():

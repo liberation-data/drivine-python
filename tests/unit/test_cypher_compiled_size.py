@@ -367,6 +367,12 @@ def test_values_that_may_hold_a_null_are_walked_on_oracle_by_the_stores_function
     fallback = OracleCypherCompiler("g", nulls_equal_stored=False).compile(write)
     assert not fallback.calls_stored_nulls_equal, fallback.sql
     assert "nulls_equal" not in fallback.sql and "THEN NULL ELSE FALSE END" in fallback.sql, fallback.sql
+    # And so are they in a reduce's step, which calls no function the query declares.
+    unfolded = OracleCypherCompiler("g", nulls_equal_stored=False).compile(
+        "MATCH (c:Claim) WITH [c.a, null] AS l RETURN reduce(acc = true, x IN [[1]] | acc AND x = l)"
+    )
+    assert not unfolded.calls_stored_nulls_equal, unfolded.sql
+    assert "nulls_equal" not in unfolded.sql and "THEN NULL ELSE FALSE END" in unfolded.sql, unfolded.sql
     declared = OracleCypherCompiler("g", nulls_equal_stored=False).compile(
         "MATCH (c:Claim) WITH [c.a, null] AS l, [c.b] AS m RETURN [l = m, m = l]"
     )

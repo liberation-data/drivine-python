@@ -66,11 +66,15 @@ jobs:
 
   # The full CI, as ci.yml runs it on a push or a pull request.
   gate:
+    needs: check
     uses: ./.github/workflows/ci.yml
 
   build:
     needs: [check, gate]
     runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.check.outputs.version }}
+      PUBLISH: ${{ needs.check.outputs.publish }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
@@ -80,6 +84,21 @@ jobs:
       # The sdist, then the wheel built from it, into dist/.
       - name: Build
         run: uv build --no-sources
+      # PyPI refuses a version it already has, so a tag of one fails here, before anything is uploaded. The wheel's
+      # name holds the version as PEP 440 normalizes it, as PyPI has it: 0.3.0rc1 for 0.3.0-rc.1.
+      - name: PyPI doesn't have this version yet
+        run: |
+          wheels=(dist/*.whl)
+          name=${wheels[0]#dist/drivine-}
+          normalized=${name%%-*}
+          status=$(curl -sL -o /dev/null -w '%{http_code}' "https://pypi.org/pypi/drivine/$normalized/json")
+          if [[ "$status" == 200 ]]; then
+            if [[ "$PUBLISH" == true ]]; then
+              echo "::error::PyPI already has drivine $normalized."
+              exit 1
+            fi
+            echo "::warning::PyPI already has drivine $normalized. This dry run goes on, but a tag of it would fail."
+          fi
       - name: Check the distributions
         run: uvx twine check --strict dist/*
       # The wheel, installed into a clean environment on the oldest and the newest Python drivine supports, imports
@@ -89,8 +108,6 @@ jobs:
       - name: Smoke test the wheel on Python 3.14
         run: uv run --no-project --python 3.14 python scripts/smoke_wheel.py dist/*.whl
       - name: List the distributions
-        env:
-          VERSION: ${{ needs.check.outputs.version }}
         run: |
           echo "drivine $VERSION"
           ls -l dist
@@ -133,4 +150,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
-        run: gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --generate-notes --verify-tag
+          VERSION: ${{ needs.check.outputs.version }}
+        run: |
+          prerelease=()
+          if [[ "$VERSION" == *-* ]]; then prerelease=(--prerelease); fi
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --generate-notes --verify-tag "${prerelease[@]}"

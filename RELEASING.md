@@ -30,7 +30,11 @@ git push origin vX.Y.Z
 - **`build`** builds the release artifacts from the checked-out ref, checks them, runs a smoke test, and uploads them
   as the run's artifact.
 - **`publish`** runs on a tag push alone, in the `release` environment. It publishes the exact files `build` made.
-- **`github-release`** then creates the GitHub release for the tag, with generated notes.
+- **`github-release`** then creates the GitHub release for the tag, with generated notes, marked a prerelease when
+  the version has a `-suffix`.
+
+A tag that fails `check` publishes nothing. Delete it (`git push origin :refs/tags/vX.Y.Z`), fix what the message
+says, and tag again.
 
 A **dry run** is everything but `publish` and `github-release`. Run it from the Actions tab (Release, Run workflow,
 on any branch or tag), and it runs by itself on a pull request that changes the release machinery. A tag push is the
@@ -40,13 +44,20 @@ only thing that publishes.
 
 - **Version:** `version` in `pyproject.toml`. The tag must be `v` and that version, character for character: `v0.3.0`
   for `0.3.0`. There is no `__version__` to keep in step.
+- **Prereleases:** write the version in `pyproject.toml` as the tag has it, with a `-`: `0.3.0-rc.1`, tagged
+  `v0.3.0-rc.1`. PEP 440 normalizes it, so the distributions and PyPI call it `0.3.0rc1`, and pip installs it only
+  when asked (`pip install drivine==0.3.0rc1`, or `--pre`). `0.3.0rc1` in `pyproject.toml` can't be tagged: `check`
+  wants a `-` in the tag. The suffix must be one PEP 440 reads (`a`, `b`, `rc`, `alpha`, `beta`, `c`, `pre`, `dev`, with
+  a number), or the build fails before anything is published.
 - **Build:** `uv build --no-sources`, which writes the sdist and the wheel built from it to `dist/` (hatchling).
-- **Checks:** `twine check --strict` on both, then `scripts/smoke_wheel.py`, which installs the wheel into a clean
+- **Checks:** `build` fails a tag of a version PyPI already has, since PyPI refuses to take it again. Then
+  `twine check --strict` on both, then `scripts/smoke_wheel.py`, which installs the wheel into a clean
   virtual environment on Python 3.11 and 3.14, imports `drivine`, and runs `python -m drivine.stubs` on a small
   project's models.
 - **Publish:** `pypa/gh-action-pypi-publish` uploads the built `dist/` to [PyPI](https://pypi.org/project/drivine/)
   with trusted publishing (OIDC). No token is held anywhere.
 - **Dry run:** leaves the `dist` artifact on the run: `drivine-X.Y.Z.tar.gz` and `drivine-X.Y.Z-py3-none-any.whl`.
+  A dry run of a version PyPI already has only warns.
 
 The same checks, locally, publishing nothing:
 

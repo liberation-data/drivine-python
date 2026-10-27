@@ -2,14 +2,10 @@ import os
 
 import pytest
 
-# Neo4j's latest release, so that a change in it shows up here soon. The Cypher spec (tests/cypher) is written for a
-# current release, as drivine4j runs it: the plugin's default, 5.26, refuses an aggregate in an ORDER BY that its RETURN
-# doesn't hold, and a date added to a text.
-os.environ.setdefault("NEO4J_TEST_IMAGE", "neo4j:latest")
-# Memgraph's and FalkorDB's current releases, for the same reason: move these to each new release. The plugin's own
-# defaults, which a user's tests get, stay memgraph/memgraph:3.12.0 and falkordb/falkordb:6.0.0.
-os.environ.setdefault("MEMGRAPH_TEST_IMAGE", "memgraph/memgraph:3.14.0")
-os.environ.setdefault("FALKORDB_TEST_IMAGE", "falkordb/falkordb:6.0.3")
+# The tests run on the plugin's defaults, the latest Neo4j, Memgraph and FalkorDB, which a user's tests get too, so that
+# an engine release that changes what Drivine reads or writes shows up here at once. The Cypher spec (tests/cypher) is
+# written for a current Neo4j, as drivine4j runs it. NEO4J_TEST_IMAGE, MEMGRAPH_TEST_IMAGE or FALKORDB_TEST_IMAGE runs
+# another.
 
 # The datasources the tests run on. Drivine's plugin starts a container for each and points these at it. The host is
 # a name that resolves nowhere, so that with the plugin off the tests fail rather than clear a database of yours. To

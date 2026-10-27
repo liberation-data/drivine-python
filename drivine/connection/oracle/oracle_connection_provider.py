@@ -65,7 +65,7 @@ class OracleConnectionProvider(ConnectionProvider):
         pool = self._pool_of()
         connection = await pool.acquire()
         try:
-            await self._tables.ensure(lambda statement: self._run(connection, statement))
+            await self._tables.ensure(lambda statement: self._ensure(connection, statement))
             cursor = connection.cursor()
             await cursor.execute("SELECT SYS_CONTEXT('USERENV', 'SID') FROM dual")
             row = await cursor.fetchone()
@@ -73,7 +73,13 @@ class OracleConnectionProvider(ConnectionProvider):
         except BaseException:
             await pool.release(connection)
             raise
-        return OracleConnection(connection, pool.release, f"oracle.{row[0] if row else '?'}", self.graph.name)
+        return OracleConnection(
+            connection,
+            pool.release,
+            f"oracle.{row[0] if row else '?'}",
+            self.graph.name,
+            f"{self.connect_string}|{self.user_name or ''}",
+        )
 
     async def end(self) -> None:
         # Cleared before waiting, so a second call made meanwhile doesn't close the pool again.
@@ -81,6 +87,14 @@ class OracleConnectionProvider(ConnectionProvider):
         self._tables.forget()
         if pool is not None:
             await pool.close(force=True)
+
+    async def _ensure(self, connection: Any, statement: str) -> None:
+        """
+        Runs `statement`, the graph's `ensuring`, and has every session asked again whether it may call the graph's
+        functions (see OracleStoredFunctions), as the block makes them where they were missing.
+        """
+        await self._run(connection, statement)
+        self.graph.ensured()
 
     async def _run(self, connection: Any, statement: str) -> None:
         cursor = connection.cursor()
@@ -99,7 +113,8 @@ class OracleConnectionProvider(ConnectionProvider):
                 """
                 Sets a session the pool opens to make no adaptive plan. One that can't be set is dropped from the pool
                 and its error raised from `acquire`, rather than given out unset: python-oracledb keeps a session whose
-                callback failed counted as out, and an async pool at its size then waits for it for ever.
+                callback failed counted as out, and an async pool at its size then waits for it for ever
+                (oracle/python-oracledb#626).
                 """
                 try:
                     await self._run(connection, NO_ADAPTIVE_PLANS)

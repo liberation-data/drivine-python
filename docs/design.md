@@ -358,6 +358,8 @@ field names to the graph's.
 The mapper turns driver values into Python ones (a Neo4j `DateTime` into a `datetime`), and the row is then
 validated with `model_validate`, so a bad value fails at the load rather than later. Pydantic v2's validator is compiled Rust, so this costs microseconds per object against
 milliseconds per round trip. A class may opt out with `validate_on_load=False`, which uses `model_construct`.
+`model_construct` coerces nothing, so the mapper itself turns the list a store holds for a `set` or `tuple` field into
+that set or tuple.
 
 ### Polymorphism
 

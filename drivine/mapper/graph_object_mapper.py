@@ -87,7 +87,11 @@ class GraphObjectMapper:
         """
         A node's or relationship's properties, by the fields they are stored for. A property bag takes the properties
         in its namespace, and a flat bag those no field or other bag is stored as.
+
+        A set or tuple field of a fragment constructed without validation is turned from the stored list here; a
+        validated one, as a relationship fragment always is, is left to pydantic, which also builds its items.
         """
+        validated = fragment is None or fragment.validate_on_load
         by_property = mapping.fields_by_property
         bags = fragment.property_bags if fragment else []
         values: dict[str, Any] = {it.field: {} for it in bags}
@@ -107,7 +111,14 @@ class GraphObjectMapper:
                 continue
             if value is None and field in mapping.null_as_default:
                 continue
-            values[field] = _unpacked(value) if field in mapping.json_packed else value
+            value = _unpacked(value) if field in mapping.json_packed else value
+            kind = mapping.collections.get(field)
+            if kind is not None and value == {}:
+                # Drivine for TypeScript saved an empty set as {} on Memgraph and as JSON text before 3.3.
+                value = _collected([], kind)
+            elif kind is not None and not validated and isinstance(value, (list, tuple, set, frozenset)):
+                value = _constructed(cast(Iterable[Any], value), kind)
+            values[field] = value
         for field, kind in mapping.empty_when_absent.items():
             if values.get(field) is None:
                 values[field] = empty_collection(kind)
@@ -139,6 +150,17 @@ def _collected(items: Iterable[Any], kind: CollectionKind) -> Any:
     if kind == "tuple":
         return tuple(items)
     return list(items)
+
+
+def _constructed(items: Iterable[Any], kind: CollectionKind) -> Any:
+    """
+    A stored list as the set or tuple of an unvalidated fragment's field. Items nothing built, such as the lists a
+    set of tuples is stored as, can't be hashed into a set, so the list is left as it is.
+    """
+    try:
+        return _collected(items, kind)
+    except TypeError:
+        return items
 
 
 def _sorted(items: list[Any], by: SortedBy | None) -> list[Any]:

@@ -183,6 +183,16 @@ provider made in code with `sets_no_adaptive_plans=False`: `registry.register(Or
 the sync API). It is on by default because, without it, a read can come back with no rows and no
 error; if you turn it off, run that statement in each session yourself.
 
+Beside the tables an Oracle graph is made with one function, `<graph>_nulls_equal`, by which a compiled Cypher
+statement compares two lists or maps that may hold a null (see
+[Cypher on Postgres and Oracle](#cypher-on-postgres-and-oracle)). drivine4j and Drivine for TypeScript make it byte for
+byte alike. Making it takes `CREATE PROCEDURE`, which the `RESOURCE` role grants, as well as the `CREATE TABLE` the
+tables take. A store an earlier version made gains it the next time a pool first connects to the graph. Where the user
+that makes the graph may not make a function, the graph is made without it, and Drivine logs a warning once for the
+graph when a statement would call it, and looks for it again a minute later. Until then a statement that writes, or the
+step of a `reduce`, compares two lists or maps that hold a null and differ as JSON as false, where Cypher may give null
+(`a = b`, of `[null] AS a, [1] AS b`), and a read declares the function itself.
+
 On Postgres, `DATABASE_NAME` is the database, and `DATABASE_DEFAULT_GRAPH_PATH` names the graph, `drivine` by default:
 see [Postgres](#postgres). On either, Cypher you write is compiled to SQL: see
 [Cypher on a relational database](#cypher-on-a-relational-database).
@@ -425,10 +435,13 @@ people = await pm.query(spec.bind({"city": "Sydney"}))
   map, still order the texts in them by the database's collation (`ORDER BY n.tags`).
 - On Oracle a text read out of JSON is at most 4,000 bytes, and an empty one is null; `reduce` doesn't run in a
   statement that writes, in the step of a `reduce`, or where its step reads a path; and `map[key]` reads null where an
-  expression gives the key. Lists or maps that may hold a null are compared by a function the query declares too; in a
-  statement that writes, or the step of a `reduce`, two that are equal as JSON compare as null and any other two as
-  false, so `a = [1]`, of `[null] AS a`, is false there, where Cypher's comparison is null. Lists and maps written out
-  are compared item by item there too, so `[null] = [1]` is null.
+  expression gives the key. Lists or maps that may hold a null are compared item by item, as Cypher compares them:
+  where one holds a null, two written as the same JSON are null at once, and any other two are walked by the graph's
+  function `<graph>_nulls_equal` (see [Connecting](#connecting)), in a statement that writes and the step of a `reduce`
+  too. Where the store has no such function, a read declares it, and a statement that writes, or the step of a
+  `reduce`, compares two such values that differ as JSON as false, so `a = [1]`, of `[null] AS a`, is false there,
+  where Cypher's comparison is null. Lists and maps written out are compared item by item everywhere, so
+  `[null] = [1]` is null.
 - On Oracle a property that a `RETURN` or a `WITH` returns or passes on (`RETURN n.name`) is read through its text,
   which costs about 2.4 to 3.8 times a plain read: 100,000 rows of `RETURN n.name` take about 490 ms, against 150 ms.
   This works around an Oracle bug, seen on 23.26.3: a string past about 32 KB taken from JSON as JSON, returned or fed
@@ -1031,13 +1044,13 @@ image, with user `drivine`, password `drivine-test` and database `drivine`) or O
 the datasource at it. Datasources of one type share a container. `USE_LOCAL_NEO4J=true` (or `_MEMGRAPH`, `_FALKORDB`,
 `_POSTGRES`, `_ORACLE`) leaves that type's datasources as they are, to test against your own instance, and
 `NEO4J_TEST_IMAGE` (or `MEMGRAPH_TEST_IMAGE`, `FALKORDB_TEST_IMAGE`, ...) picks another image. The plugin's own images
-are `neo4j:5.26-community`, `memgraph/memgraph:3.12.0` and `falkordb/falkordb:6.0.0`.
+are `neo4j:latest`, `memgraph/memgraph:latest` and `falkordb/falkordb:latest`, as drivine4j's are, so a new engine
+release reaches your tests as soon as it is out; pin one with its `<TYPE>_TEST_IMAGE` to hold it back.
 
 Drivine's own tests run on Oracle only with `ORACLE_TESTS=true`: its image is large, and the database wants two
 gigabytes. A run without it ends with the line `Oracle tests skipped: set ORACLE_TESTS=true to run them`. CI runs the
-Oracle tests in a job of their own, with `pytest -k oracle`. The tests run on `neo4j:latest`, as the Cypher spec is
-written for a current Neo4j, where the plugin's own default is 5.26. They run on Memgraph 3.14.0 and FalkorDB 6.0.3,
-the current releases, so that an engine release that changes what Drivine reads or writes shows up soon.
+Oracle tests in a job of their own, with `pytest -k oracle`. The tests run on the plugin's own images, the latest Neo4j,
+Memgraph and FalkorDB, so that an engine release that changes what Drivine reads or writes shows up at once.
 
 ## Logging
 

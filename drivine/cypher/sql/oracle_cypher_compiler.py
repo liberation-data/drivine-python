@@ -450,6 +450,27 @@ class OracleCypherCompiler(SqlCypherCompiler):
             return f"JSON_TABLE({json}, '$[*]' {items}"
         return f"LATERAL (SELECT {json} AS list) {alias}_l CROSS JOIN JSON_TABLE({alias}_l.list, '$[*]' {items}"
 
+    def temporal_elements(self, json: str, alias: str) -> str:
+        """
+        Each item read by its place, from as many rows as the list has items: Oracle 23 takes many seconds, or minutes,
+        to parse a `JSON_TABLE` over a list of temporal values worked out with temporal arithmetic, item by item in a
+        comprehension (liberation-data/drivine4j#331), and neither a query timeout nor a kill ends the parse.
+        `JSON_QUERY` reads the same list in moments, at about ten times the cost of `JSON_TABLE` for a short list, so a
+        list of other values is read by `elements`. The list is worked out once, in a lateral view of its own, and its
+        places counted in another: where they are counted over the list's own view, or the list is written out again
+        where it is read, Oracle reads an `EXISTS` over its items with the wrong row's columns. It reads as
+        `JSON_TABLE`'s `$[*]` does: no rows for null, and one for a value that is no list.
+        """
+        list_, place = f"{alias}_l", f"{alias}_r"
+        size = f"JSON_VALUE({list_}.list, '$.size()' RETURNING NUMBER)"
+        return (
+            f"LATERAL (SELECT /*+ NO_MERGE */ {json} AS list FROM DUAL) {list_} CROSS JOIN "
+            f"LATERAL (SELECT {place}.n AS item_no, "
+            f"JSON_QUERY({list_}.list, '$[$i]' PASSING {place}.n - 1 AS \"i\" RETURNING JSON) AS item "
+            f"FROM (SELECT LEVEL n FROM DUAL CONNECT BY LEVEL <= GREATEST(NVL({size}, 0), 1)) {place} "
+            f"WHERE {place}.n <= {size}) {alias}"
+        )
+
     def aggregate_list(self, value: str, order: str | None = None) -> str:
         ordered = f" ORDER BY {order}" if order is not None else ""
         return f"COALESCE(JSON_ARRAYAGG({value}{ordered} NULL ON NULL RETURNING JSON), JSON('[]'))"
@@ -460,11 +481,10 @@ class OracleCypherCompiler(SqlCypherCompiler):
         return f"COALESCE(JSON_ARRAYAGG({value}{ordered} RETURNING JSON), JSON('[]'))"
 
     def joined_texts(self, text: str, order: str) -> str:
-        """At most 4,000 bytes, as a `VARCHAR2`: the rest is left off, where it would fail the statement. Unused while
-        lists sort as JSON: see `lists_by_moments`."""
+        """At most 4,000 bytes, as a `VARCHAR2`: the rest is left off, where it would fail the statement."""
         return f"LISTAGG({text} ON OVERFLOW TRUNCATE '' WITHOUT COUNT) WITHIN GROUP (ORDER BY {order})"
 
-    def distinct_items(self, list_: str) -> str:
+    def distinct_items(self, list_: str, temporal: bool = False) -> str:
         """
         Each item where it is first among those equal to it as `JSON` compares them, kept as it is: not by its text,
         which is at most 4,000 bytes and keeps a map's keys in the order written, and not read back from it, which would
@@ -473,7 +493,7 @@ class OracleCypherCompiler(SqlCypherCompiler):
         return (
             "(SELECT COALESCE(JSON_ARRAYAGG(d.item ORDER BY d.item_no RETURNING JSON), JSON('[]')) "
             "FROM (SELECT e.item_no, e.item, ROW_NUMBER() OVER (PARTITION BY e.item ORDER BY e.item_no) AS n "
-            f"FROM {self.elements(list_, 'e')}) d WHERE d.n = 1)"
+            f"FROM {self.elements_of(list_, 'e', temporal)}) d WHERE d.n = 1)"
         )
 
     def first_of_each(self, list_: str, identities: str) -> str:
@@ -618,14 +638,6 @@ class OracleCypherCompiler(SqlCypherCompiler):
     """
     Oracle's JSON orders lists item by item already, and a grouped `KEEP (DENSE_RANK FIRST ORDER BY …)` by the list key
     drops the connection (ORA-03113), as drivine4j found.
-    """
-
-    lists_by_moments = False
-    """
-    Oracle 23 takes many minutes to parse `moments_key`'s `JSON_TABLE` over a list worked out item by item with temporal
-    arithmetic, as a comprehension works one out (liberation-data/drivine4j#331), and neither a query timeout nor a
-    kill ends the parse, so the session stalls: a list of zoned values sorts as its JSON, by the text of each, as it did
-    before lists sorted by their moments.
     """
 
     def identity_equals(self, x: str, y: str) -> str:

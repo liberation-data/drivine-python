@@ -244,7 +244,7 @@ class PostgresCypherCompiler(SqlCypherCompiler):
     def joined_texts(self, text: str, order: str) -> str:
         return f"string_agg({text}, '' ORDER BY {order})"
 
-    def distinct_items(self, list_: str) -> str:
+    def distinct_items(self, list_: str, temporal: bool = False) -> str:
         return (
             "(SELECT COALESCE(json_agg(d.item ORDER BY d.first), '[]'::json) FROM (SELECT min(e.item_no) AS first, "
             f"e.item FROM {self.elements(list_, 'e')} GROUP BY e.item) d)"

@@ -33,7 +33,7 @@ from drivine.sync import (
     QuerySpecification,
     transaction,
 )
-from tests.cypher.cypher_spec import Step, canonical, load
+from tests.cypher.cypher_spec import load
 from tests.sync_integration.conftest import ORACLE, POSTGRES, SQL_STORES
 
 UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
@@ -585,11 +585,6 @@ def test_an_unwound_parameters_items_are_written_as_they_are_given_by_set_create
         {"id": 20, "f": 6.0},
     ]
     assert typed(rows) == typed(expected), rows
-
-
-def typed(value: Any) -> Any:
-    """The value in a form that compares by kind too: 5.0 is not 5."""
-    return canonical(value, Step(""))
 
 
 def seeded(pm: PersistenceManager) -> None:

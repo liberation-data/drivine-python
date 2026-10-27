@@ -137,14 +137,14 @@ def _postgres_reach(started: DockerContainer) -> ContainerConnection:
 
 
 TEST_CONTAINER_SPECS: dict[DatabaseType, TestContainerSpec] = {
-    DatabaseType.NEO4J: TestContainerSpec(
-        "neo4j:5.26-community", 7687, _neo4j, _reach(7687, "neo4j", TEST_CONTAINER_PASSWORD)
-    ),
+    # Neo4j, FalkorDB and Memgraph run their latest images, as drivine4j's containers do, so a new engine release
+    # reaches the tests as soon as it is out. `<TYPE>_TEST_IMAGE` pins one to hold it back.
+    DatabaseType.NEO4J: TestContainerSpec("neo4j:latest", 7687, _neo4j, _reach(7687, "neo4j", TEST_CONTAINER_PASSWORD)),
     DatabaseType.FALKORDB: TestContainerSpec(
-        "falkordb/falkordb:6.0.0", 6379, _falkordb, _reach(6379), ready=_redis_ready
+        "falkordb/falkordb:latest", 6379, _falkordb, _reach(6379), ready=_redis_ready
     ),
     DatabaseType.MEMGRAPH: TestContainerSpec(
-        "memgraph/memgraph:3.12.0", 7687, _memgraph, _reach(7687), ready=_bolt_ready
+        "memgraph/memgraph:latest", 7687, _memgraph, _reach(7687), ready=_bolt_ready
     ),
     DatabaseType.ORACLE: TestContainerSpec("gvenzl/oracle-free:23-faststart", 1521, _oracle, _oracle_reach),
     # pgvector's image: Postgres with the extension a vector search uses, which the object manager makes where it can.
@@ -176,6 +176,12 @@ class DrivineTestContainers:
         return env.get(f"USE_LOCAL_{type.value}", "").lower() == "true"
 
     @staticmethod
+    def image(type: DatabaseType, env: MutableMapping[str, str]) -> str | None:
+        """The image the type's container runs: `<TYPE>_TEST_IMAGE`, or the type's default. None for no container."""
+        spec = TEST_CONTAINER_SPECS.get(type)
+        return None if spec is None else env.get(f"{type.value}_TEST_IMAGE") or spec.image
+
+    @staticmethod
     def datasources(env: MutableMapping[str, str]) -> list[tuple[str, DatabaseType]]:
         """The prefix of each datasource in the environment, '' for the default one, with its type."""
         found: list[tuple[str, DatabaseType]] = []
@@ -201,7 +207,7 @@ class DrivineTestContainers:
                     continue
                 started = containers.started.get(kind)
                 if started is None:
-                    image = env.get(f"{kind.value}_TEST_IMAGE") or spec.image
+                    image = cls.image(kind, env) or spec.image
                     logger.info("Starting %s for %s", image, kind.value)
                     started = spec.container(image).start()
                     containers.started[kind] = started

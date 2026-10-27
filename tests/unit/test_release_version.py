@@ -78,3 +78,12 @@ def test_set_rewrites_the_project_version(tmp_path: Path) -> None:
     release_version.set_version(pyproject, release_version.Version("0.3.0-rc.1"))
     assert 'version = "0.3.0-rc.1"' in pyproject.read_text()
     assert 'target-version = "py311"' in pyproject.read_text()
+
+
+def test_set_refuses_another_tables_version(tmp_path: Path) -> None:
+    pyproject = tmp_path / "pyproject.toml"
+    original = '[project]\nname = "drivine"\nversion="0.2.0"\n\n[tool.x]\nversion = "1.0"\n'
+    pyproject.write_text(original)
+    with pytest.raises(ValueError):
+        release_version.set_version(pyproject, release_version.Version("0.3.0"))
+    assert pyproject.read_text() == original

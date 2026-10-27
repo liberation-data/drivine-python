@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import re
 import sys
+import tomllib
 from pathlib import Path
 
 SEMVER = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-([0-9A-Za-z.-]+))?$")
@@ -94,7 +95,11 @@ def set_version(pyproject: Path, version: Version) -> None:
     text = pyproject.read_text()
     if len(PROJECT_VERSION.findall(text)) != 1:
         raise ValueError(f'{pyproject} doesn\'t have one line version = "..."')
-    pyproject.write_text(PROJECT_VERSION.sub(f'version = "{version}"', text))
+    changed = PROJECT_VERSION.sub(f'version = "{version}"', text)
+    # The line must be [project]'s version, not another table's.
+    if tomllib.loads(changed).get("project", {}).get("version") != str(version):
+        raise ValueError(f"{pyproject}'s line version = \"...\" isn't [project]'s version")
+    pyproject.write_text(changed)
 
 
 def main(args: list[str]) -> int:

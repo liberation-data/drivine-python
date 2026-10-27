@@ -409,7 +409,13 @@ people = await pm.query(spec.bind({"city": "Sydney"}))
   or a reduce's variable, or carried past a write in the statement, it compares by its properties.
 - openCypher's temporal values are their ISO 8601 text, as the store keeps a moment: `date`, `datetime`, `duration` and
   the rest make one, their fields read, and two moments compare as the moments they are. A parameter of a `date`,
-  `time`, `datetime` or `timedelta` is a temporal value of its kind.
+  `time`, `datetime` or `timedelta` is a temporal value of its kind. A zoned value the statement makes sorts as its
+  moment (`ORDER BY datetime(n.at)`); one read as a property sorts as its text, and so does a map that holds one. On
+  Postgres, a list of them, or a list of lists of them, sorts item by item so in an `ORDER BY`, `min` and `max`. Oracle
+  sorts such a list as it sorts JSON, a zoned value by its text: Oracle 23 takes many minutes to parse the key that
+  sorts it by moments over a list worked out item by item with temporal arithmetic
+  (`[i IN range(1, 10) | t + duration({minutes: i})]`), and neither a query timeout nor a kill ends the parse
+  ([drivine4j#331](https://github.com/liberation-data/drivine4j/issues/331)).
 - `UNION`, `CALL { … }`, `EXISTS { … }`, `COUNT { … }`, `FOREACH`, `=~`, variable-length relationships, `shortestPath`
   and `allShortestPaths` compile, as do quantified relationships (`-[:R]->{1,3}`) and quantified path patterns
   (`(a) ((x)-[r:R]->(y) WHERE x.v < y.v){1,3} (b)`), whose variables are lists of what each repetition matched. On
@@ -464,6 +470,11 @@ people = await pm.query(spec.bind({"city": "Sydney"}))
   (`WITH n {.a} AS m RETURN m.a`); after a write, which carries its rows on, such a value is read from the item's text
   too. A pattern that matches on such a text (`MERGE (n:X {a: r.a})`) compares it as JSON, which Oracle refuses past
   about 32 KB (ORA-40180), leaving the session open.
+- On Oracle an `OPTIONAL CALL` or an `OPTIONAL MATCH` is joined `ON 1 = 1`, where Postgres joins `ON TRUE`. This works
+  around an Oracle bug, seen on 23.26.3: in a scalar subquery, as a `COUNT { … }` is compiled, a join `ON TRUE` is
+  refused (ORA-00907) or crashes the session (ORA-03113, with ORA-07445 in the alert log)
+  ([#200](https://github.com/liberation-data/drivine-python/issues/200)). It goes once an Oracle release no longer fails
+  the repro in [docs/oracle-on-true-in-scalar-subquery-crash.md](docs/oracle-on-true-in-scalar-subquery-crash.md).
 - What each statement gives is the [Cypher spec](https://github.com/liberation-data/drivine-cypher-spec), which the
   three Drivine libraries run alike.
 

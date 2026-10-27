@@ -760,6 +760,104 @@ async def seeded(pm: PersistenceManager) -> None:
     await pm.query(spec(load("queries.yaml").graph or ""))
 
 
+@contextlib.asynccontextmanager
+async def one_session(pm: PersistenceManager) -> AsyncGenerator[None]:
+    """
+    On Oracle, one connection for the statements run in it, as a transaction holds one, so `asked_again` asks the
+    session that ran each statement. Elsewhere, nothing.
+    """
+    if pm.type is DatabaseType.ORACLE:
+        async with transaction(rollback=True):
+            yield
+    else:
+        yield
+
+
+async def asked_again(pm: PersistenceManager, cypher: str, parameters: dict[str, Any] | None = None) -> list[Any]:
+    """The rows of `cypher`; on Oracle, the session is asked again after it: a crash can come after the rows did."""
+    rows = await pm.query(spec(cypher, parameters))
+    if pm.type is DatabaseType.ORACLE:
+        assert await pm.query(spec("RETURN 1")) == [1], f"the session after: {cypher}"
+    return rows
+
+
+async def test_an_optional_call_or_an_optional_match_in_a_count_or_an_exists_keeps_the_row_it_finds_nothing_for(
+    cypher_pm: PersistenceManager,
+):
+    # Not in the spec yet (#338). Oracle refused an optional join on TRUE in a scalar subquery followed by WHERE … AND …
+    # (ORA-00907), and crashed the session on one without (ORA-03113, ORA-07445 in its alert log) (#200): it is joined
+    # on 1 = 1 there. drivine4j's CypherQueryContract of liberation-data/drivine4j#338.
+    await clear(cypher_pm)
+    await cypher_pm.query(spec("CREATE (:CyOpt {id: 1}), (:CyOpt {k: 'p'}), (:CyOpt {k: 'q'}), (:CyOpt {k: 'q'})"))
+    none = "OPTIONAL CALL { MATCH (z:Nope) RETURN z.k AS u }"
+    called = "CALL { MATCH (z:Nope) RETURN z.k AS u }"
+    async with one_session(cypher_pm):
+
+        async def counted(subquery: str) -> list[Any]:
+            return await asked_again(cypher_pm, f"MATCH (n:CyOpt {{id: 1}}) RETURN COUNT {{ {subquery} }}")
+
+        # At the top of a statement, as it ran before.
+        assert await asked_again(cypher_pm, f"{none} RETURN u") == [None]
+        assert await asked_again(cypher_pm, f"{none} MATCH (y:CyOpt) WHERE y.k = 'q' RETURN count(y)") == [2]
+        # In a COUNT { }: refused on Oracle, with a WHERE … AND … after the join, and else crashed the session.
+        assert await counted(f"{none} MATCH (y:CyOpt) WHERE y.k = 'q' RETURN y") == [2]
+        assert await counted(f"{none} RETURN u") == [1]
+        assert await counted(f"{none} MATCH (y:CyOpt) RETURN y") == [4]
+        assert await counted(f"MATCH (y:CyOpt) {none} WITH y, u WHERE y.k = u RETURN y") == [0]
+        # What a CALL that finds something gives is counted, and a plain CALL that finds nothing gives no row.
+        found = "OPTIONAL CALL { MATCH (z:CyOpt) WHERE z.k = 'q' RETURN z.k AS u }"
+        assert await counted(f"{found} MATCH (y:CyOpt) WHERE y.k = u RETURN y") == [4]
+        assert await counted(f"{called} MATCH (y:CyOpt) WHERE y.k = 'q' RETURN y") == [0]
+        # An OPTIONAL MATCH is the same join.
+        assert await counted("OPTIONAL MATCH (z:Nope) MATCH (y:CyOpt) WHERE y.k = 'q' RETURN y") == [2]
+        assert await counted("OPTIONAL MATCH (z:Nope) RETURN z") == [1]
+        # In an EXISTS { }, and in a WHERE.
+        exists = f"MATCH (n:CyOpt {{id: 1}}) RETURN [EXISTS {{ {none} RETURN u }}, EXISTS {{ {called} RETURN u }}]"
+        assert await asked_again(cypher_pm, exists) == [[True, False]]
+        where = f"MATCH (n:CyOpt) WHERE COUNT {{ {none} RETURN u }} = 1 AND n.id = 1 RETURN n.id"
+        assert await asked_again(cypher_pm, where) == [1]
+
+
+async def test_an_optional_call_or_an_optional_match_in_a_count_keeps_the_row_it_finds_nothing_for_over_the_specs_graph(
+    cypher_pm: PersistenceManager,
+):
+    # Not in the spec yet (#338): the steps proposed for "CALL subqueries".
+    await seeded(cypher_pm)
+    async with one_session(cypher_pm):
+        keanu = (
+            "MATCH (p:Person {name: 'Keanu'}) RETURN COUNT { OPTIONAL CALL (p) { MATCH (p)-[:NOPE]->(f) "
+            "RETURN f.name AS friend } MATCH (m:Movie) WHERE m.released > 1996 AND m.released < 2010 RETURN m }"
+        )
+        assert await asked_again(cypher_pm, keanu) == [2]
+        hugo = (
+            "MATCH (p:Person {name: 'Hugo'}) RETURN COUNT { OPTIONAL CALL (p) { MATCH (p)-[:KNOWS]->(f) "
+            "RETURN f.name AS friend } RETURN friend }"
+        )
+        assert await asked_again(cypher_pm, hugo) == [1]
+        matched = "MATCH (p:Person {name: 'Hugo'}) RETURN COUNT { OPTIONAL MATCH (p)-[:KNOWS]->(f) RETURN f }"
+        assert await asked_again(cypher_pm, matched) == [1]
+
+
+async def test_an_optional_call_in_a_writes_subquery_counts_what_it_finds_and_the_row_it_finds_nothing_for(
+    cypher_pm: PersistenceManager,
+):
+    # On Oracle an OPTIONAL CALL in a write's subquery was refused (ORA-06550, ORA-00907) until it was joined on 1 = 1,
+    # and with no WHERE … AND … after the join, it closed the session (#200). drivine4j's CypherWriteContract.
+    await clear(cypher_pm)
+    await cypher_pm.query(spec("CREATE (:CyWrite {id: 1}), (:CyOther {k: 'm'}), (:CyOther {k: 'l'})"))
+    given = {"ts": [{"id": 1, "a": "m", "m": {"a": "m"}, "l": {"a": "none"}}]}
+    subqueries = {
+        "o": "OPTIONAL CALL { WITH t MATCH (z:CyNope) RETURN t AS u } MATCH (y:CyOther) WHERE y.k = u.a RETURN y",
+        "f": "OPTIONAL CALL { WITH t RETURN t.m AS u } MATCH (y:CyOther) WHERE y.k = u.a RETURN y",
+        "b": "OPTIONAL CALL { WITH t MATCH (z:CyNope) RETURN t AS u } RETURN u",
+    }
+    async with one_session(cypher_pm):
+        for name, subquery in subqueries.items():
+            statement = f"UNWIND $ts AS t MATCH (n:CyWrite {{id: t.id}}) SET n.{name} = COUNT {{ {subquery} }}"
+            await asked_again(cypher_pm, statement, given)
+        assert await cypher_pm.query(spec("MATCH (n:CyWrite {id: 1}) RETURN [n.o, n.f, n.b]")) == [[0, 1, 1]]
+
+
 async def test_collect_distinct_beside_keys_other_aggregates_an_order_a_page_and_a_variable_outside_its_aggregates(
     cypher_pm: PersistenceManager,
 ):
@@ -1045,6 +1143,145 @@ async def test_min_and_max_of_lists_the_statement_makes_compare_them_item_by_ite
     assert await cypher_pm.query(spec("UNWIND [[1, null], [1], [null], null] AS xs RETURN [min(xs), max(xs)]")) == [
         [[1], [None]]
     ]
+
+
+ZONED_LIST_ON_ORACLE = (
+    "Oracle sorts a list of zoned values as its JSON (liberation-data/drivine4j#331): see test_oracle_zoned_list_sort."
+)
+ZONED = (
+    "datetime('2024-03-15T10:00:00+02:00')",
+    "datetime('2024-03-15T09:00:00Z')",
+    "datetime('2024-03-15T08:30:00Z')",
+)
+"""As text, 10:00+02:00 (08:00 UTC) sorts after 09:00Z, and 08:30Z before both."""
+
+
+async def test_a_list_of_zoned_values_and_a_list_of_lists_of_them_sort_and_compare_item_by_item_as_their_moments(
+    cypher_pm: PersistenceManager,
+):
+    # Not in the spec yet (#199): drivine4j's test of liberation-data/drivine4j#199, ported for #181.
+    if cypher_pm.type is DatabaseType.ORACLE:
+        pytest.skip(ZONED_LIST_ON_ORACLE)
+    a, b, c = ZONED
+    hours = [10, 8, 9]
+
+    async def query(cypher: str) -> list[Any]:
+        return await cypher_pm.query(spec(cypher))
+
+    assert await query(f"UNWIND [{b}, {a}, {c}] AS t WITH [t] AS ts RETURN ts[0].hour ORDER BY ts") == hours
+    assert await query(f"UNWIND [{b}, {a}, {c}] AS t WITH [t] AS ts RETURN ts[0].hour ORDER BY ts DESC") == hours[::-1]
+    assert await query(f"UNWIND [{b}, {a}, {c}] AS t WITH t.hour AS h, collect(t) AS ts RETURN h ORDER BY ts") == hours
+    assert await query(f"UNWIND [[{b}], [{a}], [{c}]] AS ts RETURN ts[0].hour ORDER BY ts") == hours
+    assert await query(f"UNWIND [{b}, {a}, {c}] AS t WITH [[t]] AS l RETURN l[0][0].hour ORDER BY l") == hours
+    assert await query(f"UNWIND [{b}, {a}, {c}] AS t WITH t.hour AS h, collect([t]) AS l RETURN h ORDER BY l") == hours
+    # A list that starts another comes first; a null item after any moment.
+    assert await query(f"WITH [{a}] AS x, [{a}, {b}] AS y UNWIND [y, x] AS l RETURN size(l) ORDER BY l") == [1, 2]
+    assert await query(
+        f"WITH [{a}, null] AS x, [{a}, {b}] AS y UNWIND [x, y] AS l RETURN size([i IN l WHERE i IS NULL]) ORDER BY l"
+    ) == [0, 1]
+    # A long list, and lists worked out with temporal arithmetic, by a comprehension or collect(): k = 0's start at
+    # 08:00 UTC.
+    at = f"CASE k WHEN 0 THEN {a} ELSE {b} END"
+    assert await query(
+        f"UNWIND [0, 1] AS k WITH k, [x IN range(1, 200) | {at} + duration({{minutes: x}})] AS l RETURN k ORDER BY l"
+    ) == [0, 1]
+    assert await query(
+        f"UNWIND [0, 1] AS k UNWIND range(1, 3) AS x WITH k, {at} + duration({{minutes: x}}) AS t "
+        "WITH k, collect(t) AS l RETURN k ORDER BY l"
+    ) == [0, 1]
+    # min() and max() of them.
+    assert await query(f"UNWIND [[{b}], [{a}], [{c}]] AS l RETURN [min(l)[0].hour, max(l)[0].hour]") == [[10, 9]]
+    assert await query(
+        f"UNWIND [{b}, {a}, {c}] AS t WITH [[t]] AS l RETURN [min(l)[0][0].hour, max(l)[0][0].hour]"
+    ) == [[10, 9]]
+    # A time of day with an offset, as a moment.
+    times = "[time('10:00:00+02:00'), time('09:00:00Z'), time('08:30:00Z')]"
+    assert await query(f"UNWIND {times} AS t WITH [t] AS ts RETURN ts[0].hour ORDER BY ts") == hours
+    assert await query(f"UNWIND {times} AS t WITH [t] AS l RETURN [min(l)[0].hour, max(l)[0].hour]") == [[10, 9]]
+    # Taken from a list kept in order, by head() and last().
+    assert await query(
+        f"UNWIND [{b}, {a}, {c}] AS t WITH t ORDER BY t WITH collect(t) AS ts RETURN [head(ts).hour, last(ts).hour]"
+    ) == [[10, 9]]
+
+
+async def test_a_list_of_zoned_values_sorts_as_their_moments_however_it_was_made_and_an_empty_list_or_null_as_cypher(
+    cypher_pm: PersistenceManager,
+):
+    # Not in the spec yet (#199). By moment 10:00+02:00, 08:30Z, 09:00Z; as text 08:30Z, 09:00Z, 10:00+02:00.
+    if cypher_pm.type is DatabaseType.ORACLE:
+        pytest.skip(ZONED_LIST_ON_ORACLE)
+    a, b, c = ZONED
+    hours = [10, 8, 9]
+
+    async def query(cypher: str) -> list[Any]:
+        return await cypher_pm.query(spec(cypher))
+
+    async def sorted_by(by: str, list_: str = "[[t]]") -> list[Any]:
+        return await query(f"UNWIND [{b}, {a}, {c}] AS t WITH t, {list_} AS l RETURN t.hour ORDER BY {by}")
+
+    # Taken from a list of lists, by an index, head(), last(), a slice, reverse(), tail() and a comprehension.
+    for by in ("l[0]", "head(l)", "last(l)", "l[0..1]", "reverse(l)", "[x IN l WHERE x IS NOT NULL]", "[x IN l | x]"):
+        assert await sorted_by(by) == hours, by
+    assert await sorted_by("tail(l)", "[[t], [t]]") == hours
+    # Made by a CASE, collect(DISTINCT), a UNION, and a comprehension over nodes or a pattern.
+    assert await sorted_by("CASE WHEN t IS NOT NULL THEN [t] END") == hours
+    assert (
+        await query(f"UNWIND [{b}, {a}, {c}] AS t WITH t.hour AS h, collect(DISTINCT [t]) AS l RETURN h ORDER BY l")
+        == hours
+    )
+    assert (
+        await query(
+            f"CALL {{ UNWIND [{b}] AS t RETURN [[t]] AS l UNION UNWIND [{a}, {c}] AS t RETURN [[t]] AS l }} "
+            "RETURN l[0][0].hour ORDER BY l"
+        )
+        == hours
+    )
+    await clear(cypher_pm)
+    await cypher_pm.query(
+        spec(
+            "CREATE (:CyZoned {h: 10})-[:AT]->(:CyZonedAt {at: '2024-03-15T10:00:00+02:00'}), "
+            "(:CyZoned {h: 9})-[:AT]->(:CyZonedAt {at: '2024-03-15T09:00:00Z'}), "
+            "(:CyZoned {h: 8})-[:AT]->(:CyZonedAt {at: '2024-03-15T08:30:00Z'})"
+        )
+    )
+    assert await query("MATCH (z:CyZoned) RETURN z.h ORDER BY [(z)-[:AT]->(w) | [datetime(w.at)]]") == hours
+    assert (
+        await query(
+            "MATCH (z:CyZoned)-[:AT]->(w) WITH z, collect(w) AS ws RETURN z.h ORDER BY [n IN ws | [datetime(n.at)]]"
+        )
+        == hours
+    )
+    # The empty list first, then a list of a moment, then a null item or no list; as items of a list too.
+    ordered = [2, 1, 3]
+    cased = f"CASE k WHEN 1 THEN [{a}] WHEN 2 THEN [i IN [{a}] WHERE false] END"
+    assert await query(f"UNWIND [1, 2, 3] AS k WITH k, {cased} AS l RETURN k ORDER BY l") == ordered
+    assert await query(f"UNWIND [1, 2, 3] AS k WITH k, {cased} AS l RETURN k ORDER BY l DESC") == ordered[::-1]
+    assert await query(f"UNWIND [1, 2, 3] AS k WITH k, [{cased}] AS l RETURN k ORDER BY l") == ordered
+    assert await query(f"UNWIND [1, 2, 3] AS k WITH k, [{cased}] AS l RETURN k ORDER BY l DESC") == ordered[::-1]
+    # Two lists of lists of them put together, and min() or max() of lists of them, grouped.
+    assert await sorted_by("l + l") == hours
+    assert await query(f"UNWIND [{b}, {a}, {c}] AS t WITH t.hour AS h, min([t]) AS m RETURN h ORDER BY m") == hours
+    assert await query(f"UNWIND [{b}, {a}, {c}] AS t WITH t.hour AS h, max([[t]]) AS m RETURN h ORDER BY m") == hours
+    # Carried past a write, as a list and as a list of lists.
+    assert (
+        await query(f"UNWIND [{b}, {a}, {c}] AS t WITH t, [t] AS l CREATE (:CyZonedWrite) RETURN t.hour ORDER BY l")
+        == hours
+    )
+    assert (
+        await query(f"UNWIND [{b}, {a}, {c}] AS t WITH t, [[t]] AS l CREATE (:CyZonedWrite) RETURN t.hour ORDER BY l")
+        == hours
+    )
+    # Read from the row a write works its value out of (row_keys), in a subquery that sorts them.
+    assert await query(
+        f"UNWIND [{b}, {a}, {c}] AS t WITH collect([t]) AS ls CREATE (n:CyZonedWrite) "
+        "SET n.first = COUNT { UNWIND ls AS l WITH l ORDER BY l LIMIT 1 WITH l WHERE l[0].hour = 10 RETURN l } "
+        "RETURN n.first"
+    ) == [1]
+    # After a term whose kind is open, which sorts by its kind first (liberation-data/drivine4j#308): the text before
+    # the numbers, then by moment.
+    opened = f"UNWIND [{b}, {a}, {c}] AS t WITH t, [t] AS l, CASE t.hour WHEN 8 THEN 'x' ELSE 1 END AS o RETURN t.hour"
+    assert await query(f"{opened} ORDER BY o, l") == [8, 10, 9]
+    assert await query(f"{opened} ORDER BY o DESC, l DESC") == [9, 10, 8]
 
 
 async def test_an_aggregate_of_floats_gives_a_float_whole_or_not_and_a_sum_of_integers_an_integer(

@@ -46,6 +46,10 @@ class TemporalSql(ABC):
         """The text as a number: null where it is null or empty."""
 
     @abstractmethod
+    def sortable(self, timestamp: str) -> str:
+        """The timestamp as a text of one width, `2024-03-15T10:30:00.000000`, which orders as the timestamps do."""
+
+    @abstractmethod
     def micros(self, timestamp: str) -> str:
         """The microseconds of the second of the timestamp, as six digits."""
 

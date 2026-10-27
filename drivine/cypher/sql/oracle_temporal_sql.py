@@ -65,6 +65,9 @@ class OracleTemporalSql(TemporalSql):
     def number(self, text: str) -> str:
         return f"TO_NUMBER({text})"
 
+    def sortable(self, timestamp: str) -> str:
+        return f"TO_CHAR({timestamp}, 'YYYY-MM-DD\"T\"HH24:MI:SS.FF6')"
+
     def micros(self, timestamp: str) -> str:
         return f"TO_CHAR({timestamp}, 'FF6')"
 

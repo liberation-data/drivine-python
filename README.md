@@ -314,8 +314,10 @@ database.
 - Parameters are named, `$name`, and not a list; values are compared as JSON, so `'7'` is not `7`; dates and times
   come back as ISO 8601 text; on Oracle a cursor over a write is refused: see
   [Cypher on Postgres and Oracle](#cypher-on-postgres-and-oracle).
-- On Postgres, float arithmetic is exact decimal, and a list or a map read from a property orders the texts in it by
-  the database's collation, where other text is ordered by its code points, as Cypher does
+- On Postgres, float arithmetic, `sum()` and `avg()` are exact decimal, so they are more accurate: `0.1 + 0.2` is
+  `0.3` there, where doubles give `0.30000000000000004`. A result differs from Neo4j's only around its 16th significant
+  digit, and still comes back as a float. A list or a map read from a property orders the texts in it by the
+  database's collation, where other text is ordered by its code points, as Cypher does
   ([Cypher on Postgres and Oracle](#cypher-on-postgres-and-oracle)).
 - On Oracle, a text read out of JSON is at most 4,000 bytes, and an empty one is null; a quantified path pattern's
   `WHERE`, `reduce` and `map[key]` take less than on Postgres
@@ -389,8 +391,10 @@ people = await pm.query(spec.bind({"city": "Sydney"}))
   mode …) give the floats Neo4j gives, but where Neo4j gives NaN or an infinity (`log(0)`, `sqrt(-1)`, `exp(1000)`) the
   statement fails: JSON holds neither. A float is written as Java writes a double, by `toString` and added to a text:
   `1.0E7`, `1.2E-4`.
-- On Postgres, compiled Cypher works float arithmetic out in exact decimal (`numeric`), not as a double, so a result
-  can differ from a graph engine's in its last digits: `0.1 * 3` is `0.3`, where Neo4j gives `0.30000000000000004`. A
+- On Postgres, compiled Cypher works float arithmetic, `sum()` and `avg()` out in exact decimal (`numeric`), not as
+  doubles, so it is more accurate: `0.1 + 0.2` is `0.3`, where Neo4j gives `0.30000000000000004`. A result
+  differs from a graph engine's only around its 16th significant digit, and still comes back as a float. It shows only
+  where a result is compared for exact equality with one worked out in doubles, which is fragile with floats anyway. A
   float's text carries no trailing zeros: `toString(4.0 / 2)` is `"2.0"`.
 - On Postgres, text is compared and sorted by its code points, as Cypher does (`B, a, b`), not by the database's
   collation: in the `C` collation, whose byte order is code point order in a UTF-8 database, as `initdb` and Postgres's

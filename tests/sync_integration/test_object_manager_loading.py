@@ -1,8 +1,19 @@
 # Written by scripts/unasync.py from tests/integration/test_object_manager_loading.py:
 # change that, and run the script again.
+from typing import Annotated
+
 import pytest
 
-from drivine.sync import PersistenceManager, QuerySpecification, StatelessGraphObjectManager, count, key
+from drivine.sync import (
+    EmptyWhenAbsent,
+    NodeFragment,
+    NodeId,
+    PersistenceManager,
+    QuerySpecification,
+    StatelessGraphObjectManager,
+    count,
+    key,
+)
 from tests.models import (
     ActorStats,
     ActorWithLatestMovie,
@@ -189,3 +200,50 @@ class TestViews:
         latest = gom.load_all(ActorWithLatestMovie)
         assert [it.actor.name for it in latest] == ["Keanu"]  # a single relationship typed without None is required
         assert latest[0].note == "not loaded"
+
+
+class CheckedCodes(NodeFragment, labels=["CheckedCodes"]):
+    id: Annotated[str, NodeId()]
+    codes: set[str] = set()
+    pair: tuple[str, ...] = ()
+    always_codes: Annotated[set[str], EmptyWhenAbsent()] = set()
+    always_pair: Annotated[tuple[str, ...], EmptyWhenAbsent()] = ()
+
+
+class UncheckedCodes(NodeFragment, labels=["UncheckedCodes"], validate_on_load=False):
+    id: Annotated[str, NodeId()]
+    codes: set[str] = set()
+    pair: tuple[str, ...] = ()
+    always_codes: Annotated[set[str], EmptyWhenAbsent()] = set()
+    always_pair: Annotated[tuple[str, ...], EmptyWhenAbsent()] = ()
+
+
+@pytest.mark.parametrize("type_", [CheckedCodes, UncheckedCodes], ids=["validated", "unvalidated"])
+class TestCollectionFields:
+    """The store holds a set or tuple as a list: it loads as the set or tuple, validated on load or not."""
+
+    def test_a_saved_set_and_tuple_load_as_a_set_and_a_tuple(self, gom, type_):
+        gom.save(type_(id="1", codes={"x", "y"}, pair=("a", "b"), always_codes={"p"}, always_pair=("c",)))
+        gom.save(type_(id="2"))
+        full = gom.load(type_, "1")
+        assert full is not None
+        assert type(full.codes) is set and full.codes == {"x", "y"}
+        assert type(full.pair) is tuple and full.pair == ("a", "b")
+        assert type(full.always_codes) is set and full.always_codes == {"p"}
+        assert type(full.always_pair) is tuple and full.always_pair == ("c",)
+        empty = gom.load(type_, "2")
+        assert empty is not None
+        assert type(empty.codes) is set and empty.codes == set()
+        assert type(empty.pair) is tuple and empty.pair == ()
+        assert type(empty.always_codes) is set and empty.always_codes == set()
+        assert type(empty.always_pair) is tuple and empty.always_pair == ()
+
+    def test_a_list_written_in_cypher_loads_as_a_set_and_a_tuple(self, pm, gom, type_):
+        label = type_.__name__
+        run(pm, f"CREATE (:{label} {{id: '1', codes: ['x', 'y', 'x'], pair: ['a', 'b'], alwaysCodes: ['p']}})")
+        loaded = gom.load(type_, "1")
+        assert loaded is not None
+        assert type(loaded.codes) is set and loaded.codes == {"x", "y"}
+        assert type(loaded.pair) is tuple and loaded.pair == ("a", "b")
+        assert type(loaded.always_codes) is set and loaded.always_codes == {"p"}
+        assert type(loaded.always_pair) is tuple and loaded.always_pair == ()  # absent, so EmptyWhenAbsent's empty

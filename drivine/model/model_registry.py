@@ -250,6 +250,7 @@ class ModelRegistry:
             json_packed=mapping.json_packed,
             null_as_default=mapping.null_as_default,
             empty_when_absent=mapping.empty_when_absent,
+            collections=mapping.collections,
             type=type_,
             labels=labels,
             node_id_field=id_field,
@@ -295,6 +296,7 @@ class ModelRegistry:
             json_packed=mapping.json_packed,
             null_as_default=mapping.null_as_default,
             empty_when_absent=mapping.empty_when_absent,
+            collections=mapping.collections,
             type=type_,
             target_field=target_field,
             target=target,
@@ -476,8 +478,10 @@ class ModelRegistry:
                 if info.is_required():
                     raise DrivineError(f"NullAsDefault {where} loads a stored null as its default, so it needs one.")
                 mapping.null_as_default.add(field)
+            kind = FieldShape.of(info.annotation).collection
+            if kind in ("set", "tuple"):
+                mapping.collections[field] = kind
             if EmptyWhenAbsent in marks:
-                kind = FieldShape.of(info.annotation).collection
                 if kind is None:
                     raise DrivineError(f"EmptyWhenAbsent {where} loads an empty collection; the field isn't one.")
                 mapping.empty_when_absent[field] = kind

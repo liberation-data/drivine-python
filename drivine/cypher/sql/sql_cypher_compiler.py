@@ -540,6 +540,14 @@ class SqlCypherCompiler(ABC):
         """
         return query
 
+    def lateral(self, query: str, name: str, optional: bool) -> str:
+        """
+        The join of the lateral query `query`, named `name`, to the row: an `OPTIONAL CALL`'s or an `OPTIONAL MATCH`'s
+        keeps the row it finds nothing for, and a `CALL`'s doesn't.
+        """
+        text = f"(\n{indent(query)}\n) {name}"
+        return f"LEFT JOIN LATERAL {text} ON TRUE" if optional else f"CROSS JOIN LATERAL {text}"
+
     def once(self, query: str) -> str:
         """
         The query that makes a value anew for each row, `randomUUID()`, kept apart from the query that reads it, where
@@ -1316,7 +1324,7 @@ class SqlCypherCompiler(ABC):
         named = [(variable, value, self._alias("v")) for variable, value in found.items()]
         columns = [it for _, value, column in named for it in _columns(value, column, self._identities)] or ["1 AS one"]
         text = [f"SELECT {', '.join(columns)}", *inner.from_(), *_present(inner.where_clause())]
-        select.join(f"LEFT JOIN LATERAL (\n{indent(chr(10).join(text))}\n) {name} ON TRUE")
+        select.join(self.lateral("\n".join(text), name, optional=True))
         for variable, value, column in named:
             select.bind(variable, _columns_of(value, name, column, self._identities))
 
@@ -1364,8 +1372,7 @@ class SqlCypherCompiler(ABC):
         self._row_order = order
         _redeclared(projected.scope, select.bound)
         name = self._alias("c")
-        text = f"(\n{indent(self.called(projected.sql))}\n) {name}"
-        select.join(f"LEFT JOIN LATERAL {text} ON TRUE" if call.optional else f"CROSS JOIN LATERAL {text}")
+        select.join(self.lateral(self.called(projected.sql), name, call.optional))
         for variable, value in projected.scope.items():
             if call.optional and isinstance(value, Json):
                 # A value taken from a write's row is null here where the call finds nothing: it is read as returned.

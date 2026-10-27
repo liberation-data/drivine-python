@@ -458,6 +458,11 @@ people = await pm.query(spec.bind({"city": "Sydney"}))
   `CREATE (:X {a: r.a})`, `MERGE … SET n.a = r.a`) is read from the row's text, at no cost measured: 1,000 rows set by
   one statement take as long as before. Any other value, a map set whole by `SET n += r` among them, is read as before.
   A value such an item gives a `RETURN` or a `WITH` (`RETURN r.a`, `WITH r.a AS a`) isn't worked around yet.
+- On Oracle an `OPTIONAL CALL` or an `OPTIONAL MATCH` is joined `ON 1 = 1`, where Postgres joins `ON TRUE`. This works
+  around an Oracle bug, seen on 23.26.3: in a scalar subquery, as a `COUNT { … }` is compiled, a join `ON TRUE` is
+  refused (ORA-00907) or crashes the session (ORA-03113, with ORA-07445 in the alert log)
+  ([#200](https://github.com/liberation-data/drivine-python/issues/200)). It goes once an Oracle release no longer fails
+  the repro in [docs/oracle-on-true-in-scalar-subquery-crash.md](docs/oracle-on-true-in-scalar-subquery-crash.md).
 - What each statement gives is the [Cypher spec](https://github.com/liberation-data/drivine-cypher-spec), which the
   three Drivine libraries run alike.
 

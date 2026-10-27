@@ -784,9 +784,9 @@ async def asked_again(pm: PersistenceManager, cypher: str, parameters: dict[str,
 async def test_an_optional_call_or_an_optional_match_in_a_count_or_an_exists_keeps_the_row_it_finds_nothing_for(
     cypher_pm: PersistenceManager,
 ):
-    # Not in the spec yet (#338). Oracle refused an optional join on TRUE in a scalar subquery followed by WHERE … AND …
-    # (ORA-00907), and crashed the session on one without (ORA-03113, ORA-07445 in its alert log) (#200): it is joined
-    # on 1 = 1 there. drivine4j's CypherQueryContract of liberation-data/drivine4j#338.
+    # Beside the spec's case since v0.6.17 (#338). Oracle refused an optional join on TRUE in a scalar subquery
+    # followed by WHERE … AND … (ORA-00907), and crashed the session on one without (ORA-03113, ORA-07445 in its alert
+    # log) (#200): it is joined on 1 = 1 there. drivine4j's CypherQueryContract of liberation-data/drivine4j#338.
     await clear(cypher_pm)
     await cypher_pm.query(spec("CREATE (:CyOpt {id: 1}), (:CyOpt {k: 'p'}), (:CyOpt {k: 'q'}), (:CyOpt {k: 'q'})"))
     none = "OPTIONAL CALL { MATCH (z:Nope) RETURN z.k AS u }"
@@ -816,26 +816,6 @@ async def test_an_optional_call_or_an_optional_match_in_a_count_or_an_exists_kee
         assert await asked_again(cypher_pm, exists) == [[True, False]]
         where = f"MATCH (n:CyOpt) WHERE COUNT {{ {none} RETURN u }} = 1 AND n.id = 1 RETURN n.id"
         assert await asked_again(cypher_pm, where) == [1]
-
-
-async def test_an_optional_call_or_an_optional_match_in_a_count_keeps_the_row_it_finds_nothing_for_over_the_specs_graph(
-    cypher_pm: PersistenceManager,
-):
-    # Not in the spec yet (#338): the steps proposed for "CALL subqueries".
-    await seeded(cypher_pm)
-    async with one_session(cypher_pm):
-        keanu = (
-            "MATCH (p:Person {name: 'Keanu'}) RETURN COUNT { OPTIONAL CALL (p) { MATCH (p)-[:NOPE]->(f) "
-            "RETURN f.name AS friend } MATCH (m:Movie) WHERE m.released > 1996 AND m.released < 2010 RETURN m }"
-        )
-        assert await asked_again(cypher_pm, keanu) == [2]
-        hugo = (
-            "MATCH (p:Person {name: 'Hugo'}) RETURN COUNT { OPTIONAL CALL (p) { MATCH (p)-[:KNOWS]->(f) "
-            "RETURN f.name AS friend } RETURN friend }"
-        )
-        assert await asked_again(cypher_pm, hugo) == [1]
-        matched = "MATCH (p:Person {name: 'Hugo'}) RETURN COUNT { OPTIONAL MATCH (p)-[:KNOWS]->(f) RETURN f }"
-        assert await asked_again(cypher_pm, matched) == [1]
 
 
 async def test_an_optional_call_in_a_writes_subquery_counts_what_it_finds_and_the_row_it_finds_nothing_for(
@@ -1156,31 +1136,19 @@ ZONED = (
 """As text, 10:00+02:00 (08:00 UTC) sorts after 09:00Z, and 08:30Z before both."""
 
 
-async def test_a_list_of_zoned_values_and_a_list_of_lists_of_them_sort_and_compare_item_by_item_as_their_moments(
+async def test_a_list_of_zoned_values_worked_out_with_temporal_arithmetic_sorts_as_their_moments(
     cypher_pm: PersistenceManager,
 ):
-    # Not in the spec yet (#199): drivine4j's test of liberation-data/drivine4j#199, ported for #181.
+    # Beside the spec's case since v0.6.17 (#199): its long list is worked out from one moment, not from a CASE, and it
+    # has no list collect() gathers of them. drivine4j's test of liberation-data/drivine4j#199, ported for #181. k = 0's
+    # start at 08:00 UTC.
     if cypher_pm.type is DatabaseType.ORACLE:
         pytest.skip(ZONED_LIST_ON_ORACLE)
-    a, b, c = ZONED
-    hours = [10, 8, 9]
+    a, b, _ = ZONED
 
     async def query(cypher: str) -> list[Any]:
         return await cypher_pm.query(spec(cypher))
 
-    assert await query(f"UNWIND [{b}, {a}, {c}] AS t WITH [t] AS ts RETURN ts[0].hour ORDER BY ts") == hours
-    assert await query(f"UNWIND [{b}, {a}, {c}] AS t WITH [t] AS ts RETURN ts[0].hour ORDER BY ts DESC") == hours[::-1]
-    assert await query(f"UNWIND [{b}, {a}, {c}] AS t WITH t.hour AS h, collect(t) AS ts RETURN h ORDER BY ts") == hours
-    assert await query(f"UNWIND [[{b}], [{a}], [{c}]] AS ts RETURN ts[0].hour ORDER BY ts") == hours
-    assert await query(f"UNWIND [{b}, {a}, {c}] AS t WITH [[t]] AS l RETURN l[0][0].hour ORDER BY l") == hours
-    assert await query(f"UNWIND [{b}, {a}, {c}] AS t WITH t.hour AS h, collect([t]) AS l RETURN h ORDER BY l") == hours
-    # A list that starts another comes first; a null item after any moment.
-    assert await query(f"WITH [{a}] AS x, [{a}, {b}] AS y UNWIND [y, x] AS l RETURN size(l) ORDER BY l") == [1, 2]
-    assert await query(
-        f"WITH [{a}, null] AS x, [{a}, {b}] AS y UNWIND [x, y] AS l RETURN size([i IN l WHERE i IS NULL]) ORDER BY l"
-    ) == [0, 1]
-    # A long list, and lists worked out with temporal arithmetic, by a comprehension or collect(): k = 0's start at
-    # 08:00 UTC.
     at = f"CASE k WHEN 0 THEN {a} ELSE {b} END"
     assert await query(
         f"UNWIND [0, 1] AS k WITH k, [x IN range(1, 200) | {at} + duration({{minutes: x}})] AS l RETURN k ORDER BY l"
@@ -1189,25 +1157,13 @@ async def test_a_list_of_zoned_values_and_a_list_of_lists_of_them_sort_and_compa
         f"UNWIND [0, 1] AS k UNWIND range(1, 3) AS x WITH k, {at} + duration({{minutes: x}}) AS t "
         "WITH k, collect(t) AS l RETURN k ORDER BY l"
     ) == [0, 1]
-    # min() and max() of them.
-    assert await query(f"UNWIND [[{b}], [{a}], [{c}]] AS l RETURN [min(l)[0].hour, max(l)[0].hour]") == [[10, 9]]
-    assert await query(
-        f"UNWIND [{b}, {a}, {c}] AS t WITH [[t]] AS l RETURN [min(l)[0][0].hour, max(l)[0][0].hour]"
-    ) == [[10, 9]]
-    # A time of day with an offset, as a moment.
-    times = "[time('10:00:00+02:00'), time('09:00:00Z'), time('08:30:00Z')]"
-    assert await query(f"UNWIND {times} AS t WITH [t] AS ts RETURN ts[0].hour ORDER BY ts") == hours
-    assert await query(f"UNWIND {times} AS t WITH [t] AS l RETURN [min(l)[0].hour, max(l)[0].hour]") == [[10, 9]]
-    # Taken from a list kept in order, by head() and last().
-    assert await query(
-        f"UNWIND [{b}, {a}, {c}] AS t WITH t ORDER BY t WITH collect(t) AS ts RETURN [head(ts).hour, last(ts).hour]"
-    ) == [[10, 9]]
 
 
 async def test_a_list_of_zoned_values_sorts_as_their_moments_however_it_was_made_and_an_empty_list_or_null_as_cypher(
     cypher_pm: PersistenceManager,
 ):
-    # Not in the spec yet (#199). By moment 10:00+02:00, 08:30Z, 09:00Z; as text 08:30Z, 09:00Z, 10:00+02:00.
+    # Beside the spec's case since v0.6.17 (#199). By moment 10:00+02:00, 08:30Z, 09:00Z; as text 08:30Z, 09:00Z,
+    # 10:00+02:00.
     if cypher_pm.type is DatabaseType.ORACLE:
         pytest.skip(ZONED_LIST_ON_ORACLE)
     a, b, c = ZONED
@@ -2772,7 +2728,8 @@ async def test_lists_of_several_kinds_of_item_nested_sort_item_by_item_among_val
 
 # Texts past 4,000 bytes measured, cut, changed, searched and put together whole, as short ones are: drivine4j's tests
 # of liberation-data/drivine4j#298, ported for #168. Oracle read a text from JSON as a VARCHAR2, which holds 4,000
-# bytes, and a longer one as null.
+# bytes, and a longer one as null. Beside the spec's cases since v0.6.17 (#298): stored and made by the statement too,
+# and more functions and edge cases.
 
 
 def long_text_functions(t: str, unit: str) -> dict[str, Any]:

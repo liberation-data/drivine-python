@@ -2,7 +2,7 @@
 A list of zoned values, and a list of lists of them, compiled: on Oracle it sorts, and takes its `min` and `max`, as its
 JSON, by the text of each item, as Oracle takes many minutes to parse the key that sorts it by moments over a list
 worked out item by item with temporal arithmetic (liberation-data/drivine4j#331); on Postgres by their moments (#181).
-drivine4j's OracleZonedListSortTest of liberation-data/drivine4j#199. Not in the spec yet (#199).
+drivine4j's OracleZonedListSortTest of liberation-data/drivine4j#199. Beside the spec's case since v0.6.17 (#199).
 """
 
 from drivine.cypher.sql.oracle_cypher_compiler import OracleCypherCompiler

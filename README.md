@@ -409,7 +409,13 @@ people = await pm.query(spec.bind({"city": "Sydney"}))
   or a reduce's variable, or carried past a write in the statement, it compares by its properties.
 - openCypher's temporal values are their ISO 8601 text, as the store keeps a moment: `date`, `datetime`, `duration` and
   the rest make one, their fields read, and two moments compare as the moments they are. A parameter of a `date`,
-  `time`, `datetime` or `timedelta` is a temporal value of its kind.
+  `time`, `datetime` or `timedelta` is a temporal value of its kind. A zoned value the statement makes sorts as its
+  moment (`ORDER BY datetime(n.at)`); one read as a property sorts as its text, and so does a map that holds one. On
+  Postgres, a list of them, or a list of lists of them, sorts item by item so in an `ORDER BY`, `min` and `max`. Oracle
+  sorts such a list as it sorts JSON, a zoned value by its text: Oracle 23 takes many minutes to parse the key that
+  sorts it by moments over a list worked out item by item with temporal arithmetic
+  (`[i IN range(1, 10) | t + duration({minutes: i})]`), and neither a query timeout nor a kill ends the parse
+  ([drivine4j#331](https://github.com/liberation-data/drivine4j/issues/331)).
 - `UNION`, `CALL { … }`, `EXISTS { … }`, `COUNT { … }`, `FOREACH`, `=~`, variable-length relationships, `shortestPath`
   and `allShortestPaths` compile, as do quantified relationships (`-[:R]->{1,3}`) and quantified path patterns
   (`(a) ((x)-[r:R]->(y) WHERE x.v < y.v){1,3} (b)`), whose variables are lists of what each repetition matched. On

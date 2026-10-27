@@ -2,7 +2,7 @@
 What an order sorts a value of open kind by, compiled: on Oracle where its kind comes, then the value, each carried out
 of a `WITH` as a column of its own; a value the statement makes of one kind by its key alone; and Postgres as before
 (liberation-data/drivine4j#307). Drivine for TypeScript's compile-only test of liberation-data/drivine4j#299
-(liberation-data/drivine#371), ported for #175. Not in the spec yet (#299).
+(liberation-data/drivine#371), ported for #175. The spec holds the rows since v0.6.16 (#299).
 """
 
 from drivine.cypher.sql.oracle_cypher_compiler import OracleCypherCompiler

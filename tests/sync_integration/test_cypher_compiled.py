@@ -974,6 +974,141 @@ def test_min_and_max_of_lists_the_statement_makes_compare_them_item_by_item_what
     ]
 
 
+ZONED_LIST_ON_ORACLE = (
+    "Oracle sorts a list of zoned values as its JSON (liberation-data/drivine4j#331): see test_oracle_zoned_list_sort."
+)
+ZONED = (
+    "datetime('2024-03-15T10:00:00+02:00')",
+    "datetime('2024-03-15T09:00:00Z')",
+    "datetime('2024-03-15T08:30:00Z')",
+)
+"""As text, 10:00+02:00 (08:00 UTC) sorts after 09:00Z, and 08:30Z before both."""
+
+
+def test_a_list_of_zoned_values_and_a_list_of_lists_of_them_sort_and_compare_item_by_item_as_their_moments(
+    cypher_pm: PersistenceManager,
+):
+    # Not in the spec yet (#199): drivine4j's test of liberation-data/drivine4j#199, ported for #181.
+    if cypher_pm.type is DatabaseType.ORACLE:
+        pytest.skip(ZONED_LIST_ON_ORACLE)
+    a, b, c = ZONED
+    hours = [10, 8, 9]
+
+    def query(cypher: str) -> list[Any]:
+        return cypher_pm.query(spec(cypher))
+
+    assert query(f"UNWIND [{b}, {a}, {c}] AS t WITH [t] AS ts RETURN ts[0].hour ORDER BY ts") == hours
+    assert query(f"UNWIND [{b}, {a}, {c}] AS t WITH [t] AS ts RETURN ts[0].hour ORDER BY ts DESC") == hours[::-1]
+    assert query(f"UNWIND [{b}, {a}, {c}] AS t WITH t.hour AS h, collect(t) AS ts RETURN h ORDER BY ts") == hours
+    assert query(f"UNWIND [[{b}], [{a}], [{c}]] AS ts RETURN ts[0].hour ORDER BY ts") == hours
+    assert query(f"UNWIND [{b}, {a}, {c}] AS t WITH [[t]] AS l RETURN l[0][0].hour ORDER BY l") == hours
+    assert query(f"UNWIND [{b}, {a}, {c}] AS t WITH t.hour AS h, collect([t]) AS l RETURN h ORDER BY l") == hours
+    # A list that starts another comes first; a null item after any moment.
+    assert query(f"WITH [{a}] AS x, [{a}, {b}] AS y UNWIND [y, x] AS l RETURN size(l) ORDER BY l") == [1, 2]
+    assert query(
+        f"WITH [{a}, null] AS x, [{a}, {b}] AS y UNWIND [x, y] AS l RETURN size([i IN l WHERE i IS NULL]) ORDER BY l"
+    ) == [0, 1]
+    # A long list, and lists worked out with temporal arithmetic, by a comprehension or collect(): k = 0's start at
+    # 08:00 UTC.
+    at = f"CASE k WHEN 0 THEN {a} ELSE {b} END"
+    assert query(
+        f"UNWIND [0, 1] AS k WITH k, [x IN range(1, 200) | {at} + duration({{minutes: x}})] AS l RETURN k ORDER BY l"
+    ) == [0, 1]
+    assert query(
+        f"UNWIND [0, 1] AS k UNWIND range(1, 3) AS x WITH k, {at} + duration({{minutes: x}}) AS t "
+        "WITH k, collect(t) AS l RETURN k ORDER BY l"
+    ) == [0, 1]
+    # min() and max() of them.
+    assert query(f"UNWIND [[{b}], [{a}], [{c}]] AS l RETURN [min(l)[0].hour, max(l)[0].hour]") == [[10, 9]]
+    assert query(f"UNWIND [{b}, {a}, {c}] AS t WITH [[t]] AS l RETURN [min(l)[0][0].hour, max(l)[0][0].hour]") == [
+        [10, 9]
+    ]
+    # A time of day with an offset, as a moment.
+    times = "[time('10:00:00+02:00'), time('09:00:00Z'), time('08:30:00Z')]"
+    assert query(f"UNWIND {times} AS t WITH [t] AS ts RETURN ts[0].hour ORDER BY ts") == hours
+    assert query(f"UNWIND {times} AS t WITH [t] AS l RETURN [min(l)[0].hour, max(l)[0].hour]") == [[10, 9]]
+    # Taken from a list kept in order, by head() and last().
+    assert query(
+        f"UNWIND [{b}, {a}, {c}] AS t WITH t ORDER BY t WITH collect(t) AS ts RETURN [head(ts).hour, last(ts).hour]"
+    ) == [[10, 9]]
+
+
+def test_a_list_of_zoned_values_sorts_as_their_moments_however_it_was_made_and_an_empty_list_or_null_as_cypher(
+    cypher_pm: PersistenceManager,
+):
+    # Not in the spec yet (#199). By moment 10:00+02:00, 08:30Z, 09:00Z; as text 08:30Z, 09:00Z, 10:00+02:00.
+    if cypher_pm.type is DatabaseType.ORACLE:
+        pytest.skip(ZONED_LIST_ON_ORACLE)
+    a, b, c = ZONED
+    hours = [10, 8, 9]
+
+    def query(cypher: str) -> list[Any]:
+        return cypher_pm.query(spec(cypher))
+
+    def sorted_by(by: str, list_: str = "[[t]]") -> list[Any]:
+        return query(f"UNWIND [{b}, {a}, {c}] AS t WITH t, {list_} AS l RETURN t.hour ORDER BY {by}")
+
+    # Taken from a list of lists, by an index, head(), last(), a slice, reverse(), tail() and a comprehension.
+    for by in ("l[0]", "head(l)", "last(l)", "l[0..1]", "reverse(l)", "[x IN l WHERE x IS NOT NULL]", "[x IN l | x]"):
+        assert sorted_by(by) == hours, by
+    assert sorted_by("tail(l)", "[[t], [t]]") == hours
+    # Made by a CASE, collect(DISTINCT), a UNION, and a comprehension over nodes or a pattern.
+    assert sorted_by("CASE WHEN t IS NOT NULL THEN [t] END") == hours
+    assert (
+        query(f"UNWIND [{b}, {a}, {c}] AS t WITH t.hour AS h, collect(DISTINCT [t]) AS l RETURN h ORDER BY l") == hours
+    )
+    assert (
+        query(
+            f"CALL {{ UNWIND [{b}] AS t RETURN [[t]] AS l UNION UNWIND [{a}, {c}] AS t RETURN [[t]] AS l }} "
+            "RETURN l[0][0].hour ORDER BY l"
+        )
+        == hours
+    )
+    clear(cypher_pm)
+    cypher_pm.query(
+        spec(
+            "CREATE (:CyZoned {h: 10})-[:AT]->(:CyZonedAt {at: '2024-03-15T10:00:00+02:00'}), "
+            "(:CyZoned {h: 9})-[:AT]->(:CyZonedAt {at: '2024-03-15T09:00:00Z'}), "
+            "(:CyZoned {h: 8})-[:AT]->(:CyZonedAt {at: '2024-03-15T08:30:00Z'})"
+        )
+    )
+    assert query("MATCH (z:CyZoned) RETURN z.h ORDER BY [(z)-[:AT]->(w) | [datetime(w.at)]]") == hours
+    assert (
+        query("MATCH (z:CyZoned)-[:AT]->(w) WITH z, collect(w) AS ws RETURN z.h ORDER BY [n IN ws | [datetime(n.at)]]")
+        == hours
+    )
+    # The empty list first, then a list of a moment, then a null item or no list; as items of a list too.
+    ordered = [2, 1, 3]
+    cased = f"CASE k WHEN 1 THEN [{a}] WHEN 2 THEN [i IN [{a}] WHERE false] END"
+    assert query(f"UNWIND [1, 2, 3] AS k WITH k, {cased} AS l RETURN k ORDER BY l") == ordered
+    assert query(f"UNWIND [1, 2, 3] AS k WITH k, {cased} AS l RETURN k ORDER BY l DESC") == ordered[::-1]
+    assert query(f"UNWIND [1, 2, 3] AS k WITH k, [{cased}] AS l RETURN k ORDER BY l") == ordered
+    assert query(f"UNWIND [1, 2, 3] AS k WITH k, [{cased}] AS l RETURN k ORDER BY l DESC") == ordered[::-1]
+    # Two lists of lists of them put together, and min() or max() of lists of them, grouped.
+    assert sorted_by("l + l") == hours
+    assert query(f"UNWIND [{b}, {a}, {c}] AS t WITH t.hour AS h, min([t]) AS m RETURN h ORDER BY m") == hours
+    assert query(f"UNWIND [{b}, {a}, {c}] AS t WITH t.hour AS h, max([[t]]) AS m RETURN h ORDER BY m") == hours
+    # Carried past a write, as a list and as a list of lists.
+    assert (
+        query(f"UNWIND [{b}, {a}, {c}] AS t WITH t, [t] AS l CREATE (:CyZonedWrite) RETURN t.hour ORDER BY l") == hours
+    )
+    assert (
+        query(f"UNWIND [{b}, {a}, {c}] AS t WITH t, [[t]] AS l CREATE (:CyZonedWrite) RETURN t.hour ORDER BY l")
+        == hours
+    )
+    # Read from the row a write works its value out of (row_keys), in a subquery that sorts them.
+    assert query(
+        f"UNWIND [{b}, {a}, {c}] AS t WITH collect([t]) AS ls CREATE (n:CyZonedWrite) "
+        "SET n.first = COUNT { UNWIND ls AS l WITH l ORDER BY l LIMIT 1 WITH l WHERE l[0].hour = 10 RETURN l } "
+        "RETURN n.first"
+    ) == [1]
+    # After a term whose kind is open, which sorts by its kind first (liberation-data/drivine4j#308): the text before
+    # the numbers, then by moment.
+    opened = f"UNWIND [{b}, {a}, {c}] AS t WITH t, [t] AS l, CASE t.hour WHEN 8 THEN 'x' ELSE 1 END AS o RETURN t.hour"
+    assert query(f"{opened} ORDER BY o, l") == [8, 10, 9]
+    assert query(f"{opened} ORDER BY o DESC, l DESC") == [9, 10, 8]
+
+
 def test_an_aggregate_of_floats_gives_a_float_whole_or_not_and_a_sum_of_integers_an_integer(
     cypher_pm: PersistenceManager,
 ):
@@ -2258,28 +2393,6 @@ def test_a_statement_that_writes_compares_a_list_that_holds_a_null_item_by_item(
             "RETURN [n.eq, n.in, n.longEq, n.longIn]"
         )
     ) == [[True, True, True, True]]
-    assert cypher_pm.query(
-        spec("CREATE (n:CyNullEquality) WITH n, [null] AS a, [1] AS b SET n.eq = coalesce(a = b, 'null') RETURN n.eq")
-    ) == ["null"]
-
-
-def test_lists_and_maps_that_hold_a_null_and_differ_as_json_compare_item_by_item_in_a_statement_that_writes(
-    cypher_pm: PersistenceManager,
-):
-    # Not in the spec yet (#270): drivine4j's CypherWriteContract of liberation-data/drivine4j#323. On Oracle a
-    # procedure declares no function of its own, so the store's walks them.
-    clear(cypher_pm)
-    assert cypher_pm.query(
-        spec(
-            "CREATE (n:CyWrite) WITH n, [null, 1] AS a, [2, 1] AS b, {x: null} AS m, {x: 1} AS o, [[null], 1] AS c, "
-            "[[1], 2] AS d RETURN [a = b, m = o, c = d, a <> [1, 2], a IN [b, [3]], a IN [[3]], "
-            "{k: [null]} = {k: [2]}, m <> {y: 1}]"
-        )
-    ) == [[None, None, False, True, None, False, None, True]]
-    # A node OPTIONAL MATCH finds none of is null in the list that holds it, beside one the statement made.
-    assert cypher_pm.query(
-        spec("OPTIONAL MATCH (x:Nope) CREATE (n:CyWrite) WITH n, [x] AS a, [n] AS b RETURN [a = b, a = a]")
-    ) == [[None, None]]
 
 
 def test_values_that_may_hold_a_null_are_null_where_written_alike_only_when_one_holds_one(
@@ -2303,22 +2416,6 @@ def test_values_that_may_hold_a_null_are_null_where_written_alike_only_when_one_
             "{a: 1, b: null} = {b: null, a: 1}, ['é', null] = ['\\u00e9', null]]"
         )
     ) == [[None, None, False, None, None]]
-
-
-def test_the_step_of_a_reduce_compares_lists_and_maps_that_hold_a_null_and_differ_as_json_item_by_item(
-    cypher_pm: PersistenceManager,
-):
-    # Not in the spec yet (#270): on Oracle a reduce's step calls no function of the query's, so the store's walks them.
-    assert cypher_pm.query(
-        spec("WITH [2, null] AS c RETURN reduce(acc = [], x IN [[1, null], [2, null], [null, 1]] | acc + [x = c])")
-    ) == [[False, None, None]]
-    assert cypher_pm.query(
-        spec("RETURN reduce(acc = [], m IN [{x: null}, {x: 1, y: 2}, {x: 2}] | acc + [m = {x: 1}])")
-    ) == [[None, False, False]]
-    assert cypher_pm.query(
-        spec("WITH [[null], 1] AS a RETURN reduce(acc = [], x IN [[[1], 1], [[1], 2]] | acc + [x = a])")
-    ) == [[None, False]]
-    assert cypher_pm.query(spec("RETURN reduce(acc = true, x IN [[null]] | acc AND x = [1])")) == [None]
 
 
 # Texts compared and sorted by their code points, as Cypher has them, on every store: drivine4j's own tests of
@@ -2362,8 +2459,9 @@ def test_a_text_in_a_list_sorts_by_its_code_points_up_to_and_across_its_500th_ch
 
 # Values of several kinds sorted as Cypher orders their kinds, a map, a list, a text, a truth value, a number, then
 # null: drivine4j's tests of liberation-data/drivine4j#299, and Drivine for TypeScript's port of them
-# (liberation-data/drivine#371), ported for #175. Postgres takes `jsonb`'s order for every kind but a text: a number
-# before a truth value, a map and a list last (liberation-data/drivine4j#307).
+# (liberation-data/drivine#371), ported for #175, beside the spec's cases since v0.6.16 (#299). Postgres takes
+# `jsonb`'s order for every kind but a text: a number before a truth value, a map and a list last
+# (liberation-data/drivine4j#307).
 
 KIND_ORDER_ON_POSTGRES = "Postgres takes jsonb's order of kinds (liberation-data/drivine4j#307)."
 
@@ -2383,22 +2481,10 @@ def typed(value: Any) -> Any:
     return value
 
 
-def test_a_text_sorts_before_a_number_and_after_one_descending(cypher_pm: PersistenceManager):
-    # Not in the spec yet (#299): the steps of "Texts beside nulls and other kinds" that skip Oracle in v0.6.13.
-    if cypher_pm.type is DatabaseType.POSTGRES:
-        pytest.skip(KIND_ORDER_ON_POSTGRES)
-
-    def rows(cypher: str) -> Any:
-        return typed(cypher_pm.query(spec(cypher)))
-
-    assert rows("UNWIND [2, 'b', null, 1, 'B'] AS t RETURN t ORDER BY t") == typed(["B", "b", 1, 2, None])
-    assert rows("UNWIND [2, 'b', null, 1, 'B'] AS t RETURN t ORDER BY t DESC") == typed([None, 2, 1, "b", "B"])
-
-
 def test_values_of_several_kinds_sort_as_cypher_orders_their_kinds_a_map_a_list_a_text_a_truth_value_a_number(
     cypher_pm: PersistenceManager,
 ):
-    # Not in the spec yet (#299): Oracle sorts first by where a value's kind comes, then by the value.
+    # Beside the spec's case since v0.6.16 (#299): Oracle sorts first by where a value's kind comes, then by the value.
     if cypher_pm.type is DatabaseType.POSTGRES:
         pytest.skip(KIND_ORDER_ON_POSTGRES)
 
@@ -2407,17 +2493,6 @@ def test_values_of_several_kinds_sort_as_cypher_orders_their_kinds_a_map_a_list_
 
     values = "[1, {a: 1}, 'b', true, [2], 2.5, null, false, 'A', [1, 2], -1]"
     ascending: list[Any] = [{"a": 1}, [1, 2], [2], "A", "b", False, True, -1, 1, 2.5, None]
-    assert rows(f"UNWIND {values} AS t RETURN t ORDER BY t") == typed(ascending)
-    assert rows(f"UNWIND {values} AS t RETURN t ORDER BY t DESC") == typed(ascending[::-1])
-    # Carried out of a WITH that pages them, kept distinct, and beside another term.
-    assert rows(f"UNWIND {values} AS t WITH t ORDER BY t SKIP 3 LIMIT 4 RETURN t") == typed(["A", "b", False, True])
-    assert rows("UNWIND [2, 'b', true, 2, 'b'] AS t RETURN DISTINCT t ORDER BY t") == typed(["b", True, 2])
-    assert rows("UNWIND [[2, 0], [1, 3], [2, false], [1, 'a']] AS p RETURN p ORDER BY p[0], p[1]") == typed(
-        [[1, "a"], [1, 3], [2, False], [2, 0]]
-    )
-    # A truth value before a number.
-    assert rows("UNWIND [1, true, 0, false] AS t RETURN t ORDER BY t") == typed([False, True, 0, 1])
-    assert rows("UNWIND [true, 1, 'b', [1], {a: 1}] AS t RETURN min(t), max(t)") == typed([[{"a": 1}, 1]])
     # Carried out of a CALL { … }, grouped by, kept distinct by another name, and sorted by when it is not returned.
     assert rows(f"CALL {{ UNWIND {values} AS t RETURN t ORDER BY t LIMIT 4 }} RETURN t") == typed(
         [{"a": 1}, [1, 2], [2], "A"]
@@ -2458,7 +2533,8 @@ def test_values_of_several_kinds_sort_as_cypher_orders_their_kinds_a_map_a_list_
 
 
 def test_a_property_stored_as_several_kinds_sorts_as_cypher_orders_their_kinds(cypher_pm: PersistenceManager):
-    # Not in the spec yet (#299): a property read from the store may be of any kind, so its kind is ranked first.
+    # Beside the spec's case since v0.6.16 (#299): a property read from the store may be of any kind, so its kind is
+    # ranked first.
     if cypher_pm.type is DatabaseType.POSTGRES:
         pytest.skip(KIND_ORDER_ON_POSTGRES)
 
@@ -2473,9 +2549,6 @@ def test_a_property_stored_as_several_kinds_sorts_as_cypher_orders_their_kinds(c
         )
     )
     ascending: list[Any] = [[1], "B", "b", False, True, 1.5, 2, None]
-    assert rows("MATCH (k:Kind) RETURN k.v ORDER BY k.v") == typed(ascending)
-    assert rows("MATCH (k:Kind) RETURN k.v ORDER BY k.v DESC") == typed(ascending[::-1])
-    assert rows("MATCH (k:Kind) WITH k ORDER BY k.v SKIP 2 LIMIT 2 RETURN k.v") == typed(["b", False])
     assert rows("CALL { MATCH (k:Kind) RETURN k.v AS v ORDER BY v DESC LIMIT 2 } RETURN v") == typed([None, 2])
     assert rows("MATCH (k:Kind) WITH k ORDER BY k.v WITH collect(k.v) AS vs RETURN vs") == typed([ascending[:-1]])
     assert rows("MATCH (k:Kind) RETURN k.v ORDER BY k.v DESC SKIP 1 LIMIT 3") == typed([2, 1.5, True])

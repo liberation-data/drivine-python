@@ -165,6 +165,9 @@ class PostgresCypherCompiler(SqlCypherCompiler):
         match = _PROPERTY.fullmatch(property)
         return f"({match.group(1)} ->> {match.group(2)}) = ({value} #>> '{{}}')" if match else None
 
+    def bytewise(self, text: str) -> str:
+        return f'({text}) COLLATE "C"'
+
     def ordered(self, x: str, operator: str, y: str) -> str:
         """Texts by their code points (`_code_point_text`); values of any other kind as `jsonb` compares them."""
         return (
@@ -237,6 +240,9 @@ class PostgresCypherCompiler(SqlCypherCompiler):
     def collect(self, value: str, order: str | None) -> str:
         ordered = f" ORDER BY {order}" if order is not None else ""
         return f"COALESCE(json_agg({value}{ordered}) FILTER (WHERE {value} IS NOT NULL), '[]'::json)"
+
+    def joined_texts(self, text: str, order: str) -> str:
+        return f"string_agg({text}, '' ORDER BY {order})"
 
     def distinct_items(self, list_: str) -> str:
         return (

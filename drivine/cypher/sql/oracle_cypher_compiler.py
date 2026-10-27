@@ -421,6 +421,11 @@ class OracleCypherCompiler(SqlCypherCompiler):
         ordered = f" ORDER BY {order}" if order is not None else ""
         return f"COALESCE(JSON_ARRAYAGG({value}{ordered} RETURNING JSON), JSON('[]'))"
 
+    def joined_texts(self, text: str, order: str) -> str:
+        """At most 4,000 bytes, as a `VARCHAR2`: the rest is left off, where it would fail the statement. Unused while
+        lists sort as JSON: see `lists_by_moments`."""
+        return f"LISTAGG({text} ON OVERFLOW TRUNCATE '' WITHOUT COUNT) WITHIN GROUP (ORDER BY {order})"
+
     def distinct_items(self, list_: str) -> str:
         """
         Each item where it is first among those equal to it as `JSON` compares them, kept as it is: not by its text,
@@ -575,6 +580,14 @@ class OracleCypherCompiler(SqlCypherCompiler):
     """
     Oracle's JSON orders lists item by item already, and a grouped `KEEP (DENSE_RANK FIRST ORDER BY …)` by the list key
     drops the connection (ORA-03113), as drivine4j found.
+    """
+
+    lists_by_moments = False
+    """
+    Oracle 23 takes many minutes to parse `moments_key`'s `JSON_TABLE` over a list worked out item by item with temporal
+    arithmetic, as a comprehension works one out (liberation-data/drivine4j#331), and neither a query timeout nor a
+    kill ends the parse, so the session stalls: a list of zoned values sorts as its JSON, by the text of each, as it did
+    before lists sorted by their moments.
     """
 
     def identity_equals(self, x: str, y: str) -> str:

@@ -2174,28 +2174,6 @@ async def test_a_statement_that_writes_compares_a_list_that_holds_a_null_item_by
             "RETURN [n.eq, n.in, n.longEq, n.longIn]"
         )
     ) == [[True, True, True, True]]
-    assert await cypher_pm.query(
-        spec("CREATE (n:CyNullEquality) WITH n, [null] AS a, [1] AS b SET n.eq = coalesce(a = b, 'null') RETURN n.eq")
-    ) == ["null"]
-
-
-async def test_lists_and_maps_that_hold_a_null_and_differ_as_json_compare_item_by_item_in_a_statement_that_writes(
-    cypher_pm: PersistenceManager,
-):
-    # Not in the spec yet (#270): drivine4j's CypherWriteContract of liberation-data/drivine4j#323. On Oracle a
-    # procedure declares no function of its own, so the store's walks them.
-    await clear(cypher_pm)
-    assert await cypher_pm.query(
-        spec(
-            "CREATE (n:CyWrite) WITH n, [null, 1] AS a, [2, 1] AS b, {x: null} AS m, {x: 1} AS o, [[null], 1] AS c, "
-            "[[1], 2] AS d RETURN [a = b, m = o, c = d, a <> [1, 2], a IN [b, [3]], a IN [[3]], "
-            "{k: [null]} = {k: [2]}, m <> {y: 1}]"
-        )
-    ) == [[None, None, False, True, None, False, None, True]]
-    # A node OPTIONAL MATCH finds none of is null in the list that holds it, beside one the statement made.
-    assert await cypher_pm.query(
-        spec("OPTIONAL MATCH (x:Nope) CREATE (n:CyWrite) WITH n, [x] AS a, [n] AS b RETURN [a = b, a = a]")
-    ) == [[None, None]]
 
 
 async def test_values_that_may_hold_a_null_are_null_where_written_alike_only_when_one_holds_one(
@@ -2219,22 +2197,6 @@ async def test_values_that_may_hold_a_null_are_null_where_written_alike_only_whe
             "{a: 1, b: null} = {b: null, a: 1}, ['é', null] = ['\\u00e9', null]]"
         )
     ) == [[None, None, False, None, None]]
-
-
-async def test_the_step_of_a_reduce_compares_lists_and_maps_that_hold_a_null_and_differ_as_json_item_by_item(
-    cypher_pm: PersistenceManager,
-):
-    # Not in the spec yet (#270): on Oracle a reduce's step calls no function of the query's, so the store's walks them.
-    assert await cypher_pm.query(
-        spec("WITH [2, null] AS c RETURN reduce(acc = [], x IN [[1, null], [2, null], [null, 1]] | acc + [x = c])")
-    ) == [[False, None, None]]
-    assert await cypher_pm.query(
-        spec("RETURN reduce(acc = [], m IN [{x: null}, {x: 1, y: 2}, {x: 2}] | acc + [m = {x: 1}])")
-    ) == [[None, False, False]]
-    assert await cypher_pm.query(
-        spec("WITH [[null], 1] AS a RETURN reduce(acc = [], x IN [[[1], 1], [[1], 2]] | acc + [x = a])")
-    ) == [[None, False]]
-    assert await cypher_pm.query(spec("RETURN reduce(acc = true, x IN [[null]] | acc AND x = [1])")) == [None]
 
 
 # Texts compared and sorted by their code points, as Cypher has them, on every store: drivine4j's own tests of
@@ -2278,8 +2240,9 @@ async def test_a_text_in_a_list_sorts_by_its_code_points_up_to_and_across_its_50
 
 # Values of several kinds sorted as Cypher orders their kinds, a map, a list, a text, a truth value, a number, then
 # null: drivine4j's tests of liberation-data/drivine4j#299, and Drivine for TypeScript's port of them
-# (liberation-data/drivine#371), ported for #175. Postgres takes `jsonb`'s order for every kind but a text: a number
-# before a truth value, a map and a list last (liberation-data/drivine4j#307).
+# (liberation-data/drivine#371), ported for #175, beside the spec's cases since v0.6.16 (#299). Postgres takes
+# `jsonb`'s order for every kind but a text: a number before a truth value, a map and a list last
+# (liberation-data/drivine4j#307).
 
 KIND_ORDER_ON_POSTGRES = "Postgres takes jsonb's order of kinds (liberation-data/drivine4j#307)."
 
@@ -2299,22 +2262,10 @@ def typed(value: Any) -> Any:
     return value
 
 
-async def test_a_text_sorts_before_a_number_and_after_one_descending(cypher_pm: PersistenceManager):
-    # Not in the spec yet (#299): the steps of "Texts beside nulls and other kinds" that skip Oracle in v0.6.13.
-    if cypher_pm.type is DatabaseType.POSTGRES:
-        pytest.skip(KIND_ORDER_ON_POSTGRES)
-
-    async def rows(cypher: str) -> Any:
-        return typed(await cypher_pm.query(spec(cypher)))
-
-    assert await rows("UNWIND [2, 'b', null, 1, 'B'] AS t RETURN t ORDER BY t") == typed(["B", "b", 1, 2, None])
-    assert await rows("UNWIND [2, 'b', null, 1, 'B'] AS t RETURN t ORDER BY t DESC") == typed([None, 2, 1, "b", "B"])
-
-
 async def test_values_of_several_kinds_sort_as_cypher_orders_their_kinds_a_map_a_list_a_text_a_truth_value_a_number(
     cypher_pm: PersistenceManager,
 ):
-    # Not in the spec yet (#299): Oracle sorts first by where a value's kind comes, then by the value.
+    # Beside the spec's case since v0.6.16 (#299): Oracle sorts first by where a value's kind comes, then by the value.
     if cypher_pm.type is DatabaseType.POSTGRES:
         pytest.skip(KIND_ORDER_ON_POSTGRES)
 
@@ -2323,19 +2274,6 @@ async def test_values_of_several_kinds_sort_as_cypher_orders_their_kinds_a_map_a
 
     values = "[1, {a: 1}, 'b', true, [2], 2.5, null, false, 'A', [1, 2], -1]"
     ascending: list[Any] = [{"a": 1}, [1, 2], [2], "A", "b", False, True, -1, 1, 2.5, None]
-    assert await rows(f"UNWIND {values} AS t RETURN t ORDER BY t") == typed(ascending)
-    assert await rows(f"UNWIND {values} AS t RETURN t ORDER BY t DESC") == typed(ascending[::-1])
-    # Carried out of a WITH that pages them, kept distinct, and beside another term.
-    assert await rows(f"UNWIND {values} AS t WITH t ORDER BY t SKIP 3 LIMIT 4 RETURN t") == typed(
-        ["A", "b", False, True]
-    )
-    assert await rows("UNWIND [2, 'b', true, 2, 'b'] AS t RETURN DISTINCT t ORDER BY t") == typed(["b", True, 2])
-    assert await rows("UNWIND [[2, 0], [1, 3], [2, false], [1, 'a']] AS p RETURN p ORDER BY p[0], p[1]") == typed(
-        [[1, "a"], [1, 3], [2, False], [2, 0]]
-    )
-    # A truth value before a number.
-    assert await rows("UNWIND [1, true, 0, false] AS t RETURN t ORDER BY t") == typed([False, True, 0, 1])
-    assert await rows("UNWIND [true, 1, 'b', [1], {a: 1}] AS t RETURN min(t), max(t)") == typed([[{"a": 1}, 1]])
     # Carried out of a CALL { … }, grouped by, kept distinct by another name, and sorted by when it is not returned.
     assert await rows(f"CALL {{ UNWIND {values} AS t RETURN t ORDER BY t LIMIT 4 }} RETURN t") == typed(
         [{"a": 1}, [1, 2], [2], "A"]
@@ -2378,7 +2316,8 @@ async def test_values_of_several_kinds_sort_as_cypher_orders_their_kinds_a_map_a
 
 
 async def test_a_property_stored_as_several_kinds_sorts_as_cypher_orders_their_kinds(cypher_pm: PersistenceManager):
-    # Not in the spec yet (#299): a property read from the store may be of any kind, so its kind is ranked first.
+    # Beside the spec's case since v0.6.16 (#299): a property read from the store may be of any kind, so its kind is
+    # ranked first.
     if cypher_pm.type is DatabaseType.POSTGRES:
         pytest.skip(KIND_ORDER_ON_POSTGRES)
 
@@ -2393,9 +2332,6 @@ async def test_a_property_stored_as_several_kinds_sorts_as_cypher_orders_their_k
         )
     )
     ascending: list[Any] = [[1], "B", "b", False, True, 1.5, 2, None]
-    assert await rows("MATCH (k:Kind) RETURN k.v ORDER BY k.v") == typed(ascending)
-    assert await rows("MATCH (k:Kind) RETURN k.v ORDER BY k.v DESC") == typed(ascending[::-1])
-    assert await rows("MATCH (k:Kind) WITH k ORDER BY k.v SKIP 2 LIMIT 2 RETURN k.v") == typed(["b", False])
     assert await rows("CALL { MATCH (k:Kind) RETURN k.v AS v ORDER BY v DESC LIMIT 2 } RETURN v") == typed([None, 2])
     assert await rows("MATCH (k:Kind) WITH k ORDER BY k.v WITH collect(k.v) AS vs RETURN vs") == typed([ascending[:-1]])
     assert await rows("MATCH (k:Kind) RETURN k.v ORDER BY k.v DESC SKIP 1 LIMIT 3") == typed([2, 1.5, True])

@@ -171,6 +171,18 @@ have. A vector index is a table of embeddings beside the nodes, holding those of
 another size is left out, not refused. `load_nearest` is approximate through it. With no index made, or one of another
 size than the vector's, it measures every node of the label whose embedding is of the vector's size, and is exact.
 
+Each session of Drivine's Oracle pool makes no adaptive plan (`ALTER SESSION SET OPTIMIZER_ADAPTIVE_PLANS = FALSE`, run
+as the pool opens it; a session it fails in is dropped from the pool, not given out). Once a graph's tables had grown
+and shrunk without statistics, Oracle's adaptive join plan gave no rows for a read that filters a node by a label and a
+property, where the same plan, fixed, gave them all ([#146](https://github.com/liberation-data/drivine-python/issues/146)).
+A statement of yours that relies on an adaptive plan can ask for one with the hint
+`/*+ OPT_PARAM('optimizer_adaptive_plans' 'true') */`. To have the sessions left as Oracle opens them, register a
+provider made in code with `sets_no_adaptive_plans=False`: `registry.register(OracleConnectionProvider("default",
+"localhost:1521/FREEPDB1", user, password, sets_no_adaptive_plans=False))`, its class from
+`drivine.connection.oracle.oracle_connection_provider` (`drivine.sync.connection.oracle.oracle_connection_provider` for
+the sync API). It is on by default because, without it, a read can come back with no rows and no
+error; if you turn it off, run that statement in each session yourself.
+
 On Postgres, `DATABASE_NAME` is the database, and `DATABASE_DEFAULT_GRAPH_PATH` names the graph, `drivine` by default:
 see [Postgres](#postgres). On either, Cypher you write is compiled to SQL: see
 [Cypher on a relational database](#cypher-on-a-relational-database).

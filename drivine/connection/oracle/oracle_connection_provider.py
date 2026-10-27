@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 from typing import Any
 
 from drivine.backend.oracle.oracle_graph import DEFAULT_GRAPH, OracleGraph
@@ -8,6 +9,15 @@ from drivine.connection.connection_provider import ConnectionProvider
 from drivine.connection.database_type import DatabaseType
 from drivine.connection.graph_tables import GraphTables
 from drivine.connection.oracle.oracle_connection import OracleConnection
+
+NO_ADAPTIVE_PLANS = "ALTER SESSION SET OPTIMIZER_ADAPTIVE_PLANS = FALSE"
+"""
+Run in each session the pool opens: Oracle makes no adaptive plan in it. An adaptive plan picks its joins as it runs,
+and once the graph's tables had grown and shrunk without statistics, one gave no rows for a join that filters a node by
+a label and a property, where the same plan, fixed, gave them all (#146, liberation-data/drivine#331). A walk's step
+already asks for no adaptive plan; this covers every statement. One statement can ask for an adaptive plan again:
+`/*+ OPT_PARAM('optimizer_adaptive_plans' 'true') */`.
+"""
 
 
 class OracleConnectionProvider(ConnectionProvider):
@@ -26,8 +36,14 @@ class OracleConnectionProvider(ConnectionProvider):
         pool_max: int = 10,
         connection_timeout: int | None = None,
         graph: str | None = None,
+        sets_no_adaptive_plans: bool = True,
     ) -> None:
-        """`connect_string` is `host:port/service`, say `localhost:1521/FREEPDB1`; `connection_timeout` is in ms."""
+        """
+        `connect_string` is `host:port/service`, say `localhost:1521/FREEPDB1`; `connection_timeout` is in ms.
+        `sets_no_adaptive_plans` is whether each session the pool opens is set to make no adaptive plan (see
+        NO_ADAPTIVE_PLANS). On by default: an adaptive plan can give a read of the graph no rows, and no error (#146).
+        False leaves the sessions as Oracle opens them; run the statement in each yourself then, or tune the database.
+        """
         self.name = name
         self.type = DatabaseType.ORACLE
         self.connect_string = connect_string
@@ -35,6 +51,7 @@ class OracleConnectionProvider(ConnectionProvider):
         self.password = password
         self.pool_max = pool_max
         self.connection_timeout = connection_timeout
+        self.sets_no_adaptive_plans = sets_no_adaptive_plans
         # Refuses a name that can't name the graph's tables now, rather than at the first connection.
         self.graph = OracleGraph(graph or DEFAULT_GRAPH)
         self.graph_name = self.graph.name
@@ -76,12 +93,29 @@ class OracleConnectionProvider(ConnectionProvider):
         if self._pool is None:
             import oracledb
 
-            self._pool = oracledb.create_pool_async(
+            pool: Any = None
+
+            async def without_adaptive_plans(connection: Any, _requested_tag: str | None) -> None:
+                """
+                Sets a session the pool opens to make no adaptive plan. One that can't be set is dropped from the pool
+                and its error raised from `acquire`, rather than given out unset: python-oracledb keeps a session whose
+                callback failed counted as out, and an async pool at its size then waits for it for ever.
+                """
+                try:
+                    await self._run(connection, NO_ADAPTIVE_PLANS)
+                except BaseException:
+                    with contextlib.suppress(Exception):
+                        await pool.drop(connection)
+                    raise
+
+            pool = oracledb.create_pool_async(
                 user=self.user_name,
                 password=self.password,
                 dsn=self.connect_string,
                 min=0,
                 max=self.pool_max,
                 tcp_connect_timeout=self.connection_timeout / 1000 if self.connection_timeout else None,
+                session_callback=without_adaptive_plans if self.sets_no_adaptive_plans else None,
             )
+            self._pool = pool
         return self._pool

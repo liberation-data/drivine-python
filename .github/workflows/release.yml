@@ -1,0 +1,136 @@
+# Releases drivine to PyPI from a tag. RELEASING.md describes the process.
+#
+# - A push of a tag vX.Y.Z publishes: the tag is checked, the full CI runs, the distributions are built and checked,
+#   and those exact files are uploaded to PyPI with trusted publishing.
+# - workflow_dispatch, and a pull request that changes the release machinery, are dry runs: everything but the
+#   publish, with the built files left as the run's artifact to inspect.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - RELEASING.md
+      - pyproject.toml
+      - scripts/smoke_wheel.py
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      publish: ${{ steps.version.outputs.publish }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Work out the version
+        id: version
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          declared=$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
+          if [[ "$GITHUB_EVENT_NAME" == "push" && "$GITHUB_REF" == refs/tags/* ]]; then
+            tag="$GITHUB_REF_NAME"
+            if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+              echo "::error::The tag $tag isn't vX.Y.Z (or vX.Y.Z-suffix). Delete it and tag the release commit vX.Y.Z."
+              exit 1
+            fi
+            version="${tag#v}"
+            if [[ "$version" != "$declared" ]]; then
+              echo "::error::The tag $tag is version $version, but pyproject.toml's version is $declared. Tag the commit whose version is $version, or bump pyproject.toml in a release PR first."
+              exit 1
+            fi
+            if ! git merge-base --is-ancestor "$GITHUB_SHA" "origin/$DEFAULT_BRANCH"; then
+              echo "::error::The tag $tag is on $GITHUB_SHA, which isn't on $DEFAULT_BRANCH. Tag the release PR's merge commit on $DEFAULT_BRANCH."
+              exit 1
+            fi
+            publish=true
+          else
+            version="$declared"
+            publish=false
+          fi
+          echo "Version $version, publish: $publish"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+
+  # The full CI, as ci.yml runs it on a push or a pull request.
+  gate:
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    needs: [check, gate]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          python-version: "3.14"
+          enable-cache: false
+      # The sdist, then the wheel built from it, into dist/.
+      - name: Build
+        run: uv build --no-sources
+      - name: Check the distributions
+        run: uvx twine check --strict dist/*
+      # The wheel, installed into a clean environment on the oldest and the newest Python drivine supports, imports
+      # and writes typed references with python -m drivine.stubs.
+      - name: Smoke test the wheel on Python 3.11
+        run: uv run --no-project --python 3.11 python scripts/smoke_wheel.py dist/*.whl
+      - name: Smoke test the wheel on Python 3.14
+        run: uv run --no-project --python 3.14 python scripts/smoke_wheel.py dist/*.whl
+      - name: List the distributions
+        env:
+          VERSION: ${{ needs.check.outputs.version }}
+        run: |
+          echo "drivine $VERSION"
+          ls -l dist
+          sha256sum dist/*
+          unzip -l dist/*.whl
+          tar -tzf dist/*.tar.gz
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    needs: [check, build]
+    if: needs.check.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: release
+      url: https://pypi.org/project/drivine/${{ needs.check.outputs.version }}/
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist/
+      # Trusted publishing: PyPI trusts this workflow, in the release environment, through OIDC. No token is held.
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+        with:
+          packages-dir: dist/
+
+  github-release:
+    needs: [check, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --generate-notes --verify-tag

@@ -1,14 +1,21 @@
-# Releases drivine to PyPI from a tag. RELEASING.md describes the process.
+# Releases drivine to PyPI. RELEASING.md describes the process.
 #
-# - A push of a tag vX.Y.Z publishes: the tag is checked, the full CI runs, the distributions are built and checked,
-#   and those exact files are uploaded to PyPI with trusted publishing.
+# - A push to main that raises pyproject.toml's version (the merge of a "Release vX.Y.Z" PR) publishes it, and tags
+#   the commit vX.Y.Z. A push to main that changes pyproject.toml without raising the version publishes nothing.
+# - A push of a tag vX.Y.Z, by hand, publishes too: the fallback.
+# - Either way, the full CI runs, the distributions are built and checked, and those exact files are uploaded to PyPI
+#   with trusted publishing.
 # - workflow_dispatch, and a pull request that changes the release machinery, are dry runs: everything but the
 #   publish, with the built files left as the run's artifact to inspect.
 name: Release
 
 on:
   push:
+    branches: [main]
     tags: ["v*"]
+    # A push to main runs this only when it changes the version's file. GitHub doesn't apply paths to a tag push.
+    paths:
+      - pyproject.toml
   workflow_dispatch:
   pull_request:
     paths:
@@ -16,12 +23,15 @@ on:
       - RELEASING.md
       - pyproject.toml
       - scripts/smoke_wheel.py
+      - scripts/release_version.py
 
 permissions:
   contents: read
 
+# A push (a release) queues behind another on the same ref. A dry run gets a group of its own: GitHub keeps one pending
+# run per group, so a dry run queued on main would otherwise cancel a release waiting there.
 concurrency:
-  group: release-${{ github.ref }}
+  group: ${{ github.event_name == 'push' && format('release-{0}', github.ref) || format('release-dry-run-{0}', github.run_id) }}
   cancel-in-progress: false
 
 jobs:
@@ -30,6 +40,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       publish: ${{ steps.version.outputs.publish }}
+      tag: ${{ steps.version.outputs.tag }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -56,19 +67,41 @@ jobs:
               exit 1
             fi
             publish=true
+          elif [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
+            # A push to main that changed pyproject.toml. It releases the version when that is a new one, greater than
+            # the newest vX.Y.Z tag; github-release then makes the tag.
+            version="$declared"
+            tag="v$version"
+            newest=$(git tag -l 'v*' | python3 scripts/release_version.py newest)
+            publish=false
+            if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+              echo "::error::pyproject.toml's version $version isn't X.Y.Z (or X.Y.Z-suffix), so it can't be released."
+              exit 1
+            elif git rev-parse -q --verify "refs/tags/$tag" > /dev/null; then
+              echo "::notice::pyproject.toml's version $version is already tagged $tag, so this push releases nothing. A change to pyproject.toml that isn't a version bump does this."
+            elif [[ -n "$newest" ]] && ! python3 scripts/release_version.py greater "$version" "${newest#v}"; then
+              echo "::notice::pyproject.toml's version $version isn't later than the last release, $newest, so this push releases nothing."
+            else
+              publish=true
+            fi
           else
             version="$declared"
+            tag="v$version"
             publish=false
           fi
           echo "Version $version, publish: $publish"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "publish=$publish" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
-  # The full CI, as ci.yml runs it on a push or a pull request.
+  # The full CI, as ci.yml runs it on a push or a pull request. A push that releases nothing stops at check: ci.yml
+  # runs on the same push to main by itself.
   gate:
     needs: check
+    if: needs.check.outputs.publish == 'true' || github.event_name != 'push'
     uses: ./.github/workflows/ci.yml
 
+  # A push that releases nothing skips gate, and so this and the jobs after it.
   build:
     needs: [check, gate]
     runs-on: ubuntu-latest
@@ -96,7 +129,7 @@ jobs:
           status=$(curl -sL --retry 3 -o /dev/null -w '%{http_code}' "$url" || true)
           if [[ "$status" == 200 ]]; then
             if [[ "$PUBLISH" == true ]]; then
-              echo "::error::PyPI already has drivine $normalized."
+              echo "::error::PyPI already has drivine $normalized, so this run publishes nothing. If merging its version bump released it, and this is a tag pushed for it by hand afterwards, there is nothing left to do. Otherwise bump the version in a release PR."
               exit 1
             fi
             echo "::warning::PyPI already has drivine $normalized. This dry run goes on, but a tag of it would fail."
@@ -150,12 +183,18 @@ jobs:
     permissions:
       contents: write
     steps:
+      # On a push to main, the tag doesn't exist yet: the release makes it, on the commit this run built. A tag made
+      # with GITHUB_TOKEN starts no workflow, so it doesn't run this again. A tag pushed by hand is already there.
       - name: Create the GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ needs.check.outputs.tag }}
           VERSION: ${{ needs.check.outputs.version }}
         run: |
           prerelease=()
           if [[ "$VERSION" == *-* ]]; then prerelease=(--prerelease); fi
-          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --generate-notes --verify-tag "${prerelease[@]}"
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --generate-notes --verify-tag "${prerelease[@]}"
+          else
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --generate-notes "${prerelease[@]}"
+          fi

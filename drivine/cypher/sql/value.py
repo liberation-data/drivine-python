@@ -45,6 +45,12 @@ class Json:
     Where a write reads it from the row it is making, to work out what it writes, the keys it is at in that row: a
     property of it is read from the row at those keys and the property's, as `SqlCypherCompiler.row_value` reads it.
     """
+    from_list: bool = False
+    """
+    Whether it is read from an item of a list the query unwinds, an `UNWIND`'s or the rows a write carries on, and
+    passed on as it is: it reads no node's or relationship's properties, so a property of it a `RETURN` or a `WITH`
+    gives is read as `SqlCypherCompiler.item_value` reads it.
+    """
 
 
 @dataclass(frozen=True)

@@ -1,8 +1,8 @@
 """
 On Oracle, a property that is an item of a `RETURN` or a `WITH` is read through its text, as extended JSON: Oracle
 crashed the session where a statement took a text past 32 KB from the properties as JSON for each of two rows (#144).
-So is a text a write takes from the row it is writing, to work out what it writes (#176). Elsewhere a property is read
-as it was. drivine4j's OracleItemPropertyTest, ported.
+So is a text a write takes from the row it is writing, to work out what it writes (#176), and an unwound item's value a
+`RETURN` or a `WITH` gives (#186). Elsewhere a property is read as it was. drivine4j's OracleItemPropertyTest, ported.
 """
 
 from drivine.cypher.sql.oracle_cypher_compiler import OracleCypherCompiler, _direct  # pyright: ignore[reportPrivateUsage]
@@ -91,6 +91,79 @@ def test_a_text_a_write_takes_from_its_row_is_read_through_the_rows_text_and_a_p
     assert "= JSON_QUERY(JSON_QUERY(cy_row, '$.v1' RETURNING JSON), '$.id' RETURNING JSON)" in merged, merged
     assert f"JSON_OBJECT('id' VALUE {row_read('$.v1.id')} NULL ON NULL RETURNING JSON) INTO cy_value" in merged, merged
     assert f"SELECT {row_read('$.v1.a')} INTO cy_value" in merged, merged
+
+
+def item_read(json: str) -> str:
+    return (
+        f"CASE WHEN JSON_VALUE({json}, '$.a.type()') = 'string' "
+        f"THEN JSON(JSON_QUERY(JSON_SERIALIZE({json} RETURNING CLOB), '$.a' RETURNING CLOB)) "
+        f"ELSE JSON_QUERY({json}, '$.a' RETURNING JSON) END"
+    )
+
+
+def test_an_unwound_items_value_an_item_returns_or_passes_on_is_read_through_the_items_text_where_it_is_a_text():
+    # Oracle crashed the session where such a value, a text past 32 KB, was read as JSON for each of two rows (#186).
+    def compiled(cypher: str) -> str:
+        return OracleCypherCompiler("g").compile(cypher, {"ts": []}).sql
+
+    returned = compiled("UNWIND $ts AS t RETURN t.a")
+    assert f"{item_read('u1.item')} AS c1" in returned, returned
+    passed = compiled("UNWIND $ts AS t WITH t.a AS a CREATE (:Doc {a: a})")
+    assert f"{item_read('u1.item')} AS c1" in passed, passed
+    carried = compiled("UNWIND $ts AS t WITH t RETURN t.a")
+    assert f"{item_read('w3.c1')} AS c1" in carried, carried
+    written = compiled("UNWIND $ts AS t MATCH (n:Doc {id: t.id}) SET n.b = 1 RETURN t.a")
+    from_rows = item_read("JSON_QUERY(r4.item, '$.v1' RETURNING JSON)")
+    assert f"{from_rows} AS c1" in written, written
+    # Tested, sorted, nested in an item, or matched by a pattern, as it was.
+    other = compiled("UNWIND $ts AS t WITH t WHERE t.b = 1 RETURN [t.a] ORDER BY t.c")
+    assert "SERIALIZE" not in other and "JSON_QUERY(w3.c1, '$.a' RETURNING JSON)" in other, other
+    merged = compiled("UNWIND $ts AS t MERGE (n:Doc {a: t.a})")
+    assert "= JSON_QUERY(JSON_QUERY(cy_row, '$.v1' RETURNING JSON), '$.a' RETURNING JSON)" in merged, merged
+    for cypher in (
+        # A UNION whose every query returns an unwound item gives one, read so too.
+        "CALL { UNWIND $ts AS m RETURN m UNION ALL UNWIND $ts AS m RETURN m } RETURN m.a",
+        # A map made of a node's properties and carried past a write is read from the write's rows, so read so too.
+        "MATCH (n:Doc) WITH n, n {.a} AS m SET n.b = 1 RETURN m.a",
+        # So does a CALL that returns one, an OPTIONAL one among them.
+        "CALL { UNWIND $ts AS m RETURN m } RETURN m.a",
+        "OPTIONAL CALL { UNWIND $ts AS m RETURN m } RETURN m.a",
+    ):
+        sql = compiled(cypher)
+        assert "JSON_SERIALIZE(" in sql and "'$.a.type()'" in sql, sql
+    # A temporal value's field, or a key that may name one, is read as a temporal field is.
+    for cypher in ("UNWIND $ts AS t RETURN t.year", "UNWIND [date('2020-01-02')] AS t RETURN t.year"):
+        sql = compiled(cypher)
+        assert "'$.year.type()'" not in sql, sql
+
+
+def test_a_value_of_a_map_made_of_a_nodes_properties_or_written_is_read_as_elsewhere():
+    # Only a value read from an unwound item is read through its text: a CASE on a node's properties made Oracle drop a
+    # label test.
+    for cypher in (
+        "MATCH (n:Doc) RETURN properties(n).a",
+        "MATCH (n:Doc) WITH n {.a} AS m RETURN m.a",
+        "MATCH (n:Doc) WITH {a: n.a} AS m RETURN m.a",
+        "MATCH (n:Doc) CALL { WITH n RETURN n {.a} AS m UNION ALL UNWIND [{a: 1}] AS m RETURN m } RETURN m.a",
+    ):
+        sql = oracle(cypher)
+        assert "SERIALIZE" not in sql, sql
+
+
+def test_on_postgres_an_unwound_items_value_returned_is_read_as_elsewhere():
+    def compiled(cypher: str) -> str:
+        return PostgresCypherCompiler("g").compile(cypher, {"ts": []}).sql
+
+    assert "SELECT (u1.item -> 'a') AS c1" in compiled("UNWIND $ts AS t RETURN t.a")
+    assert "SELECT (w3.c1 -> 'a') AS c1" in compiled("UNWIND $ts AS t WITH t RETURN t.a")
+    # A write on Postgres is a function, which `prelude` makes.
+    prelude = (
+        PostgresCypherCompiler("g")
+        .compile("UNWIND $ts AS t MATCH (n:Doc {id: t.id}) SET n.b = 1 RETURN t.a", {"ts": []})
+        .prelude
+    )
+    assert prelude is not None
+    assert "SELECT ((r4.item -> 'v1') -> 'a') AS c1" in prelude, prelude
 
 
 def test_a_value_a_union_in_a_writes_subquery_takes_from_its_row_in_each_query_is_read_from_what_the_union_gives():

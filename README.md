@@ -351,8 +351,9 @@ database.
   digit, and still comes back as a float. A list or a map read from a property orders the texts in it by the
   database's collation, where other text is ordered by its code points, as Cypher does
   ([Cypher on Postgres and Oracle](#cypher-on-postgres-and-oracle)).
-- On Oracle, a text read out of JSON is at most 4,000 bytes, and an empty one is null; a quantified path pattern's
-  `WHERE`, `reduce` and `map[key]` take less than on Postgres
+- On Oracle, an empty text is null, and a text past 4,000 bytes is measured, cut, changed and searched whole, but
+  `reverse()` gives null for one; a quantified path pattern's `WHERE`, `reduce` and `map[key]` take less than on
+  Postgres
   ([Cypher on Postgres and Oracle](#cypher-on-postgres-and-oracle)).
 
 The object manager needs no Cypher at all, on any store: [the quick start](#quick-start) runs as written on Postgres and
@@ -433,7 +434,8 @@ people = await pm.query(spec.bind({"city": "Sydney"}))
   images make one. In a list the statement makes, such as `ORDER BY [n.last, n.first]`, a text is ordered by its code
   points over its first 500 characters, and past them by the database's collation. A list read from a property, and a
   map, still order the texts in them by the database's collation (`ORDER BY n.tags`).
-- On Oracle a text read out of JSON is at most 4,000 bytes, and an empty one is null; `reduce` doesn't run in a
+- On Oracle a text read out of JSON past 4,000 bytes is read whole where it is measured, cut, changed or searched, but
+  by `reverse()`, which gives null for one; an empty text is null; `reduce` doesn't run in a
   statement that writes, in the step of a `reduce`, or where its step reads a path; and `map[key]` reads null where an
   expression gives the key. Lists or maps that may hold a null are compared item by item, as Cypher compares them:
   where one holds a null, two written as the same JSON are null at once, and any other two are walked by the graph's

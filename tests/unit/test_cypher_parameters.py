@@ -306,3 +306,13 @@ def test_round_takes_a_mode_and_a_precision_bound_as_any_parameter_is(compiler: 
     assert compiler("g").compile("RETURN round(2.345, 2, $m)", {"m": _Mode.HALF_UP}).sql
     sql = compiler("g").compile("RETURN round(2.345, $p, 'UP')", {"p": Decimal(-1)}).sql
     assert "round() takes a precision from 0 to 2147483647, as in Neo4j." in sql
+
+
+@pytest.mark.parametrize("compiler", [PostgresCypherCompiler, OracleCypherCompiler])
+def test_a_text_given_to_replace_or_a_sum_holding_a_lone_surrogate_compiles(compiler: type[SqlCypherCompiler]):
+    # Its length in UTF-8, measured for replace() and Oracle's sum (#168), failed the compile with UnicodeEncodeError:
+    # the driver, which binds no such text, is left to refuse it, as it did before.
+    sql = compiler("g").compile(
+        "WITH 'abc' AS a RETURN replace(a, $s, 'x'), replace(a, 'b', $s), a + $s", {"s": "\ud800"}
+    )
+    assert "REPLACE(" in sql.sql

@@ -1947,12 +1947,17 @@ def test_quantifiers_are_three_valued_in_a_projection_a_comparison_an_order_and_
         "single(x IN ts + [null] WHERE x = $u), single(x IN ts + ts WHERE x = $u)]",
         texts,
     ) == [[True, False, None, False]]
-    # Compared by equality: STARTS WITH reads a text past 4000 bytes as null on Oracle, as size() does (#168).
+    # Searched, too: Oracle read a text past 4,000 bytes as null where it searched one (#168).
     assert rows(
-        "UNWIND [$t, $u] AS t WITH collect(t) AS ts WITH ts WHERE any(x IN ts WHERE x = $t) "
-        "AND none(x IN ts WHERE x = 'c') AND all(x IN ts WHERE x <> 'c') RETURN size(ts)",
+        "UNWIND [$t, $u] AS t WITH collect(t) AS ts WITH ts WHERE any(x IN ts WHERE x ENDS WITH 'b') "
+        "AND none(x IN ts WHERE x STARTS WITH 'c') AND all(x IN ts WHERE x STARTS WITH $u) RETURN size(ts)",
         texts,
     ) == [2]
+    assert rows(
+        "UNWIND [$t, $u] AS t WITH collect(t) AS ts RETURN [single(x IN ts WHERE x STARTS WITH $u), "
+        "single(x IN ts WHERE x ENDS WITH 'b'), none(x IN ts WHERE x CONTAINS 'c')]",
+        texts,
+    ) == [[False, True, True]]
     # A list long enough to be bound once in a subquery, of values and of nodes, read for a value and in a WHERE.
     comprehended = "[y IN l WHERE y > 0 | y * 2]"
     assert rows(
@@ -2409,3 +2414,168 @@ def test_lists_of_several_kinds_of_item_nested_sort_item_by_item_among_values_of
     assert rows(f"UNWIND {values} AS t RETURN t ORDER BY t") == typed(ascending)
     assert rows(f"UNWIND {values} AS t RETURN t ORDER BY t DESC") == typed(ascending[::-1])
     assert rows(f"CALL {{ UNWIND {values} AS t RETURN t ORDER BY t LIMIT 4 }} RETURN t") == typed(ascending[:4])
+
+
+# Texts past 4,000 bytes measured, cut, changed, searched and put together whole, as short ones are: drivine4j's tests
+# of liberation-data/drivine4j#298, ported for #168. Oracle read a text from JSON as a VARCHAR2, which holds 4,000
+# bytes, and a longer one as null.
+
+
+def long_text_functions(t: str, unit: str) -> dict[str, Any]:
+    """Each function of the text `t`, a space, `unit` over and over and a space, with what it gives: one a statement."""
+    first, last = unit[0], unit[-1]
+    return {
+        "size(t)": len(t),
+        "toUpper(t)": t.upper(),
+        "toLower(t)": t.lower(),
+        "trim(t)": t.strip(),
+        "ltrim(t)": t.lstrip(),
+        "rtrim(t)": t.rstrip(),
+        "substring(t, 1, size(t) - 2)": t[1:-1],
+        "substring(t, 2)": t[2:],
+        "left(t, size(t) - 1)": t[:-1],
+        "right(t, size(t) - 1)": t[1:],
+        f"replace(t, '{last}', '{last}{last.lower()}')": t.replace(last, last + last.lower()),
+        f"split(t, '{last}')": t.split(last),
+        # A separator past 4,000 bytes, too, but within 32 KB, past which Oracle's REPLACE looks for none.
+        "split('x' + t + 'y', left(t, 4100))": ("x" + t + "y").split(t[:4100]),
+        "split('x', left(t, 4100))": ["x"],
+        f"t STARTS WITH ' {unit}'": True,
+        "t STARTS WITH 'x'": False,
+        "t STARTS WITH t": True,
+        f"t ENDS WITH '{last} '": True,
+        "t ENDS WITH t": True,
+        "left(t, 10) STARTS WITH t": False,
+        "left(t, 10) ENDS WITH t": False,
+        # INSTR looks for no text past 32 KB on Oracle.
+        f"t CONTAINS '{last}{first}{last}'": True,
+        "t CONTAINS 'z'": False,
+        "t CONTAINS left(t, 4100)": True,
+        f"t =~ ' ({unit})+ '": True,
+        "t + 'z'": t + "z",
+        "'z' + t": "z" + t,
+        "t + t": t + t,
+        "t + 1": t + "1",
+        "toString(t)": t,
+        "isEmpty(t)": False,
+    }
+
+
+@pytest.mark.parametrize(
+    ("unit", "length"),
+    # Two-byte characters, so a text of fewer than 4,000 characters is past 4,000 bytes. Past 32 KB, given only: Oracle
+    # closes the session (ORA-03113) after statements that read such a text from a property and from a parameter in
+    # turn, much as it does for one read over two rows (#144), and its sessions hold more of its memory for each
+    # statement that reads one the statement makes, up to the instance's limit (ORA-04036): drivine4j#313.
+    [("aB", 5_000), ("éB", 3_000), ("aB", 40_000)],
+)
+def test_a_text_past_4000_bytes_is_measured_cut_changed_searched_and_added_to_whole_as_a_short_one_is(
+    cypher_pm: PersistenceManager, unit: str, length: int
+):
+    clear(cypher_pm)
+    t = " " + unit * ((length - 2) // 2) + " "
+    assert len(t.encode()) > 4_000
+
+    def rows(cypher: str, parameters: dict[str, Any] | None = None) -> list[Any]:
+        return cypher_pm.query(spec(cypher, parameters))
+
+    short = len(t.encode()) < 32_000
+    if short:
+        rows("CREATE (n:CyLongText {t: $t})", {"t": t})
+    parts = {"a": t[: length // 2], "b": t[length // 2 :]}
+    for function, expected in long_text_functions(t, unit).items():
+        # Given, and stored and read in one row, and made by the statement.
+        assert rows(f"WITH $t AS t RETURN {function}", {"t": t}) == [expected], f"{function} given"
+        if not short:
+            continue
+        assert rows(f"MATCH (n:CyLongText) WITH n.t AS t RETURN {function}") == [expected], f"{function} stored"
+        assert rows(f"WITH $a + $b AS t RETURN {function}", parts) == [expected], f"{function} made"
+    clear(cypher_pm)
+
+
+def test_texts_either_side_of_4000_bytes_are_measured_searched_and_put_together_whole(
+    cypher_pm: PersistenceManager,
+):
+    def rows(cypher: str, parameters: dict[str, Any] | None = None) -> list[Any]:
+        return cypher_pm.query(spec(cypher, parameters))
+
+    # 3,999, 4,000 and 4,001 bytes, of two-byte characters and one of a byte.
+    for t in ("a" + "é" * 1_999, "é" * 2_000, "a" + "é" * 2_000):
+        searched = (
+            "WITH $t AS t RETURN [size(t), toUpper(t), substring(t, 1), t STARTS WITH left(t, 3), "
+            "t ENDS WITH right(t, 3), t CONTAINS right(t, 2), t STARTS WITH 'z', t + 'z', size(split(t, 'é'))]"
+        )
+        assert rows(searched, {"t": t}) == [
+            [len(t), t.upper(), t[1:], True, True, True, False, t + "z", len(t.split("é"))]
+        ], len(t.encode())
+    # Two short texts whose sum is past 4,000 bytes.
+    assert rows("WITH $a AS a RETURN size(a + a)", {"a": "é" * 3_000}) == [6_000]
+    # Sums at and around 4,000 bytes, of texts of two-byte characters and of a float, put together short on Oracle only
+    # where they fit.
+    sides: list[tuple[str, Any]] = [
+        ("é" * 1_000, "é" * 1_000),
+        ("a" * 1_968, "a" * 1_968),
+        ("a" * 1_969, "a" * 1_968),
+        ("a" * 2_000, "a" * 2_001),
+        ("a" * 3_999, 1.5),
+    ]
+    for a, b in sides:
+        assert rows("WITH $a AS a, $b AS b RETURN a + b", {"a": a, "b": b}) == [f"{a}{b}"], f"{len(a)} + {b}"
+    # What to replace, and what with, made by the statement, so their lengths are measured for each row: a short text
+    # made past 4,000 bytes, made shorter, and made no longer.
+    assert rows(
+        "WITH $a AS a RETURN [replace(a, left(a, 1), left(a, 2)), replace(a, left(a, 2), left(a, 1)), "
+        "replace(a, left(a, 1), right(a, 1))]",
+        {"a": "é" * 1_500},
+    ) == [["é" * 3_000, "é" * 750, "é" * 1_500]]
+    # Given what to replace and what with: a short text made past 4,000 bytes.
+    assert rows("WITH $a AS a RETURN size(replace(a, 'é', 'éé'))", {"a": "é" * 1_500}) == [3_000]
+    # A null text, and a function of a short text that gives Oracle's empty text, null, are not read again as long ones
+    # to give another value.
+    for function in (
+        "toUpper(n)",
+        "trim(n)",
+        "substring(n, 1)",
+        "replace(n, 'a', 'b')",
+        "split(n, ',')",
+        "size(n)",
+        "toString(n)",
+        "n + 'a'",
+        "n STARTS WITH 'a'",
+        "n ENDS WITH 'a'",
+        "n CONTAINS 'a'",
+        "n =~ 'a'",
+    ):
+        assert rows(f"WITH $n AS n RETURN {function}", {"n": None}) == [None], function
+    empty = None if cypher_pm.type is DatabaseType.ORACLE else ""
+    assert rows(
+        "WITH $s AS s, $w AS w RETURN [substring(s, 5), left(s, 0), replace(s, 'abc', ''), trim(w)]",
+        {"s": "abc", "w": "   "},
+    ) == [[empty, empty, empty, empty]]
+    # Two empty texts put together are empty: on Oracle null, as its empty text is, and not read as a long one.
+    assert rows("WITH $e AS e RETURN e + e", {"e": ""}) == [empty]
+
+
+def test_a_stored_text_past_32_kb_read_in_one_row_is_measured_and_changed_whole_passed_on_or_read_where_used(
+    cypher_pm: PersistenceManager,
+):
+    # On Oracle a WITH passes a property on read through its text (#144), and a function reads a text past 4,000 bytes
+    # as a CLOB (#168): the two together. One node: Oracle crashes on a long property read from two rows (#144).
+    clear(cypher_pm)
+    t = "aB" * 20_000
+    cypher_pm.query(spec("CREATE (n:CyLongText {t: $t})", {"t": t}))
+    functions: dict[str, Any] = {
+        "size(#)": 40_000,
+        "toUpper(#)": t.upper(),
+        "substring(#, 2)": t[2:],
+        "replace(#, 'B', 'b')": t.lower(),
+        "# ENDS WITH 'aB'": True,
+        "size(# + 'z')": 40_001,
+        "toString(#)": t,
+    }
+    for function, expected in functions.items():
+        passed = f"MATCH (n:CyLongText) WITH n.t AS t RETURN {function.replace('#', 't')}"
+        assert cypher_pm.query(spec(passed)) == [expected], f"{function}, passed on"
+        used = f"MATCH (n:CyLongText) RETURN {function.replace('#', 'n.t')}"
+        assert cypher_pm.query(spec(used)) == [expected], f"{function}, read where used"
+    clear(cypher_pm)

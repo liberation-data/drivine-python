@@ -480,7 +480,7 @@ def test_a_text_past_32_kb_set_from_an_unwound_parameter_on_two_nodes_leaves_the
         query("UNWIND $items AS t MATCH (n:CyWrite {id: t.id}) SET n += t", items)
         assert query("MATCH (n:CyWrite) RETURN n.a ORDER BY n.id") == texts
         floats = query("MATCH (n:CyWrite) RETURN n.f ORDER BY n.id")
-        assert typed(floats) == typed([5.0, 5.0, 5.0]), floats
+        assert canonically(floats) == canonically([5.0, 5.0, 5.0]), floats
     finally:
         connection.release()
         clear(factory.get("oracle"))
@@ -584,10 +584,10 @@ def test_an_unwound_parameters_items_are_written_as_they_are_given_by_set_create
         {"id": 12, "f": -0.5, "m": "v"},
         {"id": 20, "f": 6.0},
     ]
-    assert typed(rows) == typed(expected), rows
+    assert canonically(rows) == canonically(expected), rows
 
 
-def typed(value: Any) -> Any:
+def canonically(value: Any) -> Any:
     """The value in a form that compares by kind too: 5.0 is not 5."""
     return canonical(value, Step(""))
 
@@ -2138,11 +2138,11 @@ def test_a_null_node_or_relationship_in_a_list_or_a_map_makes_its_comparison_nul
     ) == [[None, None, None, None, None, None, False]]
 
 
-def test_a_statement_that_writes_compares_a_list_that_holds_a_null_as_null_where_it_is_equal_as_json(
+def test_a_statement_that_writes_compares_a_list_that_holds_a_null_item_by_item(
     cypher_pm: PersistenceManager,
 ):
-    # Beyond the spec's cases (#116): on Oracle a procedure calls no function of its own, so values that differ as JSON
-    # are false there.
+    # Beyond the spec's cases (#116); on Oracle a procedure calls no function of its own, so the store's walks them
+    # (#188).
     clear(cypher_pm)
     assert cypher_pm.query(
         spec(
@@ -2160,11 +2160,67 @@ def test_a_statement_that_writes_compares_a_list_that_holds_a_null_as_null_where
             "RETURN [n.eq, n.in, n.longEq, n.longIn]"
         )
     ) == [[True, True, True, True]]
-    if cypher_pm.type is DatabaseType.ORACLE:
-        return
     assert cypher_pm.query(
         spec("CREATE (n:CyNullEquality) WITH n, [null] AS a, [1] AS b SET n.eq = coalesce(a = b, 'null') RETURN n.eq")
     ) == ["null"]
+
+
+def test_lists_and_maps_that_hold_a_null_and_differ_as_json_compare_item_by_item_in_a_statement_that_writes(
+    cypher_pm: PersistenceManager,
+):
+    # Not in the spec yet (#270): drivine4j's CypherWriteContract of liberation-data/drivine4j#323. On Oracle a
+    # procedure declares no function of its own, so the store's walks them.
+    clear(cypher_pm)
+    assert cypher_pm.query(
+        spec(
+            "CREATE (n:CyWrite) WITH n, [null, 1] AS a, [2, 1] AS b, {x: null} AS m, {x: 1} AS o, [[null], 1] AS c, "
+            "[[1], 2] AS d RETURN [a = b, m = o, c = d, a <> [1, 2], a IN [b, [3]], a IN [[3]], "
+            "{k: [null]} = {k: [2]}, m <> {y: 1}]"
+        )
+    ) == [[None, None, False, True, None, False, None, True]]
+    # A node OPTIONAL MATCH finds none of is null in the list that holds it, beside one the statement made.
+    assert cypher_pm.query(
+        spec("OPTIONAL MATCH (x:Nope) CREATE (n:CyWrite) WITH n, [x] AS a, [n] AS b RETURN [a = b, a = a]")
+    ) == [[None, None]]
+
+
+def test_values_that_may_hold_a_null_are_null_where_written_alike_only_when_one_holds_one(
+    cypher_pm: PersistenceManager,
+):
+    # Not in the spec yet (#270): on Oracle two written as the same JSON text are null with no walk, so the text must
+    # be written alike only where one holds a null; any written otherwise are walked.
+    clear(cypher_pm)
+    assert cypher_pm.query(
+        spec(
+            "CREATE (n:CyWrite) WITH n, CASE WHEN n.x IS NULL THEN [1, 2] ELSE [null] END AS a, "
+            "CASE WHEN n.x IS NULL THEN [1, null] ELSE [2] END AS c "
+            "RETURN [a = [1, 2], c = [1, null], c = [1.0, null], {a: 1, b: c[1]} = {b: null, a: 1}, "
+            "['é', c[1]] = ['\\u00e9', null], [[1, 2], c] = [[1, 2], [1, null]]]"
+        )
+    ) == [[True, None, None, None, None, None]]
+    # And in a read, where the same text is null and any other is walked.
+    assert cypher_pm.query(
+        spec(
+            "WITH [1, null] AS c RETURN [c = [1, null], c = [1.0, null], c = [2, null], "
+            "{a: 1, b: null} = {b: null, a: 1}, ['é', null] = ['\\u00e9', null]]"
+        )
+    ) == [[None, None, False, None, None]]
+
+
+def test_the_step_of_a_reduce_compares_lists_and_maps_that_hold_a_null_and_differ_as_json_item_by_item(
+    cypher_pm: PersistenceManager,
+):
+    # Not in the spec yet (#270): on Oracle a reduce's step calls no function of the query's, so the store's walks them.
+    assert cypher_pm.query(
+        spec("WITH [2, null] AS c RETURN reduce(acc = [], x IN [[1, null], [2, null], [null, 1]] | acc + [x = c])")
+    ) == [[False, None, None]]
+    assert cypher_pm.query(
+        spec("RETURN reduce(acc = [], m IN [{x: null}, {x: 1, y: 2}, {x: 2}] | acc + [m = {x: 1}])")
+    ) == [[None, False, False]]
+    assert cypher_pm.query(
+        spec("WITH [[null], 1] AS a RETURN reduce(acc = [], x IN [[[1], 1], [[1], 2]] | acc + [x = a])")
+    ) == [[None, False]]
+    assert cypher_pm.query(spec("RETURN reduce(acc = true, x IN [[null]] | acc AND x = [1])")) == [None]
 
 
 # Texts compared and sorted by their code points, as Cypher has them, on every store: drivine4j's own tests of

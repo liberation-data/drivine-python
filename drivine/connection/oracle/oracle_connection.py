@@ -5,6 +5,7 @@ import re
 import time
 from typing import Any, TypeVar
 
+from drivine.backend.oracle.oracle_stored_functions import OracleStoredFunctions, is_missing
 from drivine.backend.sql.sql_graph import DEFAULT_GRAPH
 from drivine.connection.connection import Connection
 from drivine.connection.oracle.oracle_cursor import OracleCursor
@@ -32,17 +33,24 @@ class OracleConnection(Connection):
     to a block.
     """
 
-    def __init__(self, connection: Any, release: Any, session_id: str, graph: str = DEFAULT_GRAPH) -> None:
+    def __init__(
+        self, connection: Any, release: Any, session_id: str, graph: str = DEFAULT_GRAPH, database: str = ""
+    ) -> None:
+        """
+        `database` is the database and the user the session is of: whether it may call the graph's functions is
+        remembered for them (see OracleStoredFunctions).
+        """
         self.connection = connection
         self._release = release
         self.session_id = session_id
         self.graph = graph
+        self.database = database
         self.result_mapper = OracleResultMapper()
         self._in_transaction = False
 
     async def query(self, spec: QuerySpecification[T]) -> list[T]:
         finalized = spec.finalized_copy("SQL")
-        sql = cypher_compiled(finalized, "ORACLE", self.graph)[0]
+        sql = await self._compiled(finalized)
         compiled = OracleSpecCompiler(sql).compile()
         start = time.perf_counter()
         self.connection.autocommit = not self._in_transaction
@@ -66,7 +74,7 @@ class OracleConnection(Connection):
 
     async def open_cursor(self, spec: CursorSpecification[T]) -> OracleCursor[T]:
         finalized = spec.finalized_copy("SQL")
-        sql = cypher_compiled(finalized, "ORACLE", self.graph)[0]
+        sql = await self._compiled(finalized)
         compiled = OracleSpecCompiler(sql).compile()
         if sql is not finalized and _BLOCK.match(compiled.statement):
             raise DrivineError(
@@ -79,6 +87,42 @@ class OracleConnection(Connection):
         cursor.arraysize = spec.batch
         await cursor.execute(compiled.statement, await self._bindable(compiled.parameters), fetch_lobs=False)
         return OracleCursor(finalized, cursor, self.result_mapper)
+
+    async def _compiled(self, finalized: QuerySpecification[T]) -> QuerySpecification[T]:
+        """
+        The specification, a Cypher statement compiled for Oracle, calling the functions the graph's store keeps where
+        the statement needs one and the session may call it, and compiled again to call none where it may not: see
+        OracleStoredFunctions.
+        """
+        sql, compiled = cypher_compiled(finalized, "ORACLE", self.graph)
+        if compiled is None or not compiled.calls_stored_nulls_equal or await self._calls_nulls_equal():
+            return sql
+        return cypher_compiled(finalized, "ORACLE", self.graph, nulls_equal_stored=False)[0]
+
+    async def _calls_nulls_equal(self) -> bool:
+        """
+        Whether this session may call the graph's function `<graph>_nulls_equal`, as remembered, or as calling it
+        finds. A query that fails rolls back only itself, so an open transaction is left as it was.
+        """
+        import oracledb
+
+        key = f"{self.database}|{self.graph}"
+        known = OracleStoredFunctions.known(key)
+        if known is not None:
+            return known
+        self.connection.autocommit = not self._in_transaction
+        cursor = self.connection.cursor()
+        try:
+            await cursor.execute(OracleStoredFunctions.check(self.graph))
+            await cursor.fetchall()
+            found = True
+        except oracledb.DatabaseError as error:
+            if not is_missing(error):
+                raise
+            found = False
+        finally:
+            cursor.close()
+        return OracleStoredFunctions.found(key, self.graph, found)
 
     async def _bindable(self, parameters: dict[str, Any]) -> dict[str, Any]:
         """

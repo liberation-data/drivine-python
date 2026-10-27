@@ -344,15 +344,44 @@ def test_lists_and_maps_written_out_that_may_hold_a_null_are_compared_item_by_it
     assert not any(it in sql for it in built), sql
 
 
-def test_oracle_declares_the_function_that_compares_values_that_may_hold_a_null_once_and_none_in_a_procedure():
-    # A procedure's queries call no function it declares: there, two values equal as JSON are null, as each holds one.
-    def compiled(cypher: str) -> str:
-        return OracleCypherCompiler("g").compile(cypher).sql
-
-    read = compiled("WITH [1, null] AS a, [2, null] AS b RETURN [a = b, b = a]")
-    assert read.count("FUNCTION cy_nulls_equal(") == 1 and "too_long" in read, read
-    written = compiled("CREATE (n:X) WITH n, [1, null] AS a, [2, null] AS b SET n.e = a = b")
-    assert "cy_nulls_equal" not in written and "THEN NULL ELSE FALSE END" in written, written
+def test_values_that_may_hold_a_null_are_walked_on_oracle_by_the_stores_function_where_they_differ_as_json():
+    # drivine4j's CompiledSizeTest of #270 (#188): a procedure's queries, and a reduce's step's, call no function of
+    # their own, so the store keeps it.
+    write = "MATCH (c:Claim) WITH c, [c.a, null] AS l, [c.b] AS m SET c.e = l = m"
+    stored = OracleCypherCompiler("g").compile(write)
+    assert stored.calls_stored_nulls_equal, stored.sql
+    assert "THEN NULL ELSE (g_nulls_equal(" in stored.sql and "cy_nulls_equal" not in stored.sql, stored.sql
+    # Two written as the same JSON text are null before any walk.
+    text = r"JSON_SERIALIZE\((.+?) RETURNING VARCHAR2\(4000\) NULL ON ERROR\)"
+    assert re.search(rf"CASE WHEN {text} = {text} THEN NULL ELSE \(g_nulls_equal\(\1, \2\) = 1\) END", stored.sql, re.S)
+    reduced = OracleCypherCompiler("g").compile(
+        "MATCH (c:Claim) WITH [c.a, null] AS l RETURN reduce(acc = true, x IN [[1]] | acc AND x = l)"
+    )
+    assert reduced.calls_stored_nulls_equal, reduced.sql
+    assert "THEN NULL ELSE (g_nulls_equal(" in reduced.sql and "cy_nulls_equal" not in reduced.sql, reduced.sql
+    # A read calls the store's too, and declares no function of its own for it.
+    read = OracleCypherCompiler("g").compile("MATCH (c:Claim) WITH [c.a, null] AS l, [c.b] AS m RETURN l = m")
+    assert read.calls_stored_nulls_equal and not read.sql.startswith("WITH\nFUNCTION"), read.sql
+    assert "THEN NULL ELSE (g_nulls_equal(" in read.sql, read.sql
+    # Without it, two that differ as JSON are false in a procedure, and a read declares the function itself, once.
+    fallback = OracleCypherCompiler("g", nulls_equal_stored=False).compile(write)
+    assert not fallback.calls_stored_nulls_equal, fallback.sql
+    assert "nulls_equal" not in fallback.sql and "THEN NULL ELSE FALSE END" in fallback.sql, fallback.sql
+    declared = OracleCypherCompiler("g", nulls_equal_stored=False).compile(
+        "MATCH (c:Claim) WITH [c.a, null] AS l, [c.b] AS m RETURN [l = m, m = l]"
+    )
+    assert not declared.calls_stored_nulls_equal, declared.sql
+    assert declared.sql.startswith("WITH\nFUNCTION cy_nulls_equal(") and "too_long" in declared.sql, declared.sql
+    assert declared.sql.count("FUNCTION cy_nulls_equal(") == 1, declared.sql
+    assert "THEN NULL ELSE (cy_nulls_equal(" in declared.sql, declared.sql
+    # A statement that compares no value that may hold a null calls no function.
+    flat = OracleCypherCompiler("g").compile("MATCH (c:Claim) SET c.e = c.a = c.b, c.f = c.list = [1]")
+    assert not flat.calls_stored_nulls_equal, flat.sql
+    # And calling the store's function makes a statement smaller than declaring it.
+    alone = OracleCypherCompiler("g", nulls_equal_stored=False).compile(
+        "MATCH (c:Claim) WITH [c.a, null] AS l, [c.b] AS m RETURN l = m"
+    )
+    assert len(read.sql) < len(alone.sql), (len(read.sql), len(alone.sql))
 
 
 @COMPILERS

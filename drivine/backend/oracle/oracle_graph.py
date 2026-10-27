@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from collections.abc import Sequence
 
+from drivine.backend.oracle.oracle_stored_functions import OracleStoredFunctions, nulls_equal_function, nulls_equal_name
 from drivine.backend.sql.sql_graph import DEFAULT_GRAPH, SqlGraph, sql_text
 from drivine.model import stamps
 
@@ -54,24 +55,63 @@ class OracleGraph(SqlGraph):
         ]
 
     @property
+    def nulls_equal(self) -> str:
+        """
+        The function a compiled Cypher statement compares two values that may hold a null by, list item by list item
+        and map key by map key (see `OracleCypherCompiler.nulls_equal`): a statement that writes is a PL/SQL block,
+        whose queries call no function of its own, so the store keeps it. drivine4j and Drivine for TypeScript make it
+        byte for byte alike.
+        """
+        return nulls_equal_name(self.name)
+
+    @property
+    def functions(self) -> list[str]:
+        """What makes `nulls_equal`: safe to run again."""
+        return [f"CREATE OR REPLACE {nulls_equal_function(self.nulls_equal)}"]
+
+    @property
     def ensuring(self) -> str:
         """
         The block that makes the store when it is not there and does nothing when it is: the property graph is made
         last, so its presence says the rest is. One another process made meanwhile (ORA-00955) is taken as made.
+
+        The `functions` are made after the tables, where they are not there or not valid, so a store an earlier version
+        made gains them. A user who may not make a function (ORA-01031: making one takes `CREATE PROCEDURE`, which the
+        `RESOURCE` role grants) still has the store made: a statement then compares as it would without them (see
+        OracleStoredFunctions).
         """
         statements = "\n".join(
             f"    BEGIN EXECUTE IMMEDIATE {sql_text(it)}; EXCEPTION WHEN e_exists THEN NULL; END;" for it in self.ddl
         )
+        functions = "\n".join(
+            f"    BEGIN EXECUTE IMMEDIATE {sql_text(it)}; EXCEPTION WHEN e_denied THEN NULL; END;"
+            for it in self.functions
+        )
+        function = self.nulls_equal.upper()
         return f"""DECLARE
     v_made NUMBER;
     e_exists EXCEPTION;
     PRAGMA EXCEPTION_INIT(e_exists, -955);
+    e_denied EXCEPTION;
+    PRAGMA EXCEPTION_INIT(e_denied, -1031);
 BEGIN
     SELECT COUNT(*) INTO v_made FROM user_property_graphs WHERE graph_name = '{self.name.upper()}';
     IF v_made = 0 THEN
 {statements}
     END IF;
+    SELECT COUNT(*) INTO v_made FROM user_objects
+        WHERE object_type = 'FUNCTION' AND object_name = '{function}' AND status = 'VALID';
+    IF v_made = 0 THEN
+{functions}
+    END IF;
 END;"""
+
+    def ensured(self) -> None:
+        """
+        Has every session asked again whether it may call the `functions` (see OracleStoredFunctions): `ensuring` has
+        just run.
+        """
+        OracleStoredFunctions.ensured(self.name)
 
 
 def json_key(name: str) -> str:

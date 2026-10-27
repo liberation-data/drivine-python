@@ -171,6 +171,16 @@ have. A vector index is a table of embeddings beside the nodes, holding those of
 another size is left out, not refused. `load_nearest` is approximate through it. With no index made, or one of another
 size than the vector's, it measures every node of the label whose embedding is of the vector's size, and is exact.
 
+Beside the tables an Oracle graph is made with one function, `<graph>_nulls_equal`, by which a compiled Cypher
+statement compares two lists or maps that may hold a null (see
+[Cypher on Postgres and Oracle](#cypher-on-postgres-and-oracle)). drivine4j and Drivine for TypeScript make it byte for
+byte alike. Making it takes `CREATE PROCEDURE`, which the `RESOURCE` role grants, as well as the `CREATE TABLE` the
+tables take. A store an earlier version made gains it the next time a pool first connects to the graph. Where the user
+that makes the graph may not make a function, the graph is made without it, and Drivine logs a warning once for the
+graph when a statement would call it, and looks for it again a minute later. Until then a statement that writes, or the
+step of a `reduce`, compares two lists or maps that hold a null and differ as JSON as false, where Cypher may give null
+(`a = b`, of `[null] AS a, [1] AS b`), and a read declares the function itself.
+
 On Postgres, `DATABASE_NAME` is the database, and `DATABASE_DEFAULT_GRAPH_PATH` names the graph, `drivine` by default:
 see [Postgres](#postgres). On either, Cypher you write is compiled to SQL: see
 [Cypher on a relational database](#cypher-on-a-relational-database).
@@ -413,10 +423,13 @@ people = await pm.query(spec.bind({"city": "Sydney"}))
   map, still order the texts in them by the database's collation (`ORDER BY n.tags`).
 - On Oracle a text read out of JSON is at most 4,000 bytes, and an empty one is null; `reduce` doesn't run in a
   statement that writes, in the step of a `reduce`, or where its step reads a path; and `map[key]` reads null where an
-  expression gives the key. Lists or maps that may hold a null are compared by a function the query declares too; in a
-  statement that writes, or the step of a `reduce`, two that are equal as JSON compare as null and any other two as
-  false, so `a = [1]`, of `[null] AS a`, is false there, where Cypher's comparison is null. Lists and maps written out
-  are compared item by item there too, so `[null] = [1]` is null.
+  expression gives the key. Lists or maps that may hold a null are compared item by item, as Cypher compares them:
+  where one holds a null, two written as the same JSON are null at once, and any other two are walked by the graph's
+  function `<graph>_nulls_equal` (see [Connecting](#connecting)), in a statement that writes and the step of a `reduce`
+  too. Where the store has no such function, a read declares it, and a statement that writes, or the step of a
+  `reduce`, compares two such values that differ as JSON as false, so `a = [1]`, of `[null] AS a`, is false there,
+  where Cypher's comparison is null. Lists and maps written out are compared item by item everywhere, so
+  `[null] = [1]` is null.
 - On Oracle a property that a `RETURN` or a `WITH` returns or passes on (`RETURN n.name`) is read through its text,
   which costs about 2.4 to 3.8 times a plain read: 100,000 rows of `RETURN n.name` take about 490 ms, against 150 ms.
   This works around an Oracle bug, seen on 23.26.3: a string past about 32 KB taken from JSON as JSON, returned or fed

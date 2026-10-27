@@ -28,8 +28,10 @@ on:
 permissions:
   contents: read
 
+# A push (a release) queues behind another on the same ref. A dry run gets a group of its own: GitHub keeps one pending
+# run per group, so a dry run queued on main would otherwise cancel a release waiting there.
 concurrency:
-  group: release-${{ github.ref }}
+  group: ${{ github.event_name == 'push' && format('release-{0}', github.ref) || format('release-dry-run-{0}', github.run_id) }}
   cancel-in-progress: false
 
 jobs:

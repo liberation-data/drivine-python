@@ -36,6 +36,7 @@ on:
         type: string
         required: false
         default: ""
+    # The calling job must grant contents: write and pull-requests: write, which the job below asks for.
     secrets:
       RELEASE_PR_TOKEN:
         required: false
@@ -43,8 +44,10 @@ on:
 permissions:
   contents: read
 
+# Named for this repository: a run called from another repository is in that repository's concurrency groups, where
+# the train controller may call all three libraries' prepare-release at once.
 concurrency:
-  group: prepare-release
+  group: prepare-release-liberation-data/drivine-python
   cancel-in-progress: false
 
 env:
@@ -95,6 +98,10 @@ jobs:
           branch="release/$tag"
           if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
             echo "::error::$version isn't X.Y.Z (or X.Y.Z-suffix), so it can't be released."
+            exit 1
+          fi
+          if [[ "$version" == "$current" ]]; then
+            echo "::error::pyproject.toml's version is $version already. Pick a later version, or tag the commit by hand if merging it didn't release it."
             exit 1
           fi
           if git rev-parse -q --verify "refs/tags/$tag" > /dev/null; then

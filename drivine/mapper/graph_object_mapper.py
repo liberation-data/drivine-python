@@ -107,7 +107,14 @@ class GraphObjectMapper:
                 continue
             if value is None and field in mapping.null_as_default:
                 continue
-            values[field] = _unpacked(value) if field in mapping.json_packed else value
+            value = _unpacked(value) if field in mapping.json_packed else value
+            kind = mapping.collections.get(field)
+            if kind is not None and isinstance(value, (list, tuple, set, frozenset)):
+                value = _collected(cast(Iterable[Any], value), kind)
+            elif kind is not None and value == {}:
+                # Drivine for TypeScript saved an empty set as {} on Memgraph and as JSON text before 3.3.
+                value = _collected([], kind)
+            values[field] = value
         for field, kind in mapping.empty_when_absent.items():
             if values.get(field) is None:
                 values[field] = empty_collection(kind)

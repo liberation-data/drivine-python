@@ -21,6 +21,11 @@ class FieldMapping:
     """Fields whose default a stored null loads as."""
     empty_when_absent: dict[str, CollectionKind] = field(default_factory=lambda: {})
     """Fields loaded as an empty collection when absent or null, by the collection's kind."""
+    collections: dict[str, CollectionKind] = field(default_factory=lambda: {})
+    """
+    Fields holding a set or a tuple, by its kind. A store holds them as lists, and a load gives the set or tuple, to a
+    fragment constructed without validation as to a validated one.
+    """
 
     @property
     def fields_by_property(self) -> dict[str, str]:

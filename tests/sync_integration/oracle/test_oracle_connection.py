@@ -1,13 +1,14 @@
 # Written by scripts/unasync.py from tests/integration/oracle/test_oracle_connection.py:
 # change that, and run the script again.
 import json
+import time
 from collections.abc import Iterator
 from typing import Any
 
 import pytest
 
 from drivine.backend.oracle.oracle_graph import OracleGraph, has_labels
-from drivine.sync import CursorSpecification, DatabaseRegistry, PersistenceManager, QuerySpecification
+from drivine.sync import Connection, CursorSpecification, DatabaseRegistry, PersistenceManager, QuerySpecification
 from tests.sync_integration.oracle.oracle_seed import ON_ORACLE
 
 pytestmark = ON_ORACLE
@@ -157,3 +158,61 @@ def test_reads_a_cursor_in_batches(registry: DatabaseRegistry):
         assert seen == [1, 2, 3, 4, 5, 6, 7]
     finally:
         connection.release()
+
+
+DDL_WAIT_TEST = OracleGraph("drivine_ddl_wait_test")
+"""The graph the tests of the ensure's wait on another session's lock make and drop."""
+
+
+def _drop_ddl_wait_test(pm: PersistenceManager) -> None:
+    graph = DDL_WAIT_TEST
+    pm.execute(QuerySpecification[Any](f"DROP PROPERTY GRAPH IF EXISTS {graph.name}"))
+    for table in (graph.edges, graph.nodes, graph.catalog):
+        pm.execute(QuerySpecification[Any](f"DROP TABLE IF EXISTS {table} PURGE"))
+
+
+def _turned_away_after(holder: Connection, maker: Connection) -> float:
+    """
+    How long DDL `maker` runs on the test graph's edges, while `holder` writes them, takes to be turned away
+    (ORA-00054): at once unless `maker`'s session waits on DDL locks. CREATE INDEX, as ALTER TABLE ... ADD doesn't wait.
+    """
+    holder.start_transaction()
+    try:
+        holder.query(QuerySpecification[Any](f"LOCK TABLE {DDL_WAIT_TEST.edges} IN ROW EXCLUSIVE MODE"))
+        started = time.monotonic()
+        with pytest.raises(Exception, match="ORA-00054"):
+            maker.query(
+                QuerySpecification[Any](f"CREATE INDEX {DDL_WAIT_TEST.name}_extra ON {DDL_WAIT_TEST.edges} (type)")
+            )
+        return time.monotonic() - started
+    finally:
+        holder.rollback_transaction()
+
+
+def test_oracle_ensuring_leaves_the_sessions_ddl_not_waiting_after_made_or_failed(pm, registry: DatabaseRegistry):
+    graph = DDL_WAIT_TEST
+    provider = registry.connection_provider("oracle")
+    assert provider is not None
+    holder = provider.connect()
+    maker = provider.connect()
+    try:
+        _drop_ddl_wait_test(pm)
+        maker.query(QuerySpecification[Any](graph.ensuring))
+        assert _turned_away_after(holder, maker) < 10
+
+        # A node table without the key the edges reference: the block fails after the wait is set.
+        _drop_ddl_wait_test(pm)
+        pm.execute(QuerySpecification[Any](f"CREATE TABLE {graph.nodes} (x NUMBER)"))
+        with pytest.raises(Exception, match="ORA-00904"):
+            maker.query(QuerySpecification[Any](graph.ensuring))
+        pm.execute(QuerySpecification[Any](f"CREATE TABLE {graph.edges} (type VARCHAR2(10))"))
+        assert _turned_away_after(holder, maker) < 10
+
+        # And the measure tells the wait: a session that waits three seconds is turned away after them.
+        maker.query(QuerySpecification[Any]("ALTER SESSION SET DDL_LOCK_TIMEOUT = 3"))
+        assert _turned_away_after(holder, maker) >= 2.5
+        maker.query(QuerySpecification[Any]("ALTER SESSION SET DDL_LOCK_TIMEOUT = 0"))
+    finally:
+        holder.release()
+        maker.release()
+        _drop_ddl_wait_test(pm)

@@ -15,7 +15,9 @@ class GraphTables:
 
     It runs once per pool: connections that ask at once, from tasks or threads, wait for the first, which runs it; once
     it has run, a connection asks nothing more. One that fails is run again by the next connection. The statement
-    checks before it writes, so a user who may read the tables but not make them works once they are there.
+    checks before it writes, so a user who may read the tables but not make them works once they are there. Pools or
+    processes that first connect at once each run it, and the statement makes the tables once among them: Postgres's
+    takes a lock, Oracle's waits on the other session's locks (see OracleGraph.ensuring).
     """
 
     def __init__(self, ensuring: str) -> None:

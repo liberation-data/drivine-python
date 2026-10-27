@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-try:
-    from pipilgrim import PilgrimAssembly
-except ModuleNotFoundError as e:
-    raise ModuleNotFoundError("DrivineAssembly needs pi-pilgrim: pip install 'drivine[pilgrim]'", name=e.name) from e
+from typing import Self
+
+from pipilgrim import PilgrimAssembly
 
 from drivine.connection.database_registry import DEFAULT, DatabaseRegistry
 from drivine.dsl.index_advice_policy import IndexAdvicePolicy
@@ -18,7 +17,12 @@ from drivine.schema.schema_options import SchemaOptions
 
 class DrivineAssembly(PilgrimAssembly):
     """
-    Drivine's components, for an application's pi-pilgrim assembly to use:
+    Drivine's components: the registry and the managers. On its own:
+
+        async with DrivineAssembly() as drivine:      # starts Drivine; closes its drivers and pools on the way out
+            pm = drivine.persistence_manager()
+
+    Or for an application's pi-pilgrim assembly to use, which closes Drivine when it closes:
 
         class AppAssembly(PilgrimAssembly):
             def __init__(self):
@@ -30,11 +34,11 @@ class DrivineAssembly(PilgrimAssembly):
 
     The databases come from the environment by default. To register them in code, subclass it and override
     `register_databases`.
-    """
 
-    def __init__(self) -> None:
-        self._registry_made = False
-        super().__init__()
+    When the assembly closes, at the end of `async with DrivineAssembly() as drivine:` or with the assembly that holds
+    it, it closes every database's driver or pool, as Spring closes drivine4j's when its context closes: the registry is
+    a `shared` component, whose `close` is its teardown. A closed assembly makes no more components.
+    """
 
     def make_bindings(self) -> None:
         self.make_injectable(self.registry, by_type=DatabaseRegistry)
@@ -50,7 +54,8 @@ class DrivineAssembly(PilgrimAssembly):
         registry.build_or_resolve_from_env()
 
     def registry(self) -> DatabaseRegistry:
-        return self.shared(lambda: self._registered(DatabaseRegistry()))
+        """The application's databases, registered by `register_databases`. Closed when the assembly closes."""
+        return self.shared(DatabaseRegistry, init=self.register_databases)
 
     def persistence_manager_factory(self) -> PersistenceManagerFactory:
         return self.shared(lambda: PersistenceManagerFactory(self.registry()))
@@ -102,20 +107,20 @@ class DrivineAssembly(PilgrimAssembly):
 
     async def start(self) -> None:
         """
-        Enforces the schema catalogs. Call it once, when the application starts. With none, or only empty ones, the
-        manager says so, and nothing is applied. The databases are registered here, catalogs or not, as drivine4j
-        registers them at start-up: so a missing `DATABASE_TYPE` raises `DrivineError` from `start`, not on first use.
+        Enforces the schema catalogs. Entering the assembly, `async with DrivineAssembly() as drivine:`, calls it, as
+        Spring starts drivine4j when its context is refreshed; otherwise, call it once, when the application starts. An
+        application assembly that holds this one doesn't call it on entering: call it there. With no catalogs, or only
+        empty ones, the manager says so, and nothing is applied. The databases are registered here, catalogs or not, as
+        drivine4j registers them at start-up: so a missing `DATABASE_TYPE` raises `DrivineError` from `start`, not on
+        first use.
         """
         await self.schema_manager().enforce()
 
-    async def close(self) -> None:
-        """
-        Closes every database's driver or pool. Call it once, when the application stops.
-        """
-        if self._registry_made:
-            await self.registry().close()
-
-    def _registered(self, registry: DatabaseRegistry) -> DatabaseRegistry:
-        self.register_databases(registry)
-        self._registry_made = True
-        return registry
+    async def __aenter__(self) -> Self:
+        """Starts Drivine. If starting fails, the assembly is closed before the error is raised."""
+        try:
+            await self.start()
+        except BaseException:
+            await self.aclose()
+            raise
+        return self

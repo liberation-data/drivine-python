@@ -138,7 +138,8 @@ registry.build_or_resolve_from_env("analytics") # ANALYTICS_DATABASE_TYPE, ...
   - Pool max 40, connection timeout 5 s.
   - Neptune uses a dummy auth token, TLS and a pool of one.
   - Oracle and Postgres run their graph-table DDL on first connection.
-- `await registry.close()` ends every provider, at application shutdown.
+- `await registry.close()` ends every provider, at application shutdown. Leaving `async with DatabaseRegistry()` calls
+  it, and so does closing the `DrivineAssembly` that made the registry.
 
 ## Transactions
 
@@ -559,18 +560,24 @@ class AppAssembly(PilgrimAssembly):
   and override `register_databases(registry)`. Overriding a method is how a pilgrim assembly is changed, in tests as well.
 - `Assembled` injects Drivine's components into classes made by a framework, by type or by key:
   `gom: StatelessGraphObjectManager = Assembled()`.
-- Nothing in Drivine requires pi-pilgrim at use. The managers are plain classes, so an application with another
-  container, or none, constructs them itself.
+- Closing is pi-pilgrim's, as Spring closes drivine4j's beans with its context. The registry is a `shared` component,
+  and its `close` is the teardown pi-pilgrim infers, so closing the assembly (`await aclose()`, or leaving
+  `async with`) closes every driver and pool, and an application's assembly closes the `DrivineAssembly` it asked
+  `AssemblyHolder` for. `DrivineAssembly` has no `close` of its own: an async one would hide pi-pilgrim's sync
+  `close()`, and `with` would get a coroutine it never awaits. Entering `DrivineAssembly` calls `start()`, as Spring
+  starts drivine4j on refresh; entering an application's assembly doesn't, so the application calls
+  `drivine.start()`.
+- The managers are plain classes, so an application with another container, or none, constructs them itself.
+  `DatabaseRegistry` is a context manager for it: `async with DatabaseRegistry() as registry:` closes it.
 
 ### FastAPI
 
 ```python
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    assembly = AssemblyHolder.shared(AppAssembly)
-    await assembly.drivine.start()     # connect, enforce the schema catalog
-    yield
-    await assembly.drivine.close()
+    async with AppAssembly() as assembly:
+        await assembly.drivine.start()     # connect, enforce the schema catalog
+        yield                              # leaving closes the drivers and pools
 
 app = FastAPI(lifespan=lifespan)
 ```

@@ -13,6 +13,18 @@ files = [
 ]
 
 [[package]]
+name = "antlr4-python3-runtime"
+version = "4.13.2"
+description = "ANTLR 4.13.2 runtime for Python 3"
+optional = false
+python-versions = "*"
+groups = ["main"]
+files = [
+    {file = "antlr4_python3_runtime-4.13.2-py3-none-any.whl", hash = "sha256:fe3835eb8d33daece0e799090eda89719dbccee7aa39ef94eed3818cafa5a7e8"},
+    {file = "antlr4_python3_runtime-4.13.2.tar.gz", hash = "sha256:909b647e1d2fc2b70180ac586df3933e38919c85f98ccc656a96cd3f25ef3916"},
+]
+
+[[package]]
 name = "async-timeout"
 version = "5.0.1"
 description = "Timeout context manager for asyncio programs"
@@ -446,7 +458,7 @@ websockets = ["websocket-client (>=1.3.0)"]
 
 [[package]]
 name = "drivine"
-version = "0.1.0.dev0"
+version = "0.2.0"
 description = "Graph database client for Python: Neo4j, Memgraph, FalkorDB, Neptune, Oracle and Postgres."
 optional = false
 python-versions = ">=3.11"
@@ -455,10 +467,11 @@ files = []
 develop = true
 
 [package.dependencies]
+antlr4-python3-runtime = {version = ">=4.13.2,<4.14", optional = true}
 falkordb = {version = ">=1.2", optional = true}
 neo4j = {version = ">=5.20", optional = true}
 oracledb = {version = ">=3.0", optional = true}
-pi-pilgrim = ">=0.2.0"
+pi-pilgrim = ">=0.3.0"
 pydantic = ">=2.7"
 pytest = {version = ">=8", optional = true}
 testcontainers = {version = ">=4.8", optional = true}
@@ -466,7 +479,9 @@ testcontainers = {version = ">=4.8", optional = true}
 [package.extras]
 falkordb = ["falkordb (>=1.2)"]
 neo4j = ["neo4j (>=5.20)"]
-oracle = ["oracledb (>=3.0)"]
+oracle = ["antlr4-python3-runtime (>=4.13.2,<4.14)", "oracledb (>=3.0)"]
+pilgrim = []
+postgres = ["antlr4-python3-runtime (>=4.13.2,<4.14)", "psycopg-pool (>=3.2)", "psycopg[binary] (>=3.2)"]
 testing = ["pytest (>=8)", "testcontainers (>=4.8)"]
 
 [package.source]
@@ -641,14 +656,14 @@ files = [
 
 [[package]]
 name = "pi-pilgrim"
-version = "0.2.0"
+version = "0.3.0"
 description = "Dependency injection for Python: a port of Pilgrim, the successor to Typhoon."
 optional = false
 python-versions = ">=3.11"
 groups = ["main"]
 files = [
-    {file = "pi_pilgrim-0.2.0-py3-none-any.whl", hash = "sha256:c3eafff88ed54637363d2cdb56389651ea383e3679cd64f5d25d27af7062da46"},
-    {file = "pi_pilgrim-0.2.0.tar.gz", hash = "sha256:a6bff41aa58ccc077f3450a4364056766703e6a4aef36bf4aa95118040870d24"},
+    {file = "pi_pilgrim-0.3.0-py3-none-any.whl", hash = "sha256:114e3b6ad18a514e38cdfd47c740e7010e653e93896c6e4289f40d40fffd5a06"},
+    {file = "pi_pilgrim-0.3.0.tar.gz", hash = "sha256:02ea03998ec38193f73264a93ba6f6f7dc2c78401bfeb87d38099484571145b3"},
 ]
 
 [[package]]

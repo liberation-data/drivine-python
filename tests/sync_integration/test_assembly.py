@@ -1,9 +1,9 @@
 # Written by scripts/unasync.py from tests/integration/test_assembly.py:
 # change that, and run the script again.
-from pipilgrim import Assembled, AssemblyHolder
+import pytest
+from pipilgrim import Assembled, AssemblyHolder, PilgrimAssembly, PilgrimError
 
-from drivine.sync import DatabaseRegistry, PersistenceManager, QuerySpecification
-from drivine.sync.drivine_assembly import DrivineAssembly
+from drivine.sync import DatabaseRegistry, DrivineAssembly, PersistenceManager, QuerySpecification
 
 
 class Routes:
@@ -16,12 +16,18 @@ class Handler:
 
 
 def test_provides_one_manager_for_each_database():
-    assembly = DrivineAssembly()
-    try:
+    with DrivineAssembly() as assembly:
         assert assembly.persistence_manager() is assembly.persistence_manager("default")
         assert assembly.persistence_manager().get_one(QuerySpecification("RETURN 1")) == 1
-    finally:
-        assembly.close()
+
+
+def test_closes_the_drivers_on_the_way_out():
+    with DrivineAssembly() as assembly:
+        registry = assembly.registry()
+        assert assembly.persistence_manager().get_one(QuerySpecification("RETURN 1")) == 1
+    assert registry.providers == []
+    with pytest.raises(PilgrimError, match="is closed"):
+        assembly.persistence_manager()
 
 
 def test_injects_into_classes_made_elsewhere():
@@ -30,7 +36,27 @@ def test_injects_into_classes_made_elsewhere():
         handler = Handler()
         assert handler.pm is AssemblyHolder.shared(DrivineAssembly).persistence_manager()
     finally:
-        AssemblyHolder.shared(DrivineAssembly).close()
+        AssemblyHolder.close()
+        AssemblyHolder.reset()
+
+
+def test_an_application_assembly_closes_the_drivine_it_holds():
+    class App(PilgrimAssembly):
+        def __init__(self) -> None:
+            self.drivine = AssemblyHolder.shared(DrivineAssembly)
+            super().__init__()
+
+        def routes(self) -> Routes:
+            return self.shared(lambda: Routes(self.drivine.persistence_manager()))
+
+    AssemblyHolder.reset()
+    try:
+        with App() as app:
+            app.drivine.start()
+            registry = app.drivine.registry()
+            assert app.routes().pm.get_one(QuerySpecification("RETURN 3")) == 3
+        assert registry.providers == []
+    finally:
         AssemblyHolder.reset()
 
 
@@ -39,13 +65,10 @@ def test_a_subclass_registers_its_own_databases():
         def register_databases(self, registry: DatabaseRegistry) -> None:
             registry.build_or_resolve_from_env("memgraph")
 
-    assembly = MemgraphOnly()
-    try:
+    with MemgraphOnly() as assembly:
         assert assembly.persistence_manager().database == "default"
         assert assembly.registry().connection_provider() is assembly.registry().registered("memgraph")
         assert Routes(assembly.persistence_manager()).pm.get_one(QuerySpecification("RETURN 2")) == 2
-    finally:
-        assembly.close()
 
 
 def test_closing_an_unused_assembly_does_nothing():
@@ -55,17 +78,14 @@ def test_closing_an_unused_assembly_does_nothing():
 def test_provides_one_object_manager_for_each_database():
     from drivine.sync import StatelessGraphObjectManager
 
-    assembly = DrivineAssembly()
-    try:
+    with DrivineAssembly() as assembly:
         gom = assembly.graph_object_manager()
         assert isinstance(gom, StatelessGraphObjectManager)
         assert gom is assembly.graph_object_manager("default")
         assert gom.registry is assembly.graph_object_manager_factory().get("default").registry
-    finally:
-        assembly.close()
 
 
-def test_start_enforces_the_schema():
+def test_entering_enforces_the_schema():
     import uuid
 
     from drivine.sync import SchemaCatalog, SchemaOptions, range_index
@@ -76,11 +96,14 @@ def test_start_enforces_the_schema():
         def schema_options(self) -> SchemaOptions:
             return SchemaOptions([SchemaCatalog.of(range_index(label, "a")).named(label)])
 
-    assembly = WithSchema()
-    try:
-        assembly.start()
+    with WithSchema() as assembly:
         gom = assembly.graph_object_manager()
         assert [it.properties for it in gom.indexes.list("RANGE") if it.label == label] == [("a",)]
         gom.indexes.drop(range_index(label, "a"))
-    finally:
-        assembly.close()
+
+
+def test_a_registry_closes_on_the_way_out():
+    with DatabaseRegistry() as registry:
+        provider = registry.build_or_resolve_from_env()
+        assert provider is registry.connection_provider()
+    assert registry.providers == []

@@ -4717,7 +4717,7 @@ class SqlCypherCompiler(ABC):
             if len(arguments) != 3:
                 raise DrivineError("replace() takes a text, what to replace, and what with.")
             # How long what to replace, and what with, are, in bytes, where the statement gives them.
-            search_bytes, replacement_bytes = (_utf8_bytes(self._given(it)) for it in function.arguments[1:])
+            search_bytes, replacement_bytes = (utf8_bytes(self._given(it)) for it in function.arguments[1:])
             return Json(
                 self.texts(
                     [self.comparable(self.json(it)) for it in arguments],
@@ -5436,9 +5436,13 @@ def _holds_texts(value: Value) -> bool:
     return isinstance(value, Json) and value.texts
 
 
-def _utf8_bytes(given: Any) -> int | None:
-    """How many bytes the value the statement gives is in UTF-8, where it is a text; else None."""
-    return len(given.encode()) if isinstance(given, str) else None
+def utf8_bytes(given: Any) -> int | None:
+    """
+    How many bytes the value the statement gives is in UTF-8, where it is a text; else None. A lone surrogate, which
+    UTF-8 has no bytes for, is counted as three rather than failing the compile: the driver refuses to bind it, and
+    fails the statement as it did before a length was measured here.
+    """
+    return len(given.encode("utf-8", "surrogatepass")) if isinstance(given, str) else None
 
 
 def _is_given_number(value: Any) -> bool:

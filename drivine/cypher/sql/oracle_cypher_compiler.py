@@ -35,6 +35,7 @@ from drivine.cypher.sql.sql_cypher_compiler import (
     Walked,
     indent,
     literal,
+    utf8_bytes,
 )
 from drivine.cypher.sql.temporal_sql import TemporalSql
 from drivine.cypher.sql.value import Json, Node
@@ -69,9 +70,11 @@ class OracleCypherCompiler(SqlCypherCompiler):
 
     A value is Oracle's `JSON`, which compares, groups and orders as JSON and keeps a map's keys in the order written.
     Oracle keeps a number as a number, so a stored `2.0` reads as `2`; a floating-point number the statement writes, or
-    a parameter's that is a whole number, is a `BINARY_DOUBLE`, and stays one. A text Oracle reads out of JSON is at
-    most 4,000 bytes, and an empty one is null, as Oracle's empty text is. `reduce` is a function the query declares,
-    and does not run in a statement that writes, in the step of a `reduce`, or where its step reads a path.
+    a parameter's that is a whole number, is a `BINARY_DOUBLE`, and stays one. A text Oracle reads out of JSON is a
+    `VARCHAR2` of at most 4,000 bytes, and one longer is read as a CLOB where it is measured, cut, changed or searched
+    (see `texts`), but for `reverse()`, which still gives null. An empty text is null, as Oracle's empty text is.
+    `reduce` is a function the query declares, and does not run in a statement that writes, in the step of a `reduce`,
+    or where its step reads a path.
 
     A list of ids is text, each id between commas (`,1,2,`): Oracle has no array, and a recursive query takes no `JSON`
     that changes from row to row. A recursive query reads no row outside it, so a walk starts from every node that
@@ -506,7 +509,8 @@ class OracleCypherCompiler(SqlCypherCompiler):
         swapped = (given[1], given[0])
 
         def bytes_(json: str, it: Any) -> str:
-            return str(len(it.encode())) if isinstance(it, str) else f"LENGTHB(JSON_VALUE({json}, '$'))"
+            given_bytes = utf8_bytes(it)
+            return str(given_bytes) if given_bytes is not None else f"LENGTHB(JSON_VALUE({json}, '$'))"
 
         fits = f"{bytes_(a, given[0])} + {bytes_(b, given[1])} <= {_SHORT_TEXT - 2 * _NUMBER_TEXT}"
         short = f"{self._summed_text(a, given, short=True)} || {self._summed_text(b, swapped, short=True)}"

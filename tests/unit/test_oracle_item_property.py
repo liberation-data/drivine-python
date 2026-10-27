@@ -5,7 +5,7 @@ So is a text a write takes from the row it is writing, to work out what it write
 as it was. drivine4j's OracleItemPropertyTest, ported.
 """
 
-from drivine.cypher.sql.oracle_cypher_compiler import OracleCypherCompiler
+from drivine.cypher.sql.oracle_cypher_compiler import OracleCypherCompiler, _direct  # pyright: ignore[reportPrivateUsage]
 from drivine.cypher.sql.postgres_cypher_compiler import PostgresCypherCompiler
 
 LONG = (
@@ -157,3 +157,13 @@ def test_a_property_whose_key_is_quoted_in_its_path_or_is_in_a_map_is_read_by_it
     # A key in a map is read by its path in the map, the map taken out of the properties as it was.
     nested = read("MATCH (n:Doc) RETURN size(n.m.a)")
     assert "JSON_VALUE(JSON_QUERY(n1.props, '$.m' RETURNING JSON), '$.a.size()' RETURNING NUMBER)" in nested, nested
+
+
+def test_a_map_whose_key_holds_a_parenthesis_is_read_by_its_path_and_two_values_read_together_are_left_as_they_are():
+    # The parenthesis is in a literal, so the map taken out of the properties is still the one argument.
+    sql = oracle("MATCH (n:Doc) RETURN size(n.`a)`.b)")
+    assert "JSON_VALUE(JSON_QUERY(n1.props, '$.\"a)\"' RETURNING JSON), '$.b.size()' RETURNING NUMBER)" in sql, sql
+    # Two values that start and end as a property does are no property: what reads them is left as it is.
+    two = "JSON_QUERY(a, '$.x' RETURNING JSON) || JSON_QUERY(b, '$.y' RETURNING JSON)"
+    read = f"JSON_VALUE({two}, '$.type()')"
+    assert _direct(read, two) == read

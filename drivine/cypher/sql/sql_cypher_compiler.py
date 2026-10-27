@@ -854,6 +854,17 @@ class SqlCypherCompiler(ABC):
         null."""
         return self.null_if_json_null(json)
 
+    def open_sort_key(self, json: str) -> list[str]:
+        """
+        What an order sorts the JSON value by where the statement leaves its kind open, a term after another: values of
+        several kinds as Cypher orders their kinds (`kind_order`), null last, and those of one kind among themselves. As
+        `sort_key` where a store does not override it: Postgres's takes `jsonb`'s order of kinds, a number before a
+        truth value, which is not yet Cypher's (liberation-data/drivine4j#307). Oracle's JSON order puts a number before
+        a text, so its terms are where the kind comes, then the value. A value the statement makes of one kind sorts by
+        `sort_key` alone.
+        """
+        return [self.sort_key(json)]
+
     def list_sort_key(self, json: str) -> str:
         """What an order sorts the JSON by where the statement makes it a list (Json.list): as `sort_key`, where the
         store orders lists as Cypher does."""
@@ -2519,11 +2530,12 @@ class SqlCypherCompiler(ABC):
             item.name: _columns_of(value, name, column, self._identities)
             for item, (column, value) in zip(items, columns, strict=True)
         }
-        after: dict[str, str] = {}
+        # The terms each order term is sorted by, in turn: see `open_sort_key`.
+        after: dict[str, list[str]] = {}
         # A term worked out in the query is sorted by in the query that reads it: the value carried out as a column,
-        # and what sorts it (JSON's null as SQL's) worked out of that column. Oracle (23.26), sorting by a value that
-        # reads the row more than once beside a variable-length walk, closes the session.
-        sorted_: dict[str, Callable[[str], str]] = {}
+        # and the terms that sort it (JSON's null as SQL's) worked out of that column. Oracle (23.26), sorting by a
+        # value that reads the row more than once beside a variable-length walk, closes the session.
+        sorted_: dict[str, Callable[[str], list[str]]] = {}
         # An item made anew for each row, randomUUID(), is sorted by of its column, as it is given, not made again: see
         # `once`.
         anew = {it.name for it in items if contains(it.expression, is_anew)}
@@ -2590,14 +2602,18 @@ class SqlCypherCompiler(ABC):
         inner = "\n".join(inner_lines)
 
         # What sorts a term in the query that reads this one: worked out there, of the column carried out, or that
-        # column.
-        def sorted_by(column: str) -> str:
+        # column. Each is named for the query after it, which sorts by them in turn: the last by the term's column, any
+        # before it, where its kind comes (`open_sort_key`), by that column with a number after it.
+        def sorted_by(column: str) -> list[tuple[str, str]]:
             if column in after:
-                return after[column]
-            if column in sorted_:
-                return sorted_[column](f"{name}.{column}")
-            return f"{name}.{column}"
+                terms = after[column]
+            elif column in sorted_:
+                terms = sorted_[column](f"{name}.{column}")
+            else:
+                terms = [f"{name}.{column}"]
+            return [(column if i == len(terms) - 1 else f"{column}_{i + 1}", term) for i, term in enumerate(terms)]
 
+        order = [(named, descending) for column, descending in sorts for named, _ in sorted_by(column)]
         if final:
             values = [self.json(_columns_of(value, name, column, self._identities)) for column, value in columns]
             result = values[0].sql if len(values) == 1 else self.json_array([it.sql for it in values])
@@ -2608,12 +2624,16 @@ class SqlCypherCompiler(ABC):
                 for column, value in columns
                 for it in _columns(value, column, self._identities)
             ]
-            outer += [f"{sorted_by(column)} AS {column}" for column, _ in sorts]
+            outer += [f"{term} AS {named}" for column, _ in sorts for named, term in sorted_by(column)]
             outer_columns = ", ".join(outer)
         source = self.once(inner) if sorts_anew else inner
         outer_lines = [f"SELECT {outer_columns}", f"FROM (\n{indent(source)}\n) {name}"]
         if sorts:
-            terms = ", ".join(f"{sorted_by(column)}{' DESC' if descending else ''}" for column, descending in sorts)
+            terms = ", ".join(
+                f"{term}{' DESC' if descending else ''}"
+                for column, descending in sorts
+                for _, term in sorted_by(column)
+            )
             outer_lines.append(f"ORDER BY {terms}")
         outer_lines += self.page(
             self._count(projection.skip) if projection.skip is not None else None,
@@ -2624,7 +2644,7 @@ class SqlCypherCompiler(ABC):
             item.name: _columns_of(value, PENDING, column, self._identities)
             for item, (column, value) in zip(items, columns, strict=True)
         }
-        return _Projected("\n".join(outer_lines), scope_out, sorts)
+        return _Projected("\n".join(outer_lines), scope_out, order)
 
     def _cases_first(
         self, select: _Select, projection: Projection, items: list[ProjectionItem]
@@ -4919,7 +4939,7 @@ class SqlCypherCompiler(ABC):
             return self.bool_of(self.comparable(value))
         raise DrivineError("A node, a relationship or a path is not a condition.")
 
-    def _sortable(self, value: Value) -> str:
+    def _sortable(self, value: Value) -> list[str]:
         """
         What an order sorts a value by: JSON's order for a value, a node by its properties. JSON's null, as a map or a
         list the statement builds holds it, is SQL's null, which comes last, as a graph engine orders null.
@@ -4927,19 +4947,25 @@ class SqlCypherCompiler(ABC):
         carried, sorts = self._sort_term(value)
         return sorts(carried)
 
-    def _sort_term(self, value: Value) -> tuple[str, Callable[[str], str]]:
-        """What `_sortable` sorts the value by, in two: the value as a column carries it, and what sorts it, of that
-        column."""
+    def _sort_term(self, value: Value) -> tuple[str, Callable[[str], list[str]]]:
+        """
+        What `_sortable` sorts the value by, in two: the value as a column carries it, and the terms that sort it, of
+        that column. A value whose kind the statement leaves open sorts as `open_sort_key` has it, where its kind comes
+        first; one it makes a truth value, a temporal value, a text, a list or a node is of one kind, and sorts by
+        `sort_key` alone.
+        """
         if isinstance(value, Bool):
-            return value.sql, lambda it: it
+            return value.sql, lambda it: [it]
         # A zoned value the statement makes sorts as the moment it is, whatever its offset.
         temporal = value.temporal if isinstance(value, Json) else None
         if isinstance(value, Json) and temporal is not None and temporal.zoned:
-            return self.comparable(value), lambda it: self.temporals.moment(self.text(it), temporal)
+            return self.comparable(value), lambda it: [self.temporals.moment(self.text(it), temporal)]
         # A list the statement makes sorts as Cypher sorts lists, item by item; any other value as the store sorts it.
         if _is_list(value):
-            return self.comparable(self.json(value)), self.list_sort_key
-        return self.comparable(self.json(value)), self.sort_key
+            return self.comparable(self.json(value)), lambda it: [self.list_sort_key(it)]
+        if not isinstance(value, Json) or temporal is not None or _is_text(value):
+            return self.comparable(self.json(value)), lambda it: [self.sort_key(it)]
+        return self.comparable(self.json(value)), self.open_sort_key
 
 
 # ----- What a statement holds -----

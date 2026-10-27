@@ -237,6 +237,16 @@ class OracleCypherCompiler(SqlCypherCompiler):
     def null_if_json_null(self, json: str) -> str:
         return self.shared1(json, lambda x: f"CASE WHEN {_kind(x)} <> 'null' THEN {x} END")
 
+    def open_sort_key(self, json: str) -> list[str]:
+        """
+        Where the kind comes, as `kind_order` ranks them and null for null, then the value as `JSON` orders it, which is
+        Cypher's order within a kind: `JSON` orders a number before a text, a truth value after both, and a map and a
+        list last. A null is ranked null, so the value needs no `null_if_json_null`, which would read it again.
+        """
+        ranks = "'object', 1, 'array', 2, 'string', 3, 'boolean', 4, 'number', 5, 'double', 5, 'float', 5"
+        rank = self.shared1(json, lambda x: f"DECODE({_kind(x)}, {ranks})")
+        return [rank, json]
+
     def number(self, json: str) -> str:
         return self.shared1(
             json, lambda x: f"CASE WHEN {self.type_of(x)} = 'number' THEN JSON_VALUE({x}, '$' RETURNING NUMBER) END"

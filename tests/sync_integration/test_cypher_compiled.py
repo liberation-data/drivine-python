@@ -974,9 +974,6 @@ def test_min_and_max_of_lists_the_statement_makes_compare_them_item_by_item_what
     ]
 
 
-ZONED_LIST_ON_ORACLE = (
-    "Oracle sorts a list of zoned values as its JSON (liberation-data/drivine4j#331): see test_oracle_zoned_list_sort."
-)
 ZONED = (
     "datetime('2024-03-15T10:00:00+02:00')",
     "datetime('2024-03-15T09:00:00Z')",
@@ -989,8 +986,6 @@ def test_a_list_of_zoned_values_and_a_list_of_lists_of_them_sort_and_compare_ite
     cypher_pm: PersistenceManager,
 ):
     # Not in the spec yet (#199): drivine4j's test of liberation-data/drivine4j#199, ported for #181.
-    if cypher_pm.type is DatabaseType.ORACLE:
-        pytest.skip(ZONED_LIST_ON_ORACLE)
     a, b, c = ZONED
     hours = [10, 8, 9]
 
@@ -1037,8 +1032,6 @@ def test_a_list_of_zoned_values_sorts_as_their_moments_however_it_was_made_and_a
     cypher_pm: PersistenceManager,
 ):
     # Not in the spec yet (#199). By moment 10:00+02:00, 08:30Z, 09:00Z; as text 08:30Z, 09:00Z, 10:00+02:00.
-    if cypher_pm.type is DatabaseType.ORACLE:
-        pytest.skip(ZONED_LIST_ON_ORACLE)
     a, b, c = ZONED
     hours = [10, 8, 9]
 
@@ -1107,6 +1100,88 @@ def test_a_list_of_zoned_values_sorts_as_their_moments_however_it_was_made_and_a
     opened = f"UNWIND [{b}, {a}, {c}] AS t WITH t, [t] AS l, CASE t.hour WHEN 8 THEN 'x' ELSE 1 END AS o RETURN t.hour"
     assert query(f"{opened} ORDER BY o, l") == [8, 10, 9]
     assert query(f"{opened} ORDER BY o DESC, l DESC") == [9, 10, 8]
+
+
+def test_a_list_of_temporal_values_worked_out_on_each_row_is_read_item_by_item_in_order_wherever_it_is_read(
+    cypher_pm: PersistenceManager,
+):
+    # Not in the spec yet: drivine4j's test of liberation-data/drivine4j#331, ported for #194. Oracle reads such a list
+    # by its places, not with JSON_TABLE, whose parse of one stalled the session. Of 0, 1 and 2 items, at 10:01, 10:02.
+    at = "localdatetime('2024-03-15T10:00:00')"
+    rows = f"UNWIND [0, 1, 2] AS k WITH k, [i IN range(1, k) | {at} + duration({{minutes: i}})] AS l"
+
+    def minute(m: int) -> str:
+        return f"localdatetime('2024-03-15T10:0{m}:00')"
+
+    def query(cypher: str) -> list[Any]:
+        return cypher_pm.query(spec(cypher))
+
+    # A comprehension, an IN, the quantifiers, and the list read twice in one statement.
+    assert query(
+        f"{rows} RETURN k, [x IN l | x.minute], {minute(1)} IN l, {minute(2)} IN l, all(x IN l WHERE x.minute <= k), "
+        "none(x IN l WHERE x.minute = k), single(x IN l WHERE x.minute = 1) ORDER BY k"
+    ) == [
+        [0, [], False, False, True, True, False],
+        [1, [1], True, False, True, False, True],
+        [2, [1, 2], True, True, True, False, True],
+    ]
+    # A comprehension within one over the outer item and the row, in order.
+    assert query(f"{rows} RETURN [x IN l | [y IN [x, x + duration({{minutes: k}})] | y.minute]] ORDER BY k") == [
+        [],
+        [[1, 2]],
+        [[1, 3], [2, 4]],
+    ]
+    # An IN over another row's value: each pair whose minute is in the list.
+    assert query(
+        f"{rows} UNWIND [1, 2] AS j WITH k, j, l WHERE {at} + duration({{minutes: j}}) IN l "
+        "WITH k, j ORDER BY j RETURN k, collect(j) ORDER BY k"
+    ) == [[1, [1]], [2, [1, 2]]]
+    # Null and a null item: no list, and a null that is compared.
+    assert query(
+        f"{rows} WITH k, CASE WHEN k = 1 THEN l END AS m RETURN k, [x IN m | x.minute], any(x IN m WHERE x.minute = 1) "
+        "ORDER BY k"
+    ) == [[0, None, None], [1, [1], True], [2, None, None]]
+    assert query(
+        f"UNWIND [0, 1, 2] AS k WITH k, [i IN range(1, k) | CASE WHEN i > 1 THEN {at} + duration({{minutes: i}}) END] "
+        f"AS l RETURN k, [x IN l | x.minute], {minute(1)} IN l ORDER BY k"
+    ) == [[0, [], False], [1, [None], None], [2, [None, 2], None]]
+    # A slice, from either end, an UNWIND, and a CALL { … }.
+    assert query(f"{rows} RETURN [x IN l[1..] | x.minute], [x IN l[-1..] | x.minute] ORDER BY k") == [
+        [[], []],
+        [[], [1]],
+        [[2], [2]],
+    ]
+    assert query(f"{rows} UNWIND l AS t RETURN k, collect(t.minute) ORDER BY k") == [[1, [1]], [2, [1, 2]]]
+    assert query(f"{rows} CALL {{ WITH l UNWIND l AS t RETURN count(t) AS c }} RETURN k, c ORDER BY k") == [
+        [0, 0],
+        [1, 1],
+        [2, 2],
+    ]
+    # On each side of a UNION, and a list of such lists.
+    unioned = query(f"{rows} RETURN [x IN l | x.minute] AS ms UNION {rows} RETURN [x IN reverse(l) | x.minute] AS ms")
+    assert sorted(unioned) == [[], [1], [1, 2], [2, 1]]
+    assert query(
+        f"{rows} WITH k, [l, l] AS ll RETURN [x IN ll | size(x)][1], size([x IN ll[0] WHERE x.minute > 0]) ORDER BY k"
+    ) == [[0, 0], [1, 1], [2, 2]]
+    # collect(DISTINCT …) of such lists, and of their items, each once where first.
+    twice = f"UNWIND [2, 1, 2] AS k WITH k, [i IN range(1, k) | {at} + duration({{minutes: i}})] AS l"
+    assert query(f"{twice} WITH collect(DISTINCT l) AS ls RETURN [x IN ls | [y IN x | y.minute]]") == [[[1, 2], [1]]]
+    assert query(f"{twice} UNWIND l AS t WITH collect(DISTINCT t) AS ts RETURN [x IN ts | x.minute]") == [[1, 2]]
+    # A list that holds a null is kept once, as Cypher keeps it; zoned values of one moment and two offsets are not
+    # equal in Cypher, so each is kept, in the order first seen.
+    nulls = (
+        "UNWIND [2, 1, 2, 1] AS k WITH k, "
+        f"[i IN range(1, k) | CASE WHEN i > 1 THEN {at} + duration({{minutes: i}}) END] AS l"
+    )
+    assert query(f"{nulls} WITH collect(DISTINCT l) AS ls RETURN [x IN ls | [y IN x | y.minute]]") == [
+        [[None, 2], [None]]
+    ]
+    zoned = (
+        "UNWIND [0, 1, 2] AS k WITH k, [i IN range(1, 2) | datetime(CASE k WHEN 1 THEN '2024-03-15T10:00:00+02:00' "
+        "ELSE '2024-03-15T08:00:00Z' END) + duration({minutes: i})] AS l"
+    )
+    assert query(f"{zoned} WITH collect(DISTINCT l) AS ls RETURN [x IN ls | [y IN x | y.hour]]") == [[[8, 8], [10, 10]]]
+    assert query(f"{zoned} UNWIND l AS t WITH collect(DISTINCT t) AS ts RETURN [x IN ts | x.hour]") == [[8, 8, 10, 10]]
 
 
 def test_an_aggregate_of_floats_gives_a_float_whole_or_not_and_a_sum_of_integers_an_integer(

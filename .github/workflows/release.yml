@@ -85,19 +85,23 @@ jobs:
       - name: Build
         run: uv build --no-sources
       # PyPI refuses a version it already has, so a tag of one fails here, before anything is uploaded. The wheel's
-      # name holds the version as PEP 440 normalizes it, as PyPI has it: 0.3.0rc1 for 0.3.0-rc.1.
+      # name holds the version as PEP 440 normalizes it, as PyPI has it: 0.3.0rc1 for 0.3.0-rc.1. When PyPI can't be
+      # asked, the run goes on with a warning: PyPI would refuse the upload of a version it has, overwriting nothing.
       - name: PyPI doesn't have this version yet
         run: |
           wheels=(dist/*.whl)
           name=${wheels[0]#dist/drivine-}
           normalized=${name%%-*}
-          status=$(curl -sL -o /dev/null -w '%{http_code}' "https://pypi.org/pypi/drivine/$normalized/json")
+          url="https://pypi.org/pypi/drivine/$normalized/json"
+          status=$(curl -sL --retry 3 -o /dev/null -w '%{http_code}' "$url" || true)
           if [[ "$status" == 200 ]]; then
             if [[ "$PUBLISH" == true ]]; then
               echo "::error::PyPI already has drivine $normalized."
               exit 1
             fi
             echo "::warning::PyPI already has drivine $normalized. This dry run goes on, but a tag of it would fail."
+          elif [[ "$status" != 404 ]]; then
+            echo "::warning::Couldn't ask PyPI whether it has drivine $normalized (HTTP status $status). Going on."
           fi
       - name: Check the distributions
         run: uvx twine check --strict dist/*

@@ -24,7 +24,8 @@ class FieldMapping:
     collections: dict[str, CollectionKind] = field(default_factory=lambda: {})
     """
     Fields holding a set or a tuple, by its kind. A store holds them as lists, and a load gives the set or tuple, to a
-    fragment constructed without validation as to a validated one.
+    fragment constructed without validation as to a validated one; only an unvalidated set whose stored items can't be
+    hashed, such as the lists a set of tuples is stored as, keeps the list.
     """
 
     @property

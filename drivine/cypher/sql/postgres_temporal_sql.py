@@ -43,6 +43,9 @@ class PostgresTemporalSql(TemporalSql):
     def number(self, text: str) -> str:
         return f"CAST(NULLIF({text}, '') AS numeric)"
 
+    def sortable(self, timestamp: str) -> str:
+        return f"to_char({timestamp}, 'YYYY-MM-DD\"T\"HH24:MI:SS.US')"
+
     def micros(self, timestamp: str) -> str:
         return f"to_char({timestamp}, 'US')"
 

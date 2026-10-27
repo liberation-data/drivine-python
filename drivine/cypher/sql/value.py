@@ -21,6 +21,9 @@ class Json:
     temporal: Temporal | None = None
     items: Temporal | None = None
     identity: str | None = None
+    item_items: Temporal | None = None
+    """Where the statement makes it a list whose every item is a list of `items` of one kind, that kind: an item taken
+    from it has it as its `items`."""
     list: bool = False
     """Whether the statement makes it a list, and with `item_lists` a list of lists: a store may sort a list as Cypher
     does only then."""

@@ -876,6 +876,141 @@ def test_min_and_max_of_lists_the_statement_makes_compare_them_item_by_item_what
     ]
 
 
+ZONED_LIST_ON_ORACLE = (
+    "Oracle sorts a list of zoned values as its JSON (liberation-data/drivine4j#331): see test_oracle_zoned_list_sort."
+)
+ZONED = (
+    "datetime('2024-03-15T10:00:00+02:00')",
+    "datetime('2024-03-15T09:00:00Z')",
+    "datetime('2024-03-15T08:30:00Z')",
+)
+"""As text, 10:00+02:00 (08:00 UTC) sorts after 09:00Z, and 08:30Z before both."""
+
+
+def test_a_list_of_zoned_values_and_a_list_of_lists_of_them_sort_and_compare_item_by_item_as_their_moments(
+    cypher_pm: PersistenceManager,
+):
+    # Not in the spec yet (#199): drivine4j's test of liberation-data/drivine4j#199, ported for #181.
+    if cypher_pm.type is DatabaseType.ORACLE:
+        pytest.skip(ZONED_LIST_ON_ORACLE)
+    a, b, c = ZONED
+    hours = [10, 8, 9]
+
+    def query(cypher: str) -> list[Any]:
+        return cypher_pm.query(spec(cypher))
+
+    assert query(f"UNWIND [{b}, {a}, {c}] AS t WITH [t] AS ts RETURN ts[0].hour ORDER BY ts") == hours
+    assert query(f"UNWIND [{b}, {a}, {c}] AS t WITH [t] AS ts RETURN ts[0].hour ORDER BY ts DESC") == hours[::-1]
+    assert query(f"UNWIND [{b}, {a}, {c}] AS t WITH t.hour AS h, collect(t) AS ts RETURN h ORDER BY ts") == hours
+    assert query(f"UNWIND [[{b}], [{a}], [{c}]] AS ts RETURN ts[0].hour ORDER BY ts") == hours
+    assert query(f"UNWIND [{b}, {a}, {c}] AS t WITH [[t]] AS l RETURN l[0][0].hour ORDER BY l") == hours
+    assert query(f"UNWIND [{b}, {a}, {c}] AS t WITH t.hour AS h, collect([t]) AS l RETURN h ORDER BY l") == hours
+    # A list that starts another comes first; a null item after any moment.
+    assert query(f"WITH [{a}] AS x, [{a}, {b}] AS y UNWIND [y, x] AS l RETURN size(l) ORDER BY l") == [1, 2]
+    assert query(
+        f"WITH [{a}, null] AS x, [{a}, {b}] AS y UNWIND [x, y] AS l RETURN size([i IN l WHERE i IS NULL]) ORDER BY l"
+    ) == [0, 1]
+    # A long list, and lists worked out with temporal arithmetic, by a comprehension or collect(): k = 0's start at
+    # 08:00 UTC.
+    at = f"CASE k WHEN 0 THEN {a} ELSE {b} END"
+    assert query(
+        f"UNWIND [0, 1] AS k WITH k, [x IN range(1, 200) | {at} + duration({{minutes: x}})] AS l RETURN k ORDER BY l"
+    ) == [0, 1]
+    assert query(
+        f"UNWIND [0, 1] AS k UNWIND range(1, 3) AS x WITH k, {at} + duration({{minutes: x}}) AS t "
+        "WITH k, collect(t) AS l RETURN k ORDER BY l"
+    ) == [0, 1]
+    # min() and max() of them.
+    assert query(f"UNWIND [[{b}], [{a}], [{c}]] AS l RETURN [min(l)[0].hour, max(l)[0].hour]") == [[10, 9]]
+    assert query(f"UNWIND [{b}, {a}, {c}] AS t WITH [[t]] AS l RETURN [min(l)[0][0].hour, max(l)[0][0].hour]") == [
+        [10, 9]
+    ]
+    # A time of day with an offset, as a moment.
+    times = "[time('10:00:00+02:00'), time('09:00:00Z'), time('08:30:00Z')]"
+    assert query(f"UNWIND {times} AS t WITH [t] AS ts RETURN ts[0].hour ORDER BY ts") == hours
+    assert query(f"UNWIND {times} AS t WITH [t] AS l RETURN [min(l)[0].hour, max(l)[0].hour]") == [[10, 9]]
+    # Taken from a list kept in order, by head() and last().
+    assert query(
+        f"UNWIND [{b}, {a}, {c}] AS t WITH t ORDER BY t WITH collect(t) AS ts RETURN [head(ts).hour, last(ts).hour]"
+    ) == [[10, 9]]
+
+
+def test_a_list_of_zoned_values_sorts_as_their_moments_however_it_was_made_and_an_empty_list_or_null_as_cypher(
+    cypher_pm: PersistenceManager,
+):
+    # Not in the spec yet (#199). By moment 10:00+02:00, 08:30Z, 09:00Z; as text 08:30Z, 09:00Z, 10:00+02:00.
+    if cypher_pm.type is DatabaseType.ORACLE:
+        pytest.skip(ZONED_LIST_ON_ORACLE)
+    a, b, c = ZONED
+    hours = [10, 8, 9]
+
+    def query(cypher: str) -> list[Any]:
+        return cypher_pm.query(spec(cypher))
+
+    def sorted_by(by: str, list_: str = "[[t]]") -> list[Any]:
+        return query(f"UNWIND [{b}, {a}, {c}] AS t WITH t, {list_} AS l RETURN t.hour ORDER BY {by}")
+
+    # Taken from a list of lists, by an index, head(), last(), a slice, reverse(), tail() and a comprehension.
+    for by in ("l[0]", "head(l)", "last(l)", "l[0..1]", "reverse(l)", "[x IN l WHERE x IS NOT NULL]", "[x IN l | x]"):
+        assert sorted_by(by) == hours, by
+    assert sorted_by("tail(l)", "[[t], [t]]") == hours
+    # Made by a CASE, collect(DISTINCT), a UNION, and a comprehension over nodes or a pattern.
+    assert sorted_by("CASE WHEN t IS NOT NULL THEN [t] END") == hours
+    assert (
+        query(f"UNWIND [{b}, {a}, {c}] AS t WITH t.hour AS h, collect(DISTINCT [t]) AS l RETURN h ORDER BY l") == hours
+    )
+    assert (
+        query(
+            f"CALL {{ UNWIND [{b}] AS t RETURN [[t]] AS l UNION UNWIND [{a}, {c}] AS t RETURN [[t]] AS l }} "
+            "RETURN l[0][0].hour ORDER BY l"
+        )
+        == hours
+    )
+    clear(cypher_pm)
+    cypher_pm.query(
+        spec(
+            "CREATE (:CyZoned {h: 10})-[:AT]->(:CyZonedAt {at: '2024-03-15T10:00:00+02:00'}), "
+            "(:CyZoned {h: 9})-[:AT]->(:CyZonedAt {at: '2024-03-15T09:00:00Z'}), "
+            "(:CyZoned {h: 8})-[:AT]->(:CyZonedAt {at: '2024-03-15T08:30:00Z'})"
+        )
+    )
+    assert query("MATCH (z:CyZoned) RETURN z.h ORDER BY [(z)-[:AT]->(w) | [datetime(w.at)]]") == hours
+    assert (
+        query("MATCH (z:CyZoned)-[:AT]->(w) WITH z, collect(w) AS ws RETURN z.h ORDER BY [n IN ws | [datetime(n.at)]]")
+        == hours
+    )
+    # The empty list first, then a list of a moment, then a null item or no list; as items of a list too.
+    ordered = [2, 1, 3]
+    cased = f"CASE k WHEN 1 THEN [{a}] WHEN 2 THEN [i IN [{a}] WHERE false] END"
+    assert query(f"UNWIND [1, 2, 3] AS k WITH k, {cased} AS l RETURN k ORDER BY l") == ordered
+    assert query(f"UNWIND [1, 2, 3] AS k WITH k, {cased} AS l RETURN k ORDER BY l DESC") == ordered[::-1]
+    assert query(f"UNWIND [1, 2, 3] AS k WITH k, [{cased}] AS l RETURN k ORDER BY l") == ordered
+    assert query(f"UNWIND [1, 2, 3] AS k WITH k, [{cased}] AS l RETURN k ORDER BY l DESC") == ordered[::-1]
+    # Two lists of lists of them put together, and min() or max() of lists of them, grouped.
+    assert sorted_by("l + l") == hours
+    assert query(f"UNWIND [{b}, {a}, {c}] AS t WITH t.hour AS h, min([t]) AS m RETURN h ORDER BY m") == hours
+    assert query(f"UNWIND [{b}, {a}, {c}] AS t WITH t.hour AS h, max([[t]]) AS m RETURN h ORDER BY m") == hours
+    # Carried past a write, as a list and as a list of lists.
+    assert (
+        query(f"UNWIND [{b}, {a}, {c}] AS t WITH t, [t] AS l CREATE (:CyZonedWrite) RETURN t.hour ORDER BY l") == hours
+    )
+    assert (
+        query(f"UNWIND [{b}, {a}, {c}] AS t WITH t, [[t]] AS l CREATE (:CyZonedWrite) RETURN t.hour ORDER BY l")
+        == hours
+    )
+    # Read from the row a write works its value out of (row_keys), in a subquery that sorts them.
+    assert query(
+        f"UNWIND [{b}, {a}, {c}] AS t WITH collect([t]) AS ls CREATE (n:CyZonedWrite) "
+        "SET n.first = COUNT { UNWIND ls AS l WITH l ORDER BY l LIMIT 1 WITH l WHERE l[0].hour = 10 RETURN l } "
+        "RETURN n.first"
+    ) == [1]
+    # After a term whose kind is open, which sorts by its kind first (liberation-data/drivine4j#308): the text before
+    # the numbers, then by moment.
+    opened = f"UNWIND [{b}, {a}, {c}] AS t WITH t, [t] AS l, CASE t.hour WHEN 8 THEN 'x' ELSE 1 END AS o RETURN t.hour"
+    assert query(f"{opened} ORDER BY o, l") == [8, 10, 9]
+    assert query(f"{opened} ORDER BY o DESC, l DESC") == [9, 10, 8]
+
+
 def test_an_aggregate_of_floats_gives_a_float_whole_or_not_and_a_sum_of_integers_an_integer(
     cypher_pm: PersistenceManager,
 ):

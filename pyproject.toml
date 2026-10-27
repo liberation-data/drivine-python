@@ -9,6 +9,7 @@ authors = [{ name = "Liberation Data" }]
 requires-python = ">=3.11"
 dependencies = [
     "pydantic>=2.7",
+    "pi-pilgrim>=0.3.0",
 ]
 keywords = ["graph", "database", "neo4j", "memgraph", "falkordb", "neptune", "oracle", "postgres", "cypher", "ogm"]
 classifiers = [
@@ -22,7 +23,8 @@ classifiers = [
 
 [project.optional-dependencies]
 neo4j = ["neo4j>=5.20"]
-pilgrim = ["pi-pilgrim>=0.2.0"]
+# pi-pilgrim is a core dependency now; the extra is kept so that `pip install "drivine[pilgrim]"` still works.
+pilgrim = []
 testing = ["testcontainers>=4.8", "pytest>=8"]
 falkordb = [
     "falkordb>=1.2",

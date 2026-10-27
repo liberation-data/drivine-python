@@ -6,7 +6,7 @@ authors = [{ name = "Liberation Data" }]
 license = "Apache-2.0"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = ["drivine[neo4j,falkordb,oracle,pilgrim,testing]"]
+dependencies = ["drivine[neo4j,falkordb,oracle,testing]"]
 
 [tool.poetry]
 packages = [{ include = "drivine_sample" }]
@@ -19,7 +19,7 @@ generate-setup-file = false
 
 [tool.poetry.dependencies]
 # drivine from this repository, rather than PyPI.
-drivine = { path = "..", develop = true, extras = ["neo4j", "falkordb", "oracle", "pilgrim", "testing"] }
+drivine = { path = "..", develop = true, extras = ["neo4j", "falkordb", "oracle", "testing"] }
 
 [tool.poetry.group.dev.dependencies]
 pytest = ">=8"
@@ -30,7 +30,7 @@ ruff = ">=0.6"
 [build-system]
 # The build script (build.py) runs drivine's stub generator. An application that takes drivine from PyPI lists
 # "drivine" here; the sample reads drivine from its repository, so it lists drivine's own dependencies.
-requires = ["poetry-core>=2.0", "pydantic>=2.7", "pi-pilgrim>=0.2.0"]
+requires = ["poetry-core>=2.0", "pydantic>=2.7", "pi-pilgrim>=0.3.0"]
 build-backend = "poetry.core.masonry.api"
 
 [tool.pytest.ini_options]

@@ -389,6 +389,7 @@ name = "drivine"
 version = "0.2.0"
 source = { editable = "." }
 dependencies = [
+    { name = "pi-pilgrim" },
     { name = "pydantic" },
 ]
 
@@ -403,9 +404,6 @@ oracle = [
     { name = "antlr4-python3-runtime" },
     { name = "oracledb" },
 ]
-pilgrim = [
-    { name = "pi-pilgrim" },
-]
 postgres = [
     { name = "antlr4-python3-runtime" },
     { name = "psycopg", extra = ["binary"] },
@@ -418,7 +416,7 @@ testing = [
 
 [package.dev-dependencies]
 dev = [
-    { name = "drivine", extra = ["falkordb", "neo4j", "oracle", "pilgrim", "postgres", "testing"] },
+    { name = "drivine", extra = ["falkordb", "neo4j", "oracle", "postgres", "testing"] },
     { name = "jsonschema" },
     { name = "pyright" },
     { name = "pytest-asyncio" },
@@ -433,7 +431,7 @@ requires-dist = [
     { name = "falkordb", marker = "extra == 'falkordb'", specifier = ">=1.2" },
     { name = "neo4j", marker = "extra == 'neo4j'", specifier = ">=5.20" },
     { name = "oracledb", marker = "extra == 'oracle'", specifier = ">=3.0" },
-    { name = "pi-pilgrim", marker = "extra == 'pilgrim'", specifier = ">=0.2.0" },
+    { name = "pi-pilgrim", specifier = ">=0.3.0" },
     { name = "psycopg", extras = ["binary"], marker = "extra == 'postgres'", specifier = ">=3.2" },
     { name = "psycopg-pool", marker = "extra == 'postgres'", specifier = ">=3.2" },
     { name = "pydantic", specifier = ">=2.7" },
@@ -594,11 +592,11 @@ wheels = [
 
 [[package]]
 name = "pi-pilgrim"
-version = "0.2.0"
+version = "0.3.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/bb/d4/84f6b28de21e6d04b25d16e70e85033d9449453466e0993a417c8b8883be/pi_pilgrim-0.2.0.tar.gz", hash = "sha256:a6bff41aa58ccc077f3450a4364056766703e6a4aef36bf4aa95118040870d24", size = 14290, upload-time = "2026-10-20T02:02:21.657Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/b6/2a/70a3d7f0ef615009c9d9a47190ededb24e4317f4abdaed73bc305dc4ed20/pi_pilgrim-0.3.0.tar.gz", hash = "sha256:02ea03998ec38193f73264a93ba6f6f7dc2c78401bfeb87d38099484571145b3", size = 20845, upload-time = "2026-10-27T01:18:00.503Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/27/87/4afff693a3c0b36c8acda80e923db766c7ef31e85418966255b9d8065a7f/pi_pilgrim-0.2.0-py3-none-any.whl", hash = "sha256:c3eafff88ed54637363d2cdb56389651ea383e3679cd64f5d25d27af7062da46", size = 13967, upload-time = "2026-10-20T02:02:20.559Z" },
+    { url = "https://files.pythonhosted.org/packages/06/2f/dbc3bcf2ac3a32e2166e2c838d77a1adbd2c93e1e4b8ac5eb9b0d33d226a/pi_pilgrim-0.3.0-py3-none-any.whl", hash = "sha256:114e3b6ad18a514e38cdfd47c740e7010e653e93896c6e4289f40d40fffd5a06", size = 19588, upload-time = "2026-10-27T01:17:59.417Z" },
 ]
 
 [[package]]

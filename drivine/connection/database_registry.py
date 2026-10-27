@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping
+from typing import Self
 
 from drivine.connection.connection_properties import ConnectionProperties
 from drivine.connection.connection_provider import ConnectionProvider
@@ -15,6 +16,9 @@ DEFAULT = "default"
 class DatabaseRegistry:
     """
     The application's databases, by name. `"default"` is the first one registered.
+
+    `async with DatabaseRegistry() as registry:` closes it on the way out. `DrivineAssembly` makes one, and closes it
+    when the assembly closes.
     """
 
     def __init__(self) -> None:
@@ -53,7 +57,8 @@ class DatabaseRegistry:
 
     async def close(self) -> None:
         """
-        Ends every provider: their drivers and pools. Call it once, when the application stops.
+        Ends every provider: their drivers and pools. Call it once, when the application stops, unless the registry
+        was entered, `async with DatabaseRegistry() as registry:`, or `DrivineAssembly` made it: both close it.
         """
         providers = list(self._providers.values())
         self._providers.clear()
@@ -62,3 +67,9 @@ class DatabaseRegistry:
                 await provider.end()
             except Exception as error:
                 logger.warning("Ending %s failed: %s", provider, error)
+
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(self, *exc_info: object) -> None:
+        await self.close()

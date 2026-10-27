@@ -17,7 +17,7 @@ cache, no lazy loading. It gives you two ways to work with a graph:
 
 Neptune connects for the `PersistenceManager`; the object manager runs on the others. Cypher you write runs on
 Postgres and Oracle too, compiled to SQL: see [Cypher on a relational database](#cypher-on-a-relational-database).
-0.1 is an alpha release: the API may still change. See [the design](docs/design.md) for how it came about.
+0.2 is an alpha release: the API may still change. See [the design](docs/design.md) for how it came about.
 
 > **On Node.js or the JVM?** [Drivine](https://github.com/liberation-data/drivine)
 > (`npm install @liberation-data/drivine`) and [drivine4j](https://github.com/liberation-data/drivine4j)
@@ -30,10 +30,10 @@ pip install "drivine[neo4j]"      # Neo4j, Memgraph, Neptune
 pip install "drivine[falkordb]"   # FalkorDB
 pip install "drivine[oracle]"     # Oracle 23ai and 26ai, through python-oracledb in thin mode
 pip install "drivine[postgres]"   # Postgres 14 or later, through psycopg 3
-pip install "drivine[pilgrim]"    # DrivineAssembly, for pi-pilgrim; optional
 ```
 
-Python 3.11 or newer.
+Python 3.11 or newer. [pi-pilgrim](https://github.com/liberation-data/pi-pilgrim), which `DrivineAssembly` is
+written with, comes with each; `drivine[pilgrim]` still installs, as it did when pi-pilgrim was an extra.
 
 ## Quick start
 
@@ -80,14 +80,12 @@ Then load and save, each in one statement:
 ```python
 import asyncio
 
-from drivine import DatabaseRegistry, PersistenceManagerFactory, StatelessGraphObjectManager, refs
+from drivine import DrivineAssembly, refs
 
 
 async def main() -> None:
-    registry = DatabaseRegistry()
-    registry.build_or_resolve_from_env()
-    gom = StatelessGraphObjectManager(PersistenceManagerFactory(registry).get())
-    try:
+    async with DrivineAssembly() as drivine:
+        gom = drivine.graph_object_manager()
         await gom.save(
             PersonCareer(
                 person=Person(uuid="p1", name="Ada", bio="Design Lead"),
@@ -97,11 +95,25 @@ async def main() -> None:
         q = refs(PersonCareer)
         for career in await gom.load_all(PersonCareer, where=q.person.bio.contains("Lead")):
             print(career.person.name, [it.organization.name for it in career.employment_history])
-    finally:
-        await registry.close()
 
 
 asyncio.run(main())
+```
+
+`DrivineAssembly` registers the database the environment describes and holds the managers. Entering it starts Drivine,
+holding [the schema](#schema) if you declare one, and leaving it closes the drivers and pools, as Spring starts and
+closes drivine4j with its context. In an application, [your own assembly holds it](#with-pi-pilgrim), and closes it
+when it closes.
+
+Or, without the assembly, register the database yourself. Leaving the registry closes it:
+
+```python
+from drivine import DatabaseRegistry, PersistenceManagerFactory, StatelessGraphObjectManager
+
+async with DatabaseRegistry() as registry:
+    registry.build_or_resolve_from_env()
+    gom = StatelessGraphObjectManager(PersistenceManagerFactory(registry).get())
+    ...
 ```
 
 From here: [the persistence manager](#statements) for Cypher of your own, [transactions](#transactions),
@@ -126,14 +138,16 @@ A second database takes a prefix, `ANALYTICS_DATABASE_TYPE` and so on. Then regi
 ```python
 from drivine import DatabaseRegistry, PersistenceManagerFactory
 
-registry = DatabaseRegistry()
-registry.build_or_resolve_from_env()              # "default"
-registry.build_or_resolve_from_env("analytics")   # ANALYTICS_DATABASE_*
+async with DatabaseRegistry() as registry:          # closes the drivers and pools on the way out
+    registry.build_or_resolve_from_env()              # "default"
+    registry.build_or_resolve_from_env("analytics")   # ANALYTICS_DATABASE_*
 
-pm = PersistenceManagerFactory(registry).get()    # the default database
-...
-await registry.close()                            # when the application stops
+    pm = PersistenceManagerFactory(registry).get()    # the default database
+    ...
 ```
+
+`DrivineAssembly` registers the default database alone; to register others, subclass it and override
+`register_databases(registry)` (see [With pi-pilgrim](#with-pi-pilgrim)).
 
 On FalkorDB, `DATABASE_NAME` names the graph, `graph` by default.
 
@@ -265,14 +279,12 @@ taken for SQL on these stores, as it is taken for Cypher on a graph engine:
 ```python
 import asyncio
 
-from drivine import DatabaseRegistry, PersistenceManagerFactory, QuerySpecification, cypher_statement
+from drivine import DrivineAssembly, QuerySpecification, cypher_statement
 
 
 async def main() -> None:
-    registry = DatabaseRegistry()
-    registry.build_or_resolve_from_env()
-    pm = PersistenceManagerFactory(registry).get()
-    try:
+    async with DrivineAssembly() as drivine:
+        pm = drivine.persistence_manager()
         await pm.execute(
             QuerySpecification(
                 cypher_statement(
@@ -291,14 +303,12 @@ async def main() -> None:
             ).bind({"name": "Ada"})
         )
         print(friends)  # [{'name': 'Grace', 'since': 2024}]
-    finally:
-        await registry.close()
 
 
 asyncio.run(main())
 ```
 
-A write is one statement, applied whole or not at all. The graph's tables are made on the first connection when they
+Leaving the assembly closes the pool. A write is one statement, applied whole or not at all. The graph's tables are made on the first connection when they
 aren't there, so the program runs on a new database as it is. The same program runs unchanged on Neo4j, Memgraph and
 FalkorDB.
 
@@ -789,11 +799,13 @@ class AppDrivine(DrivineAssembly):
     def schema_options(self) -> SchemaOptions:
         return SchemaOptions([SchemaCatalog.from_fragments(Chunk, dimensions=lambda label, prop: 1536)])
 
-await AssemblyHolder.shared(AppDrivine).start()      # makes what is missing; idempotent
+async with AppDrivine() as drivine:      # makes what is missing on the way in; idempotent
+    ...
 ```
 
-`start()` registers the databases whether or not there are catalogs, as drivine4j does, so a missing `DATABASE_TYPE`
-raises `DrivineError` there rather than on first use. Without pi-pilgrim, enforce it yourself:
+Entering the assembly calls `start()`, which you may call yourself instead: `await drivine.start()`, from your
+application assembly, say. It registers the databases whether or not there are catalogs, as drivine4j does, so a
+missing `DATABASE_TYPE` raises `DrivineError` there rather than on first use. Without the assembly, enforce it yourself:
 `await SchemaManager(registry, factory, options).enforce()`.
 
 - **`ensure` is idempotent.** An item that is there is left; one there with another shape (a vector index's dimensions,
@@ -899,17 +911,17 @@ same id when, and only when, they look at the same data.
 `drivine.sync` is the same API without `async` and `await`, for scripts, notebooks, Django and Flask:
 
 ```python
-from drivine.sync import DatabaseRegistry, PersistenceManagerFactory, StatelessGraphObjectManager, transactional
-
-registry = DatabaseRegistry()
-registry.build_or_resolve_from_env()
-gom = StatelessGraphObjectManager(PersistenceManagerFactory(registry).get())
+from drivine.sync import DrivineAssembly, StatelessGraphObjectManager, transactional
 
 
 @transactional
-def promote(uuid: str) -> None:
+def promote(gom: StatelessGraphObjectManager, uuid: str) -> None:
     person = gom.load(Person, uuid)
     gom.save(person.model_copy(update={"bio": "Lead"}))
+
+
+with DrivineAssembly() as drivine:      # or: with DatabaseRegistry() as registry:
+    promote(drivine.graph_object_manager(), "p1")
 ```
 
 - **Each driver's own sync client**, not an event loop behind the scenes: it costs nothing extra, and works where a loop
@@ -924,11 +936,11 @@ same tests, written alike.
 ## With pi-pilgrim
 
 `DrivineAssembly` is a [pi-pilgrim](https://github.com/liberation-data/pi-pilgrim) assembly holding the registry
-and the managers, for your own assembly to use. It needs `pip install "drivine[pilgrim]"`:
+and the managers, for your own assembly to use:
 
 ```python
 from pipilgrim import AssemblyHolder, PilgrimAssembly
-from drivine.drivine_assembly import DrivineAssembly      # drivine.sync.drivine_assembly for the sync API
+from drivine import DrivineAssembly      # drivine.sync's for the sync API
 
 
 class AppAssembly(PilgrimAssembly):
@@ -943,13 +955,44 @@ class AppAssembly(PilgrimAssembly):
         return self.shared(lambda: ReportRepository(self.drivine.persistence_manager("analytics")))
 ```
 
+Open your assembly with `async with`, start Drivine in it, and leave it when the application stops. In FastAPI, that
+is the lifespan:
+
+```python
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    async with AppAssembly() as assembly:
+        await assembly.drivine.start()      # registers the databases and holds the schema
+        app.state.assembly = assembly
+        yield
+
+
+app = FastAPI(lifespan=lifespan)
+```
+
+- **Closing is pi-pilgrim's.** Leaving `async with` (or `await assembly.aclose()`) closes the assembly's `shared`
+  components, newest first, then the `DrivineAssembly` it holds, which closes every database's driver and pool, as
+  Spring closes drivine4j's with its context. Your own components close too: whichever of `aclose()`, `close()` or
+  `shutdown()` each has, or `destroy=` on `shared`. A closed assembly makes no more components.
+- **An assembly closes the ones it asked for first.** `AssemblyHolder.shared(DrivineAssembly)` in your assembly's
+  `__init__` makes your assembly its owner. One that something else asked for first is closed by
+  `await AssemblyHolder.aclose()`.
+- **Entering your assembly doesn't start Drivine**, as entering `DrivineAssembly` itself does: call
+  `await assembly.drivine.start()`, as above.
+- **The sync assembly**, `drivine.sync.DrivineAssembly`, closes with `with` or `close()`. The async one closes only
+  with `async with` or `await aclose()`, as its drivers close asynchronously: `close()` refuses, and says so.
 - It registers the database the environment describes. To register yours in code, subclass it and override
   `register_databases(registry)`.
 - `Assembled` injects a manager into a class something else makes:
   `pm: PersistenceManager = Assembled(assembly=DrivineAssembly)`.
-- Call `await assembly.drivine.close()` when the application stops, in FastAPI's lifespan, say.
 
-Nothing else needs pi-pilgrim: `import drivine` doesn't load it, and the managers are plain classes.
+The managers are plain classes, so an application with another container, or none, makes them itself, and closes the
+registry with `async with DatabaseRegistry() as registry:`.
 
 ## The sample app
 

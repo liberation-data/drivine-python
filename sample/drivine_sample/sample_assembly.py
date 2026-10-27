@@ -16,11 +16,11 @@ class SampleAssembly(DrivineAssembly):
     The sample application, as drivine4j's SampleAppContext wires Spring and TypeScript's SampleAppModule wires Nest:
     Drivine over one database, with that database's object manager and persistence manager.
 
-        assembly = SampleAssembly("memgraph")    # MEMGRAPH_DATABASE_*; "default" for DATABASE_*
-        await assembly.start()                   # holds the schema, if it was given one
-        gom = assembly.sample_graph_object_manager()
-        ...
-        await assembly.close()
+        async with SampleAssembly("memgraph") as assembly:   # MEMGRAPH_DATABASE_*; "default" for DATABASE_*
+            gom = assembly.sample_graph_object_manager()
+            ...
+
+    Entering it holds the schema, if it was given one, and leaving it closes the driver.
 
     `schema` and `index_advice` are what an application would configure: the catalogs `start` enforces, and what an
     ordered query with no range index does.

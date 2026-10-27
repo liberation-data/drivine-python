@@ -80,7 +80,7 @@ async def start(engine: str) -> AsyncIterator[Start]:
     yield starting
     for it in started:
         await clear(it)
-        await it.close()
+        await it.aclose()
 
 
 @pytest.fixture

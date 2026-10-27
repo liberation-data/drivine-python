@@ -53,7 +53,7 @@ env:
   DEFAULT_BRANCH: main
 
 jobs:
-  prepare:
+  prepare-release:
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -94,20 +94,20 @@ jobs:
           tag="v$version"
           branch="release/$tag"
           if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
-            echo "::error::$version isn't a version X.Y.Z (or X.Y.Z-suffix)."
+            echo "::error::$version isn't X.Y.Z (or X.Y.Z-suffix), so it can't be released."
             exit 1
           fi
           if git rev-parse -q --verify "refs/tags/$tag" > /dev/null; then
-            echo "::error::The tag $tag already exists. Ask for a later version."
+            echo "::error::$tag is already tagged. Pick a later version."
             exit 1
           fi
           newest=$(git tag -l 'v*' | python3 scripts/release_version.py newest)
           if [[ -n "$newest" ]] && ! python3 scripts/release_version.py greater "$version" "${newest#v}"; then
-            echo "::error::$version isn't greater than the newest tag, $newest, so merging it would release nothing. Ask for a later version."
+            echo "::error::$version isn't later than the last release, $newest, so merging it would release nothing. Pick a later version."
             exit 1
           fi
           if git ls-remote --exit-code --heads origin "refs/heads/$branch" > /dev/null; then
-            echo "::error::The branch $branch already exists. Merge or close its PR and delete the branch, or ask for another version."
+            echo "::error::The branch $branch already exists. Merge or close its PR and delete the branch, or pick another version."
             exit 1
           fi
           echo "pyproject.toml's version $current becomes $version, on $branch"
@@ -118,11 +118,17 @@ jobs:
             echo "since=$newest"
             echo "current=$current"
           } >> "$GITHUB_OUTPUT"
-      # uv lock writes the project's own version into uv.lock, as PEP 440 normalizes it, and changes nothing else.
+      # uv lock keeps every locked package's version (it upgrades only with --upgrade), so on a uv.lock that is up to
+      # date it writes the project's own version, as PEP 440 normalizes it, and changes nothing else. One that isn't
+      # up to date fails here, rather than slipping other changes into the release PR.
       - name: Raise the version
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
+          if ! uv lock --check; then
+            echo "::error::uv.lock on $DEFAULT_BRANCH isn't up to date with pyproject.toml. Run uv lock and merge that first, so the release PR changes the version alone."
+            exit 1
+          fi
           python3 scripts/release_version.py set pyproject.toml "$VERSION"
           uv lock
           git diff --stat

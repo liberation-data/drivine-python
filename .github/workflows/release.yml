@@ -73,11 +73,12 @@ jobs:
             newest=$(git tag -l 'v*' | python3 scripts/release_version.py newest)
             publish=false
             if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
-              echo "::notice::pyproject.toml's version $version isn't X.Y.Z (or X.Y.Z-suffix), so this push releases nothing."
+              echo "::error::pyproject.toml's version $version isn't X.Y.Z (or X.Y.Z-suffix), so it can't be released."
+              exit 1
             elif git rev-parse -q --verify "refs/tags/$tag" > /dev/null; then
-              echo "::notice::The tag $tag already exists, so this push, which changed pyproject.toml but not to a new version, releases nothing."
+              echo "::notice::pyproject.toml's version $version is already tagged $tag, so this push releases nothing. A change to pyproject.toml that isn't a version bump does this."
             elif [[ -n "$newest" ]] && ! python3 scripts/release_version.py greater "$version" "${newest#v}"; then
-              echo "::notice::pyproject.toml's version $version isn't greater than the newest tag, $newest, so this push releases nothing."
+              echo "::notice::pyproject.toml's version $version isn't later than the last release, $newest, so this push releases nothing."
             else
               publish=true
             fi

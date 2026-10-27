@@ -10,7 +10,8 @@ puts `0.3.0-rc.1` after `0.3.0`, and PEP 440's order needs the versions normaliz
 
 A bump works as npm's semver does, with `rc` for a prerelease: `patch`, `minor` and `major` of a prerelease give
 the release it leads to (`0.4.0-rc.1` minor is `0.4.0`), and `prerelease` counts on a prerelease (`0.4.0-rc.1` to
-`0.4.0-rc.2`) or starts the next patch's (`0.3.0` to `0.3.1-rc.0`).
+`0.4.0-rc.2`) or starts the next patch's (`0.3.0` to `0.3.1-rc.0`), as `npm version prerelease --preid rc` does: a
+prerelease that isn't `rc.N` moves to `rc.0` (`0.4.0-beta.2` to `0.4.0-rc.0`).
 
 It reads the standard library alone, so nothing is installed for it.
 """
@@ -60,19 +61,32 @@ def bump(version: Version, kind: str) -> Version:
             patch += 1
         prerelease = []
     elif kind == "prerelease":
+        # As npm's `prerelease --preid rc`: count the last numeric identifier up, or add a 0 when there is none; then
+        # a prerelease that isn't rc.N starts over at rc.0.
         if not prerelease:
-            patch, prerelease = patch + 1, ["rc", "0"]
-        elif prerelease[-1].isdigit():
-            prerelease = [*prerelease[:-1], str(int(prerelease[-1]) + 1)]
+            patch, prerelease = patch + 1, ["0"]
         else:
-            prerelease = [*prerelease, "0"]
+            numeric = [n for n, identifier in enumerate(prerelease) if identifier.isdigit()]
+            if numeric:
+                prerelease = list(prerelease)
+                prerelease[numeric[-1]] = str(int(prerelease[numeric[-1]]) + 1)
+            else:
+                prerelease = [*prerelease, "0"]
+        if prerelease[0] != "rc" or not prerelease[1].isdigit():
+            prerelease = ["rc", "0"]
     else:
         raise ValueError(f"{kind} isn't patch, minor, major or prerelease")
     return Version(f"{major}.{minor}.{patch}" + (f"-{'.'.join(prerelease)}" if prerelease else ""))
 
 
 def newest(tags: list[str]) -> str | None:
-    versions = [Version(tag[1:]) for tag in tags if TAG.match(tag) and SEMVER.match(tag[1:])]
+    versions: list[Version] = []
+    for tag in tags:
+        if TAG.match(tag):
+            try:
+                versions.append(Version(tag[1:]))
+            except ValueError:
+                pass  # v01.2.3 or v1.2.3-rc..1: a tag, but not a semantic version, so no release's.
     return f"v{max(versions, key=Version.key)}" if versions else None
 
 

@@ -65,7 +65,7 @@ included. Only a merged version bump or a pushed tag publishes.
 
 - **Version:** `version` in `pyproject.toml`. The tag must be `v` and that version, character for character: `v0.3.0`
   for `0.3.0`. There is no `__version__` to keep in step. `uv.lock` records the project's version too; Prepare release
-  updates it with `uv lock`.
+  updates it with `uv lock`, and fails first if `uv.lock` isn't up to date, so the PR changes the version alone.
 - **Push trigger:** a push to `main` that changes `pyproject.toml`.
 - **Version arithmetic:** `scripts/release_version.py`, which `check` uses too, to compare a version with
   the newest tag. A `prerelease` bump gives `X.Y.Z-rc.N`: `0.3.0` becomes `0.3.1-rc.0`, and `0.3.1-rc.0` becomes

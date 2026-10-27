@@ -27,6 +27,12 @@ _spec.loader.exec_module(release_version)
         ("0.4.0-rc.1", "minor", "0.4.0"),
         ("0.4.0-rc.1", "major", "1.0.0"),
         ("1.0.0-rc.1", "major", "1.0.0"),
+        ("1.2.0-rc.1", "major", "2.0.0"),
+        ("1.2.3-rc.0", "minor", "1.3.0"),
+        ("0.4.0-beta.2", "prerelease", "0.4.0-rc.0"),
+        ("0.4.0-rc", "prerelease", "0.4.0-rc.0"),
+        ("0.4.0-rc.alpha", "prerelease", "0.4.0-rc.0"),
+        ("0.4.0-rc.1.fix", "prerelease", "0.4.0-rc.2.fix"),
     ],
 )
 def test_bump(version: str, kind: str, expected: str) -> None:
@@ -42,6 +48,9 @@ def test_bump(version: str, kind: str, expected: str) -> None:
         ("0.3.0-rc.1", "0.3.0-rc", True),
         ("0.10.0", "0.9.0", True),
         ("0.2.0", "0.2.0", False),
+        ("1.0.0-alpha.beta", "1.0.0-alpha.1", True),
+        ("1.0.0-alpha.1", "1.0.0-alpha", True),
+        ("1.0.0-beta.11", "1.0.0-beta.2", True),
     ],
 )
 def test_greater(first: str, second: str, greater: bool) -> None:
@@ -53,6 +62,7 @@ def test_newest_tag_by_semver() -> None:
     assert release_version.newest(tags) == "v0.3.0"
     assert release_version.newest(["v0.3.0", "v0.3.1-rc.0"]) == "v0.3.1-rc.0"
     assert release_version.newest([]) is None
+    assert release_version.newest(["v0.2.0", "v0.9.0-rc..1", "v09.0.0"]) == "v0.2.0"
 
 
 def test_refuses_what_isnt_a_version() -> None:

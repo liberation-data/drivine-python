@@ -312,7 +312,8 @@ class OracleCypherCompiler(SqlCypherCompiler):
         has closed the session over this form in the more involved statements a walk writes. Only an item that is the
         property itself is read so: a property inside an item (`[n.a]`, `collect(n.a)`) is read as `property_of` reads
         it, and isn't worked around. Read so, a text past 32 KB still can't be sorted by, grouped by or made `DISTINCT`:
-        Oracle refuses it (ORA-40180), as it does any JSON that large, and the session stays open.
+        Oracle refuses it (ORA-40180), as it does any JSON that large, and the session stays open. A write's block is
+        worked around too, where it takes a text from the row it is writing: see `row_value`.
 
         To remove it, delete this override, so the item is read as `property_of` reads it, `JSON_QUERY … RETURNING
         JSON`, once an Oracle release no longer crashes on the repro, and the "a property past 32 KB read on two nodes"
@@ -322,6 +323,36 @@ class OracleCypherCompiler(SqlCypherCompiler):
         return (
             f"JSON(JSON_QUERY(JSON_SERIALIZE(JSON_TRANSFORM({props}, KEEP {_path(key)}) RETURNING CLOB EXTENDED), "
             f"{_path(key)} RETURNING CLOB) EXTENDED)"
+        )
+
+    def row_value(self, keys: Sequence[str]) -> str:
+        """
+        A value that a write takes from the row it is writing, to work out what it writes (`SET n.a = t.a`,
+        `CREATE (:X {a: t.a})`, `MERGE … SET n.a = t.a`, where `t` is an item of an unwound parameter): a text read with
+        one path from the row written out as text, anything else with that path from the row as JSON, as before.
+
+        **A workaround for the Oracle bug of `item_property` (#176, drivine4j#309), to be removed with it.** The block
+        crashed the session where it took a text past 32 KB from the row, a `JSON` variable, with
+        `JSON_QUERY(JSON_QUERY(cy_row, '$.v1' RETURNING JSON), '$.a' RETURNING JSON)`, for each of two or more rows.
+        Read as `item_property` reads a property, through `JSON_TRANSFORM(cy_row, KEEP …)`, it crashed too; written out
+        whole, `JSON_SERIALIZE(cy_row …)`, it didn't. A text is read from text that isn't extended JSON, which has no
+        float to keep; anything else is read as JSON, as before, so a map of the row with a key as extended JSON's are
+        (`{"$numberLong": "5"}`) stays a map. A list or a map that holds a long text is so read as JSON, which didn't
+        crash: `SET n += t` sets such a map whole. The `CASE` on the value's type, which in a read made Oracle drop a
+        label test (see `item_property`), doesn't here: it reads the row variable, one value for the whole statement,
+        after the rows were matched, and a labelled pattern in a subquery of that statement keeps its test (the
+        "an unwound item's text … is written only to the nodes a labelled pattern matches" test).
+
+        To remove it, delete this override, so the value is read as `property_of` reads each key, once an Oracle
+        release no longer crashes on the repro in `docs/oracle-long-json-string-crash.md`, and the "a text past 32 KB
+        set from an unwound parameter" Oracle test still passes without it. The SQL pins in
+        `tests/unit/test_oracle_item_property.py` go with it.
+        """
+        path = _path_of(keys)
+        return (
+            f"CASE WHEN JSON_VALUE({ROW}, {_path_of(keys, '.type()')}) = 'string' "
+            f"THEN JSON(JSON_QUERY(JSON_SERIALIZE({ROW} RETURNING CLOB), {path} RETURNING CLOB)) "
+            f"ELSE JSON_QUERY({ROW}, {path} RETURNING JSON) END"
         )
 
     def element(self, json: str, index: str) -> str:
@@ -1027,9 +1058,12 @@ def _step(key: str) -> str:
     return key if _PLAIN_KEY.fullmatch(key) and key not in _JSON_WORDS else _quoted(key)
 
 
-def _path_of(keys: Sequence[str]) -> str:
-    """The path of the property the keys lead to, each of a map in the one before, as a SQL literal: `'$.p.text'`."""
-    return literal("$" + "".join(f".{_step(key)}" for key in keys))
+def _path_of(keys: Sequence[str], suffix: str = "") -> str:
+    """
+    The path of the property the keys lead to, each of a map in the one before, as a SQL literal: `'$.p.text'`, or
+    with `suffix` after it, `'$.p.text.type()'`.
+    """
+    return literal("$" + "".join(f".{_step(key)}" for key in keys) + suffix)
 
 
 def _doubled(value: Any) -> bool:

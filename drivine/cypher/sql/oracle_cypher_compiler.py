@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import dataclasses
 import math
 import re
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any, cast
 
 from drivine.backend.oracle.oracle_graph import holds_label
+from drivine.backend.oracle.oracle_stored_functions import nulls_equal_function, nulls_equal_name
+from drivine.cypher.ast.query import Query
 from drivine.cypher.sql.compiled_cypher import CompiledCypher
 from drivine.cypher.sql.oracle_temporal_sql import CLOCK, NOW, OracleTemporalSql
 from drivine.cypher.sql.parameters import OBJECT, cypher_json, json_text, jsonable
@@ -47,76 +50,16 @@ _JSON_WORDS = ("true", "false", "null")
 """The words a JSON path reads as values, not keys."""
 
 NULLS_EQUAL = "cy_nulls_equal"
-"""The function a query declares that compares two values that may hold a null: see `nulls_equal`."""
+"""
+The function a query declares that compares two values that may hold a null, where the store keeps none: see
+`nulls_equal`.
+"""
 
 _QUOTED = r"""'"([^"\\]|\\.)*"'"""
 """A JSON text, quoted, as an Oracle pattern: its quotes, and what is between them, an escape whole."""
 
 _NULL_HELD = "'[[,:]null[],}]'"
 """A null in a list or a map, as an Oracle pattern over JSON's text whose texts are taken out."""
-
-_NULLS_EQUAL_BODY = (
-    f"FUNCTION {NULLS_EQUAL}(cy_x JSON, cy_y JSON) RETURN NUMBER IS",
-    "    FUNCTION eq(a JSON_ELEMENT_T, b JSON_ELEMENT_T) RETURN NUMBER IS",
-    "        r NUMBER := 1;",
-    "        e NUMBER;",
-    "        la JSON_ARRAY_T;",
-    "        lb JSON_ARRAY_T;",
-    "        oa JSON_OBJECT_T;",
-    "        ob JSON_OBJECT_T;",
-    "        ks JSON_KEY_LIST;",
-    "        too_long EXCEPTION;",
-    "        PRAGMA EXCEPTION_INIT(too_long, -40478);",
-    "    BEGIN",
-    "        IF a.is_Null OR b.is_Null THEN RETURN NULL; END IF;",
-    "        IF a.is_Array AND b.is_Array THEN",
-    "            la := TREAT(a AS JSON_ARRAY_T);",
-    "            lb := TREAT(b AS JSON_ARRAY_T);",
-    "            IF la.get_Size <> lb.get_Size THEN RETURN 0; END IF;",
-    "            FOR i IN 0 .. la.get_Size - 1 LOOP",
-    "                e := eq(la.get(i), lb.get(i));",
-    "                IF e = 0 THEN RETURN 0; END IF;",
-    "                IF e IS NULL THEN r := NULL; END IF;",
-    "            END LOOP;",
-    "            RETURN r;",
-    "        END IF;",
-    "        IF a.is_Object AND b.is_Object THEN",
-    "            oa := TREAT(a AS JSON_OBJECT_T);",
-    "            ob := TREAT(b AS JSON_OBJECT_T);",
-    "            IF oa.get_Size <> ob.get_Size THEN RETURN 0; END IF;",
-    "            ks := oa.get_Keys;",
-    "            FOR i IN 1 .. ks.COUNT LOOP",
-    "                IF NOT ob.has(ks(i)) THEN RETURN 0; END IF;",
-    "                e := eq(oa.get(ks(i)), ob.get(ks(i)));",
-    "                IF e = 0 THEN RETURN 0; END IF;",
-    "                IF e IS NULL THEN r := NULL; END IF;",
-    "            END LOOP;",
-    "            RETURN r;",
-    "        END IF;",
-    "        IF a.is_Number AND b.is_Number THEN RETURN CASE WHEN a.to_Number = b.to_Number THEN 1 ELSE 0 END; END IF;",
-    # As VARCHAR2s, three times as fast as CLOBs; as CLOBs where one is past 32 KB, which to_String raises on
-    # (ORA-40478).
-    "        IF a.is_String AND b.is_String THEN",
-    "            BEGIN",
-    "                RETURN CASE WHEN a.to_String = b.to_String THEN 1 ELSE 0 END;",
-    "            EXCEPTION WHEN too_long THEN",
-    "                RETURN CASE WHEN DBMS_LOB.COMPARE(a.to_Clob, b.to_Clob) = 0 THEN 1 ELSE 0 END;",
-    "            END;",
-    "        END IF;",
-    "        IF a.is_Boolean AND b.is_Boolean THEN",
-    "            RETURN CASE WHEN a.to_Boolean = b.to_Boolean THEN 1 ELSE 0 END;",
-    "        END IF;",
-    "        RETURN 0;",
-    "    END;",
-    "BEGIN",
-    "    RETURN eq(JSON_ELEMENT_T.parse(JSON_SERIALIZE(cy_x RETURNING CLOB)), "
-    "JSON_ELEMENT_T.parse(JSON_SERIALIZE(cy_y RETURNING CLOB)));",
-    "END;",
-)
-"""
-NULLS_EQUAL, which walks two values together, item by item and key by key, as Cypher compares them: 0 where a pair
-differs, else null where a pair holds a null, else 1.
-"""
 
 
 class OracleCypherCompiler(SqlCypherCompiler):
@@ -134,8 +77,17 @@ class OracleCypherCompiler(SqlCypherCompiler):
     meets what the node walked from meets of its own, and carries the node it started from.
     """
 
-    def __init__(self, graph: str) -> None:
+    def __init__(self, graph: str, nulls_equal_stored: bool = True) -> None:
+        """
+        `nulls_equal_stored` says whether two values that may hold a null are compared by the function the store keeps
+        beside the graph's tables, `nulls_equal_name`: see `nulls_equal`.
+        """
         super().__init__(graph)
+        self._nulls_equal_stored = nulls_equal_stored
+        self._stored_nulls_equal = nulls_equal_name(graph)
+        """The function the store keeps that compares two values that may hold a null: see `nulls_equal`."""
+        self._calls_stored_nulls_equal = False
+        """Whether the statement calls `_stored_nulls_equal`: see `compile_query`."""
         self._folding = False
         """Whether the step of a `reduce` is being written, as its function's own: see `reduce`."""
         self._nulls_compared = False
@@ -149,6 +101,11 @@ class OracleCypherCompiler(SqlCypherCompiler):
         self._extended_parameters: set[str] = set()
         """The names of a procedure's parameters that hold a float as extended JSON writes one: see `property_of`."""
         self.parameter_path = self._parameter_path
+
+    def compile_query(self, query: Query, parameters: Mapping[str, Any]) -> CompiledCypher:
+        """As SqlCypherCompiler's, saying whether the statement calls the store's function: see `nulls_equal`."""
+        compiled = super().compile_query(query, parameters)
+        return dataclasses.replace(compiled, calls_stored_nulls_equal=self._calls_stored_nulls_equal)
 
     def literal_json(self, value: Any) -> str:
         if isinstance(value, float):
@@ -567,18 +524,32 @@ class OracleCypherCompiler(SqlCypherCompiler):
 
     def nulls_equal(self, x: str, y: str, equals: Callable[[str, str], str]) -> str:
         """
-        By a function the query declares (see `reduce`), which walks the two together: Oracle's recursive queries take
-        no `JSON`. A procedure's queries call no function it declares, nor do a `reduce`'s step's: there, two values
-        equal as JSON are null, as each holds a null, and any other two false, as before null was compared item by
-        item: `a = [1]`, of `[null] AS a`, is false there, where Cypher's is null. Lists and maps written out are
-        compared item by item without it (see `_itemwise`), so `[null] = [1]` is null there.
+        Two values written as the same JSON text are null, as one holds a null and so its pair in the other does: that
+        needs no walk. The text is read as a `VARCHAR2`, as `holds_null` reads it; a value past 4,000 bytes has none,
+        and `=` and `JSON_EQUAL` fail on one past about 32 KB (ORA-40180), so such a value is walked. Any other two are
+        walked together by a function, as Oracle's recursive queries take no `JSON`: the store's own
+        (`nulls_equal_name`), which the graph is made with, so a procedure's queries and a `reduce`'s step's call it
+        too. Where the store has none (see `CompiledCypher.calls_stored_nulls_equal`), a query declares it (see
+        `reduce`); a procedure's queries call no function it declares, nor do a `reduce`'s step's, so there two equal as
+        JSON are null and any other two false, as before null was compared item by item: `a = [1]`, of `[null] AS a`,
+        is false there, where Cypher's is null. Lists and maps written out are compared item by item without it (see
+        `_itemwise`), so `[null] = [1]` is null everywhere.
         """
-        if self.procedural or self._folding:
+        if not self._nulls_equal_stored and (self.procedural or self._folding):
             return f"CASE WHEN {equals(x, y)} THEN NULL ELSE FALSE END"
-        if not self._nulls_compared:
-            self._nulls_compared = True
-            self.declare("\n".join(_NULLS_EQUAL_BODY))
-        return f"({NULLS_EQUAL}({x}, {y}) = 1)"
+        if self._nulls_equal_stored:
+            self._calls_stored_nulls_equal = True
+            walked = f"({self._stored_nulls_equal}({x}, {y}) = 1)"
+        else:
+            if not self._nulls_compared:
+                self._nulls_compared = True
+                self.declare(nulls_equal_function(NULLS_EQUAL))
+            walked = f"({NULLS_EQUAL}({x}, {y}) = 1)"
+
+        def text(json: str) -> str:
+            return f"JSON_SERIALIZE({json} RETURNING VARCHAR2(4000) NULL ON ERROR)"
+
+        return f"CASE WHEN {text(x)} = {text(y)} THEN NULL ELSE {walked} END"
 
     def id_tokens(self, ids: str, key: str) -> str:
         token = literal('{"' + key + '": \\1}')

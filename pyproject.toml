@@ -93,6 +93,8 @@ select = ["E", "F", "I", "UP", "B", "ASYNC"]
 "drivine/backend/oracle/oracle_save_builder.py" = ["E501"]
 # drivine4j's block that makes a Postgres store, line for line, as scripts/postgres_store.py writes it.
 "drivine/backend/postgres/postgres_store_text.py" = ["E501"]
+# The function an Oracle graph is made with, drivine4j's line for line, as part of the store layout.
+"drivine/backend/oracle/oracle_stored_functions.py" = ["E501"]
 
 [tool.pyright]
 include = ["drivine"]

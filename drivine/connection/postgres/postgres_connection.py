@@ -43,7 +43,8 @@ class PostgresConnection(Connection):
 
     async def query(self, spec: QuerySpecification[T]) -> list[T]:
         finalized = spec.finalized_copy("SQL")
-        sql, prelude = cypher_compiled(finalized, "POSTGRES", self.graph)
+        sql, cypher = cypher_compiled(finalized, "POSTGRES", self.graph)
+        prelude = cypher.prelude if cypher else None
         compiled = PostgresSpecCompiler(sql).compile()
         start = time.perf_counter()
         async with self.connection.cursor() as cursor:
@@ -65,7 +66,8 @@ class PostgresConnection(Connection):
         transaction would write nothing. The function hands its rows back whole all the same.
         """
         finalized = spec.finalized_copy("SQL")
-        sql, prelude = cypher_compiled(finalized, "POSTGRES", self.graph)
+        sql, cypher = cypher_compiled(finalized, "POSTGRES", self.graph)
+        prelude = cypher.prelude if cypher else None
         compiled = PostgresSpecCompiler(sql).compile()
         if prelude is not None:
             await self.connection.execute(prelude)

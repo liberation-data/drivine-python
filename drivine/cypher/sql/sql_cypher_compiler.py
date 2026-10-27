@@ -1667,7 +1667,7 @@ class SqlCypherCompiler(ABC):
                 f"FROM (\n{indent(paths)}\n) {s}"
             )
             text = f"SELECT * FROM (\n{indent(least)}\n) {self._alias('s')}\nWHERE len = least"
-        select.join(f"CROSS JOIN LATERAL (\n{indent(text)}\n) {name}")
+        select.join(self.lateral(text, name, optional=False))
         for variable, value, column in found:
             select.bind(variable, _columns_of(value, name, column, self._identities))
 

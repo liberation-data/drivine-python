@@ -756,6 +756,14 @@ class SqlCypherCompiler(ABC):
         kind, as JSON orders them, or by `key` where there is one, what orders them.
         """
 
+    def sum(self, json: str, distinct: str) -> str:
+        """
+        `sum` of the JSON values `json` of a group, `distinct` each once where it is `DISTINCT `: 0 where there are
+        none. A store whose numbers keep whether they are floats sums them as they are: a float where any is one, as in
+        Cypher.
+        """
+        return self.scalar(f"COALESCE(sum({distinct}{self.number(json)}), 0)")
+
     def kind_order(self, json: str) -> str:
         """
         Where the JSON's kind comes among the others, as Cypher orders values of several kinds: a map, a list, a text, a
@@ -4455,7 +4463,7 @@ class SqlCypherCompiler(ABC):
                 )
             return Json(self.distinct_items(self.comparable(self.json(listed))), ordered=True)
         if name == "sum":
-            return Json(self.scalar(f"COALESCE(sum({distinct}{self.number(self.comparable(self.json(one())))}), 0)"))
+            return Json(self.sum(self.comparable(self.json(one())), distinct))
         if name == "avg":
             return Json(self.scalar(self.float_(f"avg({distinct}{self.number(self.comparable(self.json(one())))})")))
         if name in ("min", "max"):

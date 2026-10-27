@@ -415,3 +415,24 @@ def test_quantifiers_nested_twice_as_deep_over_lists_that_may_be_null_compile_to
     short, long = (len(compiler("g").compile(nested(it)).sql) for it in (4, 8))
     assert short < 20_000, short
     assert long < 3 * short, (short, long)
+
+
+@COMPILERS
+def test_a_sum_reads_each_value_it_sums_as_often_as_an_avg_does_and_grows_under_functions_as_an_avg_does(
+    compiler: type[SqlCypherCompiler],
+) -> None:
+    # #189: on Oracle a sum tests whether any value it sums is a float. Nothing is bound under an aggregate, so a test
+    # that read each value as number() does, three times more, made a sum over nested functions twice the statement.
+    def over(aggregate: str) -> str:
+        return f"MATCH (c:Claim) RETURN {aggregate}(" + "ceil(" * 3 + "c.p" + ")" * 3 + ")"
+
+    def under(aggregate: str, depth: int) -> str:
+        return "UNWIND [1.5] AS x RETURN " + "sign(" * depth + f"{aggregate}(x)" + ")" * depth
+
+    def size(cypher: str) -> int:
+        return len(compiler("g").compile(cypher).sql)
+
+    sum_, avg = (size(over(it)) for it in ("sum", "avg"))
+    assert sum_ < avg * 1.1, f"{over('sum')}: sum {sum_}, avg {avg} characters"
+    sum_growth, avg_growth = (size(under(it, 4)) / size(under(it, 2)) for it in ("sum", "avg"))
+    assert sum_growth < avg_growth * 1.1, f"from 2 levels to 4, sum grew {sum_growth} times, avg {avg_growth}"

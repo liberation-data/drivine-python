@@ -731,6 +731,85 @@ def test_min_and_max_of_lists_the_statement_makes_compare_them_item_by_item_what
     ]
 
 
+def test_an_aggregate_of_floats_gives_a_float_whole_or_not_and_a_sum_of_integers_an_integer(
+    cypher_pm: PersistenceManager,
+):
+    # #189: Oracle's NUMBER keeps no kind, so a sum of floats that was whole came back an integer there. Each value is
+    # checked with its type, as 2 == 2.0 in Python.
+    clear(cypher_pm)
+    cypher_pm.execute(
+        spec(
+            "CREATE (:F {k: 'a', x: 0.5}), (:F {k: 'a', x: 1.0}), (:F {k: 'a', x: 0.5}), (:F {k: 'b', x: 1}), "
+            "(:F {k: 'b', x: 2})"
+        )
+    )
+
+    def kinds(value: Any) -> Any:
+        return [kinds(it) for it in value] if isinstance(value, list) else (value, type(value).__name__)
+
+    cases: list[tuple[str, dict[str, Any], Any]] = [
+        (statement, {}, value)
+        for statement, value in [
+            ("UNWIND [0.5, 1.0, 0.5] AS x RETURN sum(x)", 2.0),
+            ("UNWIND [1, 1.0] AS x RETURN sum(x)", 2.0),
+            ("UNWIND [1, 0.5, 0.5] AS x RETURN sum(x)", 2.0),
+            ("UNWIND [1, 2] AS x RETURN sum(x)", 3),
+            ("UNWIND [] AS x RETURN sum(x)", 0),
+            ("UNWIND [1.0, 1.0] AS x RETURN sum(DISTINCT x)", 1.0),
+            # Summed as doubles: past a NUMBER's range, 1e300 is no NUMBER.
+            ("UNWIND [1e300, 1.0] AS x RETURN sum(x)", 1e300),
+            # An integer among floats is summed as a double too, as Neo4j sums it, and a computed float is one.
+            ("UNWIND [9223372036854775807, 0.5] AS x RETURN sum(x)", 9.223372036854776e18),
+            ("UNWIND [0.5, 2] AS x RETURN sum(x * 10)", 25.0),
+            ("UNWIND [0.5, 1.5] AS x RETURN avg(x)", 1.0),
+            ("UNWIND [1, 3] AS x RETURN avg(x)", 2.0),
+            ("UNWIND [] AS x RETURN avg(x)", None),
+            ("UNWIND [2.0, 3.5] AS x RETURN min(x)", 2.0),
+            ("UNWIND [2.0, 1.5] AS x RETURN max(x)", 2.0),
+            ("UNWIND [1, 2.0] AS x RETURN max(x)", 2.0),
+            ("UNWIND [0.5, 1.0, 0.5] AS x RETURN [toString(sum(x)), sum(x) + 1, sum(x) * 2]", ["2.0", 3.0, 4.0]),
+            (
+                "UNWIND [['a', 0.5], ['a', 1.5], ['b', 1], ['b', 1]] AS r WITH r[0] AS k, r[1] AS x "
+                "WITH k, [sum(x), avg(x), min(x), max(x)] AS a ORDER BY k RETURN collect(a)",
+                [[2.0, 1.0, 0.5, 1.5], [2, 1.0, 1, 1]],
+            ),
+            ("MATCH (n:F) WITH n.k AS k, sum(n.x) AS s ORDER BY k RETURN collect(s)", [2.0, 3]),
+            ("MATCH (n:F) WHERE n.k = 'a' AND n.x = 1.0 RETURN sum(n.x)", 1.0),
+        ]
+    ] + [
+        ("UNWIND $xs AS x RETURN sum(x)", {"xs": xs}, total)
+        for xs, total in [
+            # Parameters: a whole float is bound so it stays one, and a fraction is a number on Oracle.
+            ([0.5, 1.0, 0.5], 2.0),
+            ([0.5, 0.5], 1.0),
+            ([1.0], 1.0),
+            ([2, 3], 5),
+            # Oracle writes a fraction of more than 40 digits with an exponent and no point.
+            ([1e-41, -1e-41], 0.0),
+        ]
+    ]
+    # Each that differs, so a store's every difference shows at once.
+    differing = []
+    for statement, parameters, value in cases:
+        given = kinds((cypher_pm.query(spec(statement, parameters)))[0])
+        if given != kinds(value):
+            differing.append(f"{statement} {parameters}: {given}, not {kinds(value)}")
+    assert differing == []
+    # Not compiled to SQL yet, so they give no integer for a float.
+    for statement, value in [
+        ("UNWIND [2.0, 3.0] AS x RETURN percentileDisc(x, 0.5)", 2.0),
+        ("UNWIND [1.0, 3.0] AS x RETURN percentileCont(x, 0.5)", 2.0),
+        ("UNWIND [1.0, 3.0] AS x RETURN stDevP(x)", 1.0),
+        ("UNWIND [1.0, 3.0] AS x RETURN stDev(x)", 1.4142135623730951),
+        ("UNWIND [1, 3] AS x RETURN percentileDisc(x, 0.5)", 1),
+    ]:
+        if cypher_pm.type is DatabaseType.NEO4J:
+            assert kinds((cypher_pm.query(spec(statement)))[0]) == kinds(value), statement
+        else:
+            with pytest.raises(DrivineError, match="is Cypher, and is not compiled to SQL yet."):
+                cypher_pm.query(spec(statement))
+
+
 HUB_GRAPH = "cy_hub"
 """The graph a hub is written to on a SQL store: tables of its own, apart from those the other tests read."""
 
@@ -1127,12 +1206,16 @@ def test_round_of_zero_gives_zero_or_null_to_a_null_precision_and_fails_on_a_neg
             "RETURN [round(sum(x), 2), round(avg(x), 400), round(sum(x), 1, 'CEILING')]"
         )
     ) == [[0.0, 0.0, 0.0]]
-    assert cypher_pm.query(
+    # Floats each, whole or not (#189), and the count an integer.
+    sums = cypher_pm.query(
         spec(
             "UNWIND range(0, 2999) AS i WITH toFloat(i % 3) * 0.5 AS x "
             "RETURN [sum(round(x, 400)), sum(round(x, 0)), sum(round(x, 0, 'UP')), count(*)]"
         )
-    ) == [[1500.0, 2000.0, 2000.0, 3000]]
+    )
+    assert [[(it, type(it)) for it in row] for row in sums] == [
+        [(1500.0, float), (2000.0, float), (2000.0, float), (3000, int)]
+    ]
     assert cypher_pm.query(
         spec(
             "UNWIND range(0, 2999) AS i WITH toFloat(i % 3) * 0.5 AS x "

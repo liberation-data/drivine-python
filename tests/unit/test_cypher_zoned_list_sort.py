@@ -2,7 +2,7 @@
 A list of zoned values, and a list of lists of them, compiled: every store sorts it, and takes its `min` and `max`, by
 their moments (#181). Oracle reads the items of a list of temporal values without `JSON_TABLE`, whose parse of one
 worked out with temporal arithmetic stalled the session (liberation-data/drivine4j#331). drivine4j's
-OracleZonedListSortTest of liberation-data/drivine4j#199 and #331. Not in the spec yet (#199).
+OracleZonedListSortTest of liberation-data/drivine4j#199 and #331. Beside the spec's case since v0.6.17 (#199).
 """
 
 from drivine.cypher.sql.oracle_cypher_compiler import OracleCypherCompiler

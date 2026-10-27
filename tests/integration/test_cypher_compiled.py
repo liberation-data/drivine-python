@@ -501,6 +501,169 @@ async def test_a_map_an_unwound_item_holds_with_a_key_as_extended_jsons_is_writt
     assert await pm.query(spec("MATCH (n:CyWrite) RETURN properties(n) ORDER BY n.id")) == items
 
 
+@pytest.mark.skipif(not ORACLE, reason="Oracle isn't configured: set ORACLE_TESTS=true.")
+async def test_a_text_past_32_kb_from_an_unwound_parameter_returned_or_passed_on_over_two_rows_leaves_the_session_open(
+    factory: PersistenceManagerFactory, registry: DatabaseRegistry
+):
+    # Oracle crashed the session where a statement took a text past 32 KB from an item of an unwound parameter as JSON,
+    # and returned it or passed it on, for each of two rows (#186, drivine4j#322). The compiler reads such a value
+    # through the item's text to work round it: see OracleCypherCompiler.item_value. As above, each statement is new,
+    # and the session is asked again after it, on one connection.
+    await clear(factory.get("oracle"))
+    provider = registry.connection_provider("oracle")
+    assert provider is not None
+    connection = await provider.connect()
+
+    async def query(cypher: str, parameters: dict[str, Any] | None = None) -> list[Any]:
+        return await connection.query(spec(cypher, parameters))
+
+    try:
+        texts = [it * 40_000 for it in ("x", "y", "z")]
+        items = {"items": [{"id": i + 1, "a": a} for i, a in enumerate(texts)]}
+        await query("UNWIND range(1, 3) AS id CREATE (:CyWrite {id: id})")
+        for i in range(3):
+
+            async def alive() -> None:
+                assert await query(f"RETURN 1 AS alive{i}") == [1]  # noqa: B023
+
+            assert await query(f"UNWIND $items AS t RETURN t.a AS a{i}", items) == texts
+            await alive()
+            assert await query(f"UNWIND $items AS t WITH t.a AS a RETURN a AS a{i}", items) == texts
+            await alive()
+            assert await query(f"UNWIND $items AS t WITH t RETURN t.a AS a{i}", items) == texts
+            await alive()
+            made = f"UNWIND $items AS t WITH t.a AS a, t.id AS id CREATE (:CyMade {{id: id, a: a, i: {i}}})"
+            await query(made, items)
+            await alive()
+            returned = await query(
+                f"UNWIND $items AS t MATCH (n:CyWrite {{id: t.id}}) SET n.a{i} = t.a RETURN t.a AS a{i}", items
+            )
+            assert returned == texts
+            await alive()
+            assert await query(f"MATCH (n:CyMade {{i: {i}}}) RETURN n.a ORDER BY n.id") == texts
+            assert await query(f"MATCH (n:CyWrite) WHERE n.id > -{i} RETURN n.a{i} ORDER BY n.id") == texts
+        # Not worked around: a pattern that matches on such a text compares it as JSON, which Oracle refuses past about
+        # 32 KB (ORA-40180), as it refuses to sort or group it, and the session stays open.
+        with pytest.raises(Exception) as refused:
+            await query("UNWIND $items AS t MERGE (n:CyMerged {a: t.a})", items)
+        causes: list[BaseException] = []
+        error: BaseException | None = refused.value
+        while error is not None and error not in causes:
+            causes.append(error)
+            error = error.__cause__ or error.__context__
+        assert any("ORA-40180" in str(it) for it in causes), repr(refused.value)
+        assert await query("MATCH (n:CyWrite) RETURN count(n)") == [3]
+    finally:
+        await connection.release()
+        await clear(factory.get("oracle"))
+
+
+async def test_an_unwound_parameters_values_returned_or_passed_on_by_a_return_or_a_with_come_back_as_they_are_given(
+    cypher_pm: PersistenceManager,
+):
+    # On Oracle such a value is read through the item's text where it is a text (#186): a whole float stays a float, a
+    # list, a map, an empty text, a null and a missing key come back as they were, returned, passed on, or after a
+    # write.
+    await clear(cypher_pm)
+    items: list[dict[str, Any]] = [
+        {
+            "id": 1,
+            "s": "short",
+            "f": 5.0,
+            "i": 5,
+            "l": [1, 2],
+            "fl": [1.0, 2.5],
+            "m": {"k": 2.0},
+            "z": None,
+            "e": "",
+        },
+        {"id": 2, "s": "x'\"y", "f": -0.5, "i": 0, "l": [], "fl": [3.0], "m": {"k": "v"}, "e": "e"},
+    ]
+    given = {"items": items}
+    await cypher_pm.query(spec("CREATE (:CyWrite {id: 1}), (:CyWrite {id: 2})"))
+    expected: dict[str, list[Any]] = {
+        "s": ["short", "x'\"y"],
+        "f": [5.0, -0.5],
+        "i": [5, 0],
+        "l": [[1, 2], []],
+        "fl": [[1.0, 2.5], [3.0]],
+        "m": [{"k": 2.0}, {"k": "v"}],
+        "z": [None, None],
+        "nothing": [None, None],
+        "e": ["", "e"],
+    }
+    for key, values in expected.items():
+        for cypher in (
+            f"UNWIND $items AS t RETURN t.{key}",
+            f"UNWIND $items AS t WITH t.{key} AS v RETURN v",
+            f"UNWIND $items AS t WITH t RETURN t.{key}",
+            f"UNWIND $items AS t MATCH (n:CyWrite {{id: t.id}}) SET n.seen = true RETURN t.{key} ORDER BY t.id",
+            f"CALL {{ UNWIND $items AS t RETURN t }} RETURN t.{key}",
+        ):
+            rows = await cypher_pm.query(spec(cypher, given))
+            assert typed(rows) == typed(values), (cypher, rows)
+    # An OPTIONAL CALL that unwinds nothing gives a null item, and its value is null.
+    optional = "UNWIND [1] AS x OPTIONAL CALL { WITH x UNWIND [] AS t RETURN t } RETURN t.s"
+    assert await cypher_pm.query(spec(optional)) == [None]
+    await cypher_pm.query(
+        spec(
+            "UNWIND $items AS t WITH t.id AS id, t.s AS s, t.f AS f, t.l AS l, t.m.k AS k "
+            "CREATE (:CyMade {id: id, s: s, f: f, l: l, k: k})",
+            given,
+        )
+    )
+    made = await cypher_pm.query(spec("MATCH (n:CyMade) RETURN properties(n) ORDER BY n.id"))
+    assert typed(made) == typed(
+        [
+            {"id": 1, "s": "short", "f": 5.0, "l": [1, 2], "k": 2.0},
+            {"id": 2, "s": "x'\"y", "f": -0.5, "l": [], "k": "v"},
+        ]
+    ), made
+    # A map with a key as extended JSON's comes back the map it is, and not the number extended JSON writes.
+    keyed = {"items": [{"d": {"$numberLong": "5"}}, {"d": {"$numberDouble": "2.0"}}]}
+    maps = [it["d"] for it in keyed["items"]]
+    assert await cypher_pm.query(spec("UNWIND $items AS t RETURN t.d", keyed)) == maps
+    assert await cypher_pm.query(spec("UNWIND $items AS t WITH t RETURN t.d", keyed)) == maps
+
+
+async def test_an_unwound_items_text_short_or_past_32_kb_is_returned_only_for_the_nodes_a_labelled_pattern_matches(
+    cypher_pm: PersistenceManager,
+):
+    # On Oracle such a text is read in a CASE on its type (#186), and such a CASE on a node's properties made Oracle
+    # drop a label test (see OracleCypherCompiler.item_property): each node a label rules out, on either end of the
+    # pattern, is left out.
+    await clear(cypher_pm)
+    await cypher_pm.query(
+        spec(
+            "UNWIND [1, 2, 3] AS id CREATE (:CyWrite {id: id, o: id * 2})-[:R]->(:CyOther {name: 'k'}), "
+            "(:CyWrite {id: id, o: id * 2 + 1})-[:R]->(:CyDecoy {name: 'k'}), "
+            "(:CyNope {id: id})-[:R]->(:CyOther {name: 'k'})"
+        )
+    )
+    for text in ("s", "x" * 40_000):
+        given = {"texts": [{"id": it, "a": f"{text}{it}", "k": "k"} for it in (1, 2, 3)]}
+        texts = [f"{text}{it}" for it in (1, 2, 3)]
+        for cypher in (
+            "UNWIND $texts AS t MATCH (n:CyWrite {id: t.id})-[r]->(k:CyOther) RETURN t.a ORDER BY n.o",
+            "UNWIND $texts AS t MATCH (k:CyOther {name: t.k})<-[r]-(n:CyWrite {id: t.id}) RETURN t.a ORDER BY n.o",
+            "UNWIND $texts AS t MATCH (n:CyWrite {id: t.id})-[r]->(k:CyOther) SET n.seen = true "
+            "RETURN t.a ORDER BY n.o",
+        ):
+            assert await cypher_pm.query(spec(cypher, given)) == texts, cypher
+        passed = (
+            "UNWIND $texts AS t MATCH (n:CyWrite {id: t.id}) WHERE (n)-->(:CyOther) "
+            "WITH t.a AS a, n RETURN [a, n.o] ORDER BY n.o"
+        )
+        assert await cypher_pm.query(spec(passed, given)) == [[f"{text}{it}", it * 2] for it in (1, 2, 3)]
+        unlabelled = "UNWIND $texts AS t MATCH (k:CyOther)<--(n {id: t.id}) RETURN t.a ORDER BY t.id"
+        assert await cypher_pm.query(spec(unlabelled, given)) == [it for it in texts for _ in range(2)]
+    # So is a value of an item of a list made of a node's properties, unwound beside the labelled pattern.
+    beside = "MATCH (n:CyWrite)-[r]->(k:CyOther) UNWIND [n {.o}] AS m RETURN m.o ORDER BY m.o"
+    assert await cypher_pm.query(spec(beside)) == [2, 4, 6]
+    ruled_out = "MATCH (n) WHERE n.seen AND NOT n:CyWrite OR n:CyWrite AND n.seen AND n.o % 2 = 1 RETURN count(n)"
+    assert await cypher_pm.query(spec(ruled_out)) == [0]
+
+
 async def test_an_unwound_items_text_short_or_past_32_kb_is_written_only_to_the_nodes_a_labelled_pattern_matches(
     cypher_pm: PersistenceManager,
 ):
@@ -621,9 +784,9 @@ async def asked_again(pm: PersistenceManager, cypher: str, parameters: dict[str,
 async def test_an_optional_call_or_an_optional_match_in_a_count_or_an_exists_keeps_the_row_it_finds_nothing_for(
     cypher_pm: PersistenceManager,
 ):
-    # Not in the spec yet (#338). Oracle refused an optional join on TRUE in a scalar subquery followed by WHERE … AND …
-    # (ORA-00907), and crashed the session on one without (ORA-03113, ORA-07445 in its alert log) (#200): it is joined
-    # on 1 = 1 there. drivine4j's CypherQueryContract of liberation-data/drivine4j#338.
+    # Beside the spec's case since v0.6.17 (#338). Oracle refused an optional join on TRUE in a scalar subquery
+    # followed by WHERE … AND … (ORA-00907), and crashed the session on one without (ORA-03113, ORA-07445 in its alert
+    # log) (#200): it is joined on 1 = 1 there. drivine4j's CypherQueryContract of liberation-data/drivine4j#338.
     await clear(cypher_pm)
     await cypher_pm.query(spec("CREATE (:CyOpt {id: 1}), (:CyOpt {k: 'p'}), (:CyOpt {k: 'q'}), (:CyOpt {k: 'q'})"))
     none = "OPTIONAL CALL { MATCH (z:Nope) RETURN z.k AS u }"
@@ -653,26 +816,6 @@ async def test_an_optional_call_or_an_optional_match_in_a_count_or_an_exists_kee
         assert await asked_again(cypher_pm, exists) == [[True, False]]
         where = f"MATCH (n:CyOpt) WHERE COUNT {{ {none} RETURN u }} = 1 AND n.id = 1 RETURN n.id"
         assert await asked_again(cypher_pm, where) == [1]
-
-
-async def test_an_optional_call_or_an_optional_match_in_a_count_keeps_the_row_it_finds_nothing_for_over_the_specs_graph(
-    cypher_pm: PersistenceManager,
-):
-    # Not in the spec yet (#338): the steps proposed for "CALL subqueries".
-    await seeded(cypher_pm)
-    async with one_session(cypher_pm):
-        keanu = (
-            "MATCH (p:Person {name: 'Keanu'}) RETURN COUNT { OPTIONAL CALL (p) { MATCH (p)-[:NOPE]->(f) "
-            "RETURN f.name AS friend } MATCH (m:Movie) WHERE m.released > 1996 AND m.released < 2010 RETURN m }"
-        )
-        assert await asked_again(cypher_pm, keanu) == [2]
-        hugo = (
-            "MATCH (p:Person {name: 'Hugo'}) RETURN COUNT { OPTIONAL CALL (p) { MATCH (p)-[:KNOWS]->(f) "
-            "RETURN f.name AS friend } RETURN friend }"
-        )
-        assert await asked_again(cypher_pm, hugo) == [1]
-        matched = "MATCH (p:Person {name: 'Hugo'}) RETURN COUNT { OPTIONAL MATCH (p)-[:KNOWS]->(f) RETURN f }"
-        assert await asked_again(cypher_pm, matched) == [1]
 
 
 async def test_an_optional_call_in_a_writes_subquery_counts_what_it_finds_and_the_row_it_finds_nothing_for(
@@ -990,29 +1133,17 @@ ZONED = (
 """As text, 10:00+02:00 (08:00 UTC) sorts after 09:00Z, and 08:30Z before both."""
 
 
-async def test_a_list_of_zoned_values_and_a_list_of_lists_of_them_sort_and_compare_item_by_item_as_their_moments(
+async def test_a_list_of_zoned_values_worked_out_with_temporal_arithmetic_sorts_as_their_moments(
     cypher_pm: PersistenceManager,
 ):
-    # Not in the spec yet (#199): drivine4j's test of liberation-data/drivine4j#199, ported for #181.
-    a, b, c = ZONED
-    hours = [10, 8, 9]
+    # Beside the spec's case since v0.6.17 (#199): its long list is worked out from one moment, not from a CASE, and it
+    # has no list collect() gathers of them. drivine4j's test of liberation-data/drivine4j#199, ported for #181. k = 0's
+    # start at 08:00 UTC.
+    a, b, _ = ZONED
 
     async def query(cypher: str) -> list[Any]:
         return await cypher_pm.query(spec(cypher))
 
-    assert await query(f"UNWIND [{b}, {a}, {c}] AS t WITH [t] AS ts RETURN ts[0].hour ORDER BY ts") == hours
-    assert await query(f"UNWIND [{b}, {a}, {c}] AS t WITH [t] AS ts RETURN ts[0].hour ORDER BY ts DESC") == hours[::-1]
-    assert await query(f"UNWIND [{b}, {a}, {c}] AS t WITH t.hour AS h, collect(t) AS ts RETURN h ORDER BY ts") == hours
-    assert await query(f"UNWIND [[{b}], [{a}], [{c}]] AS ts RETURN ts[0].hour ORDER BY ts") == hours
-    assert await query(f"UNWIND [{b}, {a}, {c}] AS t WITH [[t]] AS l RETURN l[0][0].hour ORDER BY l") == hours
-    assert await query(f"UNWIND [{b}, {a}, {c}] AS t WITH t.hour AS h, collect([t]) AS l RETURN h ORDER BY l") == hours
-    # A list that starts another comes first; a null item after any moment.
-    assert await query(f"WITH [{a}] AS x, [{a}, {b}] AS y UNWIND [y, x] AS l RETURN size(l) ORDER BY l") == [1, 2]
-    assert await query(
-        f"WITH [{a}, null] AS x, [{a}, {b}] AS y UNWIND [x, y] AS l RETURN size([i IN l WHERE i IS NULL]) ORDER BY l"
-    ) == [0, 1]
-    # A long list, and lists worked out with temporal arithmetic, by a comprehension or collect(): k = 0's start at
-    # 08:00 UTC.
     at = f"CASE k WHEN 0 THEN {a} ELSE {b} END"
     assert await query(
         f"UNWIND [0, 1] AS k WITH k, [x IN range(1, 200) | {at} + duration({{minutes: x}})] AS l RETURN k ORDER BY l"
@@ -1021,25 +1152,13 @@ async def test_a_list_of_zoned_values_and_a_list_of_lists_of_them_sort_and_compa
         f"UNWIND [0, 1] AS k UNWIND range(1, 3) AS x WITH k, {at} + duration({{minutes: x}}) AS t "
         "WITH k, collect(t) AS l RETURN k ORDER BY l"
     ) == [0, 1]
-    # min() and max() of them.
-    assert await query(f"UNWIND [[{b}], [{a}], [{c}]] AS l RETURN [min(l)[0].hour, max(l)[0].hour]") == [[10, 9]]
-    assert await query(
-        f"UNWIND [{b}, {a}, {c}] AS t WITH [[t]] AS l RETURN [min(l)[0][0].hour, max(l)[0][0].hour]"
-    ) == [[10, 9]]
-    # A time of day with an offset, as a moment.
-    times = "[time('10:00:00+02:00'), time('09:00:00Z'), time('08:30:00Z')]"
-    assert await query(f"UNWIND {times} AS t WITH [t] AS ts RETURN ts[0].hour ORDER BY ts") == hours
-    assert await query(f"UNWIND {times} AS t WITH [t] AS l RETURN [min(l)[0].hour, max(l)[0].hour]") == [[10, 9]]
-    # Taken from a list kept in order, by head() and last().
-    assert await query(
-        f"UNWIND [{b}, {a}, {c}] AS t WITH t ORDER BY t WITH collect(t) AS ts RETURN [head(ts).hour, last(ts).hour]"
-    ) == [[10, 9]]
 
 
 async def test_a_list_of_zoned_values_sorts_as_their_moments_however_it_was_made_and_an_empty_list_or_null_as_cypher(
     cypher_pm: PersistenceManager,
 ):
-    # Not in the spec yet (#199). By moment 10:00+02:00, 08:30Z, 09:00Z; as text 08:30Z, 09:00Z, 10:00+02:00.
+    # Beside the spec's case since v0.6.17 (#199). By moment 10:00+02:00, 08:30Z, 09:00Z; as text 08:30Z, 09:00Z,
+    # 10:00+02:00.
     a, b, c = ZONED
     hours = [10, 8, 9]
 
@@ -2692,7 +2811,8 @@ async def test_lists_of_several_kinds_of_item_nested_sort_item_by_item_among_val
 
 # Texts past 4,000 bytes measured, cut, changed, searched and put together whole, as short ones are: drivine4j's tests
 # of liberation-data/drivine4j#298, ported for #168. Oracle read a text from JSON as a VARCHAR2, which holds 4,000
-# bytes, and a longer one as null.
+# bytes, and a longer one as null. Beside the spec's cases since v0.6.17 (#298): stored and made by the statement too,
+# and more functions and edge cases.
 
 
 def long_text_functions(t: str, unit: str) -> dict[str, Any]:

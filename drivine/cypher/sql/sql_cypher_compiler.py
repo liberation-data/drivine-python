@@ -713,6 +713,14 @@ class SqlCypherCompiler(ABC):
             value = self.property_of(value, key)
         return value
 
+    def item_value(self, json: str, key: str) -> str:
+        """
+        The value of `key` in the JSON `json`, read from an item of a list the query unwinds (see `Json.from_list`),
+        where it is an item of a `RETURN` or a `WITH`, returned or passed on: as `property_of` reads it, but on a store
+        that must read such an item apart.
+        """
+        return self.property_of(json, key)
+
     @abstractmethod
     def element(self, json: str, index: str) -> str:
         """The item of the JSON list at the JSON index, counted from the end where it is negative."""
@@ -1490,6 +1498,7 @@ class SqlCypherCompiler(ABC):
         # A value is of a temporal kind where each query makes it of that one, and a text, or a list of texts, where
         # each makes it one. It is at keys of a write's row (`row_keys`) only where each query takes it from those: a
         # property of it is read from the row there, which would read the first query's value for every query's rows.
+        # It is read from an unwound item (`from_list`) only where each query reads it from one.
         scope: dict[str, Value] = {}
         for variable, value in projected[0].scope.items():
             if not isinstance(value, Json):
@@ -1503,6 +1512,7 @@ class SqlCypherCompiler(ABC):
             scope[variable] = dataclasses.replace(
                 value,
                 row_keys=next(iter(row_keys)) if len(row_keys) == 1 else None,
+                from_list=all(isinstance(it, Json) and it.from_list for it in all_),
                 temporal=next(iter(temporals)) if len(temporals) == 1 else None,
                 items=next(iter(items)) if len(items) == 1 else None,
                 item_items=next(iter(item_items)) if len(item_items) == 1 else None,
@@ -1545,6 +1555,7 @@ class SqlCypherCompiler(ABC):
                 list=_holds_lists(listed),
                 text=_holds_texts(listed) or _is_text(listed),
                 flat=self._is_flat(listed),
+                from_list=True,
             ),
         )
         select.order.append((f"{name}.item_no", False))
@@ -2137,6 +2148,7 @@ class SqlCypherCompiler(ABC):
                         # The row holds the value it was carried as, which holds a null only where that did.
                         flat=carried.flat if carried else False,
                         row_keys=(key,) if written else None,
+                        from_list=not written,
                     ),
                 )
             elif kind in (_Kind.NODES, _Kind.RELATIONSHIPS):
@@ -3598,9 +3610,9 @@ class SqlCypherCompiler(ABC):
     def _item(self, expression: Expression, select: _Select) -> Value:
         """
         The item `expression` of a `RETURN` or a `WITH` over `select`: a property of a node or a relationship, the item
-        itself, read as `item_property` reads it, but beside a variable-length walk; anything else as elsewhere. A node
-        or a relationship is compiled once here: compiling the item over it again lost the rows of statements that match
-        a relationship.
+        itself, read as `item_property` reads it, and a property of an unwound item (`Json.from_list`) as `item_value`
+        reads it, but beside a variable-length walk; anything else as elsewhere. A node or a relationship is compiled
+        once here: compiling the item over it again lost the rows of statements that match a relationship.
         """
         if isinstance(expression, Property) and not select.walks:
             # A property of a node or a relationship holds no null in a list, as _expression marks it (see _flat).
@@ -3609,6 +3621,16 @@ class SqlCypherCompiler(ABC):
                 return Json(self.item_property(subject.props, expression.key), flat=True)
             if isinstance(subject, Relationship):
                 return Json(self.item_property(subject.props, expression.key), flat=True)
+            # A value of an unwound item, but a temporal value's field, and one a write reads from its row as row_value
+            # does.
+            if (
+                isinstance(subject, Json)
+                and subject.from_list
+                and subject.temporal is None
+                and subject.row_keys is None
+                and expression.key not in FIELD_NAMES
+            ):
+                return Json(self.item_value(self.comparable(subject), expression.key))
         return self._expression(expression, select.scope)
 
     def _property(self, subject: Value, key: str) -> Value:

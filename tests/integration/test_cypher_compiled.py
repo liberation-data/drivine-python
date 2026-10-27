@@ -597,6 +597,104 @@ async def seeded(pm: PersistenceManager) -> None:
     await pm.query(spec(load("queries.yaml").graph or ""))
 
 
+@contextlib.asynccontextmanager
+async def one_session(pm: PersistenceManager) -> AsyncGenerator[None]:
+    """
+    On Oracle, one connection for the statements run in it, as a transaction holds one, so `asked_again` asks the
+    session that ran each statement. Elsewhere, nothing.
+    """
+    if pm.type is DatabaseType.ORACLE:
+        async with transaction(rollback=True):
+            yield
+    else:
+        yield
+
+
+async def asked_again(pm: PersistenceManager, cypher: str, parameters: dict[str, Any] | None = None) -> list[Any]:
+    """The rows of `cypher`; on Oracle, the session is asked again after it: a crash can come after the rows did."""
+    rows = await pm.query(spec(cypher, parameters))
+    if pm.type is DatabaseType.ORACLE:
+        assert await pm.query(spec("RETURN 1")) == [1], f"the session after: {cypher}"
+    return rows
+
+
+async def test_an_optional_call_or_an_optional_match_in_a_count_or_an_exists_keeps_the_row_it_finds_nothing_for(
+    cypher_pm: PersistenceManager,
+):
+    # Not in the spec yet (#338). Oracle refused an optional join on TRUE in a scalar subquery followed by WHERE … AND …
+    # (ORA-00907), and crashed the session on one without (ORA-03113, ORA-07445 in its alert log) (#200): it is joined
+    # on 1 = 1 there. drivine4j's CypherQueryContract of liberation-data/drivine4j#338.
+    await clear(cypher_pm)
+    await cypher_pm.query(spec("CREATE (:CyOpt {id: 1}), (:CyOpt {k: 'p'}), (:CyOpt {k: 'q'}), (:CyOpt {k: 'q'})"))
+    none = "OPTIONAL CALL { MATCH (z:Nope) RETURN z.k AS u }"
+    called = "CALL { MATCH (z:Nope) RETURN z.k AS u }"
+    async with one_session(cypher_pm):
+
+        async def counted(subquery: str) -> list[Any]:
+            return await asked_again(cypher_pm, f"MATCH (n:CyOpt {{id: 1}}) RETURN COUNT {{ {subquery} }}")
+
+        # At the top of a statement, as it ran before.
+        assert await asked_again(cypher_pm, f"{none} RETURN u") == [None]
+        assert await asked_again(cypher_pm, f"{none} MATCH (y:CyOpt) WHERE y.k = 'q' RETURN count(y)") == [2]
+        # In a COUNT { }: refused on Oracle, with a WHERE … AND … after the join, and else crashed the session.
+        assert await counted(f"{none} MATCH (y:CyOpt) WHERE y.k = 'q' RETURN y") == [2]
+        assert await counted(f"{none} RETURN u") == [1]
+        assert await counted(f"{none} MATCH (y:CyOpt) RETURN y") == [4]
+        assert await counted(f"MATCH (y:CyOpt) {none} WITH y, u WHERE y.k = u RETURN y") == [0]
+        # What a CALL that finds something gives is counted, and a plain CALL that finds nothing gives no row.
+        found = "OPTIONAL CALL { MATCH (z:CyOpt) WHERE z.k = 'q' RETURN z.k AS u }"
+        assert await counted(f"{found} MATCH (y:CyOpt) WHERE y.k = u RETURN y") == [4]
+        assert await counted(f"{called} MATCH (y:CyOpt) WHERE y.k = 'q' RETURN y") == [0]
+        # An OPTIONAL MATCH is the same join.
+        assert await counted("OPTIONAL MATCH (z:Nope) MATCH (y:CyOpt) WHERE y.k = 'q' RETURN y") == [2]
+        assert await counted("OPTIONAL MATCH (z:Nope) RETURN z") == [1]
+        # In an EXISTS { }, and in a WHERE.
+        exists = f"MATCH (n:CyOpt {{id: 1}}) RETURN [EXISTS {{ {none} RETURN u }}, EXISTS {{ {called} RETURN u }}]"
+        assert await asked_again(cypher_pm, exists) == [[True, False]]
+        where = f"MATCH (n:CyOpt) WHERE COUNT {{ {none} RETURN u }} = 1 AND n.id = 1 RETURN n.id"
+        assert await asked_again(cypher_pm, where) == [1]
+
+
+async def test_an_optional_call_or_an_optional_match_in_a_count_keeps_the_row_it_finds_nothing_for_over_the_specs_graph(
+    cypher_pm: PersistenceManager,
+):
+    # Not in the spec yet (#338): the steps proposed for "CALL subqueries".
+    await seeded(cypher_pm)
+    async with one_session(cypher_pm):
+        keanu = (
+            "MATCH (p:Person {name: 'Keanu'}) RETURN COUNT { OPTIONAL CALL (p) { MATCH (p)-[:NOPE]->(f) "
+            "RETURN f.name AS friend } MATCH (m:Movie) WHERE m.released > 1996 AND m.released < 2010 RETURN m }"
+        )
+        assert await asked_again(cypher_pm, keanu) == [2]
+        hugo = (
+            "MATCH (p:Person {name: 'Hugo'}) RETURN COUNT { OPTIONAL CALL (p) { MATCH (p)-[:KNOWS]->(f) "
+            "RETURN f.name AS friend } RETURN friend }"
+        )
+        assert await asked_again(cypher_pm, hugo) == [1]
+        matched = "MATCH (p:Person {name: 'Hugo'}) RETURN COUNT { OPTIONAL MATCH (p)-[:KNOWS]->(f) RETURN f }"
+        assert await asked_again(cypher_pm, matched) == [1]
+
+
+async def test_an_optional_call_in_a_writes_subquery_counts_what_it_finds_and_the_row_it_finds_nothing_for(
+    cypher_pm: PersistenceManager,
+):
+    # On Oracle an OPTIONAL CALL in a write's subquery was refused (ORA-06550, ORA-00907) until it was joined on 1 = 1,
+    # and with no WHERE … AND … after the join, it closed the session (#200). drivine4j's CypherWriteContract.
+    await clear(cypher_pm)
+    await cypher_pm.query(spec("CREATE (:CyWrite {id: 1}), (:CyOther {k: 'm'}), (:CyOther {k: 'l'})"))
+    given = {"ts": [{"id": 1, "a": "m", "m": {"a": "m"}, "l": {"a": "none"}}]}
+    subqueries = {
+        "o": "OPTIONAL CALL { WITH t MATCH (z:CyNope) RETURN t AS u } MATCH (y:CyOther) WHERE y.k = u.a RETURN y",
+        "f": "OPTIONAL CALL { WITH t RETURN t.m AS u } MATCH (y:CyOther) WHERE y.k = u.a RETURN y",
+        "b": "OPTIONAL CALL { WITH t MATCH (z:CyNope) RETURN t AS u } RETURN u",
+    }
+    async with one_session(cypher_pm):
+        for name, subquery in subqueries.items():
+            statement = f"UNWIND $ts AS t MATCH (n:CyWrite {{id: t.id}}) SET n.{name} = COUNT {{ {subquery} }}"
+            await asked_again(cypher_pm, statement, given)
+        assert await cypher_pm.query(spec("MATCH (n:CyWrite {id: 1}) RETURN [n.o, n.f, n.b]")) == [[0, 1, 1]]
+
+
 async def test_collect_distinct_beside_keys_other_aggregates_an_order_a_page_and_a_variable_outside_its_aggregates(
     cypher_pm: PersistenceManager,
 ):

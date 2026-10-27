@@ -908,6 +908,16 @@ class OracleCypherCompiler(SqlCypherCompiler):
         """
         return f"SELECT /*+ NO_MERGE */ * FROM (\n{indent(query)}\n)"
 
+    def lateral(self, query: str, name: str, optional: bool) -> str:
+        """
+        An optional join is on `1 = 1`, not `ON TRUE`: in a scalar subquery, as a `COUNT { … }` is, Oracle refuses a
+        join on `TRUE` followed by a `WHERE … AND …` (ORA-00907), and crashes the session on one without (ORA-07445 in
+        `qcsjccqb`, ORA-03113 to the client) (#200). See docs/oracle-on-true-in-scalar-subquery-crash.md.
+        """
+        if optional:
+            return f"LEFT JOIN LATERAL (\n{indent(query)}\n) {name} ON 1 = 1"
+        return super().lateral(query, name, optional=False)
+
     def matches(self, text: str, pattern: str) -> str:
         """
         Flags the pattern opens with, `(?i)`, are Oracle's match parameter, Java's `s` its `n`. The whole of the text

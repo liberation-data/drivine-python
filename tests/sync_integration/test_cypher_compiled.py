@@ -33,7 +33,7 @@ from drivine.sync import (
     QuerySpecification,
     transaction,
 )
-from tests.cypher.cypher_spec import load
+from tests.cypher.cypher_spec import Step, canonical, load
 from tests.sync_integration.conftest import ORACLE, POSTGRES, SQL_STORES
 
 UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
@@ -440,6 +440,156 @@ def test_a_property_past_32_kb_read_on_two_nodes_leaves_the_session_open_on_orac
     finally:
         connection.release()
         clear(factory.get("oracle"))
+
+
+@pytest.mark.skipif(not ORACLE, reason="Oracle isn't configured: set ORACLE_TESTS=true.")
+def test_a_text_past_32_kb_set_from_an_unwound_parameter_on_two_nodes_leaves_the_session_open_on_oracle(
+    factory: PersistenceManagerFactory, registry: DatabaseRegistry
+):
+    # Oracle crashed the session where the block took a text past 32 KB from an item of an unwound parameter, as JSON,
+    # for each of two rows (#176, drivine4j#309). The compiler reads a text a write takes from its row through the
+    # row's text to work round it: see OracleCypherCompiler.row_value. As above, each statement is new, and the session
+    # is asked again after it, on one connection.
+    clear(factory.get("oracle"))
+    provider = registry.connection_provider("oracle")
+    assert provider is not None
+    connection = provider.connect()
+
+    def query(cypher: str, parameters: dict[str, Any] | None = None) -> list[Any]:
+        return connection.query(spec(cypher, parameters))
+
+    try:
+        texts = [it * 40_000 for it in ("x", "y", "z")]
+        items = {"items": [{"id": i + 1, "a": a, "f": 5.0} for i, a in enumerate(texts)]}
+        query("UNWIND range(1, 3) AS id CREATE (:CyWrite {id: id})")
+        written: list[str] = []
+        for i in range(3):
+            query(f"UNWIND $items AS t MATCH (n:CyWrite {{id: t.id}}) SET n.a{i} = t.a", items)
+            query(f"UNWIND $items AS t MERGE (n:CyWrite {{id: t.id}}) SET n.m{i} = t.a", items)
+            query(f"UNWIND $items AS t CREATE (:CyMade {{id: t.id, a: t.a, i: {i}}})", items)
+            query(f"UNWIND $texts AS t CREATE (:CyBare {{a: t, i: {i}}})", {"texts": texts})
+            written += [f"a{i}", f"m{i}"]
+            assert query(f"MATCH (n:CyWrite) WHERE n.id > -{i} RETURN properties(n) ORDER BY n.id") == [
+                {"id": j + 1, **dict.fromkeys(written, a)} for j, a in enumerate(texts)
+            ]
+            # Each read as an item of its own: one inside a list isn't worked around (see item_property).
+            assert query(f"MATCH (n:CyMade {{i: {i}}}) RETURN n.a ORDER BY n.id") == texts
+            assert sorted(query(f"MATCH (n:CyBare {{i: {i}}}) RETURN n.a")) == texts
+            assert query(f"MATCH (n:CyWrite) RETURN count(n) AS c{i}") == [3]
+        # A map item that holds the long text, set whole: its whole float stays a float.
+        query("UNWIND $items AS t MATCH (n:CyWrite {id: t.id}) SET n += t", items)
+        assert query("MATCH (n:CyWrite) RETURN n.a ORDER BY n.id") == texts
+        floats = query("MATCH (n:CyWrite) RETURN n.f ORDER BY n.id")
+        assert typed(floats) == typed([5.0, 5.0, 5.0]), floats
+    finally:
+        connection.release()
+        clear(factory.get("oracle"))
+
+
+@pytest.mark.skipif(not ORACLE, reason="Oracle isn't configured: set ORACLE_TESTS=true.")
+def test_a_map_an_unwound_item_holds_with_a_key_as_extended_jsons_is_written_as_the_map_it_is_on_oracle(
+    factory: PersistenceManagerFactory,
+):
+    # Only a text a write takes from its row is read through the row's text (#176, drivine4j#309): a map is read as
+    # JSON, as before, and not from extended JSON, which would read {"$numberLong": "5"} as the number 5.
+    pm = factory.get("oracle")
+    clear(pm)
+    items = [{"id": 1, "m": {"$numberLong": "5"}}, {"id": 2, "m": {"$numberDouble": "2.0"}}]
+    pm.query(spec("UNWIND $items AS t CREATE (:CyWrite {id: t.id, m: t.m})", {"items": items}))
+    assert pm.query(spec("MATCH (n:CyWrite) RETURN properties(n) ORDER BY n.id")) == items
+
+
+def test_an_unwound_items_text_short_or_past_32_kb_is_written_only_to_the_nodes_a_labelled_pattern_matches(
+    cypher_pm: PersistenceManager,
+):
+    # On Oracle such a text is read in a CASE on its type (#176), and such a CASE in a read made Oracle drop a label
+    # test (see OracleCypherCompiler.item_property): each node a label rules out, on either end of the pattern, is left
+    # alone.
+    for text in ("s", "x" * 40_000):
+        clear(cypher_pm)
+        cypher_pm.query(
+            spec(
+                "UNWIND [1, 2, 3] AS id CREATE (:CyWrite {id: id, o: id * 2})-[:R]->(:CyOther {name: 'k'}), "
+                "(:CyWrite {id: id, o: id * 2 + 1})-[:R]->(:CyDecoy {name: 'k'}), "
+                "(:CyNope {id: id})-[:R]->(:CyOther {name: 'k'})"
+            )
+        )
+        given = {"texts": [{"id": it, "a": text, "s": "s", "k": "k"} for it in (1, 2, 3)]}
+        cypher_pm.query(spec("UNWIND $texts AS t MATCH (n:CyWrite {id: t.id})-[r]->(k:CyOther) SET n.a = t.a", given))
+        # A value of the item's worked out beside the node the pattern reached. The `+` is of the short text: on Oracle
+        # a `+` of a text past 4,000 bytes leaves that text out (drivine4j#314).
+        cypher_pm.query(
+            spec(
+                "UNWIND $texts AS t MATCH (n:CyWrite {id: t.id})-[r]->(k:CyOther) "
+                "SET n.b = CASE k.name WHEN 'k' THEN t.a END, n.e = t.s + k.name",
+                given,
+            )
+        )
+        cypher_pm.query(spec("UNWIND $texts AS t MERGE (n:CyWrite {id: t.id, o: t.id * 2}) SET n.c = t.a", given))
+        # A labelled pattern in a subquery of the statement that works the value out, beside the item's text in the
+        # CASE.
+        cypher_pm.query(
+            spec(
+                "UNWIND $texts AS t MATCH (n:CyWrite {id: t.id}) SET n.f = COUNT { (n)-->(:CyOther {name: t.k}) }",
+                given,
+            )
+        )
+
+        def matched(value: Any) -> list[Any]:
+            return [it for _ in range(3) for it in (value, None)]
+
+        assert cypher_pm.query(spec("MATCH (n:CyWrite) RETURN n.a ORDER BY n.o")) == matched(text)
+        assert cypher_pm.query(spec("MATCH (n:CyWrite) RETURN n.b ORDER BY n.o")) == matched(text)
+        assert cypher_pm.query(spec("MATCH (n:CyWrite) RETURN n.e ORDER BY n.o")) == matched("sk")
+        assert cypher_pm.query(spec("MATCH (n:CyWrite) RETURN n.c ORDER BY n.o")) == matched(text)
+        assert cypher_pm.query(spec("MATCH (n:CyWrite) RETURN n.f ORDER BY n.o")) == [1, 0] * 3
+        assert cypher_pm.query(spec("MATCH (n:CyWrite) RETURN count(n)")) == [6]
+        untouched = (
+            "MATCH (n:CyNope) WHERE n.a IS NOT NULL OR n.b IS NOT NULL OR n.c IS NOT NULL OR n.e IS NOT NULL "
+            "RETURN count(n)"
+        )
+        assert cypher_pm.query(spec(untouched)) == [0]
+
+
+def test_an_unwound_parameters_items_are_written_as_they_are_given_by_set_create_merge_and_set_plus(
+    cypher_pm: PersistenceManager,
+):
+    # On Oracle such a value is read through its text (#176): a whole float stays a float, a null or a missing key
+    # writes no property, and a list, a key of a map in the item and a short text are written as they were.
+    clear(cypher_pm)
+    items: list[dict[str, Any]] = [
+        {"id": 1, "s": "short", "f": 5.0, "i": 5, "l": [1, 2], "fl": [1.0, 2.5], "m": {"k": 2.0}, "z": None},
+        {"id": 2, "s": "x'\"y", "f": -0.5, "i": 0, "l": [], "fl": [3.0], "m": {"k": "v"}},
+    ]
+    given = {"items": items}
+    statements = [
+        "UNWIND $items AS t CREATE (:CyWrite {id: t.id, s: t.s, f: t.f, i: t.i, l: t.l, fl: t.fl, k: t.m.k, z: t.z, "
+        "w: t.nothing})",
+        "UNWIND $items AS t MATCH (n:CyWrite {id: t.id}) SET n.s2 = t.s, n.f2 = t.f, n.z2 = t.z, n.w2 = t.nothing",
+        "UNWIND $items AS t MERGE (n:CyWrite {id: t.id}) SET n.f3 = t.f",
+        "UNWIND $items AS t MERGE (n:CyWrite {id: t.id + 10}) ON CREATE SET n.f = t.f, n.m = t.m.k",
+    ]
+    for statement in statements:
+        cypher_pm.query(spec(statement, given))
+    added = {"added": [{"id": 1, "g": 7.0, "s": None}, {"id": 2, "g": 8}]}
+    cypher_pm.query(spec("UNWIND $added AS t MATCH (n:CyWrite {id: t.id}) SET n += t", added))
+    cypher_pm.query(spec("UNWIND $floats AS f CREATE (:CyWrite {id: 20, f: f})", {"floats": [6.0]}))
+    rows = cypher_pm.query(spec("MATCH (n:CyWrite) RETURN properties(n) ORDER BY n.id"))
+    one = {"id": 1, "f": 5.0, "i": 5, "l": [1, 2], "fl": [1.0, 2.5], "k": 2.0, "s2": "short", "f2": 5.0, "f3": 5.0}
+    two = {"id": 2, "s": "x'\"y", "f": -0.5, "i": 0, "l": [], "fl": [3.0], "k": "v", "s2": "x'\"y", "f2": -0.5}
+    expected = [
+        {**one, "g": 7.0},
+        {**two, "f3": -0.5, "g": 8},
+        {"id": 11, "f": 5.0, "m": 2.0},
+        {"id": 12, "f": -0.5, "m": "v"},
+        {"id": 20, "f": 6.0},
+    ]
+    assert typed(rows) == typed(expected), rows
+
+
+def typed(value: Any) -> Any:
+    """The value in a form that compares by kind too: 5.0 is not 5."""
+    return canonical(value, Step(""))
 
 
 def seeded(pm: PersistenceManager) -> None:

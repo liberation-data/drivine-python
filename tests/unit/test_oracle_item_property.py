@@ -1,7 +1,8 @@
 """
 On Oracle, a property that is an item of a `RETURN` or a `WITH` is read through its text, as extended JSON: Oracle
 crashed the session where a statement took a text past 32 KB from the properties as JSON for each of two rows (#144).
-Elsewhere a property is read as it was. drivine4j's OracleItemPropertyTest, ported.
+So is a text a write takes from the row it is writing, to work out what it writes (#176). Elsewhere a property is read
+as it was. drivine4j's OracleItemPropertyTest, ported.
 """
 
 from drivine.cypher.sql.oracle_cypher_compiler import OracleCypherCompiler
@@ -61,6 +62,69 @@ def test_a_property_an_item_groups_by_or_makes_distinct_is_read_through_its_text
 def test_a_property_a_write_returns_is_read_through_its_text():
     sql = oracle("MATCH (n:Doc) SET n.b = 1 RETURN n.a")
     assert "KEEP '$.a') RETURNING CLOB EXTENDED), '$.a' RETURNING CLOB) EXTENDED) AS c1" in sql, sql
+
+
+def row_read(path: str) -> str:
+    return (
+        f"CASE WHEN JSON_VALUE(cy_row, '{path}.type()') = 'string' "
+        f"THEN JSON(JSON_QUERY(JSON_SERIALIZE(cy_row RETURNING CLOB), '{path}' RETURNING CLOB)) "
+        f"ELSE JSON_QUERY(cy_row, '{path}' RETURNING JSON) END"
+    )
+
+
+def test_a_text_a_write_takes_from_its_row_is_read_through_the_rows_text_and_a_pattern_it_matches_tests_it_as_it_was():
+    set_ = (
+        OracleCypherCompiler("g")
+        .compile("UNWIND $ts AS t MATCH (n:Doc {id: t.id}) SET n.a = t.a, n.b = t, n.c = t.m.`k.j`", {"ts": []})
+        .sql
+    )
+    dotted = row_read('$.v1.m."k.j"')
+    assert f"SELECT {row_read('$.v1.a')} INTO cy_value" in set_, set_
+    assert f"SELECT {row_read('$.v1')} INTO cy_value" in set_, set_
+    assert f"SELECT {dotted} INTO cy_value" in set_, set_
+    assert "JSON_QUERY(JSON_QUERY(cy_row" not in set_, set_
+    merged = (
+        OracleCypherCompiler("g")
+        .compile("UNWIND $ts AS t MERGE (n:Doc {id: t.id}) ON CREATE SET n.a = t.a", {"ts": []})
+        .sql
+    )
+    assert "= JSON_QUERY(JSON_QUERY(cy_row, '$.v1' RETURNING JSON), '$.id' RETURNING JSON)" in merged, merged
+    assert f"JSON_OBJECT('id' VALUE {row_read('$.v1.id')} NULL ON NULL RETURNING JSON) INTO cy_value" in merged, merged
+    assert f"SELECT {row_read('$.v1.a')} INTO cy_value" in merged, merged
+
+
+def test_a_value_a_union_in_a_writes_subquery_takes_from_its_row_in_each_query_is_read_from_what_the_union_gives():
+    # x is t.m in one query and t.l in the other: read from the row at the first's keys, the other's rows read t.m.a.
+    sql = (
+        OracleCypherCompiler("g")
+        .compile(
+            "UNWIND $ts AS t MATCH (n {id: t.id}) SET n.a = COUNT { CALL { WITH t RETURN t.m AS x UNION ALL "
+            "WITH t RETURN t.l AS x } MATCH (y) WHERE y.k = x.a RETURN y }",
+            {"ts": []},
+        )
+        .sql
+    )
+    assert "'$.v1.m.a'" not in sql, sql
+    assert "'$.v1.l.a'" not in sql, sql
+
+
+def test_a_value_an_optional_call_in_a_writes_subquery_returns_from_its_row_is_read_from_what_the_call_gives():
+    # u is null where the call finds nothing: read from the row, it would be t, and y.k compared with t.a.
+    cypher = (
+        "UNWIND $ts AS t MATCH (n {id: t.id}) SET n.a = COUNT { OPTIONAL CALL { WITH t MATCH (y:Nope) RETURN t AS u } "
+        "MATCH (y) WHERE y.k = u.a RETURN y }"
+    )
+    assert "'$.v1.a'" not in OracleCypherCompiler("g").compile(cypher, {"ts": []}).sql
+    prelude = PostgresCypherCompiler("g").compile(cypher, {"ts": []}).prelude
+    assert prelude is not None
+    assert "((cy_row -> 'v1') -> 'a')" not in prelude, prelude
+
+
+def test_on_postgres_a_value_a_write_takes_from_its_row_is_read_as_elsewhere():
+    # A write on Postgres is a function, which `prelude` makes: its body reads the row's keys one by one, as before.
+    compiled = PostgresCypherCompiler("g").compile("UNWIND $ts AS t MATCH (n:Doc {id: t.id}) SET n.a = t.a", {"ts": []})
+    assert compiled.prelude is not None
+    assert "SELECT ((cy_row -> 'v1') -> 'a') INTO cy_value" in compiled.prelude, compiled.prelude
 
 
 def test_on_postgres_a_property_returned_is_read_as_elsewhere():

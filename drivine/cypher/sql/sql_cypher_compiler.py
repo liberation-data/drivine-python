@@ -687,6 +687,17 @@ class SqlCypherCompiler(ABC):
         """
         return self.property_of(props, key)
 
+    def row_value(self, keys: Sequence[str]) -> str:
+        """
+        The value at `keys`, each of a map in the one before, in the row a write is making (ROW), where a statement of
+        the write reads it to work out what it writes: as `property_of` reads each key, but on a store that must read
+        it apart.
+        """
+        value = ROW
+        for key in keys:
+            value = self.property_of(value, key)
+        return value
+
     @abstractmethod
     def element(self, json: str, index: str) -> str:
         """The item of the JSON list at the JSON index, counted from the end where it is negative."""
@@ -1335,6 +1346,9 @@ class SqlCypherCompiler(ABC):
         text = f"(\n{indent(self.called(projected.sql))}\n) {name}"
         select.join(f"LEFT JOIN LATERAL {text} ON TRUE" if call.optional else f"CROSS JOIN LATERAL {text}")
         for variable, value in projected.scope.items():
+            if call.optional and isinstance(value, Json):
+                # A value taken from a write's row is null here where the call finds nothing: it is read as returned.
+                value = dataclasses.replace(value, row_keys=None)
             select.bind(variable, _columns_of(value, name))
         for column, descending in projected.order:
             select.order.append((f"{name}.{column}", descending))
@@ -1393,7 +1407,8 @@ class SqlCypherCompiler(ABC):
             f"SELECT * FROM (\n{indent(it.sql)}\n) {self._alias('q')}" for it in projected
         )
         # A value is of a temporal kind where each query makes it of that one, and a text, or a list of texts, where
-        # each makes it one.
+        # each makes it one. It is at keys of a write's row (`row_keys`) only where each query takes it from those: a
+        # property of it is read from the row there, which would read the first query's value for every query's rows.
         scope: dict[str, Value] = {}
         for variable, value in projected[0].scope.items():
             if not isinstance(value, Json):
@@ -1402,8 +1417,10 @@ class SqlCypherCompiler(ABC):
             all_ = [it.scope[variable] for it in projected]
             temporals = {it.temporal if isinstance(it, Json) else None for it in all_}
             items = {it.items if isinstance(it, Json) else None for it in all_}
+            row_keys = {it.row_keys if isinstance(it, Json) else None for it in all_}
             scope[variable] = dataclasses.replace(
                 value,
+                row_keys=next(iter(row_keys)) if len(row_keys) == 1 else None,
                 temporal=next(iter(temporals)) if len(temporals) == 1 else None,
                 items=next(iter(items)) if len(items) == 1 else None,
                 text=all(_is_text(it) for it in all_),
@@ -1993,18 +2010,21 @@ class SqlCypherCompiler(ABC):
         self._unread = (select, select.size())
         return select
 
-    def _row(self, needed: set[str] | None) -> _Select:
+    def _row(self, needed: set[str] | None, written: bool = False) -> _Select:
         """
         The row in ROW alone, as a statement of a write reads it, with the variables `needed` bound: a row may hold
         many, and each node or relationship bound is a join.
         """
         select = _Select({})
-        self._bind_row(select, ROW, needed)
+        self._bind_row(select, ROW, needed, written)
         return select
 
-    def _bind_row(self, select: _Select, row: str, needed: set[str] | None = None) -> None:
-        """Binds into the select each variable the row holds, of `needed` where given: a node or a relationship is read
-        from its table, as it is now."""
+    def _bind_row(self, select: _Select, row: str, needed: set[str] | None = None, written: bool = False) -> None:
+        """
+        Binds into the select each variable the row holds, of `needed` where given: a node or a relationship is read
+        from its table, as it is now. With `written`, the row is ROW, and a value and each property of it are read as
+        `row_value` reads them, for a statement that works out what a write writes.
+        """
         for variable, kind in self._kinds.items():
             if needed is not None and variable not in needed:
                 continue
@@ -2022,7 +2042,7 @@ class SqlCypherCompiler(ABC):
                 select.bind(
                     variable,
                     Json(
-                        self.property_of(row, key),
+                        self.row_value([key]) if written else self.property_of(row, key),
                         temporal=carried.temporal if carried else None,
                         items=carried.items if carried else None,
                         list=carried.list if carried else False,
@@ -2031,6 +2051,7 @@ class SqlCypherCompiler(ABC):
                         texts=carried.texts if carried else False,
                         # The row holds the value it was carried as, which holds a null only where that did.
                         flat=carried.flat if carried else False,
+                        row_keys=(key,) if written else None,
                     ),
                 )
             elif kind in (_Kind.NODES, _Kind.RELATIONSHIPS):
@@ -2060,7 +2081,7 @@ class SqlCypherCompiler(ABC):
             needed = None
         else:
             needed = {name for it in read for name in variables_in(it)}
-        select = self._row(needed)
+        select = self._row(needed, written=True)
         self._emit("\n".join([f"SELECT {value(select.scope)} INTO {variable}", *self._from(select)]) + ";")
 
     def _write(self, clause: Clause) -> None:
@@ -3494,6 +3515,9 @@ class SqlCypherCompiler(ABC):
             field_ = self._temporal_field(subject, key)
             if field_ is not None:
                 return field_
+            if subject.row_keys is not None:
+                keys = (*subject.row_keys, key)
+                return Json(self.row_value(keys), row_keys=keys)
             taken = self.property_of(self.comparable(subject), key)
             return Json(
                 taken, identity=self._identity_taken(subject, taken, True, lambda it: self.property_of(it, key))

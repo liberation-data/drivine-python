@@ -36,9 +36,10 @@ def test_a_duration_added_to_a_value_read_from_the_store_grows_with_each_additio
         return "MATCH (c:Claim) RETURN " + "(" * times + "c.day" + " + duration('P1D'))" * times
 
     one, two, four = (len(compiler("g").compile(added(it)).sql) for it in (1, 2, 4))
-    # drivine4j's bound is 25,000, as a sum that may be a text writes each side as toString does, a float as Java
-    # writes it; the JSON_TRANSFORM a result is read through here (python-oracledb#622) is a few characters more.
-    assert one < 25_000, one
+    # drivine4j's bound is 30,000, as a sum that may be a text writes each side as toString does, a float as Java
+    # writes it: on Oracle twice, the second time for a text past 4,000 bytes (#168). The JSON_TRANSFORM a result is
+    # read through here (python-oracledb#622) is a few characters more.
+    assert one < 30_000, one
     assert four < 3 * two, (two, four)
 
 
@@ -160,10 +161,12 @@ def test_a_sum_writes_a_side_the_statement_makes_a_text_as_its_own_text_and_one_
         )
         == 0
     )
-    # A property may hold a float: it is written as toString writes it, beside a text or not.
-    assert writes("MATCH (c:Claim) RETURN c.s + 'b'") == once
-    assert writes("MATCH (c:Claim) RETURN toUpper(c.s) + c.f") == once
-    assert writes("MATCH (c:Claim) RETURN 'x' + toString(c.i) + c.f") == 2 * once
+    # A property may hold a float: it is written as toString writes it, beside a text or not. Oracle's sum writes such a
+    # side twice, the second time in the branch it takes for a text past 4,000 bytes (#168).
+    side = 2 * once if compiler is OracleCypherCompiler else once
+    assert writes("MATCH (c:Claim) RETURN c.s + 'b'") == side
+    assert writes("MATCH (c:Claim) RETURN toUpper(c.s) + c.f") == side
+    assert writes("MATCH (c:Claim) RETURN 'x' + toString(c.i) + c.f") == once + side
     # A text put together with a number given, on either side, is a text.
     assert writes("MATCH (c:Claim) RETURN 1 + toUpper(c.s) + 'x', toUpper(c.s) + 2.5 + 'x'") == 0
     # A CASE, a coalesce and a list written are a text, or hold texts, where each of theirs is; a text unwound is one.
@@ -197,12 +200,12 @@ def test_a_sum_writes_a_side_the_statement_makes_a_text_as_its_own_text_and_one_
         "RETURN (CASE WHEN size(ts) > 1 THEN ts ELSE {} END)[0] + 'x'"
     )
     assert writes(case.format("['a']")) == 0
-    assert writes(case.format("fs")) == once
+    assert writes(case.format("fs")) == side
     union = (
         "MATCH (c:Claim) CALL {{ WITH c RETURN split(c.s, ',') AS v UNION WITH c RETURN {} AS v }} RETURN v[0] + 'x'"
     )
     assert writes(union.format("['n']")) == 0
-    assert writes(union.format("[c.f]")) == once
+    assert writes(union.format("[c.f]")) == side
     # Joined to texts, too: the join writes its sides as any `+` does, and its item, added to a text, is written as it
     # is.
     joined = (
@@ -210,7 +213,7 @@ def test_a_sum_writes_a_side_the_statement_makes_a_text_as_its_own_text_and_one_
         "RETURN (ts + ['a'])[0], (ts + 'a')[0], ('b' + ts)[0], (ts + fs)[0]"
     )
     assert writes(joined.replace("[0],", "[0] + 'x',")) == writes(joined)
-    assert writes(f"{joined} + 'x'") == writes(joined) + once
+    assert writes(f"{joined} + 'x'") == writes(joined) + side
     # Each query of a CALL's UNION makes it a text, and a write carries it on.
     assert (
         writes("MATCH (c:Claim) CALL { WITH c RETURN toUpper(c.s) AS v UNION WITH c RETURN 'n' AS v } RETURN v + 'x'")
@@ -218,16 +221,16 @@ def test_a_sum_writes_a_side_the_statement_makes_a_text_as_its_own_text_and_one_
     )
     assert writes("MATCH (c:Claim) WITH c, toUpper(c.s) AS t SET c.t = t RETURN t + 'x'") == 0
     # Where any one of them may be a float, it is written as toString writes it.
-    assert writes("MATCH (c:Claim) RETURN CASE WHEN c.b THEN 'a' ELSE c.f END + 'x'") == once
-    assert writes("MATCH (c:Claim) RETURN coalesce(toUpper(c.s), c.f) + 'x'") == once
-    assert writes("MATCH (c:Claim) RETURN ['a', c.f][1] + 'x'") == once
+    assert writes("MATCH (c:Claim) RETURN CASE WHEN c.b THEN 'a' ELSE c.f END + 'x'") == side
+    assert writes("MATCH (c:Claim) RETURN coalesce(toUpper(c.s), c.f) + 'x'") == side
+    assert writes("MATCH (c:Claim) RETURN ['a', c.f][1] + 'x'") == side
     assert (
         writes("MATCH (c:Claim) CALL { WITH c RETURN toUpper(c.s) AS v UNION WITH c RETURN c.f AS v } RETURN v + 'x'")
-        == once
+        == side
     )
     # The least and the greatest of texts are a text; of a property, which may hold a float, not.
     assert writes("MATCH (c:Claim) WITH min(toUpper(c.s)) AS lo, max(toLower(c.s)) AS hi RETURN lo + hi + 'x'") == 0
-    assert writes("MATCH (c:Claim) WITH max(c.f) AS hi RETURN hi + 'x'") == once
+    assert writes("MATCH (c:Claim) WITH max(c.f) AS hi RETURN hi + 'x'") == side
 
 
 def test_a_sort_by_a_property_on_postgres_is_by_json_and_text_and_only_a_list_the_statement_makes_is_keyed_as_a_list():

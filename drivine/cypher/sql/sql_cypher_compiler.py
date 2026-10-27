@@ -656,6 +656,13 @@ class SqlCypherCompiler(ABC):
     def text(self, json: str) -> str:
         """The JSON as text, where it is a string."""
 
+    def texts(self, jsons: Sequence[str], body: Body) -> str:
+        """
+        The body over the texts of the JSON values, each read as `text` reads it where it is a string. A store whose
+        text read from JSON holds only so much reads a longer one otherwise: see Oracle's.
+        """
+        return body([self.text(it) for it in jsons])
+
     @abstractmethod
     def bool_of(self, json: str) -> str:
         """The JSON as a condition, where it is `true` or `false`."""
@@ -930,6 +937,20 @@ class SqlCypherCompiler(ABC):
     @abstractmethod
     def split(self, text: str, separator: str) -> str:
         """`split`: the SQL text cut at each separator, a SQL text, as a JSON list of texts."""
+
+    def replace_text(
+        self,
+        text: str,
+        search: str,
+        replacement: str,
+        search_bytes: int | None = None,
+        replacement_bytes: int | None = None,
+    ) -> str:
+        """
+        `replace`: the SQL text with each `search` in it made `replacement`; `search_bytes` and `replacement_bytes` are
+        how long they are in UTF-8, where the statement gives them.
+        """
+        return f"REPLACE({text}, {search}, {replacement})"
 
     @abstractmethod
     def reverse_text(self, text: str) -> str:
@@ -3866,12 +3887,13 @@ class SqlCypherCompiler(ABC):
         if operator is BinaryOperator.IN:
             return Bool(self._membership(binary, left_value, right_value, scope, filter_))
         if operator is BinaryOperator.STARTS_WITH:
-            return Bool(self.shared([self.text(a), self.text(b)], lambda it: self.starts_with(it[0], it[1])))
+            return Bool(self.texts([a, b], lambda texts: self.shared(texts, lambda it: self.starts_with(it[0], it[1]))))
         if operator is BinaryOperator.MATCHES:
-            return Bool(self.matches(self.text(a), self.text(b)))
+            # A pattern is short: only the text is read as a long one where it is.
+            return Bool(self.texts([a], lambda it: self.matches(it[0], self.text(b))))
         if operator is BinaryOperator.ENDS_WITH:
-            return Bool(self.shared([self.text(a), self.text(b)], lambda it: self.ends_with(it[0], it[1])))
-        return Bool(self.contains_text(self.text(a), self.text(b)))
+            return Bool(self.texts([a, b], lambda texts: self.shared(texts, lambda it: self.ends_with(it[0], it[1]))))
+        return Bool(self.texts([a, b], lambda it: self.contains_text(it[0], it[1])))
 
     def _equality(
         self,
@@ -4537,8 +4559,11 @@ class SqlCypherCompiler(ABC):
         if name == "split":
             if len(arguments) != 2:
                 raise DrivineError("split() takes a text and a separator.")
-            text, separator = (self.text(self.comparable(self.json(it))) for it in arguments)
-            return Json(self.split(text, separator), list=True, texts=True)
+            return Json(
+                self.texts([self.comparable(self.json(it)) for it in arguments], lambda it: self.split(it[0], it[1])),
+                list=True,
+                texts=True,
+            )
         if name == "reverse":
             subject = one()
 
@@ -4647,7 +4672,10 @@ class SqlCypherCompiler(ABC):
         if name == "sign":
             return Json(self.scalar(self.sign_of(self.number(self.comparable(self.json(one()))))))
         if name in ("ltrim", "rtrim"):
-            return Json(self.scalar(f"{name.upper()}({self.text(self.comparable(self.json(one())))})"), text=True)
+            return Json(
+                self.texts([self.comparable(self.json(one()))], lambda it: self.scalar(f"{name.upper()}({it[0]})")),
+                text=True,
+            )
         if name == "randomuuid":
             if arguments:
                 raise DrivineError("randomUUID() takes no argument.")
@@ -4666,7 +4694,10 @@ class SqlCypherCompiler(ABC):
                 return f"SUBSTR({text}, {position}{length})"
 
             return Json(
-                self.scalar(self.shared1(self.text(self.comparable(self.json(arguments[0]))), substring)), text=True
+                self.texts(
+                    [self.comparable(self.json(arguments[0]))], lambda it: self.scalar(self.shared1(it[0], substring))
+                ),
+                text=True,
             )
         if name in ("left", "right"):
             if len(arguments) != 2:
@@ -4677,13 +4708,23 @@ class SqlCypherCompiler(ABC):
                 return f"SUBSTR({text}, 1, {count})" if name == "left" else self.right_text(text, count)
 
             return Json(
-                self.scalar(self.shared1(self.text(self.comparable(self.json(arguments[0]))), counted)), text=True
+                self.texts(
+                    [self.comparable(self.json(arguments[0]))], lambda it: self.scalar(self.shared1(it[0], counted))
+                ),
+                text=True,
             )
         if name == "replace":
             if len(arguments) != 3:
                 raise DrivineError("replace() takes a text, what to replace, and what with.")
-            text, search, replacement = (self.text(self.comparable(self.json(it))) for it in arguments)
-            return Json(self.scalar(f"REPLACE({text}, {search}, {replacement})"), text=True)
+            # How long what to replace, and what with, are, in bytes, where the statement gives them.
+            search_bytes, replacement_bytes = (_utf8_bytes(self._given(it)) for it in function.arguments[1:])
+            return Json(
+                self.texts(
+                    [self.comparable(self.json(it)) for it in arguments],
+                    lambda it: self.scalar(self.replace_text(it[0], it[1], it[2], search_bytes, replacement_bytes)),
+                ),
+                text=True,
+            )
         kind = Temporal.of_function(name)
         if kind is not None:
             return self._temporal(kind, function, arguments, scope)
@@ -5393,6 +5434,11 @@ def _is_text(value: Value) -> bool:
 def _holds_texts(value: Value) -> bool:
     """Whether the statement makes the value a list whose every item is a text, or null: see Json.texts."""
     return isinstance(value, Json) and value.texts
+
+
+def _utf8_bytes(given: Any) -> int | None:
+    """How many bytes the value the statement gives is in UTF-8, where it is a text; else None."""
+    return len(given.encode()) if isinstance(given, str) else None
 
 
 def _is_given_number(value: Any) -> bool:

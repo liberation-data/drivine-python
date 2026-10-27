@@ -130,3 +130,30 @@ def test_on_postgres_a_value_a_write_takes_from_its_row_is_read_as_elsewhere():
 def test_on_postgres_a_property_returned_is_read_as_elsewhere():
     sql = PostgresCypherCompiler("g").compile("MATCH (n:Doc) RETURN n.a").sql
     assert "(n1.props -> 'a')" in sql, sql
+
+
+def test_a_property_a_text_function_or_a_sum_reads_is_read_from_the_properties_by_its_own_path_not_taken_out_first():
+    # Taken out with JSON_QUERY and read as a CLOB or summed, a text past 32 KB closed the session, one row a statement,
+    # and a later statement lost its rows (#168).
+    sql = oracle(
+        "MATCH (n:Doc) RETURN [toUpper(n.a), size(n.a), substring(n.a, 1), n.a STARTS WITH 'x', n.a + 'x', "
+        "toString(n.a)]"
+    )
+    assert "JSON_VALUE(JSON_QUERY(n1.props, '$.a' RETURNING JSON)" not in sql, sql
+    assert "JSON_VALUE(n1.props, '$.a' RETURNING CLOB)" in sql and "JSON_VALUE(n1.props, '$.a.type()')" in sql, sql
+    assert "JSON_VALUE(n1.props, '$.a.size()' RETURNING NUMBER)" in sql, sql
+
+
+def test_a_property_whose_key_is_quoted_in_its_path_or_is_in_a_map_is_read_by_its_own_path_too():
+    def read(cypher: str) -> str:
+        sql = oracle(cypher)
+        assert "JSON_VALUE(JSON_QUERY(n1.props, '$.\"" not in sql, sql
+        return sql
+
+    quoted = read("MATCH (n:Doc) RETURN [size(n.`it's`), toUpper(n.`a b`), size(n.`x' RETURNING JSON) y`)]")
+    assert "JSON_VALUE(n1.props, '$.\"it''s\".size()' RETURNING NUMBER)" in quoted, quoted
+    assert "JSON_VALUE(n1.props, '$.\"a b\"' RETURNING CLOB)" in quoted, quoted
+    assert "JSON_VALUE(n1.props, '$.\"x'' RETURNING JSON) y\".type()')" in quoted, quoted
+    # A key in a map is read by its path in the map, the map taken out of the properties as it was.
+    nested = read("MATCH (n:Doc) RETURN size(n.m.a)")
+    assert "JSON_VALUE(JSON_QUERY(n1.props, '$.m' RETURNING JSON), '$.a.size()' RETURNING NUMBER)" in nested, nested

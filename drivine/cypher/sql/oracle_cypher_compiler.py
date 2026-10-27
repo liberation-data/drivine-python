@@ -29,6 +29,7 @@ from drivine.cypher.sql.sql_cypher_compiler import (
     ROWS,
     SAVED,
     VALUE,
+    Body,
     SqlCypherCompiler,
     Walk,
     Walked,
@@ -101,6 +102,9 @@ class OracleCypherCompiler(SqlCypherCompiler):
         self._extended_parameters: set[str] = set()
         """The names of a procedure's parameters that hold a float as extended JSON writes one: see `property_of`."""
         self.parameter_path = self._parameter_path
+        self._long = False
+        """Whether the texts `texts` gives its body are CLOBs: see `scalar`, `starts_with`, `ends_with`, `split` and
+        `replace_text`, which read them otherwise."""
 
     def compile_query(self, query: Query, parameters: Mapping[str, Any]) -> CompiledCypher:
         """As SqlCypherCompiler's, saying whether the statement calls the store's function: see `nulls_equal`."""
@@ -182,7 +186,9 @@ class OracleCypherCompiler(SqlCypherCompiler):
         return value.sql
 
     def scalar(self, sql: str) -> str:
-        return f"JSON_SCALAR({sql})"
+        """A CLOB that `texts` gives its body is null where it is empty, as a `VARCHAR2` is, and as Oracle's empty text
+        is."""
+        return f"JSON_SCALAR(CASE WHEN LENGTH({sql}) > 0 THEN {sql} END)" if self._long else f"JSON_SCALAR({sql})"
 
     def type_of(self, json: str) -> str:
         """A floating-point number is a number, as JSON has it."""
@@ -220,7 +226,42 @@ class OracleCypherCompiler(SqlCypherCompiler):
         )
 
     def text(self, json: str) -> str:
+        """A `VARCHAR2`, which holds 4,000 bytes: a longer text is null. See `texts`, which reads one as a CLOB."""
         return self.shared1(json, lambda x: f"CASE WHEN {_kind(x)} = 'string' THEN JSON_VALUE({x}, '$') END")
+
+    def _long_text(self, json: str) -> str:
+        """The JSON as a CLOB, where it is a string: a text of any length, slower to read than `text`'s `VARCHAR2`."""
+        return self.shared1(
+            json, lambda x: f"CASE WHEN {_kind(x)} = 'string' THEN JSON_VALUE({x}, '$' RETURNING CLOB) END"
+        )
+
+    def texts(self, jsons: Sequence[str], body: Body) -> str:
+        """
+        The body over the texts as `text` reads them, `VARCHAR2`s, and where it gives null, over them as CLOBs (#168,
+        drivine4j#298). A text past 4,000 bytes is null as a `VARCHAR2`, where Neo4j measures it, cuts it and searches
+        it whole. The body gives null where a text it is given is null, and where what it gives would not fit in a
+        `VARCHAR2`: see `replace_text` and `split`. A short text is not read as a CLOB, which is slower: `COALESCE`
+        reads its second value only where the first is null. The body knows which it is given by `_long`.
+        """
+
+        def both(xs: list[str]) -> str:
+            # Within a body given CLOBs, as CLOBs alone.
+            if self._long:
+                return body([self._text_of(it, clob=True) for it in xs])
+            read = body([self._text_of(it, clob=False) for it in xs])
+            self._long = True
+            try:
+                whole = body([self._text_of(it, clob=True) for it in xs])
+            finally:
+                self._long = False
+            return f"COALESCE({read}, {whole})"
+
+        return self.shared(jsons, both)
+
+    def _text_of(self, json: str, clob: bool) -> str:
+        """The JSON as text, where it is a string: a CLOB where `clob`, else as `text` reads it; a property by its own
+        path (see `_direct`)."""
+        return _direct(self._long_text(json) if clob else self.text(json), json)
 
     def bool_of(self, json: str) -> str:
         return self.shared1(
@@ -441,7 +482,8 @@ class OracleCypherCompiler(SqlCypherCompiler):
         )
 
     def add(self, a: str, b: str, given: tuple[Any, Any] = (None, None)) -> str:
-        return (
+        """A side that is a property is read from the properties by its own path: see `_direct`."""
+        sql = (
             f"CASE WHEN {self.type_of(a)} = 'number' AND {self.type_of(b)} = 'number' THEN "
             f"{self.arithmetic(a, b, '+')} "
             f"WHEN {_kind(a)} = 'array' AND {_kind(b)} = 'array' THEN "
@@ -449,13 +491,47 @@ class OracleCypherCompiler(SqlCypherCompiler):
             f"WHEN {_kind(a)} = 'array' THEN JSON_TRANSFORM({a}, APPEND '$' = {b}) "
             f"WHEN {_kind(b)} = 'array' THEN JSON_TRANSFORM({b}, INSERT '$[0]' = {a}) "
             f"WHEN {self.type_of(a)} IN ('string', 'number') AND {self.type_of(b)} IN ('string', 'number') THEN "
-            f"JSON_SCALAR({self._summed_text(a, given)} || {self._summed_text(b, (given[1], given[0]))}) END"
+            f"{self._text_sum(a, b, given)} END"
         )
+        return _direct(_direct(sql, a), b)
 
-    def _summed_text(self, json: str, given: tuple[Any, Any]) -> str:
-        """The side of a `+` whose sides the statement gives as `given`, this side first, as text: see
-        `summed_text`."""
-        return self.summed_text(json, given[0], given[1], lambda it: f"JSON_VALUE({it}, '$')", self._as_text)
+    def _text_sum(self, a: str, b: str, given: tuple[Any, Any]) -> str:
+        """
+        Two texts put together, as `VARCHAR2`s where both are read so and their sum fits in one, 4,000 bytes; else as a
+        CLOB (#168, drivine4j#298), where a text past 4,000 bytes was left out as null, and a longer sum failed
+        (ORA-01489). Whether they fit is told from the sides' own texts, short to read: a number may be written
+        otherwise (`_as_text`), though in at most _NUMBER_TEXT bytes. A text the statement gives is as long as it is,
+        and not read for each row.
+        """
+        swapped = (given[1], given[0])
+
+        def bytes_(json: str, it: Any) -> str:
+            return str(len(it.encode())) if isinstance(it, str) else f"LENGTHB(JSON_VALUE({json}, '$'))"
+
+        fits = f"{bytes_(a, given[0])} + {bytes_(b, given[1])} <= {_SHORT_TEXT - 2 * _NUMBER_TEXT}"
+        short = f"{self._summed_text(a, given, short=True)} || {self._summed_text(b, swapped, short=True)}"
+        whole = f"TO_CLOB({self._summed_text(a, given, short=False)}) || {self._summed_text(b, swapped, short=False)}"
+        # Two empty texts are null together, as Oracle's empty text is, and not an empty CLOB.
+        empty = f"JSON_VALUE({a}, '$.length()') = 0 AND JSON_VALUE({b}, '$.length()') = 0"
+        return f"CASE WHEN {fits} THEN JSON_SCALAR({short}) WHEN {empty} THEN NULL ELSE JSON_SCALAR({whole}) END"
+
+    def _summed_text(self, json: str, given: tuple[Any, Any], short: bool) -> str:
+        """
+        The side of a `+` whose sides the statement gives as `given`, this side first, as text: see `summed_text`. A
+        text as a `VARCHAR2` where `short`, null past 4,000 bytes, and else as a CLOB; a number's text is short.
+        """
+        if short:
+            return self.summed_text(json, given[0], given[1], lambda it: f"JSON_VALUE({it}, '$')", self._as_text)
+        return self.summed_text(
+            json,
+            given[0],
+            given[1],
+            lambda it: f"JSON_VALUE({it}, '$' RETURNING CLOB)",
+            lambda it: (
+                f"CASE WHEN {_kind(it)} = 'string' THEN JSON_VALUE({it}, '$' RETURNING CLOB) "
+                f"ELSE TO_CLOB({self._as_text(it)}) END"
+            ),
+        )
 
     def _as_text(self, json: str) -> str:
         """
@@ -559,24 +635,46 @@ class OracleCypherCompiler(SqlCypherCompiler):
         return f"MOD({a}, {b})"
 
     def starts_with(self, a: str, b: str) -> str:
+        """CLOBs, which `=` does not compare (ORA-22848), by `DBMS_LOB.COMPARE`: see `texts`."""
+        if self._long:
+            return self.shared1(b, lambda x: f"(DBMS_LOB.COMPARE({a}, {x}, LENGTH({x}), 1, 1) = 0)")
         return self.shared1(b, lambda x: f"(SUBSTR({a}, 1, LENGTH({x})) = {x})")
 
     def ends_with(self, a: str, b: str) -> str:
+        if self._long:
+
+            def compared(values: list[str]) -> str:
+                t, x = values
+                return (
+                    f"(LENGTH({t}) >= LENGTH({x}) AND "
+                    f"DBMS_LOB.COMPARE({t}, {x}, LENGTH({x}), LENGTH({t}) - LENGTH({x}) + 1, 1) = 0)"
+                )
+
+            return self.shared([a, b], compared)
         return self.shared1(b, lambda x: f"(SUBSTR({a}, -LENGTH({x})) = {x})")
 
     def contains_text(self, a: str, b: str) -> str:
+        """Of CLOBs too (see `texts`), though `INSTR` looks for no text past 32 KB (ORA-22828)."""
         return f"(INSTR({a}, {b}) > 0)"
 
     def function(self, name: str, json: str) -> str | None:
+        """Of a property, read from the properties by its own path: see `_direct`."""
+        sql = self._function_of(name, json)
+        return _direct(sql, json) if sql is not None else None
+
+    def _function_of(self, name: str, json: str) -> str | None:
         functions: dict[str, Callable[[], str]] = {
+            # A text past 4,000 bytes, null as a VARCHAR2, is measured as a CLOB (#168, drivine4j#298).
             "size": lambda: (
                 f"CASE {_kind(json)} WHEN 'array' THEN JSON_SCALAR(JSON_VALUE({json}, '$.size()' RETURNING NUMBER)) "
-                f"WHEN 'string' THEN JSON_SCALAR(LENGTH(JSON_VALUE({json}, '$'))) END"
+                f"WHEN 'string' THEN JSON_SCALAR(COALESCE(LENGTH(JSON_VALUE({json}, '$')), "
+                f"LENGTH(JSON_VALUE({json}, '$' RETURNING CLOB)))) END"
             ),
-            "tolower": lambda: f"JSON_SCALAR(LOWER({self.text(json)}))",
-            "toupper": lambda: f"JSON_SCALAR(UPPER({self.text(json)}))",
-            "trim": lambda: f"JSON_SCALAR(TRIM({self.text(json)}))",
-            "tostring": lambda: f"JSON_SCALAR({self._as_text(json)})",
+            "tolower": lambda: self.texts([json], lambda it: self.scalar(f"LOWER({it[0]})")),
+            "toupper": lambda: self.texts([json], lambda it: self.scalar(f"UPPER({it[0]})")),
+            "trim": lambda: self.texts([json], lambda it: self.scalar(f"TRIM({it[0]})")),
+            # A text past 4,000 bytes, which _as_text reads as null, is read as a CLOB.
+            "tostring": lambda: f"COALESCE(JSON_SCALAR({self._as_text(json)}), JSON_SCALAR({self._long_text(json)}))",
             "tointeger": lambda: (
                 f"JSON_SCALAR(TRUNC(TO_NUMBER(JSON_VALUE({json}, '$') DEFAULT NULL ON CONVERSION ERROR)))"
             ),
@@ -811,21 +909,55 @@ class OracleCypherCompiler(SqlCypherCompiler):
         return self.shared1(pattern, matched)
 
     def split(self, text: str, separator: str) -> str:
-        """The text as JSON writes it, with each separator as JSON writes it made the end of one string and the start
-        of the next."""
+        """
+        The text as JSON writes it, with each separator as JSON writes it made the end of one string and the start of
+        the next. A `VARCHAR2` is cut off past 4,000 bytes where `REPLACE` makes it longer, so a text is split as one
+        only where what it is made cannot be longer, each of its bytes written as six at most (`\\u0001`), and else as
+        a CLOB: see `texts`.
+        """
+
+        def serialized(x: str) -> str:
+            # A separator past 4,000 bytes is a CLOB too, and written as one (ORA-40478).
+            returning = " RETURNING CLOB" if self._long else ""
+            return f"JSON_SERIALIZE(JSON_SCALAR({x}){returning})"
 
         def cut(values: list[str]) -> str:
             t, s = values
-            written = f"JSON_SERIALIZE(JSON_SCALAR({t}))"
-            separator_written = (
-                f"SUBSTR(JSON_SERIALIZE(JSON_SCALAR({s})), 2, LENGTH(JSON_SERIALIZE(JSON_SCALAR({s}))) - 2)"
-            )
+            written = serialized(t)
+            separator_written = f"SUBSTR({serialized(s)}, 2, LENGTH({serialized(s)}) - 2)"
+            fits = "" if self._long else f" AND LENGTHB({t}) <= {(_SHORT_TEXT - 2) // 6}"
             return (
-                f"CASE WHEN {t} IS NOT NULL AND {s} IS NOT NULL THEN "
+                f"CASE WHEN {t} IS NOT NULL AND {s} IS NOT NULL{fits} THEN "
                 f"JSON('[' || REPLACE({written}, {separator_written}, '\",\"') || ']') END"
             )
 
         return self.shared([text, separator], cut)
+
+    def replace_text(
+        self,
+        text: str,
+        search: str,
+        replacement: str,
+        search_bytes: int | None = None,
+        replacement_bytes: int | None = None,
+    ) -> str:
+        """
+        A `VARCHAR2` is cut off past 4,000 bytes where `REPLACE` makes it longer: as one only where it cannot be, as
+        each `search` made `replacement` grows the text by their ratio at most, and else null, so `texts` replaces in a
+        CLOB. Their lengths are worked out here where the statement gives them, and not for each row.
+        """
+        replaced = f"REPLACE({text}, {search}, {replacement})"
+        if self._long:
+            return replaced
+        if search_bytes is not None and replacement_bytes is not None:
+            if replacement_bytes <= search_bytes:
+                return replaced
+            return (
+                f"CASE WHEN LENGTHB({text}) * {replacement_bytes} <= {_SHORT_TEXT * search_bytes} THEN {replaced} END"
+            )
+        s = str(search_bytes) if search_bytes is not None else f"LENGTHB({search})"
+        r = str(replacement_bytes) if replacement_bytes is not None else f"LENGTHB({replacement})"
+        return f"CASE WHEN {r} <= {s} OR LENGTHB({text}) * {r} <= {_SHORT_TEXT} * {s} THEN {replaced} END"
 
     def reverse_text(self, text: str) -> str:
         """Oracle has no reverse of a text that it documents: its characters, read from the last."""
@@ -1014,6 +1146,60 @@ _MOST_PLACES = 100
 
 _DOUBLE = "$numberDouble"
 """The key of a double in Oracle's extended JSON."""
+
+_SHORT_TEXT = 4000
+"""The most bytes a `VARCHAR2` holds in SQL, as a database is made by default (`MAX_STRING_SIZE = STANDARD`)."""
+
+_NUMBER_TEXT = 32
+"""The most bytes `_as_text` writes a number in: Java's text of a double, `-2.2250738585072014E-308`, and some to
+spare."""
+
+_PROPERTY_READ = re.compile(r"JSON_QUERY\((.+), ('\$(?:[^']|'')*') RETURNING JSON\)", re.DOTALL)
+"""A property as `property_of` reads it, its properties and its path, a literal whose quotes are doubled: see
+`_property_read`."""
+
+
+def _property_read(json: str) -> tuple[str, str] | None:
+    """The properties and the path of the JSON where it is a property as `property_of` reads it,
+    `JSON_QUERY(props, '$.a' RETURNING JSON)`."""
+    match = _PROPERTY_READ.fullmatch(json)
+    return (match[1], match[2]) if match is not None and _balanced(match[1]) else None
+
+
+def _balanced(sql: str) -> bool:
+    """Whether the SQL's parentheses outside its literals close each other: so it is the one argument, not two
+    calls."""
+    depth = 0
+    quoted = False
+    for c in sql:
+        if c == "'":
+            quoted = not quoted
+        elif quoted:
+            continue
+        elif c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth < 0:
+                return False
+    return depth == 0 and not quoted
+
+
+def _direct(sql: str, json: str) -> str:
+    """
+    The SQL with each value it reads out of the JSON with `JSON_VALUE(json, '$…')` read from the properties by the
+    property's own path instead, where the JSON is a property as `property_of` reads it, `JSON_QUERY(props, '$.a'
+    RETURNING JSON)`. Oracle closed the session (ORA-03113) on statements, one row each, that took a text past 32 KB out
+    of a node's properties so and read it as a CLOB or put it together with another, and a later statement in the
+    session lost its rows: the memory corruption of #144 (drivine4j#255). A value used whole, as a list a sum joins,
+    still takes the property out. drivine4j measured it at about a quarter more on short texts: 100,000 rows of
+    `size(n.name)` took 208 ms against 162 ms.
+    """
+    read = _property_read(json)
+    if read is None:
+        return sql
+    props, path = read
+    return sql.replace(f"JSON_VALUE({json}, '$", f"JSON_VALUE({props}, {path[:-1]}")
 
 
 def _kind(json: str) -> str:

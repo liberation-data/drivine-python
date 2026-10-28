@@ -51,8 +51,9 @@ EXTERNAL = {"falkordb.asyncio": "falkordb"}
 
 ASYNC_ONLY = {"drivine.drivine_assembly": ("DrivineAssembly.__enter__",)}
 """
-Definitions left out of the sync code, by module: the async API's own. The async DrivineAssembly refuses `with`, naming
-the sync API; the sync one, a plain PilgrimAssembly, is closed by it.
+Definitions left out of the sync code, by module: the async API's own. The async DrivineAssembly's `__enter__` refuses
+`with`, naming the sync API. Made sync, it would replace the `__enter__` that `__aenter__` becomes, with which the sync
+assembly, a plain PilgrimAssembly, starts.
 """
 
 RENAMES = {

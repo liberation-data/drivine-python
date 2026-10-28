@@ -186,6 +186,7 @@ def test_asyncio_run_takes_what_close_returns(registry: bool):
 
 def test_drivine_is_an_async_pilgrim_assembly_and_the_sync_one_a_plain_one():
     assert issubclass(DrivineAssembly, AsyncPilgrimAssembly)
+    assert issubclass(SyncDrivineAssembly, PilgrimAssembly)
     assert not issubclass(SyncDrivineAssembly, AsyncPilgrimAssembly)
 
 
@@ -340,6 +341,35 @@ def test_a_sync_close_of_an_application_assembly_refuses_once_drivine_has_a_regi
     assert app.drivine.provider.ended == 0
     asyncio.run(app.aclose())
     assert app.drivine.provider.ended == 1
+
+
+class Flushing(FakeDrivine):
+    """Overrides aclose(), which a sync close can't run."""
+
+    def __init__(self) -> None:
+        self.flushed = 0
+        super().__init__()
+
+    async def aclose(self) -> None:
+        self.flushed += 1
+        await super().aclose()
+
+
+class FlushingApp(PilgrimAssembly):
+    def __init__(self) -> None:
+        self.drivine = AssemblyHolder.shared(Flushing)
+        super().__init__()
+
+
+async def test_a_drivine_that_overrides_aclose_runs_it_on_await_close_and_refuses_a_sync_close_with_no_registry():
+    app = FlushingApp()
+    # pi-pilgrim's sync close skips an overridden aclose(), so it refuses, though nothing async was made.
+    with pytest.raises(AsyncTeardownRequired, match=r"Flushing\.aclose\(\)"):
+        app.close()
+    assert app.drivine.flushed == 0
+    await app.drivine.close()
+    assert app.drivine.flushed == 1
+    await app.aclose()
 
 
 @pytest.mark.parametrize("registry", [False, True], ids=["no registry", "registry"])

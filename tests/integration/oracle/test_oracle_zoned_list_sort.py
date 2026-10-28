@@ -19,6 +19,7 @@ from drivine import ConnectionProperties
 from drivine.cypher.sql.oracle_cypher_compiler import OracleCypherCompiler
 from drivine.testing.drivine_test_containers import TEST_CONTAINER_PASSWORD
 from tests.integration.oracle.oracle_seed import ON_ORACLE
+from tests.unit.test_cypher_zoned_list_sort import DEEP_REPROS, KEYED, MAY_HOLD_REPROS
 
 pytestmark = ON_ORACLE
 
@@ -97,6 +98,27 @@ def test_a_list_worked_out_item_by_item_with_temporal_arithmetic_is_filtered_sor
     assert rows(f"{REPRO} WITH k, l WHERE k = 0 UNWIND l AS t RETURN count(t)") == ["10"]
     assert rows(f"{REPRO} WITH k, l WHERE k = 0 RETURN [reverse(l)[0].minute, tail(l)[0].minute]") == ["[10,2]"]
     assert rows(f"{REPRO} WITH collect(DISTINCT l) AS ls RETURN [size(ls), size(ls[0])]") == ["[1,10]"]
+
+
+def test_a_coalesce_of_such_a_list_and_a_list_of_lists_of_them_or_of_maps_of_them_are_read_in_moments():
+    # 21 to 106 seconds each, before liberation-data/drivine4j#347.
+    assert rows(f"{REPRO} RETURN [k, size([x IN coalesce(l, []) WHERE x IS NOT NULL])] ORDER BY k") == [
+        "[0,10]",
+        "[1,10]",
+    ]
+    assert sorted(rows(f"{REPRO} RETURN k ORDER BY size([x IN coalesce(l, []) WHERE x IS NOT NULL])")) == ["0", "1"]
+    for deep in DEEP_REPROS:
+        (row,) = rows(deep)
+        assert row.startswith("[[") and "2024-03-15T10:10:00" in row, row
+    assert rows(f"{REPRO} WITH collect(DISTINCT [l, l]) AS ls RETURN [size(ls), size(ls[0]), size(ls[0][0])]") == [
+        "[1,2,10]"
+    ]
+    assert rows(f"{REPRO} WITH k, [x IN l | {{t: x}}] AS ms WHERE k = 0 UNWIND ms AS m RETURN count(m.t)") == ["10"]
+    assert rows(f"{REPRO} WITH k, {{l: l}} AS m WHERE k = 0 UNWIND m.l AS t RETURN count(t)") == ["10"]
+    assert rows(MAY_HOLD_REPROS[0]) == ["[0,true]", "[1,true]"]
+    for cypher in MAY_HOLD_REPROS[1:]:
+        assert rows(cypher) == ["10", "10"], cypher
+    assert rows(KEYED) == ["1", "1"]
 
 
 def test_a_list_worked_out_with_temporal_arithmetic_by_a_comprehension_or_collect_sorts_by_its_moments_in_moments():

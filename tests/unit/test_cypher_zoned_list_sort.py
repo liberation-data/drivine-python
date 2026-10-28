@@ -152,3 +152,37 @@ def test_on_oracle_a_list_of_temporal_values_is_read_by_its_places_wherever_it_i
         )
         assert temporal.count("JSON_TABLE") == 2, reader
         assert temporal.count("PASSING") - other.count("PASSING") == other.count("JSON_TABLE") - 2, reader
+
+
+def test_on_oracle_a_list_of_maps_of_temporal_values_is_read_by_its_places_wherever_the_statement_passes_it_on():
+    # Each step that passes on what a list holds deeper than its items (liberation-data/drivine4j#347): every JSON_TABLE
+    # that reads a list of maps of numbers made so reads the list of maps of temporal values by its places instead, and
+    # only the UNWIND's and range's JSON_TABLEs are left.
+    def listed(item: str) -> str:
+        return f"UNWIND [0, 1, 2] AS k WITH k, [i IN range(1, k) | {{t: {item}}}] AS ms"
+
+    where = "WHERE m.t IS NOT NULL"
+    readers = (
+        f"RETURN [m IN tail(ms) {where}]",
+        f"RETURN [m IN reverse(ms) {where}]",
+        f"RETURN [m IN ms[1..] {where}]",
+        f"RETURN [m IN ms + ms {where}]",
+        f"RETURN [m IN CASE WHEN k > 0 THEN ms END {where}]",
+        f"WITH k, [ms, ms] AS mss RETURN [m IN head(mss) {where}]",
+        f"WITH k, [ms, ms] AS mss RETURN [m IN last(mss) {where}]",
+        f"WITH k, [ms, ms] AS mss RETURN [m IN mss[1] {where}]",
+        f"WITH min(ms) AS mn RETURN [m IN mn {where}]",
+        f"WITH max(ms) AS mx RETURN [m IN mx {where}]",
+        "WITH collect(ms) AS c RETURN [x IN c WHERE size(x) > 0]",
+        f"WITH k, {{s: ms}} AS z RETURN [m IN z {{.s}}.s {where}]",
+        f"WITH k, {{s: ms}} AS z RETURN [m IN z {{.*, n: 1}}.s {where}]",
+        f"UNWIND [ms] AS u RETURN [m IN u {where}]",
+        f"CALL {{ WITH ms RETURN [{{t: 1}}] AS u UNION WITH ms RETURN ms AS u }} RETURN [m IN u {where}]",
+    )
+    for reader in readers:
+        temporal, other = (
+            OracleCypherCompiler("g").compile(f"{listed(item)} {reader}").sql
+            for item in ("localdatetime('2024-03-15T10:00:00') + duration({minutes: i})", "i + 1")
+        )
+        assert temporal.count("JSON_TABLE") == 2, reader
+        assert temporal.count("PASSING") - other.count("PASSING") == other.count("JSON_TABLE") - 2, reader

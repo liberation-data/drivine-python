@@ -474,3 +474,88 @@ def test_a_sum_reads_each_value_it_sums_as_often_as_an_avg_does_and_grows_under_
     assert sum_ < avg * 1.1, f"{over('sum')}: sum {sum_}, avg {avg} characters"
     sum_growth, avg_growth = (size(under(it, 4)) / size(under(it, 2)) for it in ("sum", "avg"))
     assert sum_growth < avg_growth * 1.1, f"from 2 levels to 4, sum grew {sum_growth} times, avg {avg_growth}"
+
+
+Z = "datetime('2024-03-15T10:00:00+02:00')"
+WITHIN = "datetime('2024-03-15T09:30:00Z')"
+AGGREGATING = [
+    *(
+        (
+            f"UNWIND range(1, 3) AS i RETURN {aggregate}({argument})",
+            f"UNWIND range(1, 3) AS i WITH {argument} AS t RETURN {aggregate}(t)",
+        )
+        for aggregate in ("count", "collect", "min", "max", "sum", "avg")
+        for argument in [
+            f"({Z} + duration({{minutes: i}})).minute"
+            if aggregate in ("sum", "avg")
+            else f"{Z} + duration({{minutes: i}})"
+        ]
+    ),
+    (
+        f"UNWIND range(1, 3) AS i WITH i % 2 AS k, collect({Z} + duration({{minutes: i}})) AS l RETURN k ORDER BY l",
+        f"UNWIND range(1, 3) AS i WITH i % 2 AS k, {Z} + duration({{minutes: i}}) AS t "
+        "WITH k, collect(t) AS l RETURN k ORDER BY l",
+    ),
+    (
+        f"UNWIND range(1, 3) AS i RETURN count(DISTINCT {Z} + duration({{minutes: i}}))",
+        f"UNWIND range(1, 3) AS i WITH {Z} + duration({{minutes: i}}) AS t RETURN count(DISTINCT t)",
+    ),
+    (
+        f"MATCH (n:E) RETURN sum(size([x IN [datetime(n.at), datetime(n.at) + duration('PT1H')] WHERE x > {WITHIN}]))",
+        f"MATCH (n:E) WITH size([x IN [datetime(n.at), datetime(n.at) + duration('PT1H')] WHERE x > {WITHIN}]) AS s "
+        "RETURN sum(s)",
+    ),
+    # Sorted beside a variable-length walk by an aggregate that is none of the items.
+    (
+        "MATCH (a:E)-[:NEXT*1..2]->(b:E) RETURN a.id AS a, count(*) AS c "
+        "ORDER BY sum((datetime(b.at) + duration({minutes: b.m})).minute)",
+        "MATCH (a:E)-[:NEXT*1..2]->(b:E) WITH a, (datetime(b.at) + duration({minutes: b.m})).minute AS t "
+        "RETURN a.id AS a, count(*) AS c ORDER BY sum(t)",
+    ),
+    # A text function or + in an aggregate: liberation-data/drivine-python#193.
+    (
+        "UNWIND range(1, 500) AS i WITH collect(DISTINCT 'value number ' + toString(i % 400)) AS xs RETURN size(xs)",
+        "UNWIND range(1, 500) AS i WITH 'value number ' + toString(i % 400) AS t "
+        "WITH collect(DISTINCT t) AS xs RETURN size(xs)",
+    ),
+    (
+        "MATCH (n) RETURN collect(n.title + ': ' + n.first + ' ' + n.last)",
+        "MATCH (n) WITH n.title + ': ' + n.first + ' ' + n.last AS t RETURN collect(t)",
+    ),
+]
+"""Each aggregating statement, and the same with a WITH working the aggregate's argument out first."""
+
+
+@COMPILERS
+@pytest.mark.parametrize(("aggregating", "first"), AGGREGATING)
+def test_an_aggregate_of_temporal_arithmetic_compiles_to_about_the_statement_working_its_argument_out_first_does(
+    compiler: type[SqlCypherCompiler], aggregating: str, first: str
+) -> None:
+    # liberation-data/drivine4j#333: an aggregate's argument was compiled with nothing bound, so
+    # count(Z + duration({minutes: i})) wrote the duration's fields and the addition's operands out again at each level.
+    # Worked out first, for each row, it binds them as any item does.
+    size, reference = (len(compiler("g").compile(it).sql) for it in (aggregating, first))
+    assert size < 120_000 and size < reference * 1.2, f"{aggregating}: {size} characters, {reference} with a WITH first"
+
+
+def test_an_aggregates_argument_compiled_only_to_see_whether_it_binds_declares_each_oracle_function_once() -> None:
+    # Compiled to see, then again: a reduce() in it was declared twice, under one name or a name no query calls.
+    z = "datetime('2024-03-15T10:00:00Z') + duration({minutes: x})"
+    for statement in [
+        "UNWIND range(1, 3) AS i RETURN sum(reduce(a = 0, x IN [i] | a + x))",
+        f"UNWIND range(1, 3) AS i RETURN sum(reduce(a = 0, x IN [i] | a + ({z}).minute))",
+    ]:
+        sql = OracleCypherCompiler("g").compile(statement).sql
+        declared = re.findall(r"FUNCTION (cy_\w+)\(", sql)
+        assert declared and declared == list(dict.fromkeys(declared)), f"{statement}: {sql}"
+        assert all(len(re.findall(rf"\b{name}\(", sql)) > 1 for name in declared), f"{statement}: {sql}"
+    # Without the store's function, the query declares its own once, where the aggregate's argument binds a value or
+    # not.
+    for statement in [
+        "UNWIND range(1, 3) AS i WITH i, [i, null] AS l, [i] AS m RETURN collect(l = m)",
+        "UNWIND range(1, 3) AS i WITH i, [i, null] AS l, [i] AS m "
+        "RETURN collect(l = m AND (datetime('2024-03-15T10:00:00Z') + duration({minutes: i})).minute > 0)",
+    ]:
+        sql = OracleCypherCompiler("g", nulls_equal_stored=False).compile(statement).sql
+        assert len(re.findall(r"FUNCTION cy_nulls_equal\(", sql)) == 1, f"{statement}: {sql}"
+        assert "THEN NULL ELSE (cy_nulls_equal(" in sql, f"{statement}: {sql}"

@@ -17,9 +17,9 @@ prerelease that isn't `rc.N` moves to `rc.0` (`0.4.0-beta.2` to `0.4.0-rc.0`).
 `set` writes the version in pyproject.toml, and `uv lock` then writes it in uv.lock. Other files name the version
 too, and `references` rewrites them, from the list in REFERENCES below: the sample's model file, whose generator
 version the sample's test of its typed references compares (sample/tests/test_typed_refs_up_to_date.py), the
-sample's poetry.lock, and the README's line on which release this is. Each is matched by a pattern tight enough that
-it can't hit another package's version, and must be found exactly once, so that a file moved or a line reworded
-fails the release PR here, rather than leaving it to name the old version.
+sample's poetry.lock, and the line on which release this is, in the README and in docs/00-introduction.md. Each is
+matched by a pattern tight enough that it can't hit another package's version, and must be found exactly once, so
+that a file moved or a line reworded fails the release PR here, rather than leaving it to name the old version.
 
 It reads the standard library alone, so nothing is installed for it.
 """
@@ -144,6 +144,8 @@ class Reference:
         self.write = write
 
 
+ALPHA_RELEASE = r"((?<![0-9.]))[0-9]+\.[0-9]+( is an alpha release:)"
+
 # Every file but pyproject.toml and uv.lock that names drivine's own version, and moves with each release. A file
 # that names it only as history, as RELEASING.md's examples do, isn't listed. tests/unit/test_release_version.py
 # checks that every model file in the repository is listed.
@@ -161,12 +163,10 @@ REFERENCES = [
     Reference(
         "sample/poetry.lock", r'(^\[\[package\]\]\nname = "drivine"\nversion = ")[^"\n]*(")', pep440, re.MULTILINE
     ),
-    # "0.2 is an alpha release": the MAJOR.MINOR, of a prerelease too.
-    Reference(
-        "README.md",
-        r"((?<![0-9.]))[0-9]+\.[0-9]+( is an alpha release:)",
-        lambda version: f"{version.major}.{version.minor}",
-    ),
+    # "0.2 is an alpha release": the MAJOR.MINOR, of a prerelease too, in the short README and in the docs'
+    # introduction, which drivine.org's page is built from.
+    Reference("README.md", ALPHA_RELEASE, lambda version: f"{version.major}.{version.minor}"),
+    Reference("docs/00-introduction.md", ALPHA_RELEASE, lambda version: f"{version.major}.{version.minor}"),
 ]
 
 

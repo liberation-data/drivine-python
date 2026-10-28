@@ -130,7 +130,7 @@ jobs:
       # up to date fails here, rather than slipping other changes into the release PR.
       #
       # `references` then rewrites the other files that name the version, the sample's model file and poetry.lock and
-      # the README, as the stubs step and `poetry lock` would, and lists them for the commit. It fails when one of them
+      # the README and docs/00-introduction.md, as the stubs step and `poetry lock` would, and lists them for the commit. It fails when one of them
       # doesn't name the version where it expects, so that the release PR doesn't leave it naming the old one.
       - name: Raise the version
         env:

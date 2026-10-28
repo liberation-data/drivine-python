@@ -213,7 +213,8 @@ async def test_a_parameter_of_fewer_characters_than_a_varchar2_takes_and_more_by
 
 async def test_one_parameter_of_forty_thousand_characters_is_read_and_written(cypher_pm: PersistenceManager):
     # One text past 32,767 bytes: on Oracle a CLOB, read and written alike. (Oracle won't compare a JSON value so long,
-    # ORA-40180, nor read a text of more than 4,000 bytes out of JSON, as the README says: it is handed back whole.)
+    # ORA-40180, nor read a text of more than 4,000 bytes out of JSON, as docs/04-statements.md says: it is handed
+    # back whole.)
     await clear(cypher_pm)
     text = "x" * 40_000
     assert await cypher_pm.query(spec("RETURN $text", {"text": text})) == [text]

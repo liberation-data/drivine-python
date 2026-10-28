@@ -458,7 +458,7 @@ websockets = ["websocket-client (>=1.3.0)"]
 
 [[package]]
 name = "drivine"
-version = "0.2.0"
+version = "0.3.0"
 description = "Graph database client for Python: Neo4j, Memgraph, FalkorDB, Neptune, Oracle and Postgres."
 optional = false
 python-versions = ">=3.11"

@@ -51,13 +51,17 @@ EXTERNAL = {"falkordb.asyncio": "falkordb"}
 
 ASYNC_ONLY = {
     "drivine.drivine_assembly": (
+        "_ASYNC_TEARDOWN_REFUSAL",
         "_Closed",
         "DrivineAssembly.close",
         "DrivineAssembly.__enter__",
         "DrivineAssembly.__exit__",
     ),
 }
-"""Definitions left out of the sync code, by module: the async API's own, which the sync API has from pi-pilgrim."""
+"""
+Definitions, and assignments to a name, left out of the sync code, by module: the async API's own, which the sync API
+has from pi-pilgrim.
+"""
 
 RENAMES = {
     "AsyncIterator": "Iterator",
@@ -153,13 +157,26 @@ def without_async_only(text: str, source: ast.Module, module: str = "") -> str:
     lines = text.splitlines(keepends=True)
     dropped: set[int] = set()
     named = ASYNC_ONLY.get(module, ())
+    found: set[str] = set()
     definitions = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
 
     def visit(body: list[ast.stmt], prefix: str) -> None:
-        for it in body:
+        for i, it in enumerate(body):
+            if isinstance(it, ast.Assign) and len(it.targets) == 1 and isinstance(it.targets[0], ast.Name):
+                name = f"{prefix}{it.targets[0].id}"
+                if name in named:
+                    found.add(name)
+                    # With the docstring that follows it, if it has one.
+                    after = body[i + 1] if i + 1 < len(body) else None
+                    docstring = isinstance(after, ast.Expr) and isinstance(after.value, ast.Constant)
+                    last = after if docstring and after else it
+                    dropped.update(range(it.lineno - 1, last.end_lineno or last.lineno))
+                continue
             if not isinstance(it, definitions):
                 continue
             name = f"{prefix}{it.name}"
+            if name in named:
+                found.add(name)
             if name in named or any(
                 ast.unparse(decorator).endswith("mark.async_only") for decorator in it.decorator_list
             ):
@@ -169,6 +186,10 @@ def without_async_only(text: str, source: ast.Module, module: str = "") -> str:
                 visit(it.body, f"{name}.")
 
     visit(source.body, "")
+    missing = [it for it in named if it not in found]
+    if missing:
+        # A renamed definition would otherwise be written into the sync code without a word.
+        raise SystemExit(f"ASYNC_ONLY names {', '.join(missing)} in {module}, which has no such definition.")
     return "".join(line for i, line in enumerate(lines) if i not in dropped)
 
 

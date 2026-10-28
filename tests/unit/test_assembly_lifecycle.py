@@ -3,12 +3,16 @@ DrivineAssembly closes the registry's drivers and pools when it closes, through 
 closes drivine4j's with its context; so does a DatabaseRegistry that was entered. Async and sync alike.
 """
 
+import asyncio
+import gc
+import inspect
 from collections.abc import Iterator
 
 import pytest
 from pipilgrim import AssemblyHolder, PilgrimAssembly, PilgrimError
 
 from drivine import DatabaseRegistry, DatabaseType, DrivineAssembly
+from drivine.drivine_assembly import _ASYNC_TEARDOWN_REFUSAL
 from drivine.sync import ConnectionProvider as SyncConnectionProvider
 from drivine.sync import DatabaseRegistry as SyncDatabaseRegistry
 from drivine.sync import DrivineAssembly as SyncDrivineAssembly
@@ -171,6 +175,74 @@ async def test_await_close_after_aclose_does_nothing():
     assert drivine.provider.ended == 1
 
 
+@pytest.mark.parametrize("registry", [False, True], ids=["no registry", "registry"])
+def test_asyncio_run_takes_what_close_returns(registry: bool):
+    drivine = FakeDrivine()
+    if registry:
+        drivine.registry()
+    asyncio.run(drivine.close())
+    assert drivine.provider.ended == (1 if registry else 0)
+    with pytest.raises(PilgrimError, match="is closed"):
+        drivine.registry()
+
+
+def test_what_close_returns_once_closed_is_a_finished_coroutine():
+    closed = FakeDrivine().close()
+    assert asyncio.iscoroutine(closed) and not inspect.iscoroutine(closed)
+    with pytest.raises(StopIteration):
+        closed.send(None)
+    with pytest.raises(ValueError, match="thrown"):
+        closed.throw(ValueError("thrown"))
+    with pytest.raises(ValueError):
+        closed.throw(ValueError)
+    with pytest.raises(KeyError, match="value"):
+        closed.throw(KeyError, KeyError("value"))
+    closed.close()
+    closed.close()
+
+
+def test_close_not_awaited_leaves_the_providers_open_and_python_warns():
+    drivine = FakeDrivine()
+    drivine.registry()
+    with pytest.warns(RuntimeWarning, match="never awaited"):
+        drivine.close()
+        gc.collect()
+    assert drivine.provider.ended == 0
+    asyncio.run(drivine.aclose())
+    assert drivine.provider.ended == 1
+
+
+def test_pi_pilgrim_still_refuses_an_async_teardown_with_the_text_close_matches():
+    # close() tells this refusal from others by its text. If pi-pilgrim rewords it, close() would raise it again, as
+    # 0.3.0 did (#228): this fails first.
+    class AsyncTeardown(PilgrimAssembly):
+        def registry(self) -> DatabaseRegistry:
+            return self.shared(DatabaseRegistry)
+
+    assembly = AsyncTeardown()
+    assembly.registry()
+    with pytest.raises(PilgrimError) as refused:
+        assembly.close()
+    assert _ASYNC_TEARDOWN_REFUSAL in str(refused.value)
+    asyncio.run(assembly.aclose())
+
+
+def test_a_sync_close_of_an_assembly_holding_drivine_as_a_component_fails_but_closes_it():
+    # pi-pilgrim's sync close() refuses what a component's close() returns when it is awaitable, as DrivineAssembly's
+    # is. Hold Drivine with AssemblyHolder.shared, as App does, or close the holder with await aclose().
+    class Holder(PilgrimAssembly):
+        def drivine(self) -> FakeDrivine:
+            return self.shared(FakeDrivine)
+
+    holder = Holder()
+    drivine = holder.drivine()
+    with pytest.raises(ExceptionGroup) as failed:
+        holder.close()
+    assert "await aclose()" in str(failed.value.exceptions[0])
+    with pytest.raises(PilgrimError, match="is closed"):
+        drivine.registry()
+
+
 def test_the_sync_assembly_closes_with_close():
     drivine = SyncFakeDrivine()
     drivine.registry()
@@ -188,6 +260,44 @@ async def test_the_async_assembly_refuses_with():
         drivine.__exit__(None, None, None)
     assert drivine.started == 0
     await drivine.aclose()
+
+
+async def test_close_raises_a_refusal_that_is_not_about_an_async_teardown():
+    # Closing from inside a factory is refused for another reason: close() raises it, not aclose() to await later.
+    class ClosesWhileMaking(FakeDrivine):
+        def closer(self) -> object:
+            return self.shared(lambda: self.close())
+
+    drivine = ClosesWhileMaking()
+    drivine.registry()
+    with pytest.raises(PilgrimError, match="while it is making a component"):
+        drivine.closer()
+    assert drivine.provider.ended == 0
+    await drivine.close()
+    assert drivine.provider.ended == 1
+
+
+async def test_await_close_ends_every_provider_when_one_fails():
+    class FailingProvider(EndingProvider):
+        async def end(self) -> None:
+            await super().end()
+            raise RuntimeError("pool won't close")
+
+    class TwoDatabases(FakeDrivine):
+        def __init__(self) -> None:
+            self.failing = FailingProvider("failing")
+            super().__init__()
+
+        def register_databases(self, registry: DatabaseRegistry) -> None:
+            registry.register(self.failing)
+            super().register_databases(registry)
+
+    drivine = TwoDatabases()
+    drivine.registry()
+    await drivine.close()
+    assert (drivine.failing.ended, drivine.provider.ended) == (1, 1)
+    with pytest.raises(PilgrimError, match="is closed"):
+        drivine.registry()
 
 
 class App(PilgrimAssembly):

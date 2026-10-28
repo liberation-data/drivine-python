@@ -1066,13 +1066,16 @@ registry with `async with DatabaseRegistry() as registry:`.
 the application assembly that holds it closes, and closing it closes every database's driver and pool.
 
 - **Shutdown.** 0.2.0 said to call `await assembly.drivine.close()` when the application stops. That still closes
-  everything, in every release after 0.3.0 (0.3.0 itself raised `PilgrimError`). The 0.3 way is to leave your assembly's `async with`,
-  as in the lifespan above, or to call `await assembly.aclose()`, which closes your components and then Drivine. To
-  close only Drivine, `await assembly.drivine.aclose()`.
+  everything, in every release after 0.3.0 (0.3.0 itself raised `PilgrimError`, or `TypeError` when Drivine had made no
+  registry). Await it: called without `await`, it closes nothing once Drivine has made its registry, and Python warns
+  that a coroutine was never awaited. The 0.3 way is to leave your assembly's `async with`, as in the lifespan above, or
+  to call `await assembly.aclose()`, which closes your components and then Drivine. To close only Drivine,
+  `await assembly.drivine.aclose()`.
 - **`with DrivineAssembly()`** raises `PilgrimError`: use `async with`, or `drivine.sync.DrivineAssembly` for the sync
   API, which closes with `with` or `close()`.
 - **Sync `close()` on your assembly** refuses once Drivine has made its registry, since the drivers close
-  asynchronously, and says to use `await aclose()`.
+  asynchronously, and says to use `await aclose()`. Hold Drivine with `AssemblyHolder.shared`, as above: an assembly
+  that holds it as a component, with `self.shared(DrivineAssembly)`, can't close it with sync `close()` at all.
 
 ## The sample app
 

@@ -58,6 +58,7 @@ class OracleConnection(Connection):
         rows: list[Any] = []
         columns: list[str] = []
         try:
+            _prepare(cursor, compiled.statement, sql is not finalized)
             await cursor.execute(compiled.statement, await self._bindable(compiled.parameters), fetch_lobs=False)
             if cursor.description is None and _BLOCK.match(compiled.statement):
                 implicit = _implicit_results(cursor)
@@ -85,6 +86,7 @@ class OracleConnection(Connection):
         self.connection.autocommit = not self._in_transaction
         cursor = self.connection.cursor()
         cursor.arraysize = spec.batch
+        _prepare(cursor, compiled.statement, sql is not finalized)
         await cursor.execute(compiled.statement, await self._bindable(compiled.parameters), fetch_lobs=False)
         return OracleCursor(finalized, cursor, self.result_mapper)
 
@@ -166,6 +168,19 @@ class OracleConnection(Connection):
 
 _MAX_TEXT = 32_767
 """The most bytes of text Oracle binds as a VARCHAR2; past it a text is bound as a CLOB."""
+
+
+def _prepare(cursor: Any, statement: str, compiled_from_cypher: bool) -> None:
+    """
+    Prepares a statement compiled from Cypher to be left out of the driver's statement cache. Oracle keeps a cursor's
+    memory while the driver keeps its statement, and a compiled Cypher statement holds megabytes of it: about 4 MB, and
+    over 20 MB where it reads a text past 32 KB. Kept in the driver's cache, 20 statements a session, a few dozen ran
+    the instance out of PGA (ORA-04036, liberation-data/drivine4j#313). Closed, its memory goes back. Drivine's own
+    statements, a few the same each time, are still kept. The statement is executed as this same text, so it is not
+    prepared again: stripped as `execute` strips it before it compares, or a padded one would be prepared again, cached.
+    """
+    if compiled_from_cypher:
+        cursor.prepare(statement.strip(), cache_statement=False)
 
 
 def _implicit_results(cursor: Any) -> list[Any]:

@@ -16,7 +16,7 @@ with a graph:
 2. **Object manager** (`StatelessGraphObjectManager`): a high-level API that maps Pydantic models, with a query DSL
    whose typed references are stubs generated from your models.
 
-Cypher you write runs on Postgres and Oracle too, compiled to SQL. 0.2 is an alpha release: the API may still change.
+Cypher you write runs on Postgres and Oracle too, compiled to SQL. 0.3 is an alpha release: the API may still change.
 
 ## Install
 

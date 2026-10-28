@@ -14,7 +14,7 @@ cache, no lazy loading. It gives you two ways to work with a graph:
 
 Neptune connects for the `PersistenceManager`; the object manager runs on the others. Cypher you write runs on
 Postgres and Oracle too, compiled to SQL: see [Cypher on a relational database](03-cypher-on-a-relational-database.md#cypher-on-a-relational-database).
-0.2 is an alpha release: the API may still change. See [the design](../docs/design.md) for how it came about.
+0.3 is an alpha release: the API may still change. See [the design](../docs/design.md) for how it came about.
 
 > **On Node.js or the JVM?** [Drivine](https://github.com/liberation-data/drivine)
 > (`npm install @liberation-data/drivine`) and [drivine4j](https://github.com/liberation-data/drivine4j)

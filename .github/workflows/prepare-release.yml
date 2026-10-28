@@ -1,6 +1,6 @@
-# Opens the release PR: "Release vX.Y.Z", which raises pyproject.toml's version (and uv.lock's record of it) on a
-# branch release/vX.Y.Z. Merging it releases the version: release.yml runs on the push to main. RELEASING.md
-# describes the process.
+# Opens the release PR: "Release vX.Y.Z", which raises pyproject.toml's version (and uv.lock's record of it, and the
+# other files that name it, which scripts/release_version.py lists) on a branch release/vX.Y.Z. Merging it releases
+# the version: release.yml runs on the push to main. RELEASING.md describes the process.
 #
 # Run it from the Actions tab (Prepare release, Run workflow), or through the API, as the train controller in
 # liberation-data/drivine-release does:
@@ -128,6 +128,10 @@ jobs:
       # uv lock keeps every locked package's version (it upgrades only with --upgrade), so on a uv.lock that is up to
       # date it writes the project's own version, as PEP 440 normalizes it, and changes nothing else. One that isn't
       # up to date fails here, rather than slipping other changes into the release PR.
+      #
+      # `references` then rewrites the other files that name the version, the sample's model file and poetry.lock and
+      # the README and docs/00-introduction.md, as the stubs step and `poetry lock` would, and lists them for the commit. It fails when one of them
+      # doesn't name the version where it expects, so that the release PR doesn't leave it naming the old one.
       - name: Raise the version
         env:
           VERSION: ${{ steps.version.outputs.version }}
@@ -138,6 +142,7 @@ jobs:
           fi
           python3 scripts/release_version.py set pyproject.toml "$VERSION"
           uv lock
+          python3 scripts/release_version.py references "$VERSION" > "$RUNNER_TEMP/references"
           git diff --stat
       - name: Push the branch and open the PR
         env:
@@ -153,6 +158,11 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git switch -c "$BRANCH"
           git add pyproject.toml uv.lock
+          xargs git add -- < "$RUNNER_TEMP/references"
+          if ! git diff --quiet; then
+            echo "::error::Raising the version changed files it doesn't commit: $(git diff --name-only | xargs)."
+            exit 1
+          fi
           git commit -m "Release $TAG"
           git push origin "refs/heads/$BRANCH"
           body="$RUNNER_TEMP/release-pr.md"

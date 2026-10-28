@@ -393,6 +393,26 @@ def test_values_that_may_hold_a_null_are_walked_on_oracle_by_the_stores_function
     assert len(read.sql) < len(alone.sql), (len(read.sql), len(alone.sql))
 
 
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "MATCH (n) RETURN count(CASE WHEN n.l < [2] THEN 1 END)",
+        "MATCH (n) RETURN count(CASE WHEN n.l < [2] AND (datetime(n.at) + duration({minutes: n.m})).minute > 0 "
+        "THEN 1 END)",
+        "MATCH (a)-[:NEXT*1..2]->(b) RETURN a.m AS a, count(*) AS c "
+        "ORDER BY sum(CASE WHEN b.l < [2] THEN 1 ELSE 0 END)",
+        "RETURN [[1] < [2], [1] <= [2], [3] > [2]]",
+    ],
+)
+def test_two_lists_compared_declare_oracles_function_once_however_often_it_is_called(statement: str) -> None:
+    # drivine4j's CompiledSizeTest of #349: in an aggregate's argument that binds a value or not, and in an order term
+    # beside a walk.
+    PostgresCypherCompiler("g").compile(statement)
+    sql = OracleCypherCompiler("g").compile(statement).sql
+    assert len(re.findall(r"FUNCTION cy_list_order\(", sql)) == 1, sql
+    assert len(re.findall(r"\bcy_list_order\(", sql)) > 1, sql
+
+
 @COMPILERS
 def test_a_round_whose_places_the_statement_gives_writes_only_the_rounding_of_those_places(
     compiler: type[SqlCypherCompiler],

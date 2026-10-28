@@ -3306,3 +3306,66 @@ async def test_a_map_literal_of_121_entries_holding_a_list_of_250_items_is_writt
     unwound = await cypher_pm.query(spec("MATCH (n:CyLongUnwound) RETURN n.x"))
     assert sorted(unwound) == sorted(expected_list)
     await clear(cypher_pm)
+
+
+async def test_two_lists_are_ordered_item_by_item_at_any_depth_and_null_where_a_pair_not_ordered_decides(
+    cypher_pm: PersistenceManager,
+):
+    # Beside the spec's cases since v0.6.19: drivine4j's tests of liberation-data/drivine4j#349, ported for #215.
+    async def row(cypher: str) -> Any:
+        return await cypher_pm.get_one(spec(cypher))
+
+    # A list that starts the other comes first, at any depth.
+    assert await row("RETURN [[[]] < [[], 1], [[]] <= [[]], [[], 1] > [[]]]") == [True, True, True]
+    # An empty list before one of durations; a null beside a temporal value is not ordered, as on Neo4j.
+    assert await row(
+        "RETURN [[] < [duration('P1D')], [date('2024-01-01'), null] < [date('2024-01-01'), date('2024-01-02')], "
+        "[date('2024-01-01'), null] < [date('2024-01-02'), null], "
+        "[localdatetime('2024-01-01T10:00'), null] <= [localdatetime('2024-01-01T10:00')], "
+        "[datetime('2024-01-01T10:00+02:00'), null] < [datetime('2024-01-01T09:00Z'), null]]"
+    ) == [True, None, True, False, True]
+    # Lists of lists of temporal values: zoned ones as their moments, and two kinds not ordered.
+    assert await row(
+        "RETURN [[[datetime('2024-01-01T10:00+02:00')]] < [[datetime('2024-01-01T09:00Z')]], "
+        "[[date('2024-01-01')]] < [[date('2024-01-01')], []], "
+        "[[date('2024-01-01')]] < [[localdatetime('2024-01-02T00:00')]]]"
+    ) == [True, True, None]
+    # Whole numbers past 2^53, as they are.
+    assert await row("RETURN [[9007199254740993] > [9007199254740992], [9007199254740992] < [9007199254740993]]") == [
+        True,
+        True,
+    ]
+
+
+async def test_two_lists_are_ordered_in_an_aggregates_argument_beside_a_walk_against_a_long_literal_and_out_of_a_map(
+    cypher_pm: PersistenceManager,
+):
+    # Beside #359, which works an aggregate's argument out first, #362's literals written in parts, and #381's temporal
+    # values of an unwound map: on Oracle, the query declares its function once, and calls it.
+    await clear(cypher_pm)
+    await cypher_pm.query(
+        spec("CREATE (a:L {m: 1, l: [3]})-[:NEXT]->(b:L {m: 2, l: [1]})-[:NEXT]->(:L {m: 3, l: [1, 5]})")
+    )
+    assert await cypher_pm.query(spec("MATCH (n:L) RETURN count(CASE WHEN n.l < [2] THEN 1 END)")) == [2]
+    assert await cypher_pm.query(
+        spec(
+            "MATCH (a:L)-[:NEXT*1..2]->(b:L) RETURN a.m AS a, count(*) AS c "
+            "ORDER BY sum(CASE WHEN b.l < [2] THEN 1 ELSE 0 END)"
+        )
+    ) == [[2, 1], [1, 2]]
+    long = "[" + ", ".join(str(it) for it in range(1, 151)) + "]"
+    assert await cypher_pm.query(spec(f"UNWIND [[1, 2], [200]] AS l RETURN l < {long}")) == [True, False]
+    unwound = (
+        "UNWIND [0, 1] AS k WITH k, [{l: [i IN range(1, 3) | localdatetime('2024-03-15T10:00:00') "
+        "+ duration({minutes: i + k})], z: [i IN range(1, 3) | datetime('2024-03-15T10:00:00+02:00') "
+        "+ duration({minutes: i + k})]}] AS ms UNWIND ms AS t WITH k, t.l AS l, t.z AS z"
+    )
+    # A zoned value read out of a map compares as its text on the SQL stores, as it sorts, so the one beside it keeps
+    # its offset.
+    assert await cypher_pm.query(
+        spec(
+            f"{unwound} RETURN [k, l < [localdatetime('2024-03-15T10:02:00')], "
+            "z < [datetime('2024-03-15T10:01:30+02:00')]] ORDER BY k"
+        )
+    ) == [[0, True, True], [1, False, False]]
+    await clear(cypher_pm)

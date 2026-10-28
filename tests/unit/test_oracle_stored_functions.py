@@ -133,6 +133,9 @@ class Cursor:
         self.session = session
         self.description: Any = None
 
+    def prepare(self, statement: str, tag: str | None = None, cache_statement: bool = True) -> None:
+        pass
+
     async def execute(self, statement: str, parameters: Any = None, **_: Any) -> None:
         self.session.run.append(statement)
         if statement.startswith("SELECT ") and "_nulls_equal(JSON('[1]'), JSON('[1]')) FROM DUAL" in statement:

@@ -183,6 +183,14 @@ provider made in code with `sets_no_adaptive_plans=False`: `registry.register(Or
 the sync API). It is on by default because, without it, a read can come back with no rows and no
 error; if you turn it off, run that statement in each session yourself.
 
+Each session of the pool keeps the statements it runs prepared, 20 of them (python-oracledb's `stmtcachesize`), so a
+save, the same block each time, is neither sent nor parsed again. A Cypher statement compiled to SQL is not kept: Oracle
+holds a kept statement's memory for as long as the driver keeps it, from about 4 MB for a compiled statement to over
+20 MB for one that reads a long text, and a few dozen of them ran the instance out of memory (ORA-04036,
+[#218](https://github.com/liberation-data/drivine-python/issues/218)). So it is prepared again each time it runs: about
+0.3 ms more for a short statement (Oracle reuses its plan; it doesn't parse it again from scratch). The object manager's
+statements are kept, so where the object manager does what you need, it is the faster way to Oracle.
+
 Beside the tables an Oracle graph is made with one function, `<graph>_nulls_equal`, by which a compiled Cypher
 statement compares two lists or maps that may hold a null (see
 [Cypher on Postgres and Oracle](#cypher-on-postgres-and-oracle)). drivine4j and Drivine for TypeScript make it byte for
@@ -358,6 +366,10 @@ database.
 
 The object manager needs no Cypher at all, on any store: [the quick start](#quick-start) runs as written on Postgres and
 Oracle.
+
+On Postgres and Oracle it is also the faster way. It runs SQL of its own, written for the store's tables, where a Cypher
+statement is compiled to SQL first; and on Oracle its statements stay prepared, where a compiled one is prepared again
+each time it runs (see [Connecting](#connecting)).
 
 ## Statements
 

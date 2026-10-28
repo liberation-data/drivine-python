@@ -19,6 +19,7 @@ from drivine.cypher.sql.sql_cypher_compiler import (
     GATHERED,
     ID,
     MATCHED,
+    MOST_ARGUMENTS,
     NESTING,
     OUT,
     PARAMS,
@@ -30,8 +31,10 @@ from drivine.cypher.sql.sql_cypher_compiler import (
     SAVED,
     VALUE,
     SqlCypherCompiler,
+    T,
     Walk,
     Walked,
+    chunked,
     indent,
     java_text,
     literal,
@@ -136,10 +139,14 @@ class PostgresCypherCompiler(SqlCypherCompiler):
         return super().arithmetic(a, b, operator)
 
     def json_array(self, items: Sequence[str]) -> str:
-        return f"json_build_array({', '.join(items)})"
+        return _spliced(items, MOST_ARGUMENTS, lambda part: f"json_build_array({', '.join(part)})")
 
     def json_object(self, entries: Sequence[tuple[str, str]]) -> str:
-        return f"json_build_object({', '.join(f'{literal(key)}, {value}' for key, value in entries)})"
+        return _spliced(
+            entries,
+            MOST_ARGUMENTS // 2,
+            lambda part: f"json_build_object({', '.join(f'{literal(key)}, {value}' for key, value in part)})",
+        )
 
     def with_entries(self, json: str, entries: Sequence[tuple[str, str]]) -> str:
         return f"({json} || CAST({self.json_object(entries)} AS jsonb))"
@@ -705,6 +712,27 @@ class PostgresCypherCompiler(SqlCypherCompiler):
 
     def without_label(self, labels: str, label: str) -> str:
         return f"({labels} - {literal(label)})"
+
+
+def _spliced(items: Sequence[T], most: int, build: Callable[[Sequence[T]], str]) -> str:
+    """
+    What `build` writes of the items, where they are at most `most`; past them, as Postgres takes no more than 100
+    arguments to a function (liberation-data/drivine-python#192), what it writes of each part of them, spliced as text
+    into the text one call would write of them all: the first part without its closing bracket, the last without its
+    opening one, and those between without either, joined as `json_build_array` and `json_build_object` join their
+    items. It stays `json`, so the keys of a map keep their order, where `jsonb`'s `||` would sort them.
+    """
+    if len(items) <= most:
+        return build(items)
+    parts = chunked(items, most)
+
+    def trimmed(i: int, part: Sequence[T]) -> str:
+        text = f"CAST({build(part)} AS text)"
+        if i == 0:
+            return f"left({text}, -1)"
+        return f"right({text}, -1)" if i == len(parts) - 1 else f"right(left({text}, -1), -1)"
+
+    return "CAST(" + " || ', ' || ".join(trimmed(i, part) for i, part in enumerate(parts)) + " AS json)"
 
 
 def _float_text(n: str) -> str:

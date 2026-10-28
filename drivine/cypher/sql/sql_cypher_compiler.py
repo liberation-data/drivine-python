@@ -3749,7 +3749,8 @@ class SqlCypherCompiler(ABC):
             if isinstance(subject, Relationship):
                 return Json(self.item_property(subject.props, expression.key), flat=True)
             # A value of an unwound item, but a temporal value's field, and one a write reads from its row as row_value
-            # does.
+            # does. It may hold temporal values deeper, as _property has it, so that a list of them is read by its
+            # places (liberation-data/drivine4j#369).
             if (
                 isinstance(subject, Json)
                 and subject.from_list
@@ -3757,7 +3758,7 @@ class SqlCypherCompiler(ABC):
                 and subject.row_keys is None
                 and expression.key not in FIELD_NAMES
             ):
-                return Json(self.item_value(self.comparable(subject), expression.key))
+                return Json(self.item_value(self.comparable(subject), expression.key), temporals=subject.temporals)
         return self._expression(expression, select.scope)
 
     def _property(self, subject: Value, key: str) -> Value:

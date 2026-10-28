@@ -18,4 +18,8 @@ release reaches your tests as soon as it is out; pin one with its `<TYPE>_TEST_I
 Drivine's own tests run on Oracle only with `ORACLE_TESTS=true`: its image is large, and the database wants two
 gigabytes. A run without it ends with the line `Oracle tests skipped: set ORACLE_TESTS=true to run them`. CI runs the
 Oracle tests in a job of their own, with `pytest -k oracle`. The tests run on the plugin's own images, the latest Neo4j,
-Memgraph and FalkorDB, so that an engine release that changes what Drivine reads or writes shows up at once.
+Memgraph and FalkorDB, so that an engine release that changes what Drivine reads or writes shows up at once. CI holds
+FalkorDB at a release that passes, with `FALKORDB_TEST_IMAGE` in `.github/workflows/ci.yml`: Docker Hub's
+`falkordb/falkordb:latest` is sometimes a 4.x patch release
+([FalkorDB/FalkorDB#3551](https://github.com/FalkorDB/FalkorDB/issues/3551)). CI's nightly run leaves the pin out and
+runs `latest`, so it shows when the pin can move or go.

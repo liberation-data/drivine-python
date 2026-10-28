@@ -3100,8 +3100,19 @@ def test_a_long_list_or_map_literal_without_a_null_equals_the_same_value_given_a
         assert cypher_pm.query(spec(collected)) == [True], f"{n} items"
         mapped = "{" + ", ".join(f"k{i}: {it[0]}" for i, it in enumerate(items)) + "}"
         expected_map = {f"k{i}": it[1] for i, it in enumerate(items)}
-        assert cypher_pm.query(spec(f"RETURN {mapped}")) == [expected_map], f"{n} entries"
+        returned = cypher_pm.get_one(spec(f"RETURN {mapped}"))
+        assert returned == expected_map, f"{n} entries"
         assert cypher_pm.query(spec(f"RETURN {mapped} = $p", {"p": expected_map})) == [True], f"{n} entries"
+        # Each written in parts within a list and a map that are written in one.
+        nested = [expected, {"m": expected_map}]
+        returned_nested = cypher_pm.get_one(spec(f"RETURN [{listed}, {{m: {mapped}}}]"))
+        assert returned_nested == nested, f"{n} nested"
+        # Its keys in the order written, alone and within a map, on Postgres as in the next test: dicts are equal
+        # whatever the order of their keys.
+        if cypher_pm.type is DatabaseType.POSTGRES:
+            assert list(returned) == list(expected_map), f"{n} entries"
+            assert list(returned_nested[1]["m"]) == list(expected_map), f"{n} nested"
+        assert cypher_pm.query(spec(f"RETURN [{listed}, {{m: {mapped}}}] = $p", {"p": nested})) == [True], f"{n} nested"
 
 
 def test_a_map_literal_of_more_than_50_entries_keeps_its_entries_in_order_returned_read_and_projected(
@@ -3123,3 +3134,36 @@ def test_a_map_literal_of_more_than_50_entries_keeps_its_entries_in_order_return
         # Set over a map by a projection.
         projected = f"WITH {{a: 1}} AS m RETURN m {{.*, {written}}}"
         assert cypher_pm.query(spec(projected)) == [{"a": 1, **expected}], f"{n} entries"
+
+
+def test_a_map_literal_of_121_entries_holding_a_list_of_250_items_is_written_by_create_merge_set_and_unwind(
+    cypher_pm: PersistenceManager,
+):
+    # What a write makes of a long literal, read back: each written in parts on Postgres, as a read is (#192).
+    clear(cypher_pm)
+    listed = "[" + ", ".join(f"'s{i}'" for i in range(250)) + "]"
+    expected_list = [f"s{i}" for i in range(250)]
+    # Values a store keeps as properties, of four kinds in turn: no null, no list of several kinds, no map.
+    values = [_long_item(i) for i in range(210) if i % 7 in (0, 1, 3, 4)]
+    mapped = "{" + ", ".join(f"k{i}: {cypher}" for i, (cypher, _) in enumerate(values)) + f", xs: {listed}}}"
+    expected = {**{f"k{i}": value for i, (_, value) in enumerate(values)}, "xs": expected_list}
+    assert len(expected) == 121
+
+    def written(label: str) -> list[Any]:
+        return cypher_pm.query(spec(f"MATCH (n:{label}) RETURN properties(n)"))
+
+    cypher_pm.query(spec(f"CREATE (n:CyLongCreate {mapped})"))
+    assert written("CyLongCreate") == [expected]
+    for _ in range(2):
+        cypher_pm.query(spec(f"MERGE (n:CyLongMerge {mapped})"))
+    assert written("CyLongMerge") == [expected], "made once, then matched"
+    cypher_pm.query(spec(f"CREATE (n:CyLongAdd {{id: 1}}) WITH n SET n += {mapped}"))
+    assert written("CyLongAdd") == [{"id": 1, **expected}]
+    cypher_pm.query(spec(f"CREATE (n:CyLongSet {{id: 1}}) WITH n SET n = {mapped}"))
+    assert written("CyLongSet") == [expected]
+    cypher_pm.query(spec(f"CREATE (:CyLongFrom)-[:CY_LONG {mapped}]->(:CyLongTo)"))
+    assert cypher_pm.query(spec("MATCH ()-[r:CY_LONG]->() RETURN properties(r)")) == [expected]
+    cypher_pm.query(spec(f"UNWIND {listed} AS x CREATE (:CyLongUnwound {{x: x}})"))
+    unwound = cypher_pm.query(spec("MATCH (n:CyLongUnwound) RETURN n.x"))
+    assert sorted(unwound) == sorted(expected_list)
+    clear(cypher_pm)

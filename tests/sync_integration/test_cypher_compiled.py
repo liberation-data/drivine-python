@@ -1378,6 +1378,95 @@ def test_a_coalesce_of_a_list_of_temporal_values_and_lists_or_maps_that_hold_one
     ]
 
 
+def test_a_list_of_temporal_values_a_with_takes_out_of_an_unwound_map_is_read_item_by_item_in_order(
+    cypher_pm: PersistenceManager,
+):
+    # Not in the spec yet: drivine4j's test of liberation-data/drivine4j#369. Oracle reads such a list by its places,
+    # not with JSON_TABLE. Of 0, 1 and 2 items, at 10:01, 10:02.
+    at = "localdatetime('2024-03-15T10:00:00')"
+    listed = f"[i IN range(1, k) | {at} + duration({{minutes: i}})]"
+    each = [[0, []], [1, [1]], [2, [1, 2]]]
+
+    def query(cypher: str) -> list[Any]:
+        return cypher_pm.query(spec(cypher))
+
+    assert (
+        query(
+            f"UNWIND [0, 1, 2] AS k WITH k, [{{l: {listed}}}] AS ms UNWIND ms AS t WITH k, t.l AS l "
+            "RETURN k, [x IN l | x.minute] ORDER BY k"
+        )
+        == each
+    )
+    assert (
+        query(
+            f"UNWIND [0, 1, 2] AS k WITH k, {listed} AS l0 UNWIND [{{l: l0}}] AS t WITH k, t.l AS l "
+            "RETURN k, [x IN l | x.minute] ORDER BY k"
+        )
+        == each
+    )
+    # A map two levels down, and a list of two maps.
+    assert (
+        query(
+            f"UNWIND [0, 1, 2] AS k WITH k, [{{m: {{l: {listed}}}}}] AS ms UNWIND ms AS t WITH k, t.m AS m "
+            "WITH k, m.l AS l RETURN k, [x IN l | x.minute] ORDER BY k"
+        )
+        == each
+    )
+    assert query(
+        f"UNWIND [0, 1, 2] AS k WITH k, [{{l: {listed}}}, "
+        f"{{l: [i IN range(1, k) | {at} + duration({{minutes: 10 + i}})]}}] AS ms UNWIND ms AS t "
+        "WITH k, t.l AS l RETURN k, [x IN l | x.minute] AS m ORDER BY k, m"
+    ) == [[0, []], [0, []], [1, [1]], [1, [11]], [2, [1, 2]], [2, [11, 12]]]
+    # After a write.
+    clear(cypher_pm)
+    assert (
+        query(
+            f"UNWIND [0, 1, 2] AS k WITH k, [{{l: {listed}}}] AS ms UNWIND ms AS t CREATE (:CyUnwoundTemporals) "
+            "WITH k, t.l AS l RETURN k, [x IN l | x.minute] ORDER BY k"
+        )
+        == each
+    )
+    assert query("MATCH (n:CyUnwoundTemporals) RETURN count(n)") == [3]
+
+
+def test_zoned_duration_and_partly_null_lists_out_of_an_unwound_map_and_numbers_beside_one_are_read_item_by_item(
+    cypher_pm: PersistenceManager,
+):
+    # Not in the spec yet (liberation-data/drivine4j#369). Zoned values compare by their moments: 10:02+02:00 alone is
+    # past 08:01:30Z.
+    def query(cypher: str) -> list[Any]:
+        return cypher_pm.query(spec(cypher))
+
+    zoned = "[i IN range(1, k) | datetime('2024-03-15T10:00:00+02:00') + duration({minutes: i})]"
+    assert query(
+        f"UNWIND [0, 1, 2] AS k WITH k, [{{l: {zoned}}}] AS ms UNWIND ms AS t WITH k, t.l AS l "
+        "RETURN k, [x IN l | x.minute], size([x IN l WHERE x > datetime('2024-03-15T08:01:30Z')]) ORDER BY k"
+    ) == [[0, [], 0], [1, [1], 0], [2, [1, 2], 1]]
+    durations = "[i IN range(1, k) | duration({minutes: i})]"
+    assert query(
+        f"UNWIND [0, 1, 2] AS k WITH k, [{{l: {durations}}}] AS ms UNWIND ms AS t WITH k, t.l AS l "
+        "RETURN k, [x IN l | x.minutes] ORDER BY k"
+    ) == [[0, []], [1, [1]], [2, [1, 2]]]
+    partly_null = (
+        "[i IN range(1, k) | CASE i WHEN 1 THEN null "
+        "ELSE localdatetime('2024-03-15T10:00:00') + duration({minutes: i}) END]"
+    )
+    assert query(
+        f"UNWIND [0, 1, 2] AS k WITH k, [{{l: {partly_null}}}] AS ms UNWIND ms AS t WITH k, t.l AS l "
+        "RETURN k, [x IN l | x.minute], size([x IN l WHERE x IS NOT NULL]) ORDER BY k"
+    ) == [[0, [], 0], [1, [None], 0], [2, [None, 2], 1]]
+    # Numbers beside such a list in the map, and the list read two levels down in one WITH.
+    local = "[i IN range(1, k) | localdatetime('2024-03-15T10:00:00') + duration({minutes: i})]"
+    assert query(
+        f"UNWIND [0, 1, 2] AS k WITH k, [{{l: {local}, n: range(1, k)}}] AS ms UNWIND ms AS t "
+        "WITH k, t.l AS l, t.n AS n RETURN k, [x IN l | x.minute], [x IN n WHERE x > 1] ORDER BY k"
+    ) == [[0, [], []], [1, [1], []], [2, [1, 2], [2]]]
+    assert query(
+        f"UNWIND [0, 1, 2] AS k WITH k, [{{m: {{l: {local}}}}}] AS ms UNWIND ms AS t WITH k, t.m.l AS l "
+        "RETURN k, [x IN l | x.minute] ORDER BY k"
+    ) == [[0, []], [1, [1]], [2, [1, 2]]]
+
+
 def test_aggregates_of_temporal_arithmetic_give_what_they_give_of_it_worked_out_first_grouped_and_over_nulls(
     cypher_pm: PersistenceManager,
 ):

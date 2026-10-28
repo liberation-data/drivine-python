@@ -13,12 +13,23 @@ from drivine.cypher.sql.postgres_cypher_compiler import PostgresCypherCompiler
 UNWOUND = "UNWIND ['2024-03-15T10:00:00+02:00', '2024-03-15T09:00:00Z'] AS at"
 SORTED = f"{UNWOUND} WITH [datetime(at)] AS l RETURN 1 ORDER BY l"
 EXTREME = f"{UNWOUND} WITH [[datetime(at)]] AS l RETURN min(l), max(l)"
-REPRO = (
-    "UNWIND [0, 1] AS k WITH k, "
-    "[i IN range(1, 10) | localdatetime('2024-03-15T10:00:00') + duration({minutes: i})] AS l"
+LIST = "[i IN range(1, 10) | localdatetime('2024-03-15T10:00:00') + duration({minutes: i})]"
+"""liberation-data/drivine4j#331's list: worked out item by item with temporal arithmetic, by a comprehension."""
+REPRO = f"UNWIND [0, 1] AS k WITH k, {LIST} AS l"
+"""#331's statement: its list, on each of two rows."""
+_SIZE = "RETURN size([x IN l WHERE x IS NOT NULL])"
+UNWOUND_REPROS = (
+    f"UNWIND [0, 1] AS k WITH k, [{{l: {LIST}}}] AS ms UNWIND ms AS t WITH k, t.l AS l {_SIZE}",
+    f"{REPRO} UNWIND [{{l: l}}] AS t WITH k, t.l AS l {_SIZE}",
+    f"UNWIND [0, 1] AS k WITH k, [{{m: {{l: {LIST}}}}}] AS ms UNWIND ms AS t WITH k, t.m AS m WITH k, m.l AS l {_SIZE}",
+    f"UNWIND [0, 1] AS k WITH k, [{{l: {LIST}}}, {{l: {LIST}}}] AS ms UNWIND ms AS t WITH k, t.l AS l {_SIZE}",
+    f"UNWIND [0, 1] AS k WITH k, [{{l: {LIST}}}] AS ms UNWIND ms AS t CREATE (:CyUnwoundTemporals) "
+    f"WITH k, t.l AS l {_SIZE}",
 )
-"""liberation-data/drivine4j#331's statement: a list worked out item by item with temporal arithmetic, by a
-comprehension."""
+"""
+#331's list in a map, unwound, and taken out by a `WITH` (liberation-data/drivine4j#369): from a map, one the list was
+put in after it was worked out, a map two levels down, a list of two maps, and after a write.
+"""
 DEEP_REPROS = (
     f"{REPRO} RETURN collect(DISTINCT [l, l])",
     f"{REPRO} RETURN collect(DISTINCT [x IN l | [x]])",
@@ -118,6 +129,37 @@ def test_on_oracle_a_value_that_may_hold_temporal_values_and_a_map_of_them_and_i
     keys = OracleCypherCompiler("g").compile(KEYED).sql
     assert "PASSING dg_r.n - 1" in keys, keys
     assert "JSON_TABLE((SELECT JSON_DATAGUIDE" not in keys, keys
+
+
+def test_on_oracle_a_list_of_temporal_values_a_with_takes_out_of_an_unwound_map_is_read_item_by_item_too():
+    # A property of an unwound item held no temporal values deeper, and such a list was read with JSON_TABLE again
+    # (liberation-data/drivine4j#369). Zoned values and durations, and a list with nulls among them, as well.
+    others = tuple(
+        f"UNWIND [0, 1] AS k WITH k, [{{l: [i IN range(1, 10) | {it}]}}] AS ms UNWIND ms AS t WITH k, t.l AS l {_SIZE}"
+        for it in (
+            "datetime('2024-03-15T10:00:00+02:00') + duration({minutes: i})",
+            "duration({minutes: i})",
+            "CASE i WHEN 1 THEN null ELSE date() END",
+        )
+    )
+    for cypher in UNWOUND_REPROS + others:
+        sql = OracleCypherCompiler("g").compile(cypher).sql
+        assert re.search(r"PASSING x\d+_r\.n - 1", sql), sql
+        assert not re.search(r"JSON_TABLE\((w|q|u)\d+\.(c|item)", sql), sql
+    # A list of other values out of an unwound map is still read with JSON_TABLE, and the value is read as
+    # liberation-data/drivine4j#344 reads it.
+    numbers = (
+        OracleCypherCompiler("g")
+        .compile(
+            "UNWIND [0, 1] AS k WITH k, [{l: range(1, 10)}] AS ms UNWIND ms AS t WITH k, t.l AS l "
+            "RETURN size([x IN l WHERE x > 1])"
+        )
+        .sql
+    )
+    assert "PASSING" not in numbers, numbers
+    for cypher in (UNWOUND_REPROS[0], "UNWIND [{a: 'x', l: [date()]}] AS t WITH t.a AS a RETURN a"):
+        sql = OracleCypherCompiler("g").compile(cypher).sql
+        assert "JSON(JSON_QUERY(JSON_SERIALIZE(" in sql, sql
 
 
 def test_on_oracle_a_list_of_temporal_values_is_read_by_its_places_wherever_it_is_read_in_each_shape_of_in_too():

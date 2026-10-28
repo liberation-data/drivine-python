@@ -1,4 +1,4 @@
-"""The README's programs, run as they are written, so the README can't drift from the API."""
+"""The programs of the README and the docs, run as they are written, so they can't drift from the API."""
 
 import asyncio
 import os
@@ -9,13 +9,20 @@ import pytest
 
 from drivine import DrivineAssembly, QuerySpecification, cypher_statement
 
-README = Path(__file__).resolve().parents[2] / "README.md"
+ROOT = Path(__file__).resolve().parents[2]
+README = ROOT / "README.md"
+DOCS = ROOT / "docs"
+
+
+def blocks(text: str) -> list[str]:
+    """The Python blocks of the text."""
+    return re.findall(r"```python\n(.*?)```", text, re.S)
 
 
 def samples(heading: str) -> list[str]:
-    """The Python blocks of the README's section under the heading."""
-    section = README.read_text().split(f"## {heading}\n", 1)[1].split("\n## ", 1)[0]
-    return re.findall(r"```python\n(.*?)```", section, re.S)
+    """The Python blocks of the docs page that holds the section under the heading."""
+    (page,) = [it for it in DOCS.glob("[0-9][0-9]-*.md") if it.read_text().startswith(f"## {heading}\n")]
+    return blocks(page.read_text())
 
 
 def run(program: str) -> None:
@@ -32,6 +39,17 @@ def delete(*uuids: str) -> None:
             )
 
     asyncio.run(deleting())
+
+
+def test_the_readme_quick_start_runs_as_written(capsys):
+    (program,) = blocks(README.read_text())
+    try:
+        delete("p1")
+        run(program)
+        out = capsys.readouterr().out
+        assert out.startswith("[Person(") and "name='Ada'" in out
+    finally:
+        delete("p1")
 
 
 def test_the_quick_start_runs_as_written(capsys):

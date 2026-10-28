@@ -64,7 +64,7 @@ def test_the_quick_start_runs_as_written(capsys):
 
 @pytest.fixture
 def on_postgres(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Points DATABASE_* at the tests' Postgres, as the README's environment for the sample does."""
+    """Points DATABASE_* at the tests' Postgres, as docs/03-cypher-on-a-relational-database.md does."""
     for name in [it for it in os.environ if it.startswith("DATABASE_")]:
         monkeypatch.delenv(name)
     for name, value in os.environ.copy().items():

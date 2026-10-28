@@ -94,8 +94,6 @@ class OracleCypherCompiler(SqlCypherCompiler):
         """Whether the statement calls `_stored_nulls_equal`: see `compile_query`."""
         self._folding = False
         """Whether the step of a `reduce` is being written, as its function's own: see `reduce`."""
-        self._nulls_compared = False
-        """Whether the query declares NULLS_EQUAL: see `nulls_equal`."""
         self._extended: dict[int, str] = {}
         """
         The parameters' texts that hold a float as Oracle's extended JSON writes one, by identity: see `parameter_text`.
@@ -684,9 +682,9 @@ class OracleCypherCompiler(SqlCypherCompiler):
             self._calls_stored_nulls_equal = True
             walked = f"({self._stored_nulls_equal}({x}, {y}) = 1)"
         else:
-            if not self._nulls_compared:
-                self._nulls_compared = True
-                self.declare(nulls_equal_function(NULLS_EQUAL))
+            # Declared once, however often it is called; and again where a compile only to see gave its declaration
+            # back.
+            self.declare(nulls_equal_function(NULLS_EQUAL))
             walked = f"({NULLS_EQUAL}({x}, {y}) = 1)"
 
         def text(json: str) -> str:

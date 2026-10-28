@@ -891,6 +891,17 @@ class SqlCypherCompiler(ABC):
         """
 
     @abstractmethod
+    def list_order(self, x: str, y: str) -> str:
+        """
+        Where the JSON list `x` comes beside the JSON list `y`, neither of them null, as Cypher orders two lists in a
+        comparison (`<`, `>=` …), as a SQL number: -1 before, 0 equal, 1 after. Item by item from the first, at any
+        depth: the first pair that is not equal decides, and a list that the other starts with comes before it. Null
+        where that pair is not ordered: a null in it, values of two kinds, or two maps that differ, which Cypher orders
+        and no store does here yet. A number, a text (by its code points) and a truth value are ordered among their own
+        kind, as `ordered` orders them.
+        """
+
+    @abstractmethod
     def item_at(self, json: str, index: int) -> str:
         """The item at the index, counted from 0, of the JSON list: null where it has none."""
 
@@ -4056,8 +4067,10 @@ class SqlCypherCompiler(ABC):
             ) or self._equality(left_value, right_value, binary.right, plain, self._stored(binary.left, scope))
             return Bool(equal if operator is BinaryOperator.EQUALS else f"NOT ({equal})")
         if operator in _COMPARED:
-            # Values of two kinds are not ordered, as in Cypher: the comparison is null.
+            # Values of two kinds are not ordered, as in Cypher: the comparison is null. Two lists are, item by item.
             sql = _COMPARED[operator]
+            if _listed(left_value, right_value):
+                return Bool(self._list_compared(left_value, a, right_value, b, sql))
 
             def ordered(values: list[str]) -> str:
                 x, y = values
@@ -4135,6 +4148,100 @@ class SqlCypherCompiler(ABC):
         if operator is BinaryOperator.ENDS_WITH:
             return Bool(self.texts([a, b], lambda texts: self.shared(texts, lambda it: self.ends_with(it[0], it[1]))))
         return Bool(self.texts([a, b], lambda it: self.contains_text(it[0], it[1])))
+
+    def _list_compared(self, left: Value, a: str, right: Value, b: str, operator: str) -> str:
+        """
+        `<`, `<=`, `>` or `>=`, `operator`, of `left` and `right`, whose JSON is `a` and `b`: where both are lists, as
+        `list_order` orders them, their temporal items as `_compared_items` gives them; else null, as a list and a value
+        of another kind are not ordered.
+        """
+        x, y = self._compared_items(left, a, right, b)
+
+        def compared(values: list[str]) -> str:
+            p, q = values
+            return (
+                f"CASE WHEN {self.type_of(p)} = 'array' AND {self.type_of(q)} = 'array' "
+                f"THEN {self.list_order(p, q)} {operator} 0 END"
+            )
+
+        return self.shared([x, y], compared)
+
+    def _compared_items(self, left: Value, a: str, right: Value, b: str) -> tuple[str, str]:
+        """
+        `a` and `b`, the JSON of the lists `left` and `right`, as `list_order` compares them, where the statement makes
+        the items of both, or the items of their items, temporal: a zoned value as the moment it is, whatever its
+        offset, as `ORDER BY` sorts it (see `moments_key`); a duration as a map of it alone, equal where it is equal and
+        else not ordered, as in Cypher; and a value of one kind beside one of another as a map of its kind, so the two
+        are not ordered, as is one beside a text, where the statement makes the other list's items texts. A local value
+        is its ISO text, which orders as it does. Each as it is otherwise: a list of temporal values beside one of
+        values of several kinds, a list whose temporal values are deeper, or one whose items the statement does not
+        know, compares its ISO texts. Their items are read by their places (`temporal_elements`), as Oracle must read a
+        list of temporal values.
+        """
+
+        def kind(listed: Value) -> tuple[Temporal, int] | None:
+            items = _items_of(listed)
+            if items is not None:
+                return items, 1
+            item_items = _item_items_of(listed)
+            return (item_items, 2) if item_items is not None and _holds_lists(listed) else None
+
+        of_left, of_right = kind(left), kind(right)
+        # A temporal value beside a text: its ISO text would order where Cypher does not.
+        if of_left is not None and of_left[1] == 1 and of_right is None and _holds_texts(right):
+            return self._mapped_items(a, 1, self._kind_wrapped(of_left[0])), b
+        if of_right is not None and of_right[1] == 1 and of_left is None and _holds_texts(left):
+            return a, self._mapped_items(b, 1, self._kind_wrapped(of_right[0]))
+        if of_left is None or of_right is None or of_left[1] != of_right[1]:
+            return a, b
+        each = self._compared_item(of_left[0], of_right[0])
+        if each is None:
+            return a, b
+        depth = of_left[1]
+        return self._mapped_items(a, depth, each[0]), self._mapped_items(b, depth, each[1])
+
+    def _compared_item(
+        self, kind: Temporal, other: Temporal
+    ) -> tuple[Callable[[str], str], Callable[[str], str]] | None:
+        """
+        How `_compared_items` gives each item of a list of `kind` beside one of `other`, as a pair for the two lists:
+        None where it gives them as they are, as it does local values of one kind.
+        """
+        if kind is not other or kind is Temporal.DURATION:
+            return self._kind_wrapped(kind), self._kind_wrapped(other)
+        if not kind.zoned:
+            return None
+
+        def moment(item: str) -> str:
+            return self.scalar(self.temporal_sql.sortable(self.temporals.moment(self.text(item), kind)))
+
+        return moment, moment
+
+    def _kind_wrapped(self, kind: Temporal) -> Callable[[str], str]:
+        """
+        A temporal value of `kind`, an item of a list, as a map of it alone at its kind's name, so it is ordered by no
+        other kind.
+        """
+        return lambda item: self.comparable(Json(self.json_object([(kind.name.lower(), item)]), ordered=True))
+
+    def _mapped_items(self, json: str, depth: int, each: Callable[[str], str]) -> str:
+        """The JSON list with each item at `depth`, 1 its own items and 2 theirs, that is not null, as `each` gives
+        it."""
+
+        def over(listed: str, at: int) -> str:
+            e = self._alias("lc")
+            item = f"{e}.item"
+            mapped = (
+                each(item)
+                if at == 1
+                else f"CASE WHEN {self.type_of(item)} = 'array' THEN {over(item, at - 1)} ELSE {item} END"
+            )
+            items = self.aggregate_list(
+                f"CASE WHEN {self.is_json_null(item)} THEN {self.literal_json(None)} ELSE {mapped} END", f"{e}.item_no"
+            )
+            return self.comparable(Json(f"(SELECT {items} FROM {self.temporal_elements(listed, e)})", ordered=True))
+
+        return self.shared1(json, lambda x: f"CASE WHEN {self.type_of(x)} = 'array' THEN {over(x, depth)} END")
 
     def _equality(
         self,
@@ -5015,6 +5122,8 @@ class SqlCypherCompiler(ABC):
         # A function the store has no SQL for is named before its arguments are counted.
         if self.function(name, "NULL") is None:
             unsupported(f"The function {function.name}()")
+        if name == "tostring":
+            _text_of_kind(function, one())
         argument = self.comparable(self.json(one()))
 
         def applied(list_: str) -> str:
@@ -5739,6 +5848,32 @@ def _list_kind_of(
 def _is_list(value: Value | None) -> bool:
     """Whether the statement makes the value a list: see Json.list."""
     return isinstance(value, Entities) or (isinstance(value, Json) and value.list)
+
+
+def _text_of_kind(function: Function, value: Value) -> None:
+    """
+    Refuses `toString` of `value`, the argument of `function`, where the statement makes it a list or a map: Neo4j
+    refuses it when it plans the statement. A value whose kind the statement leaves open is compiled as before.
+    """
+    written = function.arguments[0]
+    if _is_list(value):
+        kind = "list"
+    elif isinstance(written, (MapLiteral, MapProjection)):
+        kind = "map"
+    else:
+        return
+    raise DrivineError(
+        f"{function.name}() takes a number, a text, a truth value or a temporal value, not a {kind}, as in Neo4j."
+    )
+
+
+def _listed(left: Value, right: Value) -> bool:
+    """
+    Whether `<`, `<=`, `>` or `>=` of `left` and `right` compares two lists, item by item: where the statement makes
+    either a list, of values (a list of nodes or of relationships compares as before). Any other comparison is written
+    as it was.
+    """
+    return isinstance(left, Json) and isinstance(right, Json) and (left.list or right.list)
 
 
 def _holds_lists(value: Value) -> bool:

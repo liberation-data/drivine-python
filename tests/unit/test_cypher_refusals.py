@@ -36,6 +36,40 @@ def test_refusals(case: Case, store: str) -> None:
 
 
 @pytest.mark.parametrize("compiler", COMPILERS.values(), ids=COMPILERS.keys())
+def test_to_string_of_a_list_or_a_map_the_statement_makes_is_refused_as_neo4j_refuses_it(
+    compiler: type[SqlCypherCompiler],
+) -> None:
+    # drivine4j's #349: Postgres gave the list's JSON text, and Oracle null. The spec's refusals hold the rest.
+    for cypher, kind in (("WITH [1, 2] AS l RETURN toString(l)", "list"), ("RETURN toString({a: 1})", "map")):
+        with pytest.raises(DrivineError) as refused:
+            compiler("g").compile(cypher)
+        assert str(refused.value) == (
+            f"toString() takes a number, a text, a truth value or a temporal value, not a {kind}, as in Neo4j."
+        )
+    # A value whose kind the statement leaves open is compiled, as Neo4j plans it.
+    compiler("g").compile("UNWIND [1, 'a'] AS x RETURN toString(x)")
+    compiler("g").compile("MATCH (n) RETURN toString(n.x)")
+
+
+def test_two_lists_compared_in_a_write_or_a_reduce_step_are_refused_on_oracle_which_calls_no_declared_function() -> (
+    None
+):
+    # drivine4j's #349: Oracle compares two lists by a function the query declares, which a procedure's queries do not
+    # call.
+    write = "CREATE (n:N {a: [1] < [2]})"
+    with pytest.raises(
+        DrivineError, match=r"^Two lists compared with <, <=, > or >= do not run on Oracle in a statement"
+    ):
+        OracleCypherCompiler("g").compile(write)
+    PostgresCypherCompiler("g").compile(write)
+    # Nor does a reduce()'s step, which is a function the query declares.
+    folded = "RETURN reduce(acc = false, x IN [[1], [2]] | acc OR [1] < x)"
+    with pytest.raises(DrivineError, match=r"^Two lists compared with <, <=, > or >= do not run on Oracle in the step"):
+        OracleCypherCompiler("g").compile(folded)
+    PostgresCypherCompiler("g").compile(folded)
+
+
+@pytest.mark.parametrize("compiler", COMPILERS.values(), ids=COMPILERS.keys())
 def test_a_date_written_as_a_text_that_is_no_date_is_refused_with_what_the_parser_says(
     compiler: type[SqlCypherCompiler],
 ) -> None:

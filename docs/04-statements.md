@@ -43,6 +43,9 @@ people = await pm.query(spec.bind({"city": "Sydney"}))
 - A value is compared as JSON, so `'7'` is not `7`, and a missing property is null. A map keeps its keys in the order
   written. Two lists or maps that may hold a null are compared item by item, as Cypher compares them: `[null] = [null]`
   is null, and `[1, null] = [2, null]` false. `IN` compares the value with each item as `=` does.
+- `<`, `<=`, `>` and `>=` order two lists item by item where the statement makes one of them a list (`n.tags < ['b']`).
+  Two values whose kind it leaves open, such as two parameters or two properties, compare as null where they hold
+  lists. Two maps compare as null, and two that differ do in a list too, where Neo4j orders them.
 - A map or a list that holds a node or a relationship (`{x: r}`, `[r, 1]`) compares by what it holds, not by its
   properties, through a `WITH` or a `CALL { … }` too, as on a graph engine. Unwound by `UNWIND`, as a comprehension's
   or a reduce's variable, or carried past a write in the statement, it compares by its properties.
@@ -86,7 +89,8 @@ people = await pm.query(spec.bind({"city": "Sydney"}))
 - On Oracle a text read out of JSON past 4,000 bytes is read whole where it is measured, cut, changed, searched or
   reversed; an empty text is null; `reduce` doesn't run in a
   statement that writes, in the step of a `reduce`, or where its step reads a path; and `map[key]` reads null where an
-  expression gives the key. Lists or maps that may hold a null are compared item by item, as Cypher compares them:
+  expression gives the key. Two lists ordered with `<`, `<=`, `>` or `>=` are walked item by item by a function the
+  query declares too, so such a comparison is refused in a statement that writes and in the step of a `reduce`. Lists or maps that may hold a null are compared item by item, as Cypher compares them:
   where one holds a null, two written as the same JSON are null at once, and any other two are walked by the graph's
   function `<graph>_nulls_equal` (see [Connecting](02-connecting.md#connecting)), in a statement that writes and the step of a `reduce`
   too. Where the store has no such function, a read declares it, and a statement that writes, or the step of a

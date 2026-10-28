@@ -182,6 +182,40 @@ class PostgresCypherCompiler(SqlCypherCompiler):
             f"{self._text_of(y)} ELSE {x} {operator} {y} END"
         )
 
+    def list_order(self, x: str, y: str) -> str:
+        """
+        The pairs of `x`'s and `y`'s items, and of their items' where both are lists, at any depth, walked together by
+        place, as `nulls_equal` walks them, each with its place, a list of where it is in each list it is in. A place
+        that one list has and the other has not pairs an item with SQL's null: the list without it is the shorter. The
+        pair first by place that is not equal decides; none, the two are equal.
+        """
+
+        def items(json: str, alias: str) -> str:
+            return (
+                f"SELECT {alias}e.v, {alias}e.n FROM unnest(ARRAY(SELECT jsonb_array_elements({json}))) "
+                f"WITH ORDINALITY {alias}e (v, n)"
+            )
+
+        kind = "jsonb_typeof(low.a)"
+        unequal = (
+            f"low.a IS NULL OR low.b IS NULL OR {kind} <> jsonb_typeof(low.b) OR {kind} = 'null' "
+            f"OR {kind} <> 'array' AND (low.a <> low.b OR {kind} = 'object' AND {self.holds_null('low.a')})"
+        )
+        order = (
+            f"CASE WHEN low.a IS NULL THEN -1 WHEN low.b IS NULL THEN 1 WHEN {kind} <> jsonb_typeof(low.b) "
+            f"OR {kind} NOT IN ('number', 'string', 'boolean') THEN NULL "
+            f"WHEN {self.ordered('low.a', '<', 'low.b')} THEN -1 ELSE 1 END"
+        )
+        return (
+            f"(WITH RECURSIVE low (a, b, place) AS (SELECT {x}, {y}, CAST(ARRAY[] AS bigint[]) UNION ALL "
+            "SELECT lop.a, lop.b, low.place || lop.n FROM low CROSS JOIN LATERAL "
+            "(SELECT loa.v AS a, lob.v AS b, COALESCE(loa.n, lob.n) AS n "
+            f"FROM ({items('low.a', 'loa')}) loa FULL JOIN ({items('low.b', 'lob')}) lob ON loa.n = lob.n) lop "
+            "WHERE jsonb_typeof(low.a) = 'array' AND jsonb_typeof(low.b) = 'array') "
+            f"SELECT CASE WHEN COUNT(*) = 0 THEN 0 ELSE MIN(los.o) END FROM (SELECT {order} AS o FROM low "
+            f"WHERE {unequal} ORDER BY low.place LIMIT 1) los)"
+        )
+
     def sort_key(self, json: str) -> str:
         """
         A value as `jsonb` orders it, but a text after the other texts by its code points (`_code_point_text`): a row

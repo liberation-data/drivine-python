@@ -1378,6 +1378,117 @@ def test_a_coalesce_of_a_list_of_temporal_values_and_lists_or_maps_that_hold_one
     ]
 
 
+def test_aggregates_of_temporal_arithmetic_give_what_they_give_of_it_worked_out_first_grouped_and_over_nulls(
+    cypher_pm: PersistenceManager,
+):
+    # drivine4j's test of liberation-data/drivine4j#333, ported for #193: an aggregate's argument is worked out first,
+    # for each row, where its values are bound; it gives what it did. Unbound, it compiled to megabytes.
+    def query(cypher: str) -> list[Any]:
+        return cypher_pm.query(spec(cypher))
+
+    clear(cypher_pm)
+    query(
+        """
+        UNWIND [
+          {id: 1, g: 'a', at: '2024-03-15T10:00:00+02:00', m: 1},
+          {id: 2, g: 'a', at: '2024-03-15T10:00:00+02:00', m: 1},
+          {id: 3, g: 'a', at: '2024-03-15T10:00:00+02:00', m: 4}, {id: 4, g: 'b', at: '2024-03-15T11:00:00Z', m: 5},
+          {id: 5, g: 'b', at: null, m: 3}, {id: 6, g: 'b', at: '2024-03-15T12:30:00+02:00', m: 0}
+        ] AS r
+        CREATE (:CyAgg {id: r.id, g: r.g, at: r.at, m: r.m})
+        """
+    )
+    t = "datetime(n.at) + duration({minutes: n.m})"
+    # b's 12:30+02:00 is 10:30 UTC, before its 11:05Z: min() and max() compare moments, not their texts. Its null is
+    # passed over.
+    assert query(
+        f"""
+        MATCH (n:CyAgg) WITH n ORDER BY n.id
+        WITH n.g AS g, count({t}) AS c, count(DISTINCT {t}) AS d, min({t}) AS lo, max({t}) AS hi,
+          sum(({t}).minute) AS s, avg(({t}).minute) AS a, collect({t}) AS l
+        RETURN {{g: g, count: c, distinct: d, lo: [lo.hour, lo.minute], hi: [hi.hour, hi.minute], sum: s, avg: a,
+          times: [x IN l | [x.hour, x.minute]]}}
+        ORDER BY g
+        """
+    ) == [
+        {
+            "g": "a",
+            "count": 3,
+            "distinct": 2,
+            "lo": [10, 1],
+            "hi": [10, 4],
+            "sum": 6,
+            "avg": 2.0,
+            "times": [[10, 1], [10, 1], [10, 4]],
+        },
+        {
+            "g": "b",
+            "count": 2,
+            "distinct": 2,
+            "lo": [12, 30],
+            "hi": [11, 5],
+            "sum": 35,
+            "avg": 17.5,
+            "times": [[11, 5], [12, 30]],
+        },
+    ]
+    # Kept distinct by collect(DISTINCT …), and read in an item beside the aggregate.
+    assert query(
+        f"MATCH (n:CyAgg) WITH n ORDER BY n.id WITH n.g AS g, collect(DISTINCT {t}) AS l "
+        "RETURN {g: g, minutes: [x IN l | x.minute], n: size(l)} ORDER BY g"
+    ) == [{"g": "a", "minutes": [1, 4], "n": 2}, {"g": "b", "minutes": [5, 30], "n": 2}]
+    # Sorted by an aggregate of it, which is none of the items.
+    assert query(f"MATCH (n:CyAgg) RETURN n.g AS g, count(*) AS c ORDER BY max(({t}).minute) DESC") == [
+        ["b", 3],
+        ["a", 3],
+    ]
+    # The size of a list of temporal values that a comprehension keeps, summed: 2 for each of b's moments after 09:30
+    # UTC.
+    assert query(
+        "MATCH (n:CyAgg) RETURN sum(size([x IN [datetime(n.at), datetime(n.at) + duration('PT1H')] "
+        "WHERE x > datetime('2024-03-15T09:30:00Z')]))"
+    ) == [4]
+    # Over no grouping key, the issue's statements.
+    z = "datetime('2024-03-15T10:00:00+02:00') + duration({minutes: i})"
+    assert query(
+        f"UNWIND range(1, 3) AS i RETURN [count({z}), min({z}).minute, max({z}).minute, sum(({z}).minute)]"
+    ) == [[3, 1, 3, 6]]
+    assert query(f"UNWIND range(1, 4) AS i WITH i % 2 AS k, i WITH k, collect({z}) AS l RETURN k ORDER BY l") == [
+        1,
+        0,
+    ]
+    # Inside a CASE and arithmetic, in a WITH a WHERE filters, and in a CALL { … }: Oracle reads no imported variable in
+    # an aggregate there, worked out first or not, so this one reads none.
+    assert query(f"UNWIND range(1, 3) AS i RETURN [CASE WHEN count({z}) > 1 THEN 'many' END, count({z}) + 1]") == [
+        ["many", 4]
+    ]
+    assert query(f"UNWIND range(1, 4) AS i WITH i % 2 AS k, max(({z}).minute) AS m WHERE m < 4 RETURN k") == [1]
+    assert query(
+        f"UNWIND [2] AS o CALL {{ WITH o UNWIND range(1, 3) AS i RETURN sum(({z}).minute) AS s }} RETURN s + o"
+    ) == [8]
+    # A reduce() in the argument, which Oracle declares a function for.
+    assert query(f"UNWIND range(1, 3) AS i RETURN sum(reduce(a = 0, x IN [i] | a + ({z}).minute - i + x))") == [6]
+    # A list of temporal values, kept distinct, read back by its items' fields: Oracle reads no temporal list by
+    # JSON_TABLE (drivine4j#331).
+    assert query(
+        "WITH [datetime('2024-01-01T00:00Z'), datetime('2024-01-02T00:00Z')] AS l UNWIND [1, 2, 1] AS i "
+        "WITH collect(DISTINCT [x IN l | x + duration({days: i})]) AS c RETURN [y IN c | [x IN y | x.day]]"
+    ) == [[[2, 3], [3, 4]]]
+    # Beside a variable-length walk in the same MATCH.
+    query("MATCH (a:CyAgg {id: 1}), (b:CyAgg {id: 2}), (c:CyAgg {id: 3}) CREATE (a)-[:NEXT]->(b)-[:NEXT]->(c)")
+    assert query(
+        "MATCH (a:CyAgg)-[:NEXT*1..2]->(b:CyAgg) RETURN a.id AS a, "
+        "count(datetime(b.at) + duration({minutes: b.m})) AS c, "
+        "sum((datetime(b.at) + duration({minutes: b.m})).minute) AS s ORDER BY a"
+    ) == [[1, 2, 5], [2, 1, 4]]
+    # Sorted there by an aggregate of it that is none of the items, which binds no value beside the walk: see
+    # `_project`.
+    assert query(
+        "MATCH (a:CyAgg)-[:NEXT*1..2]->(b:CyAgg) RETURN a.id AS a, count(*) AS c "
+        "ORDER BY sum((datetime(b.at) + duration({minutes: b.m})).minute)"
+    ) == [[2, 1], [1, 2]]
+
+
 def test_an_aggregate_of_floats_gives_a_float_whole_or_not_and_a_sum_of_integers_an_integer(
     cypher_pm: PersistenceManager,
 ):
@@ -3015,4 +3126,155 @@ def test_a_stored_text_past_32_kb_read_in_one_row_is_measured_and_changed_whole_
         assert cypher_pm.query(spec(passed)) == [expected], f"{function}, passed on"
         used = f"MATCH (n:CyLongText) RETURN {function.replace('#', 'n.t')}"
         assert cypher_pm.query(spec(used)) == [expected], f"{function}, read where used"
+    clear(cypher_pm)
+
+
+# Lists and maps written longer than Postgres takes arguments to a function, 100: drivine4j's own tests of
+# liberation-data/drivine4j#332, ported for #192. Not in the spec yet.
+
+
+def _long_item(i: int) -> tuple[str, Any]:
+    """The Cypher of the `i`th item of a long literal, and what it gives: of seven kinds in turn, a null among them."""
+    match i % 7:
+        case 0:
+            return f"{i}", i
+        case 1:
+            return f"'s{i}'", f"s{i}"
+        case 2:
+            return "null", None
+        case 3:
+            return f"{i}.5", i + 0.5
+        case 4:
+            return ("true", True) if i % 2 == 0 else ("false", False)
+        case 5:
+            return f"[{i}, 'n']", [i, "n"]
+        case _:
+            return f"{{k: {i}}}", {"k": i}
+
+
+def test_a_list_literal_of_more_than_100_items_keeps_its_items_returned_tested_with_in_unwound_and_comprehended(
+    cypher_pm: PersistenceManager,
+):
+    for n in (100, 101, 250, 1001):
+        # An Oracle session spends 180 MB of its PGA on a statement of a list of 1001, 815 MB on one that reads it three
+        # times, and keeps 50 to 217 MB after (#241). Late in the suite, beside its other sessions, that passes Oracle
+        # Free's limit (ORA-04036), so Oracle isn't asked a list of 1001; drivine4j asks it all but the comparisons
+        # below (liberation-data/drivine4j#360, here #227).
+        if n > 250 and cypher_pm.type is DatabaseType.ORACLE:
+            continue
+        items = [_long_item(i) for i in range(n)]
+        listed = "[" + ", ".join(it[0] for it in items) + "]"
+        expected = [it[1] for it in items]
+        last_whole = max(i for i in range(n) if i % 7 == 0)
+        assert cypher_pm.query(spec(f"RETURN {listed}")) == [expected], f"{n} items"
+        sized = f"WITH {listed} AS xs RETURN [size(xs), xs[-1], xs[{n - 2}]]"
+        assert cypher_pm.query(spec(sized)) == [[n, expected[-1], expected[n - 2]]], f"{n} items"
+        assert cypher_pm.query(spec(f"UNWIND {listed} AS x RETURN x")) == expected, f"{n} items"
+        kept = f"RETURN [x IN {listed} WHERE x IS NOT NULL | x]"
+        assert cypher_pm.query(spec(kept)) == [[it for it in expected if it is not None]], f"{n} items"
+        assert cypher_pm.query(spec(f"RETURN size([x IN {listed} | x IS NULL])")) == [n], f"{n} items"
+        # A null among the items makes a value not found null, not false, as in Cypher. A list of numbers and nulls is
+        # tested whole, as JSON.
+        numbers = "[" + ", ".join("null" if i % 7 == 2 else f"{i}" for i in range(n)) + "]"
+        found = f"RETURN [{last_whole} IN {numbers}, 999999 IN {numbers}]"
+        assert cypher_pm.query(spec(found)) == [[True, None]], f"{n} items"
+        # A list of several kinds is compared item by item, in a few hundred characters of SQL each: Oracle runs out of
+        # memory reading the comparisons of 1001 even alone (#227). (Not -1, which compiles to ten times the statement.)
+        found = f"RETURN [{last_whole} IN {listed}, 999999 IN {listed}]"
+        assert cypher_pm.query(spec(found)) == [[True, None]], f"{n} items"
+        # Compared with itself item by item, each pair equal but the nulls, which are null beside each other.
+        assert cypher_pm.query(spec(f"RETURN {listed} = {listed}")) == [None], f"{n} items"
+
+
+def test_a_long_list_or_map_literal_without_a_null_equals_the_same_value_given_as_a_parameter_or_collected(
+    cypher_pm: PersistenceManager,
+):
+    # Text holding the brackets and commas a long literal is spliced at on Postgres.
+    def item(i: int) -> tuple[str, Any]:
+        match i % 4:
+            case 0:
+                return f"{i}", i
+            case 1:
+                return f"'a], [b}}, {{{i}'", f"a], [b}}, {{{i}"
+            case 2:
+                return f"[{i}, [{i}]]", [i, [i]]
+            case _:
+                return f"{{k: [{i}], m: {{n: {i}}}}}", {"k": [i], "m": {"n": i}}
+
+    for n in (101, 200, 201):
+        items = [item(i) for i in range(n)]
+        listed = "[" + ", ".join(it[0] for it in items) + "]"
+        expected = [it[1] for it in items]
+        assert cypher_pm.query(spec(f"RETURN {listed}")) == [expected], f"{n} items"
+        assert cypher_pm.query(spec(f"RETURN {listed} = $p", {"p": expected})) == [True], f"{n} items"
+        collected = f"UNWIND {listed} AS x WITH collect(x) AS xs RETURN xs = {listed}"
+        assert cypher_pm.query(spec(collected)) == [True], f"{n} items"
+        mapped = "{" + ", ".join(f"k{i}: {it[0]}" for i, it in enumerate(items)) + "}"
+        expected_map = {f"k{i}": it[1] for i, it in enumerate(items)}
+        returned = cypher_pm.get_one(spec(f"RETURN {mapped}"))
+        assert returned == expected_map, f"{n} entries"
+        assert cypher_pm.query(spec(f"RETURN {mapped} = $p", {"p": expected_map})) == [True], f"{n} entries"
+        # Each written in parts within a list and a map that are written in one.
+        nested = [expected, {"m": expected_map}]
+        returned_nested = cypher_pm.get_one(spec(f"RETURN [{listed}, {{m: {mapped}}}]"))
+        assert returned_nested == nested, f"{n} nested"
+        # Its keys in the order written, alone and within a map, on Postgres as in the next test: dicts are equal
+        # whatever the order of their keys.
+        if cypher_pm.type is DatabaseType.POSTGRES:
+            assert list(returned) == list(expected_map), f"{n} entries"
+            assert list(returned_nested[1]["m"]) == list(expected_map), f"{n} nested"
+        assert cypher_pm.query(spec(f"RETURN [{listed}, {{m: {mapped}}}] = $p", {"p": nested})) == [True], f"{n} nested"
+
+
+def test_a_map_literal_of_more_than_50_entries_keeps_its_entries_in_order_returned_read_and_projected(
+    cypher_pm: PersistenceManager,
+):
+    for n in (50, 51, 120):
+        entries = [(f"k{i}", _long_item(i)) for i in range(n)]
+        written = ", ".join(f"{key}: {cypher}" for key, (cypher, _) in entries)
+        mapped = "{" + written + "}"
+        expected = {key: value for key, (_, value) in entries}
+        returned = cypher_pm.get_one(spec(f"RETURN {mapped}"))
+        assert returned == expected, f"{n} entries"
+        # Its keys in the order written, where the store keeps them so: Neo4j and Oracle do for a few keys, not for 50.
+        if cypher_pm.type is DatabaseType.POSTGRES:
+            assert list(returned) == list(expected), f"{n} entries"
+        read = f"WITH {mapped} AS m RETURN [size(keys(m)), m.k{n - 1}, m['k{n - 2}']]"
+        assert cypher_pm.query(spec(read)) == [[n, expected[f"k{n - 1}"], expected[f"k{n - 2}"]]], f"{n} entries"
+        assert cypher_pm.query(spec(f"RETURN {mapped} = {mapped}")) == [None], f"{n} entries"
+        # Set over a map by a projection.
+        projected = f"WITH {{a: 1}} AS m RETURN m {{.*, {written}}}"
+        assert cypher_pm.query(spec(projected)) == [{"a": 1, **expected}], f"{n} entries"
+
+
+def test_a_map_literal_of_121_entries_holding_a_list_of_250_items_is_written_by_create_merge_set_and_unwind(
+    cypher_pm: PersistenceManager,
+):
+    # What a write makes of a long literal, read back: each written in parts on Postgres, as a read is (#192).
+    clear(cypher_pm)
+    listed = "[" + ", ".join(f"'s{i}'" for i in range(250)) + "]"
+    expected_list = [f"s{i}" for i in range(250)]
+    # Values a store keeps as properties, of four kinds in turn: no null, no list of several kinds, no map.
+    values = [_long_item(i) for i in range(210) if i % 7 in (0, 1, 3, 4)]
+    mapped = "{" + ", ".join(f"k{i}: {cypher}" for i, (cypher, _) in enumerate(values)) + f", xs: {listed}}}"
+    expected = {**{f"k{i}": value for i, (_, value) in enumerate(values)}, "xs": expected_list}
+    assert len(expected) == 121
+
+    def written(label: str) -> list[Any]:
+        return cypher_pm.query(spec(f"MATCH (n:{label}) RETURN properties(n)"))
+
+    cypher_pm.query(spec(f"CREATE (n:CyLongCreate {mapped})"))
+    assert written("CyLongCreate") == [expected]
+    for _ in range(2):
+        cypher_pm.query(spec(f"MERGE (n:CyLongMerge {mapped})"))
+    assert written("CyLongMerge") == [expected], "made once, then matched"
+    cypher_pm.query(spec(f"CREATE (n:CyLongAdd {{id: 1}}) WITH n SET n += {mapped}"))
+    assert written("CyLongAdd") == [{"id": 1, **expected}]
+    cypher_pm.query(spec(f"CREATE (n:CyLongSet {{id: 1}}) WITH n SET n = {mapped}"))
+    assert written("CyLongSet") == [expected]
+    cypher_pm.query(spec(f"CREATE (:CyLongFrom)-[:CY_LONG {mapped}]->(:CyLongTo)"))
+    assert cypher_pm.query(spec("MATCH ()-[r:CY_LONG]->() RETURN properties(r)")) == [expected]
+    cypher_pm.query(spec(f"UNWIND {listed} AS x CREATE (:CyLongUnwound {{x: x}})"))
+    unwound = cypher_pm.query(spec("MATCH (n:CyLongUnwound) RETURN n.x"))
+    assert sorted(unwound) == sorted(expected_list)
     clear(cypher_pm)

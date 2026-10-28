@@ -239,6 +239,12 @@ The greatest start or length `substring()`, `left()` and `right()` take, and the
 as Neo4j takes them: Java's greatest int.
 """
 
+MOST_ARGUMENTS = 100
+"""
+The most arguments a function takes on Postgres: a list or a map written by one call of a function past them, as a
+literal of more than 100 items or 50 entries is, is written in parts (liberation-data/drivine-python#192).
+"""
+
 LONG_MAX = (1 << 63) - 1
 """The greatest long, Java's, as `_cut` holds a number to."""
 
@@ -440,6 +446,9 @@ class SqlCypherCompiler(ABC):
         """The functions a query of the statement calls, which it declares before it: see `declare`."""
         self._shares = 0
         """How many values `shared` has bound, to name each subquery it binds one in."""
+        self._shared_bindings = 0
+        """How many times `shared` has bound its values, which an aggregate's argument it would bind in is worked out
+        first for: see `_shared_first`."""
         self._identities = True
         """
         Whether a value's identity is carried out of a query as a column of its own (see Json.identity): not where the
@@ -452,8 +461,12 @@ class SqlCypherCompiler(ABC):
         self._begin(Parameters({}, self.parameter_json, self.parameter_count, text=self.parameter_text))
 
     def declare(self, function: str) -> None:
-        """Declares the function, a function's whole text, for the statement to call: a query's own, before it."""
-        self._functions.append(function)
+        """
+        Declares the function, a function's whole text, for the statement to call: a query's own, before it; once,
+        however often it is declared.
+        """
+        if function not in self._functions:
+            self._functions.append(function)
 
     def _with_functions(self, compiled: CompiledCypher) -> CompiledCypher:
         """The compiled statement with the functions it calls declared before it."""
@@ -508,6 +521,7 @@ class SqlCypherCompiler(ABC):
         """
         if not self._sharing or all(len(it) <= SHARED_ABOVE for it in values):
             return body(list(values))
+        self._shared_bindings += 1
         return self.bound(values, body)
 
     def shared1(self, value: str, body: Callable[[str], str]) -> str:
@@ -2613,6 +2627,10 @@ class SqlCypherCompiler(ABC):
         cased = self._cases_first(select, projection, items)
         if cased is not None:
             return self._project(cased[0], cased[1], final)
+        # After _cases_first, which refuses what it must of an aggregate's CASE before working it out first.
+        shared = self._shared_first(select, projection, items)
+        if shared is not None:
+            return self._project(shared[0], shared[1], final)
         grouped = self._aggregates_first(select, projection, items)
         if grouped is not None:
             return self._project(grouped[0], grouped[1], final)
@@ -2847,6 +2865,81 @@ class SqlCypherCompiler(ABC):
         )
         # Kept apart, or Oracle merges it back into the query that aggregates.
         return self._with(select, With(with_, None), apart=True), kept
+
+    def _shared_first(
+        self, select: _Select, projection: Projection, items: list[ProjectionItem]
+    ) -> tuple[_Select, Projection] | None:
+        """
+        The rows the select reads with each aggregate's argument that `shared` would bind a value in worked out first,
+        in a `WITH *` of its own, and the projection with the aggregate of that argument read from there; None where
+        there is none. An aggregate's argument is compiled with no value bound (`_aggregating`): bound in a subquery
+        around the aggregate, a value would be taken from the group the aggregate reads, which no store reads from a
+        subquery's FROM. Unbound, an operation that reads its operands more than once writes them out again at each
+        level, and `count(t + duration({minutes: i}))` compiled to megabytes (drivine4j#333). Worked out first, for
+        each row, the argument binds its values as any item does, and the aggregate reads its column, as it does where
+        a `WITH` works it out first in the statement itself.
+        """
+        if not self._sharing:
+            return None
+        # Order terms too, beside a variable-length walk as well: there `_project` binds no value in one that is none of
+        # the items, so worked out here, in a WITH's item, is the only place its aggregate's argument binds one.
+        arguments: dict[Expression, None] = {}
+
+        def found(e: Expression) -> bool:
+            if is_aggregate(e) and isinstance(e, Function):
+                for argument in e.arguments:
+                    if argument not in arguments and self._binds(argument, select):
+                        arguments[argument] = None
+            return False
+
+        for term in [*(it.expression for it in items), *(it.expression for it in projection.order_by)]:
+            contains(term, found)
+        if not arguments:
+            return None
+        # Named as no variable is, unless quoted so.
+        names: dict[Expression, str] = {}
+        for argument in arguments:
+            self._counter += 1
+            names[argument] = f"#shared{self._counter}"
+        with_ = Projection(
+            False, True, tuple(ProjectionItem(argument, name) for argument, name in names.items()), (), None, None
+        )
+
+        def shared(expression: Expression) -> Expression:
+            return replaced(
+                expression,
+                lambda term: (
+                    dataclasses.replace(
+                        term, arguments=tuple(Variable(names[it]) if it in names else it for it in term.arguments)
+                    )
+                    if is_aggregate(term) and isinstance(term, Function)
+                    else None
+                ),
+            )
+
+        kept = dataclasses.replace(
+            projection,
+            star=False,
+            items=tuple(dataclasses.replace(it, expression=shared(it.expression)) for it in items),
+            order_by=tuple(dataclasses.replace(it, expression=shared(it.expression)) for it in projection.order_by),
+        )
+        # Kept apart, as _cases_first keeps its own, so no store merges it back into the query that aggregates.
+        outer = {variable: value for variable, value in select.scope.items() if variable not in select.bound}
+        return self._with(select, With(with_, None), outer, apart=True), kept
+
+    def _binds(self, expression: Expression, select: _Select) -> bool:
+        """
+        Whether `shared` binds a value in the expression, compiled over the rows the select reads. Compiled only to
+        see: the names it takes and the functions it declares (a `reduce`'s on Oracle) are given back, so a statement
+        whose aggregates bind nothing compiles as it did.
+        """
+        counter, shares, bindings, functions = self._counter, self._shares, self._shared_bindings, len(self._functions)
+        try:
+            self._expression(expression, select.scope)
+            return self._shared_bindings > bindings
+        finally:
+            self._counter, self._shares, self._shared_bindings = counter, shares, bindings
+            del self._functions[functions:]
 
     def _aggregates_first(
         self, select: _Select, projection: Projection, items: list[ProjectionItem]
@@ -4223,8 +4316,8 @@ class SqlCypherCompiler(ABC):
             return None
 
         def joined(pairs: Iterable[tuple[Expression, Expression]]) -> str:
-            compared = (self.bool(self._binary(Binary(BinaryOperator.EQUALS, a, b), scope)) for a, b in pairs)
-            return "(" + " AND ".join(compared) + ")"
+            compared = [self.bool(self._binary(Binary(BinaryOperator.EQUALS, a, b), scope)) for a, b in pairs]
+            return _grouped(compared, "AND")
 
         if binary.operator is BinaryOperator.IN:
             if not isinstance(right, ListLiteral) or not right.items:
@@ -4237,7 +4330,7 @@ class SqlCypherCompiler(ABC):
                 equals = Binary(BinaryOperator.EQUALS, left, listed)
                 a, b = self._compared(item, self._expression(listed, scope), equals)
                 compared.append(self._equality(a, b, listed, self._plain(left, listed, a, b, scope), stored))
-            return "(" + " OR ".join(compared) + ")"
+            return _grouped(compared, "OR")
         if isinstance(left, ListLiteral) and isinstance(right, ListLiteral):
             if len(left.items) != len(right.items):
                 return "FALSE"
@@ -5225,6 +5318,23 @@ def indent(text: str) -> str:
 
 def unsupported(construct: str) -> NoReturn:
     raise DrivineError(f"{construct} is Cypher, and is not compiled to SQL yet.")
+
+
+def chunked(items: Sequence[T], size: int) -> list[Sequence[T]]:
+    """The items in runs of `size`, in order, the last of what is left."""
+    return [items[start : start + size] for start in range(0, len(items), size)]
+
+
+def _grouped(terms: Sequence[str], operator: str) -> str:
+    """
+    The conditions joined by the operator, in parentheses. SQLite reads `a OR b OR c` as an expression as deep as it is
+    long, and refuses one deeper than 1,000 (liberation-data/drivine4j#332): past MOST_ARGUMENTS terms, each run of them
+    is joined in parentheses of its own, and the runs joined so in turn. Postgres takes such a chain at any length
+    (100,000 terms tried); it is grouped here too, as drivine4j groups it, so the libraries compile it alike.
+    """
+    if len(terms) <= MOST_ARGUMENTS:
+        return "(" + f" {operator} ".join(terms) + ")"
+    return _grouped([_grouped(it, operator) for it in chunked(terms, MOST_ARGUMENTS)], operator)
 
 
 def writes(clause: Clause) -> bool:

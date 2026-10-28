@@ -4,8 +4,11 @@ which `sort -V` gets the wrong way round."""
 from __future__ import annotations
 
 import importlib.util
+import os
+import tomllib
 from pathlib import Path
 
+import packaging.version
 import pytest
 
 _path = Path(__file__).parents[2] / "scripts" / "release_version.py"
@@ -87,3 +90,193 @@ def test_set_refuses_another_tables_version(tmp_path: Path) -> None:
     with pytest.raises(ValueError):
         release_version.set_version(pyproject, release_version.Version("0.3.0"))
     assert pyproject.read_text() == original
+
+
+ROOT = Path(__file__).parents[2]
+
+MODEL = """{
+  "$comment": "Drivine model file",
+  "format": "drivine-model/1",
+  "generator": {
+    "library": "drivine-python",
+    "version": "0.2.0",
+    "language": "python"
+  },
+  "module": "drivine-sample",
+  "fragments": [{"id": "x", "properties": [{"name": "version", "default": "0.2.0"}]}]
+}
+"""
+
+POETRY_LOCK = """[[package]]
+name = "drivine"
+version = "0.2.0"
+description = "Graph database client"
+
+[package.dependencies]
+pi-pilgrim = ">=0.2.0"
+
+[[package]]
+name = "drivine-extra"
+version = "0.2.0"
+
+[[package]]
+name = "pi-pilgrim"
+version = "0.2.0"
+"""
+
+README = """# Drivine for Python
+
+0.2 is an alpha release: the API may still change.
+
+The design names pi-pilgrim 0.2, and version 0.2.0 of a dependency.
+"""
+
+
+def a_project(tmp_path: Path, model: str = MODEL, lock: str = POETRY_LOCK, readme: str = README) -> Path:
+    (tmp_path / "sample" / ".drivine").mkdir(parents=True)
+    (tmp_path / "sample" / ".drivine" / "model.json").write_text(model)
+    (tmp_path / "sample" / "poetry.lock").write_text(lock)
+    (tmp_path / "README.md").write_text(readme)
+    return tmp_path
+
+
+def test_references_rewrites_each_and_nothing_else(tmp_path: Path) -> None:
+    root = a_project(tmp_path)
+    changed = release_version.set_references(root, release_version.Version("0.3.0"))
+    assert changed == ["sample/.drivine/model.json", "sample/poetry.lock", "README.md"]
+    assert (root / "sample" / ".drivine" / "model.json").read_text() == MODEL.replace(
+        '"version": "0.2.0"', '"version": "0.3.0"'
+    )
+    # drivine's own entry moves; a package of a name that begins drivine's, and a dependency's version, don't.
+    assert (root / "sample" / "poetry.lock").read_text() == POETRY_LOCK.replace(
+        'name = "drivine"\nversion = "0.2.0"', 'name = "drivine"\nversion = "0.3.0"'
+    )
+    assert (root / "README.md").read_text() == README.replace("0.2 is an alpha", "0.3 is an alpha")
+
+
+def test_references_of_a_prerelease(tmp_path: Path) -> None:
+    root = a_project(tmp_path)
+    release_version.set_references(root, release_version.Version("0.4.0-rc.1"))
+    # The model file has the version as drivine's metadata does, as pyproject.toml writes it; poetry.lock has it as
+    # PEP 440 normalizes it; the README has the release it leads to.
+    assert '"version": "0.4.0-rc.1"' in (root / "sample" / ".drivine" / "model.json").read_text()
+    assert 'name = "drivine"\nversion = "0.4.0rc1"' in (root / "sample" / "poetry.lock").read_text()
+    assert "0.4 is an alpha release:" in (root / "README.md").read_text()
+
+
+@pytest.mark.parametrize(
+    ("model", "lock", "readme"),
+    [
+        (MODEL.replace("drivine-python", "drivine4j"), POETRY_LOCK, README),
+        (MODEL, POETRY_LOCK.replace('name = "drivine"\n', 'name = "drivine-core"\n'), README),
+        (MODEL, POETRY_LOCK, README.replace("is an alpha release:", "is a release:")),
+        (MODEL, POETRY_LOCK, README + "\n1.0 is an alpha release: again.\n"),
+    ],
+    ids=["model file of another library", "lock without drivine", "README reworded", "README says it twice"],
+)
+def test_references_fails_on_a_reference_not_found_once_and_writes_nothing(
+    tmp_path: Path, model: str, lock: str, readme: str
+) -> None:
+    root = a_project(tmp_path, model, lock, readme)
+    with pytest.raises(ValueError, match="should name the version once"):
+        release_version.set_references(root, release_version.Version("0.3.0"))
+    assert (root / "sample" / ".drivine" / "model.json").read_text() == model
+    assert (root / "sample" / "poetry.lock").read_text() == lock
+    assert (root / "README.md").read_text() == readme
+
+
+def test_references_fails_on_a_missing_file(tmp_path: Path) -> None:
+    root = a_project(tmp_path)
+    (root / "sample" / "poetry.lock").unlink()
+    with pytest.raises(ValueError, match="no such file"):
+        release_version.set_references(root, release_version.Version("0.3.0"))
+    assert (root / "README.md").read_text() == README
+
+
+def test_references_to_one_file_each_rewrite_it_and_name_it_once(tmp_path: Path) -> None:
+    # A second reference to a file rewrites the text the first one gave, not the file as it was, and the file is
+    # listed for the commit once.
+    root = a_project(tmp_path)
+    references = [
+        release_version.Reference("README.md", r"((?<![0-9.]))[0-9]+\.[0-9]+( is an alpha release:)", str),
+        release_version.Reference("README.md", r"(pi-pilgrim )[0-9.]+(,)", lambda version: f"{version.major}.9"),
+    ]
+    assert release_version.set_references(root, release_version.Version("0.3.0"), references) == ["README.md"]
+    assert (root / "README.md").read_text() == README.replace("0.2 is an alpha", "0.3.0 is an alpha").replace(
+        "pi-pilgrim 0.2,", "pi-pilgrim 0.9,"
+    )
+
+
+def test_the_repository_s_references_name_pyproject_s_version(tmp_path: Path) -> None:
+    # Rewriting the repository's own files to the version they should have already changes nothing: every reference
+    # is found, and each names pyproject.toml's version. A file moved or reworded fails here, before a release does.
+    version = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
+    for reference in release_version.REFERENCES:
+        copy = tmp_path / reference.path
+        copy.parent.mkdir(parents=True, exist_ok=True)
+        copy.write_text((ROOT / reference.path).read_text())
+    release_version.set_references(tmp_path, release_version.Version(version))
+    for reference in release_version.REFERENCES:
+        assert (tmp_path / reference.path).read_text() == (ROOT / reference.path).read_text(), reference.path
+
+
+def test_every_model_file_in_the_repository_is_a_reference() -> None:
+    found: list[str] = []
+    for directory, subdirectories, files in os.walk(ROOT):
+        subdirectories[:] = [it for it in subdirectories if it == ".drivine" or not it.startswith((".", "__"))]
+        if Path(directory).name == ".drivine" and "model.json" in files:
+            found.append((Path(directory) / "model.json").relative_to(ROOT).as_posix())
+    assert found
+    assert set(found) <= {reference.path for reference in release_version.REFERENCES}
+
+
+@pytest.mark.parametrize(
+    "version",
+    [
+        "0.3.0",
+        "0.3.0-rc.1",
+        "0.3.0-rc1",
+        "0.3.0-rc",
+        "0.3.0-RC.01",
+        "0.3.0-alpha.2",
+        "0.3.0-beta.3",
+        "0.3.0-a.1",
+        "0.3.0-c.4",
+        "0.3.0-pre.5",
+        "0.3.0-preview.6",
+        "0.3.0-dev.7",
+        "0.3.0-post.1",
+        "0.3.0-1",
+        "0.3.0-rc.1.dev.2",
+        "0.3.0-rc.1.post.2",
+    ],
+)
+def test_pep440_normalizes_as_packaging_does(version: str) -> None:
+    assert release_version.pep440(release_version.Version(version)) == str(packaging.version.Version(version))
+
+
+def test_pep440_refuses_a_suffix_it_doesnt_read() -> None:
+    with pytest.raises(ValueError, match="PEP 440"):
+        release_version.pep440(release_version.Version("0.3.0-rc.1.fix"))
+
+
+def test_references_from_the_command_line_prints_the_paths_for_the_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The command rewrites the files of the repository the script is in, and prints each path on a line of its own,
+    # which Prepare release passes to `git add`.
+    root = a_project(tmp_path)
+    monkeypatch.setattr(release_version, "__file__", str(root / "scripts" / "release_version.py"))
+    assert release_version.main(["references", "0.3.0-rc.1"]) == 0
+    assert capsys.readouterr().out.splitlines() == ["sample/.drivine/model.json", "sample/poetry.lock", "README.md"]
+    assert 'name = "drivine"\nversion = "0.3.0rc1"' in (root / "sample" / "poetry.lock").read_text()
+
+
+def test_references_from_the_command_line_fails_on_a_version_pep440_doesnt_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = a_project(tmp_path)
+    monkeypatch.setattr(release_version, "__file__", str(root / "scripts" / "release_version.py"))
+    assert release_version.main(["references", "0.3.0-rc.1.fix"]) == 2
+    assert "PEP 440" in capsys.readouterr().err
+    assert (root / "sample" / ".drivine" / "model.json").read_text() == MODEL

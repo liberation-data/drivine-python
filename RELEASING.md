@@ -66,6 +66,20 @@ included. Only a merged version bump or a pushed tag publishes.
 - **Version:** `version` in `pyproject.toml`. The tag must be `v` and that version, character for character: `v0.3.0`
   for `0.3.0`. There is no `__version__` to keep in step. `uv.lock` records the project's version too; Prepare release
   updates it with `uv lock`, and fails first if `uv.lock` isn't up to date, so the PR changes the version alone.
+- **Other files that name the version:** Prepare release rewrites them too, with
+  `scripts/release_version.py references X.Y.Z`, from the list `REFERENCES` in that script, and commits them with the
+  version:
+  - `sample/.drivine/model.json`, whose `generator.version` is the version as `pyproject.toml` writes it. The sample's
+    test of its typed references (`sample/tests/test_typed_refs_up_to_date.py`) compares the whole file with what the
+    stubs step writes, so a model file that names another version fails it.
+  - `sample/poetry.lock`, whose entry for drivine has the version as PEP 440 normalizes it (`0.3.0rc1`), as
+    `poetry lock` writes it.
+  - `README.md`'s "0.3 is an alpha release": its `MAJOR.MINOR`.
+
+  Each must be found exactly once, or Prepare release fails, saying which: a file moved or a line reworded is then
+  updated in `REFERENCES`. A unit test checks that the list matches the files and names `pyproject.toml`'s version,
+  and that every `.drivine/model.json` in the repository is on it. A file that names a version only as history, as
+  the examples here do, isn't on it.
 - **Push trigger:** a push to `main` that changes `pyproject.toml`.
 - **Version arithmetic:** `scripts/release_version.py`, which `check` uses too, to compare a version with
   the newest tag. A `prerelease` bump gives `X.Y.Z-rc.N`: `0.3.0` becomes `0.3.1-rc.0`, and `0.3.1-rc.0` becomes

@@ -1040,6 +1040,11 @@ class SqlCypherCompiler(ABC):
     def reverse_text(self, text: str) -> str:
         """The SQL text, its characters backwards."""
 
+    def reversed_text(self, text: str) -> str:
+        """The SQL text, its characters backwards, as JSON: see Oracle's, which reverses a text past 4,000 bytes
+        otherwise."""
+        return self.scalar(self.reverse_text(text))
+
     @abstractmethod
     def contains_text(self, a: str, b: str) -> str:
         """Whether the text `a` holds the text `b`."""
@@ -4832,7 +4837,7 @@ class SqlCypherCompiler(ABC):
                 e = self._alias("e")
                 listed = self.comparable(Json(self.aggregate_list(f"{e}.item", f"{e}.item_no DESC"), ordered=True))
                 return (
-                    f"CASE {self.type_of(x)} WHEN 'string' THEN {self.scalar(self.reverse_text(self.text(x)))} "
+                    f"CASE {self.type_of(x)} WHEN 'string' THEN {self.texts([x], lambda t: self.reversed_text(t[0]))} "
                     f"WHEN 'array' THEN (SELECT {listed} FROM {self._elements_of(subject, x, e)}) END"
                 )
 

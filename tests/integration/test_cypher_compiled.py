@@ -3306,3 +3306,73 @@ async def test_a_map_literal_of_121_entries_holding_a_list_of_250_items_is_writt
     unwound = await cypher_pm.query(spec("MATCH (n:CyLongUnwound) RETURN n.x"))
     assert sorted(unwound) == sorted(expected_list)
     await clear(cypher_pm)
+
+
+REVERSED_TEXTS = [
+    # 5,000 characters, and past 32 KB.
+    " " + "aB" * 2_499 + "é",
+    "aB" * 20_000,
+    # Multibyte, under 4,000 characters and past 4,000 bytes; and at 4,000 bytes, short, and one byte past.
+    "é中" * 1_999 + "x",
+    "é" * 2_000,
+    "é" * 2_000 + "x",
+    # Characters past U+FFFF, two UTF-16 units each: across each 1,000th unit, where Oracle cuts a long text, and
+    # reversed, across each other unit; then the other way about.
+    "x" + "😀" * 1_500 + "aé" + "😀" * 1_000,
+    "😀" * 5_000 + "x",
+    # One that ends on a character across the 2,000th unit, so the last piece Oracle cuts is empty; and a piece of the
+    # most bytes, 999 three-byte characters and one of four.
+    "x" + "😀" * 1_000,
+    "中" * 999 + "😀" + "中" * 1_000,
+    # What JSON writes otherwise: quotes, a backslash, a line break and a control character.
+    'a"","x\\\n\u0001' * 800,
+    "abc",
+    "a😀é中",
+]
+
+
+@pytest.mark.parametrize("t", REVERSED_TEXTS, ids=lambda t: f"{len(t)} characters, {len(t.encode())} bytes")
+async def test_a_text_past_4000_bytes_is_reversed_whole_as_a_short_one_is(cypher_pm: PersistenceManager, t: str):
+    # Oracle reversed a text with LISTAGG, which gives a VARCHAR2 of 4,000 bytes, and read a longer one from JSON as
+    # null (#182). Given, stored and read in one row, and made by the statement, as above; reversed by its characters,
+    # so a character past U+FFFF, two UTF-16 units, stays whole. drivine4j's test of liberation-data/drivine4j#311.
+    await clear(cypher_pm)
+
+    async def rows(cypher: str, parameters: dict[str, Any] | None = None) -> list[Any]:
+        return await cypher_pm.query(spec(cypher, parameters))
+
+    await rows("CREATE (n:CyLongText {t: $t})", {"t": t})
+    parts = {"a": t[: len(t) // 2], "b": t[len(t) // 2 :]}
+    reversed_ = t[::-1]
+    assert await rows("WITH $t AS t RETURN reverse(t)", {"t": t}) == [reversed_], "given"
+    assert await rows("MATCH (n:CyLongText) RETURN reverse(n.t)") == [reversed_], "stored"
+    assert await rows("MATCH (n:CyLongText) WITH n.t AS t RETURN reverse(t)") == [reversed_], "passed on"
+    assert await rows("MATCH (n:CyLongText) RETURN collect(reverse(n.t))") == [[reversed_]], "collected"
+    # Not where a sum on Oracle puts a character past U+FFFF across its 4,000th UTF-16 unit: the sum gives two U+FFFD
+    # there (#238).
+    if cypher_pm.type is not DatabaseType.ORACLE or all(ord(it) <= 0xFFFF for it in t):
+        assert await rows("WITH $a + $b AS t RETURN reverse(t)", parts) == [reversed_], "made"
+    assert await rows("WITH $t AS t RETURN reverse(reverse(t))", {"t": t}) == [t], "twice"
+    # In a statement that writes, which Oracle runs as a PL/SQL block.
+    assert await rows("MATCH (n:CyLongText) SET n.r = reverse(n.t) RETURN n.r") == [reversed_], "written"
+    await clear(cypher_pm)
+
+
+async def test_texts_long_and_short_are_reversed_each_from_its_own_and_a_null_empty_or_written_one_as_cypher_gives(
+    cypher_pm: PersistenceManager,
+):
+    async def rows(cypher: str, parameters: dict[str, Any] | None = None) -> list[Any]:
+        return await cypher_pm.query(spec(cypher, parameters))
+
+    # Several in one statement, each row and each item reversed from its own text, long and short.
+    texts = ["aB" * 3_000, "abc", "x" + "😀" * 1_500, "é中" * 1_999 + "x"]
+    reversed_ = [it[::-1] for it in texts]
+    assert await rows("UNWIND $ts AS t RETURN reverse(t)", {"ts": texts}) == reversed_
+    assert await rows("RETURN [t IN $ts | reverse(t)]", {"ts": texts}) == [reversed_]
+    # A null text is null, and an empty one empty: on Oracle null, as its empty text is, and not read again as a long
+    # one.
+    assert await rows("WITH $n AS n RETURN reverse(n)", {"n": None}) == [None]
+    empty = None if cypher_pm.type is DatabaseType.ORACLE else ""
+    assert await rows("WITH $e AS e RETURN reverse(e)", {"e": ""}) == [empty]
+    # A literal, a text or a list, whose CLOB Oracle bound without a type, and found no DBMS_LOB.SUBSTR for (PLS-307).
+    assert await rows("RETURN [reverse('Keanu'), reverse([1, 2, 3])]") == [["unaeK", [3, 2, 1]]]

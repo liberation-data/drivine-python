@@ -71,8 +71,8 @@ class OracleCypherCompiler(SqlCypherCompiler):
     A value is Oracle's `JSON`, which compares, groups and orders as JSON and keeps a map's keys in the order written.
     Oracle keeps a number as a number, so a stored `2.0` reads as `2`; a floating-point number the statement writes, or
     a parameter's that is a whole number, is a `BINARY_DOUBLE`, and stays one. A text Oracle reads out of JSON is a
-    `VARCHAR2` of at most 4,000 bytes, and one longer is read as a CLOB where it is measured, cut, changed or searched
-    (see `texts`), but for `reverse()`, which still gives null. An empty text is null, as Oracle's empty text is.
+    `VARCHAR2` of at most 4,000 bytes, and one longer is read as a CLOB where it is measured, cut, changed, searched
+    or reversed (see `texts`). An empty text is null, as Oracle's empty text is.
     `reduce` is a function the query declares, and does not run in a statement that writes, in the step of a `reduce`,
     or where its step reads a path.
 
@@ -104,8 +104,8 @@ class OracleCypherCompiler(SqlCypherCompiler):
         """The names of a procedure's parameters that hold a float as extended JSON writes one: see `property_of`."""
         self.parameter_path = self._parameter_path
         self._long = False
-        """Whether the texts `texts` gives its body are CLOBs: see `scalar`, `starts_with`, `ends_with`, `split` and
-        `replace_text`, which read them otherwise."""
+        """Whether the texts `texts` gives its body are CLOBs: see `scalar`, `starts_with`, `ends_with`, `split`,
+        `replace_text` and `reversed_text`, which read them otherwise."""
 
     def compile_query(self, query: Query, parameters: Mapping[str, Any]) -> CompiledCypher:
         """As SqlCypherCompiler's, saying whether the statement calls the store's function: see `nulls_equal`."""
@@ -1044,13 +1044,67 @@ class OracleCypherCompiler(SqlCypherCompiler):
         return f"CASE WHEN {r} <= {s} OR LENGTHB({text}) * {r} <= {_SHORT_TEXT} * {s} THEN {replaced} END"
 
     def reverse_text(self, text: str) -> str:
-        """Oracle has no reverse of a text that it documents: its characters, read from the last."""
+        """Oracle has no reverse of a text that it documents: its characters, read from the last, put together by
+        `LISTAGG`."""
         return self.shared1(
             text,
             lambda t: (
                 f"(SELECT LISTAGG(SUBSTR({t}, LEVEL, 1)) WITHIN GROUP (ORDER BY LEVEL DESC) FROM DUAL "
                 f"CONNECT BY LEVEL <= LENGTH({t}))"
             ),
+        )
+
+    def reversed_text(self, text: str) -> str:
+        """
+        `LISTAGG` gives a `VARCHAR2`, and fails past 4,000 bytes (ORA-01489), so a CLOB that `texts` gives (#182) is
+        reversed in pieces, as JSON: see `_reversed_pieces`. The CLOB is bound once, as each piece reads it, and bound
+        as a CLOB by `TO_CLOB`: of a literal, `reverse('Keanu')` or `reverse([1, 2, 3])`, Oracle otherwise finds no one
+        `DBMS_LOB.SUBSTR` to call (PLS-307).
+        """
+        if self._long:
+            return self.bound([f"TO_CLOB({text})"], lambda it: self._reversed_pieces(it[0]))
+        return super().reversed_text(text)
+
+    def _reversed_pieces(self, text: str) -> str:
+        """
+        The CLOB reversed as a JSON text: cut into pieces of `_REVERSED_PIECE` of its UTF-16 units, each a `VARCHAR2`
+        reversed by `reverse_text`, and the pieces put together last to first.
+
+        A CLOB counts a character past U+FFFF as two units, and refuses a cut that starts between them (ORA-22831), so
+        a piece that would end on the first of two takes the second too, and the next starts after it: `REGEXP_SUBSTR`
+        reads the character at a unit, two units where one starts there, and from that unit, not from the text's
+        start, so each piece of a long text takes as long.
+
+        The pieces are put together as a JSON list, each after an `x`, written in ASCII: a `","x` in it is then only
+        ever between two of them, as a quote in a text is written `\\"`, so removing each, and the first `x`, leaves a
+        list of one text, which is read as JSON. A null text has one piece, as a hierarchical query has a first row,
+        which is left out, so the list is null, and so is the text. Written otherwise, a character past U+FFFF whose
+        two units are the 4,000th and the 4,001st of a CLOB Oracle has made, as a CLOB put together or cut is, comes
+        out of `JSON_SCALAR`, `JSON_ARRAY` and `JSON_OBJECT` as two U+FFFD; in ASCII it is written `\\uD83D\\uDE00`, and
+        read back whole. The pieces are `VARCHAR2`s.
+        """
+
+        def pair_starts(unit: str) -> str:
+            return f"LENGTH(REGEXP_SUBSTR({text}, '.', {unit}, 1, 'n')) = 2"
+
+        piece = _REVERSED_PIECE
+        first = (
+            f"((LEVEL - 1) * {piece} + 1 + CASE WHEN LEVEL > 1 AND {pair_starts(f'(LEVEL - 1) * {piece}')} "
+            "THEN 1 ELSE 0 END)"
+        )
+        last = f"(LEVEL * {piece} + CASE WHEN {pair_starts(f'LEVEL * {piece}')} THEN 1 ELSE 0 END)"
+        cut = (
+            f"SELECT LEVEL n, DBMS_LOB.SUBSTR({text}, {last} - {first} + 1, {first}) s FROM DUAL "
+            f"CONNECT BY LEVEL <= CEIL(LENGTH({text}) / {piece})"
+        )
+        joined = (
+            "JSON_SERIALIZE(JSON_ARRAYAGG('x' || rv_reversed.r ORDER BY rv_reversed.n DESC RETURNING JSON) "
+            "RETURNING CLOB ASCII)"
+        )
+        return (
+            f"(SELECT JSON_QUERY(JSON(REPLACE(REPLACE({joined}, '\",\"x'), '[\"x', '[\"')), '$[0]' RETURNING JSON) "
+            f"FROM (SELECT rv_piece.n, {self.reverse_text('rv_piece.s')} r FROM ({cut}) rv_piece "
+            "WHERE rv_piece.s IS NOT NULL) rv_reversed)"
         )
 
     @property
@@ -1233,6 +1287,11 @@ _DOUBLE = "$numberDouble"
 
 _SHORT_TEXT = 4000
 """The most bytes a `VARCHAR2` holds in SQL, as a database is made by default (`MAX_STRING_SIZE = STANDARD`)."""
+
+_REVERSED_PIECE = 1000
+"""How many UTF-16 units of a CLOB `_reversed_pieces` reverses as one `VARCHAR2`: with one more, where a pair is not
+cut, and the `x` the piece is put together after, at most 3,002 bytes, as a unit is three bytes at most and a pair
+four."""
 
 _NUMBER_TEXT = 32
 """The most bytes `_as_text` writes a number in: Java's text of a double, `-2.2250738585072014E-308`, and some to

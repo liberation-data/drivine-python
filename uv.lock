@@ -431,7 +431,7 @@ requires-dist = [
     { name = "falkordb", marker = "extra == 'falkordb'", specifier = ">=1.2" },
     { name = "neo4j", marker = "extra == 'neo4j'", specifier = ">=5.20" },
     { name = "oracledb", marker = "extra == 'oracle'", specifier = ">=3.0" },
-    { name = "pi-pilgrim", specifier = ">=0.3.0" },
+    { name = "pi-pilgrim", specifier = ">=0.4.0,<0.5" },
     { name = "psycopg", extras = ["binary"], marker = "extra == 'postgres'", specifier = ">=3.2" },
     { name = "psycopg-pool", marker = "extra == 'postgres'", specifier = ">=3.2" },
     { name = "pydantic", specifier = ">=2.7" },
@@ -592,11 +592,11 @@ wheels = [
 
 [[package]]
 name = "pi-pilgrim"
-version = "0.3.0"
+version = "0.4.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/b6/2a/70a3d7f0ef615009c9d9a47190ededb24e4317f4abdaed73bc305dc4ed20/pi_pilgrim-0.3.0.tar.gz", hash = "sha256:02ea03998ec38193f73264a93ba6f6f7dc2c78401bfeb87d38099484571145b3", size = 20845, upload-time = "2026-10-27T01:18:00.503Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/4f/cf/4f387a921d833cdcb87e264c1a6be5c11b194a901e665cb5284874dc900c/pi_pilgrim-0.4.0.tar.gz", hash = "sha256:e308a9e1e103ca48574ed86a48cf07e8bbaa5eb7c035382ff2b3dc6b7c85577d", size = 23656, upload-time = "2026-10-28T20:04:41.133Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/06/2f/dbc3bcf2ac3a32e2166e2c838d77a1adbd2c93e1e4b8ac5eb9b0d33d226a/pi_pilgrim-0.3.0-py3-none-any.whl", hash = "sha256:114e3b6ad18a514e38cdfd47c740e7010e653e93896c6e4289f40d40fffd5a06", size = 19588, upload-time = "2026-10-27T01:17:59.417Z" },
+    { url = "https://files.pythonhosted.org/packages/08/77/212b07020427ac893273ffc71aa32ca1aab42da0556a0895ee75e2f82bd1/pi_pilgrim-0.4.0-py3-none-any.whl", hash = "sha256:de5f5d0010d56e7303a45e795a7bba4c505f226b6f7888db0600377d16c5a2a0", size = 21594, upload-time = "2026-10-28T20:04:39.792Z" },
 ]
 
 [[package]]

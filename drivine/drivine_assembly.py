@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from typing import Self
+from typing import NoReturn, Self
 
-from pipilgrim import PilgrimAssembly
+from pipilgrim import AsyncPilgrimAssembly, AsyncTeardownRequired
 
 from drivine.connection.database_registry import DEFAULT, DatabaseRegistry
 from drivine.dsl.index_advice_policy import IndexAdvicePolicy
@@ -15,7 +15,7 @@ from drivine.schema.schema_manager import SchemaManager
 from drivine.schema.schema_options import SchemaOptions
 
 
-class DrivineAssembly(PilgrimAssembly):
+class DrivineAssembly(AsyncPilgrimAssembly):
     """
     Drivine's components: the registry and the managers. On its own:
 
@@ -124,3 +124,10 @@ class DrivineAssembly(PilgrimAssembly):
             await self.aclose()
             raise
         return self
+
+    def __enter__(self) -> NoReturn:
+        """Refuses, as pi-pilgrim's does, and names the sync API, whose assembly `with` closes."""
+        raise AsyncTeardownRequired(
+            f"{type(self).__name__} closes its drivers and pools asynchronously: use async with, or "
+            f"drivine.sync.DrivineAssembly for the sync API."
+        )

@@ -49,8 +49,12 @@ app = FastAPI(lifespan=lifespan)
   `await AssemblyHolder.aclose()`.
 - **Entering your assembly doesn't start Drivine**, as entering `DrivineAssembly` itself does: call
   `await assembly.drivine.start()`, as above.
-- **The sync assembly**, `drivine.sync.DrivineAssembly`, closes with `with` or `close()`. The async one closes only
-  with `async with` or `await aclose()`, as its drivers close asynchronously: `close()` refuses, and says so.
+- **The async assembly is an `AsyncPilgrimAssembly`**, as its drivers close asynchronously: `await close()`,
+  `asyncio.run(close())`, `await aclose()` and `async with` all close it, and `with` refuses, and says to use
+  `async with`. Await `close()`: left unawaited, it closes nothing, and Python warns that a coroutine was never
+  awaited. Your assembly closes it whether it holds it with `AssemblyHolder.shared(DrivineAssembly)` or as a component,
+  `self.shared(DrivineAssembly)`. The sync assembly, `drivine.sync.DrivineAssembly`, is a plain `PilgrimAssembly`,
+  which closes with `with` or `close()`.
 - It registers the database the environment describes. To register yours in code, subclass it and override
   `register_databases(registry)`.
 - `Assembled` injects a manager into a class something else makes:
@@ -58,3 +62,22 @@ app = FastAPI(lifespan=lifespan)
 
 The managers are plain classes, so an application with another container, or none, makes them itself, and closes the
 registry with `async with DatabaseRegistry() as registry:`.
+
+### Upgrading from 0.2.0
+
+0.3.0 moved `DrivineAssembly` onto pi-pilgrim 0.3's lifecycle: the assembly closes when you leave `async with`, or when
+the application assembly that holds it closes, and closing it closes every database's driver and pool.
+
+- **Shutdown.** 0.2.0 said to call `await assembly.drivine.close()` when the application stops. That closes everything
+  again in every release after 0.3.0, where `DrivineAssembly` is pi-pilgrim's `AsyncPilgrimAssembly`, whose `close()`
+  is `aclose()` (0.3.0 raised `PilgrimError`, or `TypeError` when Drivine had made no registry). Await it: called
+  without `await`, it closes nothing, and Python warns that a coroutine was never awaited. The 0.3 way is to leave your
+  assembly's `async with`, as in the lifespan above, or to call `await assembly.aclose()`, which closes your components
+  and then Drivine. To close only Drivine, `await assembly.drivine.aclose()`.
+- **`with DrivineAssembly()`** raises `AsyncTeardownRequired`, a `PilgrimError`: use `async with`, or
+  `drivine.sync.DrivineAssembly` for the sync API, which closes with `with` or `close()`.
+- **Sync `close()` on your assembly** closes Drivine while it has made no registry, whether your assembly holds it with
+  `AssemblyHolder.shared` or with `self.shared(DrivineAssembly)`. Once Drivine has made its registry it refuses with
+  `AsyncTeardownRequired`, before closing anything, since the drivers close asynchronously: close with
+  `await aclose()`. It refuses from the start if your subclass of `DrivineAssembly` overrides `aclose()`, which a sync
+  close can't run.

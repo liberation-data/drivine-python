@@ -90,9 +90,8 @@ database.
   digit, and still comes back as a float. A list or a map read from a property orders the texts in it by the
   database's collation, where other text is ordered by its code points, as Cypher does
   ([Cypher on Postgres and Oracle](04-statements.md#cypher-on-postgres-and-oracle)).
-- On Oracle, an empty text is null, and a text past 4,000 bytes is measured, cut, changed and searched whole, but
-  `reverse()` gives null for one; a quantified path pattern's `WHERE`, `reduce` and `map[key]` take less than on
-  Postgres
+- On Oracle, an empty text is null, and a text past 4,000 bytes is measured, cut, changed, searched and reversed
+  whole; a quantified path pattern's `WHERE`, `reduce` and `map[key]` take less than on Postgres
   ([Cypher on Postgres and Oracle](04-statements.md#cypher-on-postgres-and-oracle)).
 
 The object manager needs no Cypher at all, on any store: [the quick start](01-quick-start.md#quick-start) runs as written on Postgres and

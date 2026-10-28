@@ -2857,10 +2857,10 @@ def long_text_functions(t: str, unit: str) -> dict[str, Any]:
 
 @pytest.mark.parametrize(
     ("unit", "length"),
-    # Two-byte characters, so a text of fewer than 4,000 characters is past 4,000 bytes. Past 32 KB, given only: Oracle
-    # closes the session (ORA-03113) after statements that read such a text from a property and from a parameter in
-    # turn, much as it does for one read over two rows (#144), and its sessions hold more of its memory for each
-    # statement that reads one the statement makes, up to the instance's limit (ORA-04036): drivine4j#313.
+    # Two-byte characters, so a text of fewer than 4,000 characters is past 4,000 bytes. Past 32 KB too, given, stored
+    # and made: Oracle closed the session (ORA-03113) after statements that read such a text from a property and from a
+    # parameter in turn, and its sessions held megabytes for each compiled statement the driver kept, up to the
+    # instance's limit (ORA-04036, liberation-data/drivine4j#313, #218).
     [("aB", 5_000), ("éB", 3_000), ("aB", 40_000)],
 )
 async def test_a_text_past_4000_bytes_is_measured_cut_changed_searched_and_added_to_whole_as_a_short_one_is(
@@ -2873,15 +2873,11 @@ async def test_a_text_past_4000_bytes_is_measured_cut_changed_searched_and_added
     async def rows(cypher: str, parameters: dict[str, Any] | None = None) -> list[Any]:
         return await cypher_pm.query(spec(cypher, parameters))
 
-    short = len(t.encode()) < 32_000
-    if short:
-        await rows("CREATE (n:CyLongText {t: $t})", {"t": t})
+    await rows("CREATE (n:CyLongText {t: $t})", {"t": t})
     parts = {"a": t[: length // 2], "b": t[length // 2 :]}
     for function, expected in long_text_functions(t, unit).items():
         # Given, and stored and read in one row, and made by the statement.
         assert await rows(f"WITH $t AS t RETURN {function}", {"t": t}) == [expected], f"{function} given"
-        if not short:
-            continue
         assert await rows(f"MATCH (n:CyLongText) WITH n.t AS t RETURN {function}") == [expected], f"{function} stored"
         assert await rows(f"WITH $a + $b AS t RETURN {function}", parts) == [expected], f"{function} made"
     await clear(cypher_pm)

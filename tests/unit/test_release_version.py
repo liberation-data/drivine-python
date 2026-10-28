@@ -193,6 +193,20 @@ def test_references_fails_on_a_missing_file(tmp_path: Path) -> None:
     assert (root / "README.md").read_text() == README
 
 
+def test_references_to_one_file_each_rewrite_it_and_name_it_once(tmp_path: Path) -> None:
+    # A second reference to a file rewrites the text the first one gave, not the file as it was, and the file is
+    # listed for the commit once.
+    root = a_project(tmp_path)
+    references = [
+        release_version.Reference("README.md", r"((?<![0-9.]))[0-9]+\.[0-9]+( is an alpha release:)", str),
+        release_version.Reference("README.md", r"(pi-pilgrim )[0-9.]+(,)", lambda version: f"{version.major}.9"),
+    ]
+    assert release_version.set_references(root, release_version.Version("0.3.0"), references) == ["README.md"]
+    assert (root / "README.md").read_text() == README.replace("0.2 is an alpha", "0.3.0 is an alpha").replace(
+        "pi-pilgrim 0.2,", "pi-pilgrim 0.9,"
+    )
+
+
 def test_the_repository_s_references_name_pyproject_s_version(tmp_path: Path) -> None:
     # Rewriting the repository's own files to the version they should have already changes nothing: every reference
     # is found, and each names pyproject.toml's version. A file moved or reworded fails here, before a release does.
@@ -244,3 +258,25 @@ def test_pep440_normalizes_as_packaging_does(version: str) -> None:
 def test_pep440_refuses_a_suffix_it_doesnt_read() -> None:
     with pytest.raises(ValueError, match="PEP 440"):
         release_version.pep440(release_version.Version("0.3.0-rc.1.fix"))
+
+
+def test_references_from_the_command_line_prints_the_paths_for_the_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The command rewrites the files of the repository the script is in, and prints each path on a line of its own,
+    # which Prepare release passes to `git add`.
+    root = a_project(tmp_path)
+    monkeypatch.setattr(release_version, "__file__", str(root / "scripts" / "release_version.py"))
+    assert release_version.main(["references", "0.3.0-rc.1"]) == 0
+    assert capsys.readouterr().out.splitlines() == ["sample/.drivine/model.json", "sample/poetry.lock", "README.md"]
+    assert 'name = "drivine"\nversion = "0.3.0rc1"' in (root / "sample" / "poetry.lock").read_text()
+
+
+def test_references_from_the_command_line_fails_on_a_version_pep440_doesnt_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = a_project(tmp_path)
+    monkeypatch.setattr(release_version, "__file__", str(root / "scripts" / "release_version.py"))
+    assert release_version.main(["references", "0.3.0-rc.1.fix"]) == 2
+    assert "PEP 440" in capsys.readouterr().err
+    assert (root / "sample" / ".drivine" / "model.json").read_text() == MODEL

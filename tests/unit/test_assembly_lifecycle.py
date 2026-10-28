@@ -135,14 +135,59 @@ def test_a_failed_start_closes_the_sync_assembly():
     assert drivine.provider.ended == 1
 
 
-async def test_the_async_assembly_refuses_a_sync_close():
+async def test_await_close_closes_the_providers_as_in_0_2_0():
+    drivine = FakeDrivine()
+    drivine.persistence_manager()
+    await drivine.close()
+    assert drivine.provider.ended == 1
+    with pytest.raises(PilgrimError, match="is closed"):
+        drivine.persistence_manager()
+
+
+async def test_await_close_twice_ends_the_providers_once():
     drivine = FakeDrivine()
     drivine.registry()
-    with pytest.raises(PilgrimError, match="aclose"):
-        drivine.close()
-    assert drivine.provider.ended == 0
+    await drivine.close()
+    await drivine.close()
     await drivine.aclose()
     assert drivine.provider.ended == 1
+
+
+async def test_await_close_without_a_registry_closes_the_assembly():
+    drivine = FakeDrivine()
+    await drivine.close()
+    await drivine.close()
+    assert drivine.provider.ended == 0
+    with pytest.raises(PilgrimError, match="is closed"):
+        drivine.registry()
+
+
+async def test_await_close_after_aclose_does_nothing():
+    drivine = FakeDrivine()
+    drivine.registry()
+    await drivine.aclose()
+    assert drivine.provider.ended == 1
+    await drivine.close()
+    assert drivine.provider.ended == 1
+
+
+def test_the_sync_assembly_closes_with_close():
+    drivine = SyncFakeDrivine()
+    drivine.registry()
+    assert drivine.close() is None
+    drivine.close()
+    assert drivine.provider.ended == 1
+
+
+async def test_the_async_assembly_refuses_with():
+    drivine = FakeDrivine()
+    with pytest.raises(PilgrimError, match="async with"):
+        with drivine:  # type: ignore[misc]
+            pytest.fail("the body ran")
+    with pytest.raises(PilgrimError, match="async with"):
+        drivine.__exit__(None, None, None)
+    assert drivine.started == 0
+    await drivine.aclose()
 
 
 class App(PilgrimAssembly):
@@ -172,6 +217,33 @@ async def test_an_application_assembly_closes_the_drivine_it_holds():
     assert AssemblyHolder.shared(FakeDrivine) is not app.drivine
     with pytest.raises(PilgrimError, match="is closed"):
         app.drivine.persistence_manager()
+
+
+async def test_await_close_on_an_application_assemblys_drivine_closes_it_as_in_0_2_0():
+    # 0.2.0's README: `self.drivine = AssemblyHolder.shared(DrivineAssembly)`, then `await assembly.drivine.close()`.
+    app = App()
+    app.greeter()
+    await app.drivine.close()
+    assert app.drivine.provider.ended == 1
+    await app.aclose()
+    assert app.drivine.provider.ended == 1
+
+
+def test_a_sync_close_of_an_application_assembly_closes_a_drivine_with_no_registry():
+    # The application assembly's close() calls the DrivineAssembly's without awaiting it: nothing is left to await.
+    app = App()
+    drivine = app.drivine
+    app.close()
+    with pytest.raises(PilgrimError, match="is closed"):
+        drivine.registry()
+
+
+def test_a_sync_close_of_an_application_assembly_refuses_once_drivine_has_a_registry():
+    app = App()
+    app.greeter()
+    with pytest.raises(PilgrimError, match="aclose"):
+        app.close()
+    assert app.drivine.provider.ended == 0
 
 
 def test_a_sync_application_assembly_closes_the_drivine_it_holds():

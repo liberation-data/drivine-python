@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from typing import Self
+from collections.abc import Awaitable, Generator
+from typing import NoReturn, Self
 
-from pipilgrim import PilgrimAssembly
+from pipilgrim import PilgrimAssembly, PilgrimError
 
 from drivine.connection.database_registry import DEFAULT, DatabaseRegistry
 from drivine.dsl.index_advice_policy import IndexAdvicePolicy
@@ -124,3 +125,36 @@ class DrivineAssembly(PilgrimAssembly):
             await self.aclose()
             raise
         return self
+
+    def close(self) -> Awaitable[None]:  # pyright: ignore[reportIncompatibleMethodOverride]
+        """
+        Closes the assembly, as `await aclose()` does: kept so that 0.2.0's shutdown, `await assembly.drivine.close()`,
+        still closes every database's driver and pool. Prefer `await aclose()`, or leaving `async with`.
+
+        Await what it returns. It closes the assembly at once when nothing in it needs awaiting, as when the registry
+        was never made, so that an application assembly's sync `close()`, which calls it without awaiting, still
+        closes it; otherwise it returns `aclose()` to await. Closing twice does nothing.
+        """
+        try:
+            super().close()
+        except PilgrimError:
+            # pi-pilgrim's close() refuses, before closing anything, when a teardown is async, as the registry's is.
+            return self.aclose()
+        return _Closed()
+
+    def __enter__(self) -> NoReturn:
+        raise PilgrimError(
+            f"{type(self).__name__} closes its drivers and pools asynchronously: use async with, or "
+            f"drivine.sync.DrivineAssembly for the sync API."
+        )
+
+    def __exit__(self, *exc_info: object) -> NoReturn:
+        self.__enter__()
+
+
+class _Closed:
+    """What `DrivineAssembly.close()` returns when it has already closed the assembly: awaiting it does nothing."""
+
+    def __await__(self) -> Generator[None, None, None]:
+        return
+        yield

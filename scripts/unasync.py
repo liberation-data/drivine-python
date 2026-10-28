@@ -8,7 +8,8 @@ one is.
 
 A module is written again when it has async code, or imports one that does; the rest (models, the query DSL, the
 backends) is shared by both APIs. drivine/concurrency.py, what the async API asks of asyncio, has a counterpart written
-by hand: drivine/sync/concurrency.py. A test marked `async_only` (one that runs tasks concurrently) is left out.
+by hand: drivine/sync/concurrency.py. A test marked `async_only` (one that runs tasks concurrently) is left out, as
+are the definitions ASYNC_ONLY names.
 """
 
 from __future__ import annotations
@@ -47,6 +48,16 @@ TWINS = {"drivine.concurrency": "drivine.sync.concurrency"}
 
 EXTERNAL = {"falkordb.asyncio": "falkordb"}
 """Driver modules whose sync counterpart is another module."""
+
+ASYNC_ONLY = {
+    "drivine.drivine_assembly": (
+        "_Closed",
+        "DrivineAssembly.close",
+        "DrivineAssembly.__enter__",
+        "DrivineAssembly.__exit__",
+    ),
+}
+"""Definitions left out of the sync code, by module: the async API's own, which the sync API has from pi-pilgrim."""
 
 RENAMES = {
     "AsyncIterator": "Iterator",
@@ -137,16 +148,27 @@ def written_again(sources: dict[str, ast.Module]) -> set[str]:
         marked |= more
 
 
-def without_async_only(text: str, source: ast.Module) -> str:
-    """The text without the tests marked `async_only`."""
+def without_async_only(text: str, source: ast.Module, module: str = "") -> str:
+    """The text without the tests marked `async_only`, or the module's definitions that ASYNC_ONLY names."""
     lines = text.splitlines(keepends=True)
     dropped: set[int] = set()
-    for it in ast.walk(source):
-        if isinstance(it, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and any(
-            ast.unparse(decorator).endswith("mark.async_only") for decorator in it.decorator_list
-        ):
-            first = min(decorator.lineno for decorator in it.decorator_list)
-            dropped.update(range(first - 1, (it.end_lineno or it.lineno)))
+    named = ASYNC_ONLY.get(module, ())
+    definitions = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+
+    def visit(body: list[ast.stmt], prefix: str) -> None:
+        for it in body:
+            if not isinstance(it, definitions):
+                continue
+            name = f"{prefix}{it.name}"
+            if name in named or any(
+                ast.unparse(decorator).endswith("mark.async_only") for decorator in it.decorator_list
+            ):
+                first = min([it.lineno, *(decorator.lineno for decorator in it.decorator_list)])
+                dropped.update(range(first - 1, (it.end_lineno or it.lineno)))
+            elif isinstance(it, ast.ClassDef):
+                visit(it.body, f"{name}.")
+
+    visit(source.body, "")
     return "".join(line for i, line in enumerate(lines) if i not in dropped)
 
 
@@ -252,7 +274,7 @@ def write(into: Path) -> list[Path]:
     written: list[Path] = []
     for name in sorted(generated):
         path = paths[name]
-        text = rewritten(without_async_only(path.read_text(), sources[name]), generated)
+        text = rewritten(without_async_only(path.read_text(), sources[name], name), generated)
         left = leftovers(text)
         if left:
             raise SystemExit(f"{path.relative_to(ROOT)} still holds {', '.join(left)} once made sync.")

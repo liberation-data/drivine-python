@@ -1323,6 +1323,78 @@ async def test_a_list_of_temporal_values_worked_out_on_each_row_is_read_item_by_
     ]
 
 
+async def test_a_coalesce_of_a_list_of_temporal_values_and_lists_or_maps_that_hold_one_deeper_read_item_by_item(
+    cypher_pm: PersistenceManager,
+):
+    # Not in the spec yet: drivine4j's test of liberation-data/drivine4j#347. Oracle reads these by their places too,
+    # not with JSON_TABLE. Of 0, 1 and 2 items, at 10:01, 10:02.
+    at = "localdatetime('2024-03-15T10:00:00')"
+    rows = f"UNWIND [0, 1, 2] AS k WITH k, [i IN range(1, k) | {at} + duration({{minutes: i}})] AS l"
+    each = [[0, []], [1, [1]], [2, [1, 2]]]
+
+    async def query(cypher: str) -> list[Any]:
+        return await cypher_pm.query(spec(cypher))
+
+    assert await query(
+        f"{rows} RETURN k, [x IN coalesce(l, []) | x.minute], size([x IN coalesce(l, []) WHERE x IS NOT NULL]) "
+        "ORDER BY k"
+    ) == [[0, [], 0], [1, [1], 1], [2, [1, 2], 2]]
+    assert await query(
+        f"{rows} WITH k, CASE WHEN k = 1 THEN l END AS m RETURN k, [x IN coalesce(m, []) | x.minute] ORDER BY k"
+    ) == [[0, []], [1, [1]], [2, []]]
+    # collect(DISTINCT …) of lists of lists, and of lists of maps, that hold such a list, each once where first.
+    twice = f"UNWIND [2, 1, 2] AS k WITH k, [i IN range(1, k) | {at} + duration({{minutes: i}})] AS l"
+    assert await query(
+        f"{twice} WITH collect(DISTINCT [l, l]) AS ls RETURN [x IN ls | [y IN x | [z IN y | z.minute]]]"
+    ) == [[[[1, 2], [1, 2]], [[1], [1]]]]
+    assert await query(
+        f"{twice} WITH collect(DISTINCT [x IN l | [x]]) AS ls RETURN [x IN ls | [y IN x | y[0].minute]]"
+    ) == [[[1, 2], [1]]]
+    assert await query(
+        f"{twice} WITH collect(DISTINCT [x IN l | [x, null]]) AS ls RETURN [x IN ls | [y IN x | [y[0].minute, y[1]]]]"
+    ) == [[[[1, None], [2, None]], [[1, None]]]]
+    assert await query(
+        f"{twice} WITH k, [l, l] AS ll WITH collect(DISTINCT ll) AS lls RETURN [x IN lls | size(x[0])]"
+    ) == [[2, 1]]
+    assert await query(
+        f"{twice} WITH collect(DISTINCT [x IN l | {{t: x}}]) AS ms RETURN [x IN ms | [y IN x | y.t.minute]]"
+    ) == [[[1, 2], [1]]]
+    assert await query(f"{rows} UNWIND [x IN l | {{t: x}}] AS m RETURN k, collect(m.t.minute) ORDER BY k") == [
+        [1, [1]],
+        [2, [1, 2]],
+    ]
+    # A list taken back out of a map that holds it.
+    assert await query(f"{rows} WITH k, {{l: l}} AS m RETURN k, [x IN m.l | x.minute] ORDER BY k") == each
+    # An item a quantifier takes from a list of such lists, and a coalesce in a list worked out item by item that is a
+    # temporal value or a number.
+    assert await query(
+        f"{rows} WITH k, [l, l] AS ll RETURN k, any(x IN ll WHERE size([y IN x WHERE y.minute = 2]) > 0) ORDER BY k"
+    ) == [[0, False], [1, False], [2, True]]
+    assert (
+        await query(
+            "UNWIND [0, 1, 2] AS k WITH k, [i IN range(1, k) | "
+            f"coalesce(CASE WHEN k > 5 THEN k END, {at} + duration({{minutes: i}}))] AS l "
+            "RETURN k, [x IN l | x.minute] ORDER BY k"
+        )
+        == each
+    )
+    # Such a list a reduce gives, one at a map's key a temporal value's field is named for, and the keys of a map that
+    # holds one.
+    reduced = "reduce(acc = [], x IN l | acc + [x])"
+    assert await query(f"{rows} WITH k, {reduced} AS m RETURN k, [x IN m | x.minute] ORDER BY k") == each
+    assert await query(f"{rows} WITH k, {{minute: l}} AS m RETURN k, [x IN m.minute | x.minute] ORDER BY k") == each
+    assert await query(f"{rows} WITH k, {{l: l}} AS m RETURN k, keys(m) ORDER BY k") == [
+        [0, ["l"]],
+        [1, ["l"]],
+        [2, ["l"]],
+    ]
+    # A list of a number and a temporal value sorts, and is searched with IN, as Cypher has it.
+    mixed = f"UNWIND [[2, {at} + duration({{minutes: 2}})], [1, {at}], [2, {at} + duration({{minutes: 1}})]] AS l"
+    assert await query(
+        f"{mixed} RETURN l[0], l[1].minute, {at} + duration({{minutes: 1}}) IN l, 2 IN l ORDER BY l"
+    ) == [[1, 0, False, False], [2, 1, True, True], [2, 2, False, True]]
+
+
 async def test_an_aggregate_of_floats_gives_a_float_whole_or_not_and_a_sum_of_integers_an_integer(
     cypher_pm: PersistenceManager,
 ):

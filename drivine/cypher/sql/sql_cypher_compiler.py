@@ -757,8 +757,8 @@ class SqlCypherCompiler(ABC):
 
     def temporal_elements(self, json: str, alias: str) -> str:
         """
-        `elements` of the JSON list whose items the statement makes temporal values, or lists of them, as Oracle reads
-        them apart: see its own.
+        `elements` of the JSON list that the statement makes hold temporal values at any depth, as Oracle reads them
+        apart: see its own.
         """
         return self.elements(json, alias)
 
@@ -768,8 +768,8 @@ class SqlCypherCompiler(ABC):
         return self.temporal_elements(json, alias) if temporal else self.elements(json, alias)
 
     def _elements_of(self, listed: Value, json: str, alias: str) -> str:
-        """The items of the JSON list, the value `listed`, as rows named `alias`: by `temporal_elements` where they
-        are temporal values or lists of them."""
+        """The items of the JSON list, the value `listed`, as rows named `alias`: by `temporal_elements` where it holds
+        temporal values at any depth."""
         return self.elements_of(json, alias, _holds_temporals(listed))
 
     @abstractmethod
@@ -794,7 +794,8 @@ class SqlCypherCompiler(ABC):
         """
         The items of the JSON list once each, where each is first: what `collect(DISTINCT …)` keeps of what a `WITH`
         before it collected, for a store dedupes no aggregate in the query that makes it. Where `temporal`, the
-        statement makes its items temporal values or lists of them, and they are read as `temporal_elements` reads them.
+        statement makes its list hold temporal values at any depth, and its items are read as `temporal_elements` reads
+        them.
         """
 
     @abstractmethod
@@ -1516,6 +1517,7 @@ class SqlCypherCompiler(ABC):
                 temporal=next(iter(temporals)) if len(temporals) == 1 else None,
                 items=next(iter(items)) if len(items) == 1 else None,
                 item_items=next(iter(item_items)) if len(item_items) == 1 else None,
+                temporals=any(isinstance(it, Json) and it.temporals for it in all_),
                 text=all(_is_text(it) for it in all_),
                 texts=all(_holds_texts(it) for it in all_),
             )
@@ -1552,6 +1554,7 @@ class SqlCypherCompiler(ABC):
                 f"{name}.item",
                 temporal=_items_of(listed),
                 items=_item_items_of(listed),
+                temporals=_item_temporals_of(listed),
                 list=_holds_lists(listed),
                 text=_holds_texts(listed) or _is_text(listed),
                 flat=self._is_flat(listed),
@@ -2141,6 +2144,7 @@ class SqlCypherCompiler(ABC):
                         temporal=carried.temporal if carried else None,
                         items=carried.items if carried else None,
                         item_items=carried.item_items if carried else None,
+                        temporals=carried.temporals if carried else False,
                         list=carried.list if carried else False,
                         item_lists=carried.item_lists if carried else False,
                         text=carried.text if carried else False,
@@ -3113,6 +3117,7 @@ class SqlCypherCompiler(ABC):
                 identity=self._identity_holding(
                     [value for _, value in entries], lambda ids: self.json_object(list(zip(keys, ids, strict=True)))
                 ),
+                temporals=any(_has_temporals(value) for _, value in entries),
             )
         if isinstance(expression, MapProjection):
             return self._map_projection(expression, scope)
@@ -3173,6 +3178,7 @@ class SqlCypherCompiler(ABC):
             items=_kind_of(list(zip(expression.items, items, strict=True))),
             identity=self._identity_holding(items, self.json_array),
             item_items=_item_kind_of(list(zip(expression.items, items, strict=True))),
+            temporals=any(_has_temporals(it) for it in items),
             list=True,
             item_lists=bool(entities) and all(_is_list(it) for it in entities),
             texts=all(_is_text(it) for it in items),
@@ -3253,6 +3259,7 @@ class SqlCypherCompiler(ABC):
                 identity=self._identity_taken(subject_value(), element, True, lambda it: self.element(it, at)),
                 list=_holds_lists(subject_value()),
                 text=_holds_texts(subject_value()),
+                temporals=_item_temporals_of(subject_value()),
             )
 
         def item(list_: str) -> str:
@@ -3273,6 +3280,7 @@ class SqlCypherCompiler(ABC):
             identity=self._identity_taken(subject_value(), taken, True, item),
             list=_holds_lists(subject_value()),
             text=_holds_texts(subject_value()),
+            temporals=_item_temporals_of(subject_value()),
         )
 
     def _entity_at(self, entities: Entities, at: str) -> Value:
@@ -3348,6 +3356,7 @@ class SqlCypherCompiler(ABC):
             item_items=_items_of(kind),
             list=True,
             item_lists=_is_list(kind),
+            temporals=_has_temporals(kind),
         )
 
     def _list_comprehension(self, expression: ListComprehension, scope: Scope) -> Value:
@@ -3356,7 +3365,13 @@ class SqlCypherCompiler(ABC):
             return self._entity_comprehension(expression, listed, scope)
         list_ = self.comparable(self.json(listed))
         name = self._alias("x")
-        item = Json(f"{name}.item", temporal=_items_of(listed), items=_item_items_of(listed), list=_holds_lists(listed))
+        item = Json(
+            f"{name}.item",
+            temporal=_items_of(listed),
+            items=_item_items_of(listed),
+            temporals=_item_temporals_of(listed),
+            list=_holds_lists(listed),
+        )
         inner = {**scope, expression.variable: item}
         projected = self._expression(expression.projection, inner) if expression.projection is not None else None
         projection = self.json(projected).sql if projected is not None else f"{name}.item"
@@ -3382,12 +3397,14 @@ class SqlCypherCompiler(ABC):
             ordered=True,
             items=kind,
             item_items=item_kind,
+            temporals=_has_temporals(projected) if projected is not None else _holds_temporals(listed),
             list=True,
             item_lists=item_lists,
         )
 
     def _reduce(self, expression: Reduce, scope: Scope) -> Value:
-        initial = self.comparable(self.json(self._expression(expression.initial, scope)))
+        start = self._expression(expression.initial, scope)
+        initial = self.comparable(self.json(start))
         listed = self._expression(expression.list, scope)
         list_ = self.comparable(self.json(listed))
         own = {expression.accumulator, expression.variable}
@@ -3410,7 +3427,7 @@ class SqlCypherCompiler(ABC):
             inner = {
                 **scope,
                 expression.accumulator: Json(accumulator),
-                expression.variable: Json(item, temporal=_items_of(listed)),
+                expression.variable: Json(item, temporal=_items_of(listed), temporals=_item_temporals_of(listed)),
             }
             return self.comparable(self.json(self._expression(expression.expression, inner)))
 
@@ -3426,7 +3443,7 @@ class SqlCypherCompiler(ABC):
                     items=was_json.items if was_json else None,
                 )
             inner[expression.accumulator] = Json(accumulator)
-            inner[expression.variable] = Json(item, temporal=_items_of(listed))
+            inner[expression.variable] = Json(item, temporal=_items_of(listed), temporals=_item_temporals_of(listed))
             was = self._given_parameters
             self._given_parameters = {
                 it: Json(self.property_of(map_, f"${it}"), temporal=Temporal.of_value(self._parameters.value(it)))
@@ -3437,7 +3454,11 @@ class SqlCypherCompiler(ABC):
             finally:
                 self._given_parameters = was
 
-        return Json(self.reduce(self._alias("f"), initial, list_, step, context, context_step))
+        return Json(
+            self.reduce(self._alias("f"), initial, list_, step, context, context_step),
+            # It may hold what its start, its list or a value of the row its step reads holds (#347).
+            temporals=_has_temporals(start) or _has_temporals(listed) or any(_has_temporals(scope[it]) for it in read),
+        )
 
     def _pattern_comprehension(self, expression: PatternComprehension, scope: Scope) -> Value:
         inner = _Select(scope)
@@ -3468,6 +3489,7 @@ class SqlCypherCompiler(ABC):
             item_items=_items_of(projected),
             list=True,
             item_lists=_is_list(projected),
+            temporals=_has_temporals(projected),
         )
 
     def _quantifier(self, expression: Quantifier, scope: Scope) -> Value:
@@ -3533,7 +3555,7 @@ class SqlCypherCompiler(ABC):
                     lambda ids: quantified(*self._entity_items(ids, entities.relationships, name), f"{ids} IS NULL"),
                 )
             )
-        item = Json(f"{name}.item", temporal=_items_of(listed))
+        item = Json(f"{name}.item", temporal=_items_of(listed), temporals=_item_temporals_of(listed))
         return Bool(
             self.shared1(
                 self.comparable(self.json(listed)),
@@ -3598,6 +3620,7 @@ class SqlCypherCompiler(ABC):
             list=True,
             item_lists=_holds_lists(listed),
             texts=_holds_texts(listed),
+            temporals=_holds_temporals(listed),
         )
 
     def _exists(self, patterns: Sequence[Pattern], where: Expression | None, scope: Scope) -> Bool:
@@ -3649,7 +3672,9 @@ class SqlCypherCompiler(ABC):
                 return Json(self.row_value(keys), row_keys=keys)
             taken = self.property_of(self.comparable(subject), key)
             return Json(
-                taken, identity=self._identity_taken(subject, taken, True, lambda it: self.property_of(it, key))
+                taken,
+                identity=self._identity_taken(subject, taken, True, lambda it: self.property_of(it, key)),
+                temporals=subject.temporals,
             )
         if isinstance(subject, Bool):
             raise DrivineError("A truth value has no properties.")
@@ -3658,7 +3683,8 @@ class SqlCypherCompiler(ABC):
     def _temporal_field(self, subject: Json, key: str) -> Value | None:
         """
         A field of a temporal value, `d.year` or `dur.days`: of the kind the statement makes it, or of the kind a text's
-        shape tells, where a map's is its entry of that name; None for a name no temporal value has.
+        shape tells, where a map's is its entry of that name; None for a name no temporal value has. A map's entry may
+        hold what the map holds, as `{minute: l}.minute` does: see Json.temporals.
         """
         if key not in FIELD_NAMES:
             return None
@@ -3676,7 +3702,7 @@ class SqlCypherCompiler(ABC):
             )
             return f"CASE WHEN {self.type_of(x)} = 'string' THEN {by_kind} ELSE {self.property_of(x, key)} END"
 
-        return Json(self.shared1(self.comparable(subject), read))
+        return Json(self.shared1(self.comparable(subject), read), temporals=subject.temporals)
 
     def _temporal_binary(self, operator: BinaryOperator, left: Value, right: Value) -> Value | None:
         """
@@ -3835,15 +3861,19 @@ class SqlCypherCompiler(ABC):
         def present(map_: str) -> str:
             return f"CASE WHEN NOT ({self._is_null(subject)}) THEN {map_} END"
 
+        temporals = any(_has_temporals(value) for _, value in values)
         if not any(isinstance(it, AllProperties) for it in projection.elements):
             keys = [key for key, _ in values]
             identity = self._identity_holding(
                 [value for _, value in values],
                 lambda ids: present(self.json_object(list(zip(keys, ids, strict=True)))),
             )
-            return Json(present(self.json_object(entries)), ordered=True, identity=identity)
+            return Json(present(self.json_object(entries)), ordered=True, identity=identity, temporals=temporals)
         # Every property, then the entries over them.
-        return Json(present(self.with_entries(self.comparable(self.json(subject)), entries)))
+        return Json(
+            present(self.with_entries(self.comparable(self.json(subject)), entries)),
+            temporals=temporals or _holds_temporals(subject),
+        )
 
     def _compared(self, left: Value, right: Value, binary: Binary) -> tuple[Value, Value]:
         """
@@ -3969,6 +3999,7 @@ class SqlCypherCompiler(ABC):
                 self.shared([a, b], lambda it: self.add(it[0], it[1], given)),
                 items=items if items == _items_of(right_value) else None,
                 item_items=item_items if item_items == _item_items_of(right_value) else None,
+                temporals=_has_temporals(left_value) or _has_temporals(right_value),
                 list=_is_list(left_value) or _is_list(right_value),
                 item_lists=_holds_lists(left_value) and (_holds_lists(right_value) or not _is_list(right_value)),
                 text=(text_left and (text_right or _is_given_number(given_right)))
@@ -4525,6 +4556,7 @@ class SqlCypherCompiler(ABC):
             temporal=_kind_of(results),
             items=_item_kind_of(results),
             identity=identity,
+            temporals=any(_has_temporals(result) for _, result in results),
             list=all(_is_list(result) for _, result in results),
             item_lists=all(_holds_lists(result) for _, result in results),
             text=all(_is_text(result) for _, result in results),
@@ -4578,9 +4610,15 @@ class SqlCypherCompiler(ABC):
             raise DrivineError("relationships() takes a path.")
         if name == "coalesce":
             coalesced = ", ".join(self.null_if_json_null(self.comparable(self.json(it))) for it in arguments)
+            written = list(zip(function.arguments, arguments, strict=True))
             return Json(
                 f"COALESCE({coalesced})",
-                temporal=_kind_of(list(zip(function.arguments, arguments, strict=True))),
+                temporal=_kind_of(written),
+                # A list of one kind where each is, or is null or an empty list written, as `coalesce(l, [])`: so Oracle
+                # reads its items by their places, as it reads l's (#347).
+                items=_list_kind_of(written, _items_of),
+                item_items=_list_kind_of(written, _item_items_of),
+                temporals=any(_has_temporals(it) for it in arguments),
                 text=all(_is_text(it) for it in arguments),
                 texts=all(_holds_texts(it) for it in arguments),
             )
@@ -4609,6 +4647,7 @@ class SqlCypherCompiler(ABC):
                 list=True,
                 item_lists=_is_list(gathered),
                 texts=_is_text(gathered),
+                temporals=_has_temporals(gathered),
                 identity=(
                     self.comparable(Json(self.collect(identity, self._row_order), ordered=True))
                     if identity is not None
@@ -4634,6 +4673,7 @@ class SqlCypherCompiler(ABC):
                         list=True,
                         item_lists=listed.item_lists,
                         texts=listed.texts,
+                        temporals=listed.temporals,
                     )
                 return Json(
                     self.distinct_items(self.comparable(listed), _holds_temporals(listed)),
@@ -4643,6 +4683,7 @@ class SqlCypherCompiler(ABC):
                     list=True,
                     item_lists=listed.item_lists,
                     texts=listed.texts,
+                    temporals=listed.temporals,
                 )
             return Json(self.distinct_items(self.comparable(self.json(listed))), ordered=True)
         if name == "sum":
@@ -4673,6 +4714,7 @@ class SqlCypherCompiler(ABC):
                 list=value.list,
                 item_lists=value.item_lists,
                 text=_is_text(value),
+                temporals=value.temporals,
             )
         if name == "range":
             if len(arguments) not in (2, 3):
@@ -4709,6 +4751,7 @@ class SqlCypherCompiler(ABC):
                 item_lists=_holds_lists(subject),
                 text=_is_text(subject),
                 texts=_holds_texts(subject),
+                temporals=_holds_temporals(subject),
             )
         if name == "tail":
             subject = one()
@@ -4728,6 +4771,7 @@ class SqlCypherCompiler(ABC):
                 list=_is_list(subject),
                 item_lists=_holds_lists(subject),
                 texts=_holds_texts(subject),
+                temporals=_holds_temporals(subject),
             )
         if name == "toboolean":
             # A text is read as Cypher reads it, its case and the spaces around it aside; a number is true but for 0.
@@ -4887,6 +4931,7 @@ class SqlCypherCompiler(ABC):
                 identity=self._identity_taken(one(), result, True, applied),
                 list=_holds_lists(one()),
                 text=_holds_texts(one()),
+                temporals=_item_temporals_of(one()),
             )
         return Json(result, text=name in TEXT_FUNCTIONS)
 
@@ -5557,10 +5602,21 @@ def _kind_of(values: Sequence[tuple[Expression, Value]]) -> Temporal | None:
 def _item_kind_of(values: Sequence[tuple[Expression, Value]]) -> Temporal | None:
     """The temporal kind the statement makes each item of each of the values, lists all, as `_kind_of` tells it of
     values."""
-    listed = [value for written, value in values if written != Literal(None)]
-    if not all(_is_list(it) for it in listed):
+    return _list_kind_of(values, _items_of)
+
+
+def _list_kind_of(
+    values: Sequence[tuple[Expression, Value]], of: Callable[[Value], Temporal | None]
+) -> Temporal | None:
+    """
+    The kind `of` gives each of the values, lists all, where it gives every one the same: a null written among them
+    aside, and an empty list written, which holds no item of another kind. None where they are of different kinds or of
+    none.
+    """
+    listed = [value for written, value in values if written != Literal(None) and written != ListLiteral(())]
+    if not listed or not all(_is_list(it) for it in listed):
         return None
-    kinds = {_items_of(it) for it in listed}
+    kinds = {of(it) for it in listed}
     return next(iter(kinds)) if len(kinds) == 1 else None
 
 
@@ -5638,9 +5694,27 @@ def _items_of(listed: Value) -> Temporal | None:
 
 
 def _holds_temporals(listed: Value) -> bool:
-    """Whether the statement makes the items of the list temporal values, or lists of them: see
-    `SqlCypherCompiler.temporal_elements`."""
-    return _items_of(listed) is not None or _item_items_of(listed) is not None
+    """
+    Whether the statement makes the list or map hold, at any depth, temporal values, as its items or deeper: see
+    `SqlCypherCompiler.temporal_elements`. A list of other values, or of lists of them, is read as `elements` reads it.
+    """
+    return (
+        _items_of(listed) is not None
+        or _item_items_of(listed) is not None
+        or (isinstance(listed, Json) and listed.temporals)
+    )
+
+
+def _has_temporals(value: Value) -> bool:
+    """Whether the statement makes the value a temporal value, or a list or a map that holds one at any depth: see
+    Json.temporals."""
+    return (isinstance(value, Json) and value.temporal is not None) or _holds_temporals(value)
+
+
+def _item_temporals_of(listed: Value) -> bool:
+    """Whether an item taken from the list may hold temporal values at any depth: not where it is of a temporal kind
+    itself."""
+    return isinstance(listed, Json) and listed.temporals and listed.items is None
 
 
 def _item_items_of(listed: Value) -> Temporal | None:

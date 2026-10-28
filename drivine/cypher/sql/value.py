@@ -24,6 +24,14 @@ class Json:
     item_items: Temporal | None = None
     """Where the statement makes it a list whose every item is a list of `items` of one kind, that kind: an item taken
     from it has it as its `items`."""
+    temporals: bool = False
+    """
+    Whether the statement makes it a list or a map that holds, at any depth, a value it makes temporal: deeper than
+    `items` and `item_items` tell, or beside values of other kinds, as in `[l, l]` of a list `l` of them. Of an item
+    taken from such a list, of an entry read from such a map, and of a `CASE`, a `coalesce` or a `reduce` that may give
+    one, that it may be or hold one. Oracle reads the items of such a list by their places (#331, #347): see
+    `SqlCypherCompiler.temporal_elements`.
+    """
     list: bool = False
     """Whether the statement makes it a list, and with `item_lists` a list of lists: a store may sort a list as Cypher
     does only then."""

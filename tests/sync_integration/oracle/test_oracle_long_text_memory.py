@@ -60,13 +60,16 @@ def test_compiled_statements_that_read_a_text_past_32_kb_give_back_their_memory_
         grown = (session_memory(dsn, str(sid)) - before) // 1_000_000
         # Kept, the 90 statements held 400 MB (20 a session, where drivine4j keeps 64 and held 1,134 MB); closed, 37 MB.
         assert grown < 200, f"The session holds {grown} MB more after 90 statements."
-        for statement in [
-            f"DROP PROPERTY GRAPH IF EXISTS {GRAPH}",
-            f"DROP TABLE IF EXISTS {GRAPH}_edge PURGE",
-            f"DROP TABLE IF EXISTS {GRAPH}_node PURGE",
-            f"DROP TABLE IF EXISTS {GRAPH}_schema PURGE",
-        ]:
-            connection.query(QuerySpecification[Any](statement))
     finally:
-        connection.release()
-        provider.end()
+        # The graph's tables go whether the statements gave their memory back or not.
+        try:
+            for statement in [
+                f"DROP PROPERTY GRAPH IF EXISTS {GRAPH}",
+                f"DROP TABLE IF EXISTS {GRAPH}_edge PURGE",
+                f"DROP TABLE IF EXISTS {GRAPH}_node PURGE",
+                f"DROP TABLE IF EXISTS {GRAPH}_schema PURGE",
+            ]:
+                connection.query(QuerySpecification[Any](statement))
+        finally:
+            connection.release()
+            provider.end()

@@ -177,10 +177,10 @@ def _prepare(cursor: Any, statement: str, compiled_from_cypher: bool) -> None:
     over 20 MB where it reads a text past 32 KB. Kept in the driver's cache, 20 statements a session, a few dozen ran
     the instance out of PGA (ORA-04036, liberation-data/drivine4j#313). Closed, its memory goes back. Drivine's own
     statements, a few the same each time, are still kept. The statement is executed as this same text, so it is not
-    prepared again.
+    prepared again: stripped as `execute` strips it before it compares, or a padded one would be prepared again, cached.
     """
     if compiled_from_cypher:
-        cursor.prepare(statement, cache_statement=False)
+        cursor.prepare(statement.strip(), cache_statement=False)
 
 
 def _implicit_results(cursor: Any) -> list[Any]:

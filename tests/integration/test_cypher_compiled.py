@@ -3042,3 +3042,110 @@ async def test_a_stored_text_past_32_kb_read_in_one_row_is_measured_and_changed_
         used = f"MATCH (n:CyLongText) RETURN {function.replace('#', 'n.t')}"
         assert await cypher_pm.query(spec(used)) == [expected], f"{function}, read where used"
     await clear(cypher_pm)
+
+
+# Lists and maps written longer than Postgres takes arguments to a function, 100: drivine4j's own tests of
+# liberation-data/drivine4j#332, ported for #192. Not in the spec yet.
+
+
+def _long_item(i: int) -> tuple[str, Any]:
+    """The Cypher of the `i`th item of a long literal, and what it gives: of seven kinds in turn, a null among them."""
+    match i % 7:
+        case 0:
+            return f"{i}", i
+        case 1:
+            return f"'s{i}'", f"s{i}"
+        case 2:
+            return "null", None
+        case 3:
+            return f"{i}.5", i + 0.5
+        case 4:
+            return ("true", True) if i % 2 == 0 else ("false", False)
+        case 5:
+            return f"[{i}, 'n']", [i, "n"]
+        case _:
+            return f"{{k: {i}}}", {"k": i}
+
+
+async def test_a_list_literal_of_more_than_100_items_keeps_its_items_returned_tested_with_in_unwound_and_comprehended(
+    cypher_pm: PersistenceManager,
+):
+    for n in (100, 101, 250, 1001):
+        # An Oracle session spends 180 MB of its PGA on a statement of a list of 1001, 815 MB on one that reads it three
+        # times, and keeps 50 to 217 MB after (#241). Late in the suite, beside its other sessions, that passes Oracle
+        # Free's limit (ORA-04036), so Oracle isn't asked a list of 1001; drivine4j asks it all but the comparisons
+        # below (liberation-data/drivine4j#360, here #227).
+        if n > 250 and cypher_pm.type is DatabaseType.ORACLE:
+            continue
+        items = [_long_item(i) for i in range(n)]
+        listed = "[" + ", ".join(it[0] for it in items) + "]"
+        expected = [it[1] for it in items]
+        last_whole = max(i for i in range(n) if i % 7 == 0)
+        assert await cypher_pm.query(spec(f"RETURN {listed}")) == [expected], f"{n} items"
+        sized = f"WITH {listed} AS xs RETURN [size(xs), xs[-1], xs[{n - 2}]]"
+        assert await cypher_pm.query(spec(sized)) == [[n, expected[-1], expected[n - 2]]], f"{n} items"
+        assert await cypher_pm.query(spec(f"UNWIND {listed} AS x RETURN x")) == expected, f"{n} items"
+        kept = f"RETURN [x IN {listed} WHERE x IS NOT NULL | x]"
+        assert await cypher_pm.query(spec(kept)) == [[it for it in expected if it is not None]], f"{n} items"
+        assert await cypher_pm.query(spec(f"RETURN size([x IN {listed} | x IS NULL])")) == [n], f"{n} items"
+        # A null among the items makes a value not found null, not false, as in Cypher. A list of numbers and nulls is
+        # tested whole, as JSON.
+        numbers = "[" + ", ".join("null" if i % 7 == 2 else f"{i}" for i in range(n)) + "]"
+        found = f"RETURN [{last_whole} IN {numbers}, 999999 IN {numbers}]"
+        assert await cypher_pm.query(spec(found)) == [[True, None]], f"{n} items"
+        # A list of several kinds is compared item by item, in a few hundred characters of SQL each: Oracle runs out of
+        # memory reading the comparisons of 1001 even alone (#227). (Not -1, which compiles to ten times the statement.)
+        found = f"RETURN [{last_whole} IN {listed}, 999999 IN {listed}]"
+        assert await cypher_pm.query(spec(found)) == [[True, None]], f"{n} items"
+        # Compared with itself item by item, each pair equal but the nulls, which are null beside each other.
+        assert await cypher_pm.query(spec(f"RETURN {listed} = {listed}")) == [None], f"{n} items"
+
+
+async def test_a_long_list_or_map_literal_without_a_null_equals_the_same_value_given_as_a_parameter_or_collected(
+    cypher_pm: PersistenceManager,
+):
+    # Text holding the brackets and commas a long literal is spliced at on Postgres.
+    def item(i: int) -> tuple[str, Any]:
+        match i % 4:
+            case 0:
+                return f"{i}", i
+            case 1:
+                return f"'a], [b}}, {{{i}'", f"a], [b}}, {{{i}"
+            case 2:
+                return f"[{i}, [{i}]]", [i, [i]]
+            case _:
+                return f"{{k: [{i}], m: {{n: {i}}}}}", {"k": [i], "m": {"n": i}}
+
+    for n in (101, 200, 201):
+        items = [item(i) for i in range(n)]
+        listed = "[" + ", ".join(it[0] for it in items) + "]"
+        expected = [it[1] for it in items]
+        assert await cypher_pm.query(spec(f"RETURN {listed}")) == [expected], f"{n} items"
+        assert await cypher_pm.query(spec(f"RETURN {listed} = $p", {"p": expected})) == [True], f"{n} items"
+        collected = f"UNWIND {listed} AS x WITH collect(x) AS xs RETURN xs = {listed}"
+        assert await cypher_pm.query(spec(collected)) == [True], f"{n} items"
+        mapped = "{" + ", ".join(f"k{i}: {it[0]}" for i, it in enumerate(items)) + "}"
+        expected_map = {f"k{i}": it[1] for i, it in enumerate(items)}
+        assert await cypher_pm.query(spec(f"RETURN {mapped}")) == [expected_map], f"{n} entries"
+        assert await cypher_pm.query(spec(f"RETURN {mapped} = $p", {"p": expected_map})) == [True], f"{n} entries"
+
+
+async def test_a_map_literal_of_more_than_50_entries_keeps_its_entries_in_order_returned_read_and_projected(
+    cypher_pm: PersistenceManager,
+):
+    for n in (50, 51, 120):
+        entries = [(f"k{i}", _long_item(i)) for i in range(n)]
+        written = ", ".join(f"{key}: {cypher}" for key, (cypher, _) in entries)
+        mapped = "{" + written + "}"
+        expected = {key: value for key, (_, value) in entries}
+        returned = await cypher_pm.get_one(spec(f"RETURN {mapped}"))
+        assert returned == expected, f"{n} entries"
+        # Its keys in the order written, where the store keeps them so: Neo4j and Oracle do for a few keys, not for 50.
+        if cypher_pm.type is DatabaseType.POSTGRES:
+            assert list(returned) == list(expected), f"{n} entries"
+        read = f"WITH {mapped} AS m RETURN [size(keys(m)), m.k{n - 1}, m['k{n - 2}']]"
+        assert await cypher_pm.query(spec(read)) == [[n, expected[f"k{n - 1}"], expected[f"k{n - 2}"]]], f"{n} entries"
+        assert await cypher_pm.query(spec(f"RETURN {mapped} = {mapped}")) == [None], f"{n} entries"
+        # Set over a map by a projection.
+        projected = f"WITH {{a: 1}} AS m RETURN m {{.*, {written}}}"
+        assert await cypher_pm.query(spec(projected)) == [{"a": 1, **expected}], f"{n} entries"

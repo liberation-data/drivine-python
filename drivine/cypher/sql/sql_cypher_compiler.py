@@ -239,6 +239,12 @@ The greatest start or length `substring()`, `left()` and `right()` take, and the
 as Neo4j takes them: Java's greatest int.
 """
 
+MOST_ARGUMENTS = 100
+"""
+The most arguments a function takes on Postgres: a list or a map written by one call of a function past them, as a
+literal of more than 100 items or 50 entries is, is written in parts (liberation-data/drivine-python#192).
+"""
+
 LONG_MAX = (1 << 63) - 1
 """The greatest long, Java's, as `_cut` holds a number to."""
 
@@ -4223,8 +4229,8 @@ class SqlCypherCompiler(ABC):
             return None
 
         def joined(pairs: Iterable[tuple[Expression, Expression]]) -> str:
-            compared = (self.bool(self._binary(Binary(BinaryOperator.EQUALS, a, b), scope)) for a, b in pairs)
-            return "(" + " AND ".join(compared) + ")"
+            compared = [self.bool(self._binary(Binary(BinaryOperator.EQUALS, a, b), scope)) for a, b in pairs]
+            return _grouped(compared, "AND")
 
         if binary.operator is BinaryOperator.IN:
             if not isinstance(right, ListLiteral) or not right.items:
@@ -4237,7 +4243,7 @@ class SqlCypherCompiler(ABC):
                 equals = Binary(BinaryOperator.EQUALS, left, listed)
                 a, b = self._compared(item, self._expression(listed, scope), equals)
                 compared.append(self._equality(a, b, listed, self._plain(left, listed, a, b, scope), stored))
-            return "(" + " OR ".join(compared) + ")"
+            return _grouped(compared, "OR")
         if isinstance(left, ListLiteral) and isinstance(right, ListLiteral):
             if len(left.items) != len(right.items):
                 return "FALSE"
@@ -5225,6 +5231,23 @@ def indent(text: str) -> str:
 
 def unsupported(construct: str) -> NoReturn:
     raise DrivineError(f"{construct} is Cypher, and is not compiled to SQL yet.")
+
+
+def chunked(items: Sequence[T], size: int) -> list[Sequence[T]]:
+    """The items in runs of `size`, in order, the last of what is left."""
+    return [items[start : start + size] for start in range(0, len(items), size)]
+
+
+def _grouped(terms: Sequence[str], operator: str) -> str:
+    """
+    The conditions joined by the operator, in parentheses. SQLite reads `a OR b OR c` as an expression as deep as it is
+    long, and refuses one deeper than 1,000 (liberation-data/drivine4j#332): past MOST_ARGUMENTS terms, each run of them
+    is joined in parentheses of its own, and the runs joined so in turn. Postgres takes such a chain at any length
+    (100,000 terms tried); it is grouped here too, as drivine4j groups it, so the libraries compile it alike.
+    """
+    if len(terms) <= MOST_ARGUMENTS:
+        return "(" + f" {operator} ".join(terms) + ")"
+    return _grouped([_grouped(it, operator) for it in chunked(terms, MOST_ARGUMENTS)], operator)
 
 
 def writes(clause: Clause) -> bool:

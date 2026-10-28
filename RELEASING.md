@@ -74,7 +74,7 @@ included. Only a merged version bump or a pushed tag publishes.
     stubs step writes, so a model file that names another version fails it.
   - `sample/poetry.lock`, whose entry for drivine has the version as PEP 440 normalizes it (`0.3.0rc1`), as
     `poetry lock` writes it.
-  - `README.md`'s "0.3 is an alpha release": its `MAJOR.MINOR`.
+  - `README.md`'s and `docs/00-introduction.md`'s "0.3 is an alpha release": its `MAJOR.MINOR`.
 
   Each must be found exactly once, or Prepare release fails, saying which: a file moved or a line reworded is then
   updated in `REFERENCES`. A unit test checks that the list matches the files and names `pyproject.toml`'s version,

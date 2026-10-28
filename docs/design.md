@@ -565,9 +565,9 @@ class AppAssembly(PilgrimAssembly):
 - Closing is pi-pilgrim's, as Spring closes drivine4j's beans with its context. The registry is a `shared` component,
   and its `close` is the teardown pi-pilgrim infers, so closing the assembly (`await aclose()`, or leaving `async with`)
   closes every driver and pool, and an application's assembly closes the `DrivineAssembly` it asked `AssemblyHolder`
-  for. `DrivineAssembly.close()`, kept for 0.2.0's `await drivine.close()`, is sync and returns something to await:
-  `aclose()` once the registry needs closing, else a finished coroutine, so an application assembly's sync `close()`
-  still closes a `DrivineAssembly` with no registry. `with` on it refuses, as its exit couldn't await. Entering
+  for, or holds as a component. The async `DrivineAssembly` is pi-pilgrim's `AsyncPilgrimAssembly`, whose `close()` is
+  `aclose()`, so 0.2.0's `await drivine.close()` closes it, and whose `with` refuses, as its exit couldn't await; it
+  overrides `__enter__` only to name the sync API in that refusal. The sync one is a plain `PilgrimAssembly`. Entering
   `DrivineAssembly` calls `start()`, as Spring starts drivine4j on refresh; entering an application's assembly doesn't,
   so the application calls `drivine.start()`.
 - The managers are plain classes, so an application with another container, or none, constructs them itself.

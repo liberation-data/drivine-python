@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import Coroutine, Generator
-from typing import Any, NoReturn, Self
+from typing import NoReturn, Self
 
-from pipilgrim import PilgrimAssembly, PilgrimError
+from pipilgrim import AsyncPilgrimAssembly, AsyncTeardownRequired
 
 from drivine.connection.database_registry import DEFAULT, DatabaseRegistry
 from drivine.dsl.index_advice_policy import IndexAdvicePolicy
@@ -16,7 +15,7 @@ from drivine.schema.schema_manager import SchemaManager
 from drivine.schema.schema_options import SchemaOptions
 
 
-class DrivineAssembly(PilgrimAssembly):
+class DrivineAssembly(AsyncPilgrimAssembly):
     """
     Drivine's components: the registry and the managers. On its own:
 
@@ -126,60 +125,9 @@ class DrivineAssembly(PilgrimAssembly):
             raise
         return self
 
-    def close(self) -> Coroutine[Any, Any, None]:  # pyright: ignore[reportIncompatibleMethodOverride]
-        """
-        Closes the assembly, as `await aclose()` does: kept so that 0.2.0's shutdown, `await assembly.drivine.close()`,
-        still closes every database's driver and pool. Prefer `await aclose()`, or leaving `async with`.
-
-        Await what it returns: left unawaited, it closes nothing once the registry is made, and Python warns that a
-        coroutine was never awaited. It can't refuse a call from sync code instead, as `asyncio.run(drivine.close())`
-        calls it before any loop runs. It closes the assembly at once when nothing in it needs awaiting, as when the
-        registry was never made, so that an application assembly's sync `close()`, which calls it without awaiting,
-        still closes it; otherwise it returns `aclose()` to await. Closing twice does nothing.
-        """
-        try:
-            super().close()
-        except PilgrimError as error:
-            # pi-pilgrim's close() refuses, before closing anything, when a teardown is async, as the registry's is.
-            # Any other refusal, such as closing while making a component, is raised.
-            if _ASYNC_TEARDOWN_REFUSAL not in str(error):
-                raise
-            return self.aclose()
-        return _Closed()
-
     def __enter__(self) -> NoReturn:
-        raise PilgrimError(
+        """Refuses, as pi-pilgrim's does, and names the sync API, whose assembly `with` closes."""
+        raise AsyncTeardownRequired(
             f"{type(self).__name__} closes its drivers and pools asynchronously: use async with, or "
             f"drivine.sync.DrivineAssembly for the sync API."
         )
-
-    def __exit__(self, *exc_info: object) -> NoReturn:
-        self.__enter__()
-
-
-_ASYNC_TEARDOWN_REFUSAL = "is async. Close it with await aclose()."
-"""
-How pi-pilgrim's close() says a teardown is async, in `_refuse_async` (pipilgrim/pilgrim_assembly.py:586 in 0.3.0 and
-0.3.1), as it raises no subclass of PilgrimError for it: liberation-data/pi-pilgrim#9. A test fails if the text changes.
-"""
-
-
-class _Closed(Coroutine[Any, Any, None]):
-    """
-    What `DrivineAssembly.close()` returns when it has already closed the assembly: awaiting it does nothing. A
-    Coroutine, so that `asyncio.run` and `create_task` take it as they take `aclose()`, but not a native one, so that
-    leaving it unawaited, as an application assembly's sync `close()` does, raises no warning.
-    """
-
-    def __await__(self) -> Generator[None, None, None]:
-        return
-        yield
-
-    def send(self, value: object) -> NoReturn:
-        raise StopIteration
-
-    def throw(self, typ: Any, val: Any = None, tb: Any = None) -> NoReturn:
-        raise typ if val is None else val
-
-    def close(self) -> None:
-        pass

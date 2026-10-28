@@ -9,7 +9,7 @@ one is.
 A module is written again when it has async code, or imports one that does; the rest (models, the query DSL, the
 backends) is shared by both APIs. drivine/concurrency.py, what the async API asks of asyncio, has a counterpart written
 by hand: drivine/sync/concurrency.py. A test marked `async_only` (one that runs tasks concurrently) is left out, as
-are the definitions ASYNC_ONLY names.
+is a definition ASYNC_ONLY names.
 """
 
 from __future__ import annotations
@@ -49,18 +49,10 @@ TWINS = {"drivine.concurrency": "drivine.sync.concurrency"}
 EXTERNAL = {"falkordb.asyncio": "falkordb"}
 """Driver modules whose sync counterpart is another module."""
 
-ASYNC_ONLY = {
-    "drivine.drivine_assembly": (
-        "_ASYNC_TEARDOWN_REFUSAL",
-        "_Closed",
-        "DrivineAssembly.close",
-        "DrivineAssembly.__enter__",
-        "DrivineAssembly.__exit__",
-    ),
-}
+ASYNC_ONLY = {"drivine.drivine_assembly": ("DrivineAssembly.__enter__",)}
 """
-Definitions, and assignments to a name, left out of the sync code, by module: the async API's own, which the sync API
-has from pi-pilgrim.
+Definitions left out of the sync code, by module: the async API's own. The async DrivineAssembly refuses `with`, naming
+the sync API; the sync one, a plain PilgrimAssembly, is closed by it.
 """
 
 RENAMES = {
@@ -88,6 +80,7 @@ RENAMES = {
     "AsyncConnection": "Connection",
     "AsyncCursor": "Cursor",
     "AsyncIteratorFixture": "IteratorFixture",
+    "AsyncPilgrimAssembly": "PilgrimAssembly",
 }
 """Names whose sync counterpart is another name: the language's, and each driver's."""
 
@@ -161,17 +154,7 @@ def without_async_only(text: str, source: ast.Module, module: str = "") -> str:
     definitions = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
 
     def visit(body: list[ast.stmt], prefix: str) -> None:
-        for i, it in enumerate(body):
-            if isinstance(it, ast.Assign) and len(it.targets) == 1 and isinstance(it.targets[0], ast.Name):
-                name = f"{prefix}{it.targets[0].id}"
-                if name in named:
-                    found.add(name)
-                    # With the docstring that follows it, if it has one.
-                    after = body[i + 1] if i + 1 < len(body) else None
-                    docstring = isinstance(after, ast.Expr) and isinstance(after.value, ast.Constant)
-                    last = after if docstring and after else it
-                    dropped.update(range(it.lineno - 1, last.end_lineno or last.lineno))
-                continue
+        for it in body:
             if not isinstance(it, definitions):
                 continue
             name = f"{prefix}{it.name}"

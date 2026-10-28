@@ -35,12 +35,6 @@ class Assembly:
 
 def close():
     return 5
-
-
-REFUSAL = "await it"
-'''Its docstring.'''
-
-KEPT = 6
 """
 
 
@@ -49,7 +43,6 @@ def test_async_only_leaves_out_exactly_the_named_definitions(monkeypatch: pytest
     text = unasync.without_async_only(SOURCE, ast.parse(SOURCE), "m")
     assert "return 3" not in text and "@property" not in text
     assert all(f"return {it}" in text for it in (1, 2, 4, 5))
-    assert "REFUSAL" in text
     assert unasync.without_async_only(SOURCE, ast.parse(SOURCE), "other") == SOURCE
 
 
@@ -57,10 +50,3 @@ def test_async_only_refuses_a_name_the_module_does_not_define(monkeypatch: pytes
     monkeypatch.setattr(unasync, "ASYNC_ONLY", {"m": ("Assembly.closed",)})
     with pytest.raises(SystemExit, match="Assembly.closed"):
         unasync.without_async_only(SOURCE, ast.parse(SOURCE), "m")
-
-
-def test_async_only_leaves_out_an_assignment_with_its_docstring(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(unasync, "ASYNC_ONLY", {"m": ("REFUSAL",)})
-    text = unasync.without_async_only(SOURCE, ast.parse(SOURCE), "m")
-    assert "REFUSAL" not in text and "Its docstring" not in text
-    assert "KEPT = 6" in text and "return 5" in text

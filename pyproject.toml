@@ -9,7 +9,7 @@ authors = [{ name = "Liberation Data" }]
 requires-python = ">=3.11"
 dependencies = [
     "pydantic>=2.7",
-    "pi-pilgrim>=0.3.0",
+    "pi-pilgrim>=0.4.0,<0.5",
 ]
 keywords = ["graph", "database", "neo4j", "memgraph", "falkordb", "neptune", "oracle", "postgres", "cypher", "ogm"]
 classifiers = [

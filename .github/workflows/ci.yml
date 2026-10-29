@@ -4,7 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
-  # release.yml runs this as its gate, so that a release passes the same CI as a pull request.
+  # release.yml runs this as its gate, so that a release passes the same CI as a pull request, unless a push or
+  # pull_request run of it has already passed on the same tree.
   workflow_call:
   # Each night on the images the tests name, without the pin below, so an engine's new release shows up here and not
   # in a pull request's run.
@@ -19,6 +20,30 @@ env:
   FALKORDB_TEST_IMAGE: ${{ github.event_name != 'schedule' && 'falkordb/falkordb:6.0.3' || '' }}
 
 jobs:
+  # Records the git tree this run tests, as an artifact named ci-tree-<tree>, so a release of the same tree can trust
+  # this run and skip its gate (scripts/ci_trust.py). It matters on a pull request, which tests its merge ref, not the
+  # head commit the run names. It has no condition, as no job here may: release.yml trusts a run only when every job
+  # in it passed, and a job skipped by a condition doesn't.
+  tree:
+    name: record the tree
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Work out the tree
+        id: tree
+        run: |
+          tree=$(git rev-parse 'HEAD^{tree}')
+          echo "tree=$tree" >> "$GITHUB_OUTPUT"
+          echo "$tree $(git rev-parse HEAD)" > ci-tree.txt
+          echo "This run tests tree $tree, of commit $(git rev-parse HEAD)." >> "$GITHUB_STEP_SUMMARY"
+      # Overwritten when the run is re-run, as an artifact's name is unique within a run.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ci-tree-${{ steps.tree.outputs.tree }}
+          path: ci-tree.txt
+          if-no-files-found: error
+          overwrite: true
+
   # The Cypher spec's copies in tests/cypher are the tag tests/cypher/VERSION names, unchanged, and a later tag is
   # shown as a warning. The script reads the standard library alone, so nothing is installed for it.
   cypher-spec:

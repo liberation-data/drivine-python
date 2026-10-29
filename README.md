@@ -23,7 +23,7 @@ Cypher you write runs on Postgres and Oracle too, compiled to SQL. 0.3 is an alp
 ```
 pip install "drivine[neo4j]"      # Neo4j, Memgraph, Neptune
 pip install "drivine[falkordb]"   # FalkorDB
-pip install "drivine[oracle]"     # Oracle 23ai and 26ai, through python-oracledb in thin mode
+pip install "drivine[oracle]"     # Oracle 23.9 or later, through python-oracledb in thin mode
 pip install "drivine[postgres]"   # Postgres 14 or later, through psycopg 3
 ```
 

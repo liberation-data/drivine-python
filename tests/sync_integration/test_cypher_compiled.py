@@ -911,6 +911,27 @@ def test_an_aggregate_in_a_call_reads_the_variables_the_call_imports(cypher_pm: 
         [1, 11],
         [2, 11],
     ]
+    # Under a RETURN that aggregates after a WITH *; an aggregate within a comprehension or a CASE; an import renamed by
+    # the first WITH; a boolean and a path imported.
+    assert rows_of(
+        "UNWIND [1, 2] AS o CALL (o) { UNWIND range(1, 3) AS i WITH * RETURN sum(i + o) AS s } RETURN o, s ORDER BY o"
+    ) == [[1, 9], [2, 12]]
+    assert rows_of(
+        "UNWIND [1, 2] AS o CALL (o) { UNWIND range(1, 3) AS i RETURN [x IN collect(o) | x + 1] AS c, "
+        "CASE WHEN count(o) > 2 THEN 'many' ELSE 'few' END AS k } RETURN o, c, k ORDER BY o"
+    ) == [[1, [2, 2, 2], "many"], [2, [3, 3, 3], "many"]]
+    assert rows_of(
+        "UNWIND [1, 2] AS o CALL (o) { WITH o AS x UNWIND range(1, 3) AS i RETURN sum(x + i) AS s } "
+        "RETURN o, s ORDER BY o"
+    ) == [[1, 9], [2, 12]]
+    assert rows_of(
+        "UNWIND [1, 2] AS o WITH o, o > 1 AS b CALL (o, b) { UNWIND [1, 2] AS i "
+        "RETURN collect(b) AS bs, sum(i + o) AS s } RETURN o, bs, s ORDER BY o"
+    ) == [[1, [False, False], 5], [2, [True, True], 7]]
+    assert rows_of(
+        "MATCH path = (p:Person {name: 'Laurence'})-[:ACTED_IN]->() CALL (path) { UNWIND [1, 2] AS i "
+        "RETURN count(path) AS n, collect(length(path)) AS ls } RETURN n, ls"
+    ) == [[2, [1, 1]]]
 
 
 def test_an_optional_call_in_a_writes_subquery_counts_what_it_finds_and_the_row_it_finds_nothing_for(

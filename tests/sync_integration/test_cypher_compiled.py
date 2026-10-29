@@ -3668,3 +3668,98 @@ def test_properties_of_a_node_beside_another_nodes_table_give_the_rows_of_the_pa
     for cypher, expected in writes:
         assert rows(cypher) == expected, cypher
     clear(cypher_pm)
+
+
+def test_an_order_term_over_an_aggregate_that_reads_a_grouping_key_is_sorted_by_the_key_as_it_is_grouped_by(
+    cypher_pm: PersistenceManager,
+):
+    # On Oracle `me.age` in the term read the properties, where the key is grouped by as read through its text, and
+    # Oracle refused it (ORA-00979): #256, liberation-data/drivine4j#413. drivine4j's CypherQueryContract.
+    def rows(cypher: str) -> list[Any]:
+        return cypher_pm.query(spec(cypher))
+
+    clear(cypher_pm)
+    # Sorted by the key alone, A, B, C, D; by the key and the count, B, A, C, D.
+    rows(
+        "CREATE (a:CyKey {name: 'A', age: 10, born: date('2000-01-01')}), "
+        "(b:CyKey {name: 'B', age: 11, born: date('2000-01-05')}), "
+        "(c:CyKey {name: 'C', age: 20, born: date('2000-01-20')}), "
+        "(d:CyKey {name: 'D', age: 21, born: date('2000-01-25')}), "
+        "(a)-[:K]->(b), (a)-[:K]->(c), (a)-[:K]->(d)"
+    )
+    match = "MATCH (me:CyKey)--(you:CyKey)"
+    by_key = [[10, 3], [11, 1], [20, 1], [21, 1]]
+    by_both = [[11, 1], [10, 3], [20, 1], [21, 1]]
+    cases: list[tuple[str, list[Any]]] = [
+        (f"{match} RETURN me.age AS age, count(you.age) AS cnt ORDER BY me.age + count(you.age)", by_both),
+        (
+            f"{match} WITH me.age AS age, count(you.age) AS cnt ORDER BY me.age + count(you.age) RETURN age, cnt",
+            by_both,
+        ),
+        (f"{match} RETURN DISTINCT me.age AS age, count(you.age) AS cnt ORDER BY me.age + count(you.age)", by_both),
+        (f"{match} RETURN me.age AS age, count(you.age) AS cnt ORDER BY age + count(you.age)", by_both),
+        # Sorted, skipped and limited before the WITH's WHERE, as Cypher reads it; a node keying the groups, read by
+        # property.
+        (
+            f"{match} WITH me.age AS age, count(you.age) AS cnt ORDER BY me.age + count(you.age) SKIP 1 LIMIT 2 "
+            "WHERE cnt = 1 RETURN age",
+            [20],
+        ),
+        (f"{match} WITH me, count(you) AS cnt ORDER BY me.age * count(you) RETURN me.name", ["B", "C", "D", "A"]),
+        # An aggregate that is no item; a comprehension that names its own variable as the key's; the key in a function.
+        # On Oracle the comprehension's term compiles to 4.7 MB, which Oracle is still parsing minutes later: + over an
+        # aggregate's result is written out at every level until #235 is fixed.
+        (f"{match} RETURN me.age AS age, count(*) AS c ORDER BY me.age + count(you.age)", by_both),
+        *(
+            []
+            if cypher_pm.type is DatabaseType.ORACLE
+            else [
+                (
+                    f"{match} RETURN me.age AS age, count(you.age) AS cnt "
+                    "ORDER BY me.age + size([me IN [1] | me]) + count(you.age)",
+                    by_both,
+                )
+            ]
+        ),
+        (f"{match} RETURN me.age AS age, count(*) AS cnt ORDER BY toString(me.age) + count(*)", by_key),
+        # Two keys, one a part of the other.
+        (
+            f"{match} RETURN me.age AS a, me.age + 1 AS b, count(*) AS cnt "
+            "ORDER BY me.age + 1 + count(*), me.age * 2 - count(*)",
+            [[11, 12, 1], [10, 11, 3], [20, 21, 1], [21, 22, 1]],
+        ),
+        # Beside a variable-length walk, where the key is read as elsewhere.
+        (
+            "MATCH (me:CyKey)-[:K*1..1]-(you:CyKey) RETURN me.age AS age, count(you) AS cnt "
+            "ORDER BY me.age * count(you)",
+            [[11, 1], [20, 1], [21, 1], [10, 3]],
+        ),
+        (f"{match} RETURN me.age AS age, count(you.age) AS cnt ORDER BY me.age", by_key),
+        # A key that is an expression, and several keys.
+        (
+            f"{match} RETURN me.age + 1 AS k, count(*) AS cnt ORDER BY me.age + 1 + count(*)",
+            [[12, 1], [11, 3], [21, 1], [22, 1]],
+        ),
+        (
+            f"{match} RETURN me.name AS name, me.age AS age, count(*) AS cnt ORDER BY me.age * count(*) DESC, me.name",
+            [["A", 10, 3], ["D", 21, 1], ["C", 20, 1], ["B", 11, 1]],
+        ),
+    ]
+    # Each that differs, so a store's every difference shows at once.
+    differing: list[str] = []
+    for cypher, expected in cases:
+        try:
+            given = rows(cypher)
+        except Exception as e:  # noqa: BLE001
+            differing.append(f"{cypher}: {str(e).splitlines()[0]}")
+            continue
+        if given != expected:
+            differing.append(f"{cypher}: {given}")
+    assert differing == []
+    # A temporal key: A's 30 days are past C's 10.
+    temporal = (
+        f"{match} RETURN me.name AS name, me.born AS born, count(*) AS cnt "
+        "ORDER BY me.born + duration({days: 10 * count(*)})"
+    )
+    assert [it[0] for it in rows(temporal)] == ["B", "C", "A", "D"], temporal
+    clear(cypher_pm)

@@ -318,6 +318,14 @@ def test_a_property_whose_key_is_quoted_in_its_path_or_is_in_a_map_is_read_by_it
     assert "JSON_VALUE(JSON_QUERY(n1.props, '$.m' RETURNING JSON), '$.a.size()' RETURNING NUMBER)" in nested, nested
 
 
+def test_a_grouping_key_an_order_term_over_the_items_reads_is_read_through_its_text_once_for_item_and_group_by():
+    # liberation-data/drivine4j#413: the term read the key from the properties again, `JSON_VALUE(n1.props, '$.age' …)`,
+    # which isn't what the GROUP BY holds, and Oracle refused it (ORA-00979). It reads the items' columns now.
+    sql = oracle("MATCH (me:P)--(you:P) RETURN me.age AS age, count(you.age) AS cnt ORDER BY me.age + count(you.age)")
+    assert sql.count("JSON_SERIALIZE") == 2, sql
+    assert "JSON_VALUE(n1.props, '$.age" not in sql, sql
+
+
 def test_a_map_whose_key_holds_a_parenthesis_is_read_by_its_path_and_two_values_read_together_are_left_as_they_are():
     # The parenthesis is in a literal, so the map taken out of the properties is still the one argument.
     sql = oracle("MATCH (n:Doc) RETURN size(n.`a)`.b)")

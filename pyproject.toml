@@ -1,6 +1,6 @@
 [project]
 name = "drivine"
-version = "0.3.0"
+version = "0.3.1"
 description = "Graph database client for Python: Neo4j, Memgraph, FalkorDB, Neptune, Oracle and Postgres."
 readme = "README.md"
 license = "Apache-2.0"

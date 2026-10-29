@@ -1501,6 +1501,12 @@ class SqlCypherCompiler(ABC):
         where a `UNION` names them so, and kept distinct with `distinct`.
         """
         inner = _Select(select.scope)
+        apart = self._imports_apart(select.scope, clauses)
+        if apart is not None:
+            source, imports = apart
+            inner.source(source)
+            for variable, value in imports.items():
+                inner.bind(variable, value)
         for clause in clauses[:-1]:
             inner = self._read(inner, clause, select.scope)
         projection = _returned(clauses).projection
@@ -1511,6 +1517,43 @@ class SqlCypherCompiler(ABC):
         return self._project(
             inner, dataclasses.replace(projection, items=items, distinct=distinct or projection.distinct), final=False
         )
+
+    def _imports_apart(self, scope: Scope, clauses: Sequence[Clause]) -> tuple[str, dict[str, Value]] | None:
+        """
+        Where the query `clauses` of a `CALL { … }` aggregates, the variables of the row it is in, `scope`, read from a
+        query of no table of their own in the call's rows: that query, as a source, and the variables as read from it;
+        None where it aggregates nothing. Read from the row, a variable is of the row's query, not the call's: Postgres
+        takes an aggregate of it alone, `count(o)`, as one of the row's query, which it refuses in a FROM; Oracle's
+        aggregate reads a variable of an unwound row as null there, so `sum(i + o)` gave 0 (#253). Kept apart with
+        `bound_select`, or Oracle merges it back. Bound as the call's own, so a `WITH *` a projection works out first
+        carries them: not a name the call binds itself, as a CALL within it yields one, and not where its `RETURN` and
+        each `WITH` is `*`, which would return them: a `WITH` of named items before a `RETURN *` passes on only those,
+        as it does without them.
+        """
+        projections = [it.projection for it in clauses if isinstance(it, (With, Return))]
+        if not any(
+            contains(it, is_aggregate)
+            for p in projections
+            for it in [*(item.expression for item in p.items), *(sort.expression for sort in p.order_by)]
+        ):
+            return None
+        if all(it.star for it in projections):
+            return None
+        declared: set[str] = set()
+        for clause in clauses:
+            if isinstance(clause, Unwind):
+                declared.add(clause.variable)
+            elif isinstance(clause, Call):
+                for part in [clause.query.clauses, *(it.clauses for it in clause.query.unions)]:
+                    if isinstance(part[-1], Return):
+                        declared.update(item.name for item in part[-1].projection.items)
+        named = [(variable, value, self._alias("v")) for variable, value in scope.items() if variable not in declared]
+        if not named:
+            return None
+        name = self._alias("i")
+        columns = [it for _, value, column in named for it in _columns(value, column, self._identities)]
+        imports = {variable: _columns_of(value, name, column, self._identities) for variable, value, column in named}
+        return f"({self.bound_select(', '.join(columns))}) {name}", imports
 
     def _called_union(self, select: _Select, query: Query) -> _Projected:
         """A `UNION` in a `CALL { … }`: each query's rows, the same items of the same kinds, matched by name as Cypher

@@ -36,7 +36,8 @@ from drivine.sync import (
 from tests.cypher.cypher_spec import load
 from tests.sync_integration.conftest import ORACLE, POSTGRES, SQL_STORES
 
-UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
+"""A random version 4 UUID, in lower case, as Neo4j's `randomUUID()` gives one."""
 
 
 def spec(cypher: str, parameters: dict[str, Any] | None = None) -> QuerySpecification[Any]:
@@ -51,9 +52,57 @@ def clear(pm: PersistenceManager) -> None:
         pm.execute(QuerySpecification("DELETE FROM drivine_node"))
 
 
-def test_random_uuid_gives_a_new_uuid_each_time(cypher_pm: PersistenceManager):
-    a, b = cypher_pm.query(spec("UNWIND [1, 2] AS x RETURN randomUUID()"))
-    assert a != b and UUID.fullmatch(a), (a, b)
+def long_prefixes(values: list[str]) -> int:
+    """How many of the values share more than 4 leading characters with the one before."""
+    return sum(1 for a, b in zip(values, values[1:], strict=False) if a[:5] == b[:5])
+
+
+def test_random_uuid_gives_a_new_random_version_4_uuid_each_time_seldom_sharing_a_long_prefix(
+    cypher_pm: PersistenceManager,
+):
+    # Oracle's SYS_GUID() gave version 0 values that shared their first 12 characters, a counter changing (#252).
+    uuids = cypher_pm.query(spec("UNWIND range(1, 50) AS i RETURN randomUUID()"))
+    assert len(set(uuids)) == 50, uuids
+    assert all(UUID.fullmatch(it) for it in uuids), uuids
+    # Two random UUIDs share 5 characters once in about a million; three such pairs in 49, about once in 6e13 runs.
+    assert long_prefixes(uuids) <= 2, uuids
+
+
+@pytest.mark.parametrize("expression", ["randomUUID() + ''", "'id-' + randomUUID()"])
+def test_random_uuid_read_into_a_longer_expression_is_made_again_for_each_row(
+    cypher_pm: PersistenceManager, expression: str
+):
+    # An Oracle expression for randomUUID() past SHARED_ABOVE is bound in a subquery of its own, which Oracle makes once
+    # for the statement, so each row would read the same one: one made of DBMS_RANDOM digits did
+    # (liberation-data/drivine4j#401).
+    values = cypher_pm.query(spec(f"UNWIND range(1, 100) AS i RETURN {expression}"))
+    assert len(set(values)) == 100, values
+
+
+def test_the_tokens_the_stamp_clauses_make_are_random_so_a_stale_objects_stamp_does_not_come_round_again(
+    cypher_pm: PersistenceManager,
+):
+    # On Oracle a token was the first 16 hex digits of a SYS_GUID(), of which a counter's 4 changed (#252).
+    clear(cypher_pm)
+    stamp = f"`{stamps.PROPERTY}`"
+    cypher_pm.query(spec("UNWIND range(1, 1000) AS i CREATE (:CyWrite {id: i})"))
+    cypher_pm.query(spec(f"MATCH (n:CyWrite) SET {stamps.set_clause('n')}"))
+    cypher_pm.query(spec(f"MATCH (n:CyWrite) SET {stamps.links_clause('n')}"))
+    found = cypher_pm.query(spec(f"MATCH (n:CyWrite) RETURN n.{stamp}"))
+    tokens = [token for it in found for token in it.split(":")]
+    assert len(set(found)) == 1000
+    assert len(set(tokens)) == 2000
+    # Each hex digit but the 13th, a version 4 UUID's version, takes nearly every value across the tokens.
+    for position in (it for it in range(stamps.TOKEN) if it != 12):
+        digits = {it[position] for it in tokens}
+        assert len(digits) >= 12, f"position {position} of the tokens took only {sorted(digits)}"
+    # Saved one after another, a node's tokens seldom share a long prefix, where SYS_GUID()'s always did.
+    saved: list[str] = []
+    for _ in range(20):
+        cypher_pm.query(spec(f"MATCH (n:CyWrite {{id: 1}}) SET {stamps.set_clause('n')}"))
+        saved.append((cypher_pm.get_one(spec(f"MATCH (n:CyWrite {{id: 1}}) RETURN n.{stamp}"))).split(":")[0])
+    # Two random tokens share 5 digits once in about a million; three such pairs in 19, about once in 1e15 runs.
+    assert long_prefixes(saved) <= 2, saved
 
 
 def test_a_day_and_a_moment_are_their_iso_text_on_a_sql_store(cypher_pm: PersistenceManager):
@@ -3671,3 +3720,70 @@ def test_texts_long_and_short_are_reversed_each_from_its_own_and_a_null_empty_or
     assert rows("WITH $e AS e RETURN reverse(e)", {"e": ""}) == [empty]
     # A literal, a text or a list, whose CLOB Oracle bound without a type, and found no DBMS_LOB.SUBSTR for (PLS-307).
     assert rows("RETURN [reverse('Keanu'), reverse([1, 2, 3])]") == [["unaeK", [3, 2, 1]]]
+
+
+def test_properties_of_a_node_beside_another_nodes_table_give_the_rows_of_the_pattern_and_that_nodes_values(
+    cypher_pm: PersistenceManager,
+):
+    # Oracle's JSON table transformation lost a node's label test where the query read two of its properties, or one two
+    # ways, beside another node's table, and gave a row for each two nodes (#258, liberation-data/drivine4j#415): see
+    # OracleCypherCompiler.planned. drivine4j's CypherQueryContract.
+    def rows(cypher: str) -> list[Any]:
+        return cypher_pm.query(spec(cypher))
+
+    clear(cypher_pm)
+    rows(
+        "CREATE (a:N1 {n: 1, m: 10, s: 'x', l: [1]}) CREATE (b:N2 {n: 2, m: 20, s: 'y', l: [2]}) "
+        "CREATE (c:N3 {n: 3, m: 30, s: 'z', l: [3]}) CREATE (a)-[:R]->(b), (a)-[:R]->(c)"
+    )
+    # A row of two columns or more comes back as a list of its values.
+    cases: list[tuple[str, list[Any]]] = [
+        ("MATCH (a:N1), (b:N2) RETURN a.n + b.n AS sum, a.n - b.n AS diff", [[3, -1]]),
+        ("MATCH (a:N1), (b:N2) RETURN a.n + b.n, a.n * b.n", [[3, 2]]),
+        ("MATCH (a:N1) MATCH (b:N2) RETURN a.n + b.n, a.n - b.n", [[3, -1]]),
+        ("MATCH (a:N1), (b:N2) RETURN a.n + b.n, a.n < b.n, a.n = b.n", [[3, True, False]]),
+        ("MATCH (a:N1), (b:N2) RETURN CASE WHEN a.n > 0 THEN a.n + b.n ELSE a.n - b.n END", [3]),
+        ("MATCH (a:N1), (b:N2) RETURN a.s + b.s, a.l + b.l, a.l + b.n", [["xy", [1, 2], [1, 2]]]),
+        ("MATCH (a:N1), (b:N2) RETURN a.n - a.m, [a.n, a.m]", [[-9, [1, 10]]]),
+        ("MATCH (a:N1), (b:N2) RETURN toUpper(a.s), size(a.s), toString(a.n)", [["X", 1, "1"]]),
+        ("MATCH (a:N1), (b:N2) WHERE a.s STARTS WITH 'x' RETURN a.n - b.n", [-1]),
+        ("MATCH (a:N1), (b:N2) RETURN sum(a.n + b.n)", [3]),
+        ("MATCH (a:N1)-->(b:N2) RETURN b.n + 1, b.n - 1", [[3, 1]]),
+        ("MATCH (b:N2) WITH b MATCH (a:N1) RETURN a.n - a.m, b.n", [[-9, 2]]),
+        (
+            "MATCH (a:N1), (b:N2) RETURN a.n + b.n AS s UNION ALL MATCH (a:N2), (b:N3) RETURN a.n + b.n AS s",
+            [3, 5],
+        ),
+    ]
+    for cypher, expected in cases:
+        assert rows(cypher) == expected, cypher
+    # Beside a node of no label that a property filters, and between two nodes of one label, the label test went too.
+    clear(cypher_pm)
+    rows(
+        "CREATE (a:N1 {n: 1, m: 10, s: 'x', l: [1]}) CREATE (b:N2 {n: 2, m: 20, s: 'y', l: [2]}) "
+        "CREATE (c:N3 {n: 3, m: 30, s: 'z', l: [3]}) CREATE (d:N2 {n: 4, m: 40, s: 'w', l: [4]}) "
+        "CREATE (a)-[:R {w: 1}]->(b), (a)-[:R {w: 2}]->(c), (b)-[:R {w: 3}]->(d), (c)-[:R {w: 4}]->(d)"
+    )
+    beside = "MATCH (a:N1), (b) WHERE b.n > 1 AND b.m < 35 RETURN a.n - a.m, b.n ORDER BY b.n"
+    assert rows(beside) == [[-9, 2], [-9, 3]], beside
+    same = "MATCH (a:N2)-[r:R]->(b:N2) RETURN a.n - a.m, b.n - b.m, r.w"
+    assert rows(same) == [[-18, -36, 3]], same
+    # A write reads its rows by a SELECT … INTO, a MERGE its match by a loop, and the rows it returns by a cursor. The
+    # first, unhinted, gave a row for each two nodes, and set x and y on the N2 and the N3 too.
+    clear(cypher_pm)
+    rows(
+        "CREATE (a:N1 {n: 1, m: 10, s: 'x', l: [1]}) CREATE (b:N2 {n: 2, m: 20, s: 'y', l: [2]}) "
+        "CREATE (c:N3 {n: 3, m: 30, s: 'z', l: [3]}) CREATE (a)-[:R]->(b), (a)-[:R]->(c)"
+    )
+    writes: list[tuple[str, list[Any]]] = [
+        ("MATCH (a:N1), (b:N2) WITH a, b, a.n + b.n AS s, a.n - b.n AS d SET a.x = s, a.y = d RETURN s, d", [[3, -1]]),
+        ("MATCH (a:N1) MERGE (a)-[:R]->(b:N2) RETURN b.n - b.m, b.s", [[-18, "y"]]),
+        ("MATCH (a:N1), (b:N2) SET a.z = 1 RETURN a.n + b.n, a.n - b.n", [[3, -1]]),
+        (
+            "MATCH (a) RETURN a.n, a.x, a.y, a.z ORDER BY a.n",
+            [[1, 3, -1, 1], [2, None, None, None], [3, None, None, None]],
+        ),
+    ]
+    for cypher, expected in writes:
+        assert rows(cypher) == expected, cypher
+    clear(cypher_pm)

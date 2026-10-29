@@ -36,17 +36,25 @@ class OracleConnection(Connection):
     """
 
     def __init__(
-        self, connection: Any, release: Any, session_id: str, graph: str = DEFAULT_GRAPH, database: str = ""
+        self,
+        connection: Any,
+        release: Any,
+        session_id: str,
+        graph: str = DEFAULT_GRAPH,
+        database: str = "",
+        cypher_refusal: str | None = None,
     ) -> None:
         """
         `database` is the database and the user the session is of: whether it may call the graph's functions is
-        remembered for them (see OracleStoredFunctions).
+        remembered for them (see OracleStoredFunctions). `cypher_refusal` is why the store runs no Cypher, an Oracle
+        older than 23.9, as its provider found it (see `oracle_refusal`); None where it runs Cypher.
         """
         self.connection = connection
         self._release = release
         self.session_id = session_id
         self.graph = graph
         self.database = database
+        self.cypher_refusal = cypher_refusal
         self.result_mapper = OracleResultMapper()
         self._in_transaction = False
 
@@ -96,8 +104,11 @@ class OracleConnection(Connection):
         """
         The specification, a Cypher statement compiled for Oracle, calling the functions the graph's store keeps where
         the statement needs one and the session may call it, and compiled again to call none where it may not: see
-        OracleStoredFunctions.
+        OracleStoredFunctions. On an Oracle older than 23.9, which has no UUID() for randomUUID(), plain SQL runs, and
+        Cypher is refused with why.
         """
+        if self.cypher_refusal and finalized.statement is not None and finalized.statement.language == "CYPHER":
+            raise DrivineError(self.cypher_refusal, finalized)
         sql, compiled = cypher_compiled(finalized, "ORACLE", self.graph)
         if compiled is None or not compiled.calls_stored_nulls_equal or self._calls_nulls_equal():
             return sql

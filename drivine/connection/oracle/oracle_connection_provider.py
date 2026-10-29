@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import contextlib
+import logging
+import re
 from typing import Any
 
 from drivine.backend.oracle.oracle_graph import DEFAULT_GRAPH, OracleGraph
@@ -9,6 +11,30 @@ from drivine.connection.connection_provider import ConnectionProvider
 from drivine.connection.database_type import DatabaseType
 from drivine.connection.graph_tables import GraphTables
 from drivine.connection.oracle.oracle_connection import OracleConnection
+
+logger = logging.getLogger("drivine.connection")
+
+ORACLE_MAJOR = 23
+ORACLE_MINOR = 9
+"""The oldest Oracle Drivine runs Cypher on, 23.9: see oracle_refusal."""
+
+
+def oracle_refusal(version: Any) -> str | None:
+    """
+    Why Drivine runs no Cypher on the Oracle of `version`, as python-oracledb gives it (`connection.version`,
+    "23.26.3.0.0"): one older than 23.9, which has no `UUID()`, the random version 4 UUID compiled Cypher's
+    `randomUUID()` is (#252, as liberation-data/drivine4j#401). None for 23.9 or later, and for a version that can't be
+    read: the database says what is missing when a statement needs it.
+    """
+    found = re.match(r"(\d+)\.(\d+)", version) if isinstance(version, str) else None
+    if found is None or (int(found[1]), int(found[2])) >= (ORACLE_MAJOR, ORACLE_MINOR):
+        return None
+    return (
+        f"Drivine needs Oracle {ORACLE_MAJOR}.{ORACLE_MINOR} or later (it uses UUID()); this database is {version}. "
+        f"Upgrade, or use an Oracle Free image {ORACLE_MAJOR}.{ORACLE_MINOR} or newer. Plain SQL over this provider "
+        "still runs; Cypher does not."
+    )
+
 
 NO_ADAPTIVE_PLANS = "ALTER SESSION SET OPTIMIZER_ADAPTIVE_PLANS = FALSE"
 """
@@ -25,6 +51,10 @@ class OracleConnectionProvider(ConnectionProvider):
     Connections to Oracle, from a pool of its own, through python-oracledb in thin mode (no Instant Client). The
     graph's tables are made on the first connection when they aren't there (see GraphTables), so Cypher or SQL sent
     through a persistence manager alone finds them, as an object manager's statements do.
+
+    Drivine needs Oracle 23.9 or later. The first connection's version, read once for the pool as the tables are made,
+    says whether the store runs Cypher: on an older Oracle a connection is still handed out and plain SQL runs, and
+    Cypher, which needs Oracle's `UUID()`, is refused with why (see oracle_refusal).
     """
 
     def __init__(
@@ -57,6 +87,8 @@ class OracleConnectionProvider(ConnectionProvider):
         self.graph_name = self.graph.name
         self._pool: Any = None
         self._tables = GraphTables(self.graph.ensuring)
+        self._cypher_refusal: str | None = None
+        """Why this store runs no Cypher, found on the first connection: see oracle_refusal. None where it runs it."""
 
     async def connect(self) -> Connection:
         """
@@ -79,6 +111,7 @@ class OracleConnectionProvider(ConnectionProvider):
             f"oracle.{row[0] if row else '?'}",
             self.graph.name,
             f"{self.connect_string}|{self.user_name or ''}",
+            self._cypher_refusal,
         )
 
     async def end(self) -> None:
@@ -91,10 +124,22 @@ class OracleConnectionProvider(ConnectionProvider):
     async def _ensure(self, connection: Any, statement: str) -> None:
         """
         Runs `statement`, the graph's `ensuring`, and has every session asked again whether it may call the graph's
-        functions (see OracleStoredFunctions), as the block makes them where they were missing.
+        functions (see OracleStoredFunctions), as the block makes them where they were missing. First it reads the
+        database's version, which the driver found as it connected and which needs no grant: see oracle_refusal.
         """
+        self._check_version(connection)
         await self._run(connection, statement)
         self.graph.ensured()
+
+    def _check_version(self, connection: Any) -> None:
+        """Finds whether the Oracle behind `connection` is too old for Cypher, and warns if so."""
+        try:
+            self._cypher_refusal = oracle_refusal(connection.version)
+        except Exception:
+            logger.debug("Could not read the version of Oracle database '%s'.", self.name, exc_info=True)
+            self._cypher_refusal = None
+        if self._cypher_refusal:
+            logger.warning("ORACLE database '%s': %s", self.name, self._cypher_refusal)
 
     async def _run(self, connection: Any, statement: str) -> None:
         cursor = connection.cursor()

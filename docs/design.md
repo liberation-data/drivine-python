@@ -39,7 +39,7 @@ Non-goals:
 | Neo4j | `neo4j` (async) | yes | yes |
 | Memgraph | `neo4j` (async) | yes | yes |
 | FalkorDB | `falkordb.asyncio` | yes | yes |
-| Oracle 23ai/26ai | `oracledb` (async, thin mode) | yes | yes (SQL/PGQ backend) |
+| Oracle 23.9+ | `oracledb` (async, thin mode) | yes | yes (SQL/PGQ backend) |
 | Neptune | `neo4j` (async, Bolt) | yes | no |
 | Postgres | `psycopg` 3 (async) | yes | yes (SQL backend) |
 

@@ -1,6 +1,7 @@
 # Written by scripts/unasync.py from tests/integration/oracle/test_oracle_connection.py:
 # change that, and run the script again.
 import json
+import re
 import time
 from collections.abc import Iterator
 from typing import Any
@@ -8,7 +9,9 @@ from typing import Any
 import pytest
 
 from drivine.backend.oracle.oracle_graph import OracleGraph, has_labels
+from drivine.query.statement import cypher_statement
 from drivine.sync import Connection, CursorSpecification, DatabaseRegistry, PersistenceManager, QuerySpecification
+from drivine.sync.connection.oracle.oracle_connection_provider import oracle_refusal
 from tests.sync_integration.oracle.oracle_seed import ON_ORACLE
 
 pytestmark = ON_ORACLE
@@ -156,6 +159,21 @@ def test_reads_a_cursor_in_batches(registry: DatabaseRegistry):
         seen = [it for it in cursor]
         cursor.close()
         assert seen == [1, 2, 3, 4, 5, 6, 7]
+    finally:
+        connection.release()
+
+
+def test_the_test_image_is_oracle_23_9_or_later_by_the_drivers_version_and_runs_cyphers_random_uuid(
+    registry: DatabaseRegistry,
+):
+    # python-oracledb reads the version as it connects, which needs no grant (#252, as liberation-data/drivine4j#401).
+    provider = registry.connection_provider("oracle")
+    assert provider is not None
+    connection: Any = provider.connect()
+    try:
+        assert oracle_refusal(connection.connection.version) is None, connection.connection.version
+        [uuid] = connection.query(QuerySpecification[Any](cypher_statement("RETURN randomUUID()")))
+        assert re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", uuid), uuid
     finally:
         connection.release()
 

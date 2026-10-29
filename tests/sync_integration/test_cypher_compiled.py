@@ -3552,3 +3552,52 @@ def test_texts_long_and_short_are_reversed_each_from_its_own_and_a_null_empty_or
     assert rows("WITH $e AS e RETURN reverse(e)", {"e": ""}) == [empty]
     # A literal, a text or a list, whose CLOB Oracle bound without a type, and found no DBMS_LOB.SUBSTR for (PLS-307).
     assert rows("RETURN [reverse('Keanu'), reverse([1, 2, 3])]") == [["unaeK", [3, 2, 1]]]
+
+
+def test_properties_of_a_node_beside_another_nodes_table_give_the_rows_of_the_pattern_and_that_nodes_values(
+    cypher_pm: PersistenceManager,
+):
+    # Oracle's JSON table transformation lost a node's label test where the query read two of its properties, or one two
+    # ways, beside another node's table, and gave a row for each two nodes (#258, liberation-data/drivine4j#415): see
+    # OracleCypherCompiler.planned. drivine4j's CypherQueryContract.
+    def rows(cypher: str) -> list[Any]:
+        return cypher_pm.query(spec(cypher))
+
+    clear(cypher_pm)
+    rows(
+        "CREATE (a:N1 {n: 1, m: 10, s: 'x', l: [1]}) CREATE (b:N2 {n: 2, m: 20, s: 'y', l: [2]}) "
+        "CREATE (c:N3 {n: 3, m: 30, s: 'z', l: [3]}) CREATE (a)-[:R]->(b), (a)-[:R]->(c)"
+    )
+    # A row of two columns or more comes back as a list of its values.
+    cases: list[tuple[str, list[Any]]] = [
+        ("MATCH (a:N1), (b:N2) RETURN a.n + b.n AS sum, a.n - b.n AS diff", [[3, -1]]),
+        ("MATCH (a:N1), (b:N2) RETURN a.n + b.n, a.n * b.n", [[3, 2]]),
+        ("MATCH (a:N1) MATCH (b:N2) RETURN a.n + b.n, a.n - b.n", [[3, -1]]),
+        ("MATCH (a:N1), (b:N2) RETURN a.n + b.n, a.n < b.n, a.n = b.n", [[3, True, False]]),
+        ("MATCH (a:N1), (b:N2) RETURN CASE WHEN a.n > 0 THEN a.n + b.n ELSE a.n - b.n END", [3]),
+        ("MATCH (a:N1), (b:N2) RETURN a.s + b.s, a.l + b.l, a.l + b.n", [["xy", [1, 2], [1, 2]]]),
+        ("MATCH (a:N1), (b:N2) RETURN a.n - a.m, [a.n, a.m]", [[-9, [1, 10]]]),
+        ("MATCH (a:N1), (b:N2) RETURN toUpper(a.s), size(a.s), toString(a.n)", [["X", 1, "1"]]),
+        ("MATCH (a:N1), (b:N2) WHERE a.s STARTS WITH 'x' RETURN a.n - b.n", [-1]),
+        ("MATCH (a:N1), (b:N2) RETURN sum(a.n + b.n)", [3]),
+        ("MATCH (a:N1)-->(b:N2) RETURN b.n + 1, b.n - 1", [[3, 1]]),
+        ("MATCH (b:N2) WITH b MATCH (a:N1) RETURN a.n - a.m, b.n", [[-9, 2]]),
+        (
+            "MATCH (a:N1), (b:N2) RETURN a.n + b.n AS s UNION ALL MATCH (a:N2), (b:N3) RETURN a.n + b.n AS s",
+            [3, 5],
+        ),
+    ]
+    for cypher, expected in cases:
+        assert rows(cypher) == expected, cypher
+    # Beside a node of no label that a property filters, and between two nodes of one label, the label test went too.
+    clear(cypher_pm)
+    rows(
+        "CREATE (a:N1 {n: 1, m: 10, s: 'x', l: [1]}) CREATE (b:N2 {n: 2, m: 20, s: 'y', l: [2]}) "
+        "CREATE (c:N3 {n: 3, m: 30, s: 'z', l: [3]}) CREATE (d:N2 {n: 4, m: 40, s: 'w', l: [4]}) "
+        "CREATE (a)-[:R {w: 1}]->(b), (a)-[:R {w: 2}]->(c), (b)-[:R {w: 3}]->(d), (c)-[:R {w: 4}]->(d)"
+    )
+    beside = "MATCH (a:N1), (b) WHERE b.n > 1 AND b.m < 35 RETURN a.n - a.m, b.n ORDER BY b.n"
+    assert rows(beside) == [[-9, 2], [-9, 3]], beside
+    same = "MATCH (a:N2)-[r:R]->(b:N2) RETURN a.n - a.m, b.n - b.m, r.w"
+    assert rows(same) == [[-18, -36, 3]], same
+    clear(cypher_pm)

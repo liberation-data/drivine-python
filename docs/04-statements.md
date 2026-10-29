@@ -122,6 +122,12 @@ people = await pm.query(spec.bind({"city": "Sydney"}))
   refused (ORA-00907) or crashes the session (ORA-03113, with ORA-07445 in the alert log)
   ([#200](https://github.com/liberation-data/drivine-python/issues/200)). It goes once an Oracle release no longer fails
   the repro in [docs/oracle-on-true-in-scalar-subquery-crash.md](../docs/oracle-on-true-in-scalar-subquery-crash.md).
+- On Oracle a compiled query that reads the graph's node or relationship table twice or more, and each query of a
+  write that does, carries the hint `NO_JSON_TABLE_TRANSFORM`. This works around an Oracle bug, seen on 23.26.3:
+  Oracle's JSON table transformation reads several JSON values of one node's row by one `JSON_TABLE`, and so rewritten
+  beside another node's table the query lost that node's label and property tests, giving rows its pattern doesn't
+  have and values of the wrong node, or crashing the session (ORA-03113)
+  ([#258](https://github.com/liberation-data/drivine-python/issues/258)). A query of one table carries no hint.
 - What each statement gives is the [Cypher spec](https://github.com/liberation-data/drivine-cypher-spec), which the
   three Drivine libraries run alike.
 

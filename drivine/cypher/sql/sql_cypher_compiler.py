@@ -519,10 +519,22 @@ class SqlCypherCompiler(ABC):
         one another do not grow the statement exponentially. Short values are written where they are read. Oracle
         groups by no subquery, so a projection that would group by a value so bound works it out first.
         """
-        if not self._sharing or all(len(it) <= SHARED_ABOVE for it in values):
+        if not self.binds_long(values):
             return body(list(values))
+        return self.shared_bound(values, body)
+
+    def shared_bound(self, values: Sequence[str], body: Body) -> str:
+        """The body over the values `bound` as `shared` binds them, and counted so: see `_binds`."""
         self._shared_bindings += 1
         return self.bound(values, body)
+
+    def binds_long(self, values: Sequence[str]) -> bool:
+        """Whether `shared` binds the values: where one is long, and values are bound here at all."""
+        return self._sharing and any(len(it) > SHARED_ABOVE for it in values)
+
+    def shared_sum(self, a: str, b: str, body: Body) -> str:
+        """The body over the sides of a `+`, as `shared` binds them: see Oracle's."""
+        return self.shared([a, b], body)
 
     def shared1(self, value: str, body: Callable[[str], str]) -> str:
         """`shared`, of one value."""
@@ -3838,14 +3850,15 @@ class SqlCypherCompiler(ABC):
 
             # A side read from the store: the temporal of the two texts, null where neither is of a kind it reads; then,
             # in an addition, the two added as any two values are, as Cypher adds a temporal value to a list or to a
-            # text.
+            # text. Bound as a sum's sides are, so a stored text past 32 KB beside a long duration leaves Oracle's
+            # session open (drivine4j#370).
             def read(kind: Temporal | None, temporal: Callable[[str, str], str]) -> Json:
                 def both(values: list[str]) -> str:
                     x, y = values
                     value = self.scalar(self.shared([self.text(x), self.text(y)], lambda it: temporal(it[0], it[1])))
                     return f"COALESCE({value}, {self.add(x, y)})" if sign > 0 else value
 
-                return Json(self.shared([json_a, json_b], both), temporal=kind)
+                return Json(self.shared_sum(json_a, json_b, both), temporal=kind)
 
             if l_ is duration and r is duration:
                 return of(t.sum(a, b, sign), duration)
@@ -4108,7 +4121,7 @@ class SqlCypherCompiler(ABC):
                 MADE_TEXT if given_right is None and text_right else given_right,
             )
             return Json(
-                self.shared([a, b], lambda it: self.add(it[0], it[1], given)),
+                self.shared_sum(a, b, lambda it: self.add(it[0], it[1], given)),
                 items=items if items == _items_of(right_value) else None,
                 item_items=item_items if item_items == _item_items_of(right_value) else None,
                 temporals=_has_temporals(left_value) or _has_temporals(right_value),

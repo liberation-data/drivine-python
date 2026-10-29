@@ -28,6 +28,7 @@ from drivine.cypher.sql.sql_cypher_compiler import (
     ROW,
     ROWS,
     SAVED,
+    SHARED_ABOVE,
     VALUE,
     Body,
     SqlCypherCompiler,
@@ -316,21 +317,96 @@ class OracleCypherCompiler(SqlCypherCompiler):
         it whole. The body gives null where a text it is given is null, and where what it gives would not fit in a
         `VARCHAR2`: see `replace_text` and `split`. A short text is not read as a CLOB, which is slower: `COALESCE`
         reads its second value only where the first is null. The body knows which it is given by `_long`.
+
+        A property beside a long value, which is bound in a subquery, has its texts bound beside it, each read by the
+        property's own path (see `_direct`): Oracle closed the session (ORA-03113) where a text past 32 KB was read as a
+        CLOB, and searched or compared, beside such a subquery for each of two rows or more (drivine4j#370), where the
+        property was left where it is read, and where it was bound as JSON and read as a CLOB from that.
         """
+        properties = [_beside_long(it) for it in jsons]
+        if not self.binds_long(jsons) or not any(properties):
+            return self.shared(jsons, lambda xs: self._texts_of([self._texts_of_json(it) for it in xs], body))
+        # Within a body given CLOBs, a property's CLOB alone: its VARCHAR2 is not read.
+        columns: list[str] = []
+        for json, property_ in zip(jsons, properties, strict=True):
+            if not property_:
+                columns.append(json)
+            elif self._long:
+                columns.append(self._text_of(json, clob=True))
+            else:
+                columns += [self._text_of(json, clob=False), self._text_of(json, clob=True)]
 
-        def both(xs: list[str]) -> str:
-            # Within a body given CLOBs, as CLOBs alone.
-            if self._long:
-                return body([self._text_of(it, clob=True) for it in xs])
-            read = body([self._text_of(it, clob=False) for it in xs])
-            self._long = True
-            try:
-                whole = body([self._text_of(it, clob=True) for it in xs])
-            finally:
-                self._long = False
-            return f"COALESCE({read}, {whole})"
+        def bound(names: list[str]) -> str:
+            rest = iter(names)
+            texts: list[_Texts] = []
+            for property_ in properties:
+                if not property_:
+                    texts.append(self._texts_of_json(next(rest)))
+                elif self._long:
+                    whole = next(rest)
+                    texts.append(_Texts(whole, whole))
+                else:
+                    texts.append(_Texts(next(rest), next(rest)))
+            return self._texts_of(texts, body)
 
-        return self.shared(jsons, both)
+        return self.shared_bound(columns, bound)
+
+    def _texts_of_json(self, json: str) -> _Texts:
+        """The JSON's texts: see `_text_of`."""
+        return _Texts(self._text_of(json, clob=False), self._text_of(json, clob=True))
+
+    def _texts_of(self, texts: Sequence[_Texts], body: Body) -> str:
+        """The body over the texts as `VARCHAR2`s, and where it gives null, as CLOBs: see `texts`."""
+        # Within a body given CLOBs, as CLOBs alone.
+        if self._long:
+            return body([it.whole for it in texts])
+        read = body([it.short for it in texts])
+        self._long = True
+        try:
+            whole = body([it.whole for it in texts])
+        finally:
+            self._long = False
+        return f"COALESCE({read}, {whole})"
+
+    def shared_sum(self, a: str, b: str, body: Body) -> str:
+        """
+        A side of a `+` that is a property, beside a long value, is bound by the property's own path, as `texts` binds
+        its texts: its kind and its CLOB, each a column the body's reads of them are rewritten to, and the property as
+        JSON only where it is no text past _BOUND_TEXT characters. Bound as JSON whole and read as a CLOB from that, a
+        text past 32 KB closed the session on two rows or more (ORA-03113, drivine4j#370); left where it is read beside
+        the subquery, as `_direct` reads it, a sum of short texts closed it on one, `a.id + '->' + b.id`. A text past
+        _BOUND_TEXT characters is summed with a text or a number from its CLOB, and is null added to a list, which takes
+        it as JSON: read as JSON beside the subquery, it closed the session.
+        """
+        sides = [a, b]
+        properties = [_beside_long(it) for it in sides]
+        if not self.binds_long(sides) or not any(properties):
+            return self.shared(sides, body)
+        columns: list[str] = []
+        for json, property_ in zip(sides, properties, strict=True):
+            if not property_:
+                columns.append(json)
+                continue
+            props, path = cast(tuple[str, str], _property_read(json))
+            length, type_ = f"{path[:-1]}.length()'", f"{path[:-1]}.type()'"
+            columns += [
+                f"CASE WHEN JSON_VALUE({props}, {length} RETURNING NUMBER) > {_BOUND_TEXT} THEN NULL ELSE {json} END",
+                f"JSON_VALUE({props}, {type_})",
+                f"JSON_VALUE({props}, {path} RETURNING CLOB)",
+            ]
+
+        def bound(names: list[str]) -> str:
+            rest = iter(names)
+            sides_bound = [[next(rest), next(rest), next(rest)] if it else [next(rest)] for it in properties]
+            sql = body([it[0] for it in sides_bound])
+            # A property's kind and CLOB are read from their own columns: its JSON is null past _BOUND_TEXT characters.
+            for side in sides_bound:
+                if len(side) == 3:
+                    json, kind, clob = side
+                    sql = sql.replace(_kind(json), kind).replace(f"JSON_VALUE({json}, '$' RETURNING CLOB)", clob)
+            return sql
+
+        return self.shared_bound(columns, bound)
 
     def _text_of(self, json: str, clob: bool) -> str:
         """The JSON as text, where it is a string: a CLOB where `clob`, else as `text` reads it; a property by its own
@@ -1381,6 +1457,11 @@ _DOUBLE = "$numberDouble"
 _SHORT_TEXT = 4000
 """The most bytes a `VARCHAR2` holds in SQL, as a database is made by default (`MAX_STRING_SIZE = STANDARD`)."""
 
+_BOUND_TEXT = 32_767
+"""The most characters of a text `shared_sum` binds as JSON: one of 40,001, bound as JSON beside a long value, closed
+the session (drivine4j#370), where one of 12,000 three-byte characters, 36 KB, did not, so a text is counted in
+characters, as `.length()` counts them. One as long or shorter is bound as it was."""
+
 _REVERSED_PIECE = 1000
 """How many UTF-16 units of a CLOB `_reversed_pieces` reverses as one `VARCHAR2`: with one more, where a pair is not
 cut, and the `x` the piece is put together after, at most 3,002 bytes, as a unit is three bytes at most and a pair
@@ -1400,6 +1481,20 @@ def _property_read(json: str) -> tuple[str, str] | None:
     `JSON_QUERY(props, '$.a' RETURNING JSON)`."""
     match = _PROPERTY_READ.fullmatch(json)
     return (match[1], match[2]) if match is not None and _balanced(match[1]) else None
+
+
+def _beside_long(json: str) -> bool:
+    """Whether the JSON is a property as `property_of` reads it, short beside a long value: see `texts` and
+    `shared_sum`."""
+    return len(json) <= SHARED_ABOVE and _property_read(json) is not None
+
+
+@dataclasses.dataclass(frozen=True)
+class _Texts:
+    """A text as a `VARCHAR2`, null past 4,000 bytes, and as a CLOB: see `texts`."""
+
+    short: str
+    whole: str
 
 
 def _balanced(sql: str) -> bool:

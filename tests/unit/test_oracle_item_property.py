@@ -5,6 +5,8 @@ So is a text a write takes from the row it is writing, to work out what it write
 `RETURN` or a `WITH` gives (#186). Elsewhere a property is read as it was. drivine4j's OracleItemPropertyTest, ported.
 """
 
+import re
+
 from drivine.cypher.sql.oracle_cypher_compiler import OracleCypherCompiler, _direct  # pyright: ignore[reportPrivateUsage]
 from drivine.cypher.sql.postgres_cypher_compiler import PostgresCypherCompiler
 
@@ -215,6 +217,90 @@ def test_a_property_a_text_function_or_a_sum_reads_is_read_from_the_properties_b
     assert "JSON_VALUE(JSON_QUERY(n1.props, '$.a' RETURNING JSON)" not in sql, sql
     assert "JSON_VALUE(n1.props, '$.a' RETURNING CLOB)" in sql and "JSON_VALUE(n1.props, '$.a.type()')" in sql, sql
     assert "JSON_VALUE(n1.props, '$.a.size()' RETURNING NUMBER)" in sql, sql
+
+
+BESIDE = "toLower(trim(coalesce($p.q, m.name)))"
+"""A value long to write as SQL, so bound in a subquery: a coalesce of a parameter's key, trimmed and made lower
+case."""
+
+
+def compiled_beside(cypher: str) -> str:
+    """The statement, whose long value is bound, compiled; its property `a` is not bound as JSON, and the nodes' labels
+    are tested."""
+    sql = OracleCypherCompiler("g").compile(cypher, {"p": {"q": None}}).sql
+    assert re.search(r" AS v1\b", sql), f"{cypher} binds the long value: {sql}"
+    assert not re.search(r"JSON_QUERY\([\w.]+props, '\$.[ab]' RETURNING JSON\) AS v", sql), f"{cypher}: {sql}"
+    assert not re.search(r"JSON_VALUE\(JSON_QUERY\([\w.]+props, '\$.[ab]' RETURNING JSON\)", sql), f"{cypher}: {sql}"
+    assert sql.count("JSON_EXISTS(") == 2, f"{cypher}: {sql}"
+    return sql
+
+
+def test_a_property_a_text_function_reads_beside_a_long_value_has_its_texts_bound_beside_it_by_its_own_path():
+    # A value past SHARED_ABOVE's length is bound in a subquery. The property was bound beside it as JSON, and read as a
+    # CLOB from that; left where it is read, its CLOB was read beside the subquery. On two rows or more, a text past
+    # 32 KB so closed the session either way (drivine4j#370).
+    shapes = [
+        "n.a CONTAINS #",
+        "# CONTAINS n.a",
+        "n.a STARTS WITH #",
+        "n.a ENDS WITH #",
+        "split(n.a, #)",
+        "replace(n.a, #, 'x')",
+        "replace(n.a, 'x', #)",
+        "replace(n.a, n.b, #)",
+    ]
+    for shape in shapes:
+        term = shape.replace("#", BESIDE)
+        for cypher in (
+            f"MATCH (n:Doc), (m:Doc) RETURN {term}",
+            f"MATCH (n:Doc), (m:Doc) WITH n, m WHERE {term} IS NOT NULL RETURN 1",
+        ):
+            sql = compiled_beside(cypher)
+            assert re.search(r"JSON_VALUE\([\w.]+props, '\$.a'\) END AS v\d+", sql), f"{cypher}: {sql}"
+            assert re.search(r"JSON_VALUE\([\w.]+props, '\$.a' RETURNING CLOB\) END AS v\d+", sql), f"{cypher}: {sql}"
+            assert not re.search(r"THEN JSON_VALUE\([\w.]+props, '\$.a' RETURNING CLOB\) END(?! AS v)", sql), (
+                f"{cypher}: {sql}"
+            )
+
+
+def test_a_property_a_sum_reads_beside_a_long_value_has_its_kind_and_its_clob_bound_beside_it_by_its_own_path():
+    # Bound beside the long value as JSON and read as a CLOB from that, a text past 32 KB closed the session
+    # (drivine4j#370); left where it is read beside the subquery, a sum of short texts closed it on one row,
+    # `a.id + '->' + b.id`.
+    for shape in ("n.a + #", "# + n.a", "size(n.a + #)", "n.a + duration(#)", "duration(#) + n.a", "n.a - duration(#)"):
+        sql = compiled_beside(f"MATCH (n:Doc), (m:Doc) RETURN {shape.replace('#', BESIDE)}")
+        assert "JSON_VALUE(n1.props, '$.a.type()') AS v" in sql, f"{shape}: {sql}"
+        assert "JSON_VALUE(n1.props, '$.a' RETURNING CLOB) AS v" in sql, f"{shape}: {sql}"
+        assert (
+            "CASE WHEN JSON_VALUE(n1.props, '$.a.length()' RETURNING NUMBER) > 32767 THEN NULL "
+            "ELSE JSON_QUERY(n1.props, '$.a' RETURNING JSON) END AS v"
+        ) in sql, f"{shape}: {sql}"
+        # Read nowhere else: its length, its JSON, its kind and its CLOB.
+        assert sql.count("n1.props, '$.a") == 4, f"{shape}: {sql}"
+        # Its kind and its CLOB are read from their own columns, not from its JSON, which is null past 32,767
+        # characters.
+        match = re.search(r"END AS (v\d+), JSON_VALUE\(n1.props, '\$.a.type\(\)'\) AS (v\d+)", sql)
+        assert match is not None, f"{shape}: {sql}"
+        json, kind = match[1], match[2]
+        view = re.search(rf"(sh\d+)\.{kind}\b", sql)
+        assert view is not None, f"{shape}: {sql}"
+        assert not re.search(rf"JSON_VALUE\({view[1]}\.{json}, '\$(\.type\(\)'\)|' RETURNING CLOB\))", sql), (
+            f"{shape}: {sql}"
+        )
+    sum_ = oracle("MATCH (a)-[:R]->(b) RETURN a.id + '->' + b.id")
+    assert "JSON_VALUE(n2.props, '$.id.type()') AS v" in sum_, sum_
+    assert sum_.count("n2.props, '$.id") == 4, sum_
+
+
+def test_an_aggregate_of_a_text_function_a_property_is_read_by_beside_a_long_value_works_its_argument_out_first():
+    # An aggregate's argument binds no value; one that would is worked out first, for each row (drivine4j#333), which
+    # the texts' binding says as shared's does, so the property's texts are bound beside the long value there too. A
+    # long literal binds nothing of its own, so only the texts' binding says the argument binds a value.
+    long = f"'{'y' * 250}'"
+    for aggregate in (f"count(CASE WHEN n.a CONTAINS {long} THEN 1 END)", f"collect(split(n.a, {long}))"):
+        cypher = f"MATCH (n:Doc), (m:Doc) RETURN {aggregate}"
+        sql = compiled_beside(cypher)
+        assert re.search(r"JSON_VALUE\([\w.]+props, '\$.a' RETURNING CLOB\) END AS v\d+", sql), f"{cypher}: {sql}"
 
 
 def test_a_property_whose_key_is_quoted_in_its_path_or_is_in_a_map_is_read_by_its_own_path_too():

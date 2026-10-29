@@ -839,6 +839,60 @@ async def test_an_optional_call_in_a_writes_subquery_counts_what_it_finds_and_th
         assert await cypher_pm.query(spec("MATCH (n:CyWrite {id: 1}) RETURN [n.o, n.f, n.b]")) == [[0, 1, 1]]
 
 
+async def test_a_stored_text_past_32_kb_a_text_function_or_a_sum_reads_beside_a_long_value_on_two_rows_is_read_whole(
+    cypher_pm: PersistenceManager,
+):
+    # On Oracle a value past SHARED_ABOVE's length is bound in a subquery, and a property beside it was bound too, taken
+    # out as JSON and read as a CLOB: a text past 32 KB so closed the session from the second run on (ORA-03113,
+    # drivine4j#370), as #144's did. A node of another label holds the same text, and is not read. drivine4j's
+    # CypherQueryContract of liberation-data/drivine4j#370.
+    await clear(cypher_pm)
+    bio = "a" * 40_000 + "x"
+    # A text past 4,000 bytes but within 32 KB, too, which a list is added to; and one of fewer than 32,767 characters
+    # that is past 32 KB, each of three bytes.
+    mid = "b" * 20_000
+    euros = "€" * 12_000
+    props = "{name: 'x', first: 'A', bio: $bio, mid: $mid, euros: $euros, span: 'p1d'}"
+    given = {"bio": bio, "mid": mid, "euros": euros}
+    await cypher_pm.query(spec(f"CREATE (:CyBio {props}), (:CyBio {props}), (:CyBioOther {props})", given))
+
+    def long(text: str) -> str:
+        # Long to write as SQL, so bound: a coalesce of a parameter's key, trimmed and made lower case.
+        return f"toLower(trim(coalesce($p.q, {text})))"
+
+    def each(value: Any) -> list[Any]:
+        return [value] * 4
+
+    statements: list[tuple[str, list[Any]]] = [
+        (f"MATCH (n:CyBio), (m:CyBio) WHERE n.bio CONTAINS {long('m.name')} RETURN count(*)", [4]),
+        (f"MATCH (n:CyBio), (m:CyBio) WHERE n.bio STARTS WITH {long('m.first')} RETURN count(*)", [4]),
+        (f"MATCH (n:CyBio), (m:CyBio) WHERE n.bio ENDS WITH {long('m.name')} RETURN count(*)", [4]),
+        (f"MATCH (n:CyBio), (m:CyBio) RETURN size(n.bio + {long('m.name')})", each(40_002)),
+        (f"MATCH (n:CyBio), (m:CyBio) RETURN size({long('m.name')} + n.bio)", each(40_002)),
+        # A sum of short texts too, which closed the session on Oracle where the property was left where it is read.
+        ("MATCH (n:CyBio), (m:CyBio) RETURN n.name + '->' + m.first", each("x->A")),
+        ("MATCH (n:CyBio), (m:CyBio) RETURN size(n.bio + '->' + m.name)", each(40_004)),
+        (f"MATCH (n:CyBio), (m:CyBio) RETURN size(n.mid + {long('m.name')})", each(20_001)),
+        (f"MATCH (n:CyBio), (m:CyBio) RETURN size(last([{long('m.name')}] + n.mid))", each(20_000)),
+        (f"MATCH (n:CyBio), (m:CyBio) RETURN size(n.euros + {long('m.name')})", each(12_001)),
+        (f"MATCH (n:CyBio), (m:CyBio) RETURN size(n.bio + size({long('m.name')}))", each(40_002)),
+        # A duration, added to a text as any value is.
+        (
+            "MATCH (n:CyBio), (m:CyBio) RETURN size(n.bio + duration(toUpper(trim(coalesce($p.q, m.span)))))",
+            each(40_004),
+        ),
+        (f"MATCH (n:CyBio), (m:CyBio) RETURN size(split(n.bio, {long('m.name')}))", each(2)),
+        (f"MATCH (n:CyBio), (m:CyBio) RETURN size(replace(n.bio, {long('m.name')}, 'yy'))", each(40_002)),
+        (f"MATCH (n:CyBio), (m:CyBio) RETURN right(replace(n.bio, 'x', {long('m.first')} + 'b'), 3)", each("aab")),
+        (f"MATCH (n:CyBio) WITH n WHERE n.bio CONTAINS {long('n.name')} RETURN count(*)", [2]),
+    ]
+    async with one_session(cypher_pm):
+        # Oracle closed the session from the second run on.
+        for run in range(1, 4):
+            for cypher, expected in statements:
+                assert await asked_again(cypher_pm, cypher, {"p": {"q": None}}) == expected, f"{cypher}, run {run}"
+
+
 async def test_collect_distinct_beside_keys_other_aggregates_an_order_a_page_and_a_variable_outside_its_aggregates(
     cypher_pm: PersistenceManager,
 ):

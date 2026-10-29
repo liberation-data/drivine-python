@@ -7,6 +7,14 @@
 
 **Docs: [drivine.org](https://drivine.org/py/)**, for Python, TypeScript, and Kotlin & Java.
 
+<p align="center">
+  <a href="https://www.youtube.com/watch?v=uETP0EN_04E" target="_blank">
+    <img src="https://raw.githubusercontent.com/liberation-data/drivine/master/website/src/assets/video-poster.jpg" alt="Watch: Drivine, graph RAG on any database (4:26)" width="700">
+  </a>
+  <br>
+  <a href="https://www.youtube.com/watch?v=uETP0EN_04E" target="_blank">▶ Watch Drivine in four and a half minutes: graph RAG on any database</a> (4:26, with captions)
+</p>
+
 A graph database client for Python, supporting **Neo4j**, **Memgraph**, **FalkorDB**, **Oracle** (SQL/PGQ) and
 **Postgres** as graph stores, plus **Amazon Neptune** through the low-level API. Async first, with a sync API written
 from it, typed, and fast: one statement per round trip, no session cache, no lazy loading. It gives you two ways to work

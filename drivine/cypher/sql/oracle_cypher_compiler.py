@@ -935,13 +935,15 @@ class OracleCypherCompiler(SqlCypherCompiler):
         bound first: the data guide's query reads a column of a row outside it, and not an expression of one. The
         guide's paths are read by their places, as `temporal_elements` reads them: a `JSON_TABLE` over the guide of a
         map that holds a list of temporal values worked out item by item stalls the parse as one over the list does
-        (#331, #347). They are so read for every map, not only one the statement makes hold such a list: over the guide,
-        which a subquery gives, they are read many times faster than `JSON_TABLE` reads them (`keys(n)` of 100,000
-        nodes: 0.4 s, not 4.8 s). Null has no keys, and gives null.
+        (#331, #347). They are so read for every map, not only one the statement makes hold such a list. The guide is
+        worked out by the lateral view itself, as its one aggregate over `DUAL`: a subquery that works it out, in that
+        view's select list, is worked out once, and every row then had the first row's keys
+        (liberation-data/drivine4j#414, here #257). drivine4j measured the keys of 100,000 maps so at 7 s, where a
+        `JSON_TABLE` over each guide takes 4.4 s. Null has no keys, and gives null.
         """
 
         def keys(map_: str) -> str:
-            paths = self.temporal_elements(f"(SELECT JSON_DATAGUIDE({map_}, 2) FROM DUAL)", "dg")
+            paths = self.temporal_elements(f"JSON_DATAGUIDE({map_}, 2)", "dg")
             return f"CASE WHEN {_kind(map_)} = 'object' THEN {_keys_of(paths)} END"
 
         return self.bound([json], lambda it: keys(it[0]))

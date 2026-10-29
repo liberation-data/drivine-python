@@ -129,6 +129,10 @@ def test_on_oracle_a_value_that_may_hold_temporal_values_and_a_map_of_them_and_i
     keys = OracleCypherCompiler("g").compile(KEYED).sql
     assert "PASSING dg_r.n - 1" in keys, keys
     assert "JSON_TABLE((SELECT JSON_DATAGUIDE" not in keys, keys
+    # Worked out by the lateral view itself: a subquery in its select list is worked out once, for every row
+    # (liberation-data/drivine4j#414, here #257).
+    assert "LATERAL (SELECT /*+ NO_MERGE */ JSON_DATAGUIDE(" in keys, keys
+    assert "(SELECT JSON_DATAGUIDE" not in keys, keys
 
 
 def test_on_oracle_a_list_of_temporal_values_a_with_takes_out_of_an_unwound_map_is_read_item_by_item_too():

@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from drivine import DrivineError, QuerySpecification
+from drivine import CursorSpecification, DrivineError, QuerySpecification
 from drivine.connection.oracle.oracle_connection_provider import OracleConnectionProvider, oracle_refusal
 from drivine.query.statement import cypher_statement
 from drivine.sync.connection.oracle.oracle_connection_provider import (
@@ -127,6 +127,9 @@ async def test_on_an_oracle_older_than_23_9_a_connection_runs_sql_and_cypher_is_
     with pytest.raises(DrivineError) as refused:
         await connection.query(cypher("RETURN randomUUID()"))
     assert str(refused.value) == REFUSED
+    # A cursor, and so a stream, compiles its Cypher as a query does, and is refused alike.
+    with pytest.raises(DrivineError, match="Drivine needs Oracle 23.9 or later"):
+        await connection.open_cursor(CursorSpecification[Any](cypher_statement("RETURN 1")))
     with pytest.raises(DrivineError, match="Drivine needs Oracle 23.9 or later"):
         await (await it.connect()).query(cypher("RETURN 1"))
 

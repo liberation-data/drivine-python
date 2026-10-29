@@ -815,6 +815,104 @@ def test_an_optional_call_or_an_optional_match_in_a_count_or_an_exists_keeps_the
         assert asked_again(cypher_pm, where) == [1]
 
 
+def test_an_aggregate_in_a_call_reads_the_variables_the_call_imports(cypher_pm: PersistenceManager):
+    # Not in the spec yet (#253). On Oracle, an aggregate in a CALL read a variable of an unwound row as null, so sum()
+    # gave 0 and collect() gave []. Postgres refused an aggregate of an imported variable alone, count(o), as the row's
+    # query's. drivine4j's CypherQueryContract of liberation-data/drivine4j#368; the rows are Neo4j's (2026.10).
+    seeded(cypher_pm)
+
+    def rows_of(cypher: str, parameters: dict[str, Any] | None = None) -> list[Any]:
+        return cypher_pm.query(spec(cypher, parameters))
+
+    aggregates = (
+        "RETURN sum(i + o) AS s, collect(o) AS c, count(o) AS n, max(i * o) AS m } RETURN o, s, c, n, m ORDER BY o"
+    )
+    rows = [[1, 9, [1, 1, 1], 3, 3], [2, 12, [2, 2, 2], 3, 6]]
+    assert rows_of("UNWIND [2] AS o CALL { WITH o UNWIND range(1, 3) AS i RETURN sum(i + o) AS s } RETURN s") == [12]
+    assert rows_of("UNWIND [2] AS o CALL { WITH o UNWIND range(1, 3) AS i RETURN collect(o) AS s } RETURN s") == [
+        [2, 2, 2]
+    ]
+    # Imported by a WITH, or by the CALL's scope clause.
+    assert rows_of(f"UNWIND [1, 2] AS o CALL {{ WITH o UNWIND range(1, 3) AS i {aggregates}") == rows
+    assert rows_of(f"UNWIND [1, 2] AS o CALL (o) {{ UNWIND range(1, 3) AS i {aggregates}") == rows
+    assert rows_of(
+        "UNWIND [1, 2] AS o OPTIONAL CALL (o) { UNWIND range(1, 3) AS i RETURN sum(i + o) AS s, collect(o) AS c } "
+        "RETURN o, s, c ORDER BY o"
+    ) == [[1, 9, [1, 1, 1]], [2, 12, [2, 2, 2]]]
+    # Aggregated in a WITH within the CALL.
+    assert rows_of(
+        "UNWIND [1, 2] AS o CALL { WITH o UNWIND range(1, 3) AS i WITH sum(i + o) AS t RETURN t * 10 AS s } "
+        "RETURN o, s ORDER BY o"
+    ) == [[1, 90], [2, 120]]
+    # Grouped within the CALL, by a key worked out first where it holds a subquery or a parameter.
+    grouped = [[1, 0, [3, 5], 2], [1, 1, [2, 4], 2], [2, 0, [4, 6], 4], [2, 1, [3, 5], 4]]
+    each = "collect(o + i) AS xs, sum(o) AS s } RETURN o, k, xs, s ORDER BY o, k"
+    assert rows_of(f"UNWIND [1, 2] AS o CALL (o) {{ UNWIND range(1, 4) AS i RETURN i % 2 AS k, {each}") == grouped
+    assert rows_of(f"UNWIND [1, 2] AS o CALL {{ WITH o UNWIND range(1, 4) AS i RETURN i % 2 AS k, {each}") == grouped
+    assert (
+        rows_of(f"UNWIND [1, 2] AS o CALL {{ WITH o UNWIND range(1, 4) AS i RETURN i % $m AS k, {each}", {"m": 2})
+        == grouped
+    )
+    # Over an imported node's property.
+    assert rows_of(
+        "MATCH (p:Person) CALL (p) { UNWIND range(1, 2) AS i "
+        "RETURN sum(p.born + i) AS s, collect(p.name) AS ns, max(p.born) AS b } RETURN p.name, s, ns, b ORDER BY p.name"
+    ) == [
+        ["Carrie", 3937, ["Carrie", "Carrie"], 1967],
+        ["Hugo", 0, ["Hugo", "Hugo"], None],
+        ["Keanu", 3931, ["Keanu", "Keanu"], 1964],
+        ["Laurence", 3925, ["Laurence", "Laurence"], 1961],
+    ]
+    assert rows_of(
+        "MATCH (p:Person) CALL { WITH p UNWIND [10, 20] AS i RETURN count(p) AS n, sum(i) + max(p.born) AS t } "
+        "RETURN p.name, n, t ORDER BY p.name"
+    ) == [["Carrie", 2, 1997], ["Hugo", 2, None], ["Keanu", 2, 1994], ["Laurence", 2, 1991]]
+    # Each row's own values, a null among them; two imports; a map and a relationship.
+    assert rows_of(
+        "UNWIND [1, null] AS o CALL (o) { UNWIND range(1, 3) AS i RETURN count(o) AS n, collect(o) AS c, max(o) AS s } "
+        "RETURN o, n, c, s ORDER BY o"
+    ) == [[1, 3, [1, 1, 1], 1], [None, 0, [], None]]
+    assert rows_of(
+        "UNWIND [1, 2] AS a UNWIND [10, 20] AS b CALL { WITH a, b UNWIND range(1, 2) AS i "
+        "RETURN sum(a * b + i) AS s, collect(a) AS ca, count(b) AS nb } RETURN a, b, s, ca, nb ORDER BY a, b"
+    ) == [[1, 10, 23, [1, 1], 2], [1, 20, 43, [1, 1], 2], [2, 10, 43, [2, 2], 2], [2, 20, 83, [2, 2], 2]]
+    assert rows_of(
+        "UNWIND [{a: 1}, {a: 2}] AS o CALL { WITH o UNWIND range(1, 2) AS i "
+        "RETURN sum(o.a + i) AS s, collect(o) AS c } RETURN o.a, s, c ORDER BY o.a"
+    ) == [[1, 5, [{"a": 1}, {"a": 1}]], [2, 7, [{"a": 2}, {"a": 2}]]]
+    assert rows_of(
+        "MATCH (p:Person {name: 'Laurence'})-[r:ACTED_IN]->() CALL { WITH r UNWIND [1, 2] AS i "
+        "RETURN collect(r.role) AS rs, count(r) AS n } RETURN p.name, rs, n"
+    ) == [["Laurence", ["Morpheus", "Morpheus"], 2]]
+    # In each query of a UNION in the CALL, in a CALL within the CALL, and in a CALL after a write.
+    assert rows_of(
+        "UNWIND [1, 2] AS o CALL (o) { UNWIND [1, 2] AS i RETURN sum(i + o) AS s "
+        "UNION ALL UNWIND [3] AS i RETURN sum(i + o) AS s } RETURN o, s ORDER BY o, s"
+    ) == [[1, 4], [1, 5], [2, 5], [2, 7]]
+    assert rows_of(
+        "UNWIND [1, 2] AS o CALL (o) { UNWIND [1, 2] AS j CALL (o, j) { UNWIND range(1, 3) AS i "
+        "RETURN sum(o * j + i) AS s } RETURN collect(s) AS ss } RETURN o, ss ORDER BY o"
+    ) == [[1, [9, 12]], [2, [12, 18]]]
+    assert rows_of(
+        "CREATE (x:CyCallWrite {v: 1}) WITH x UNWIND range(1, 2) AS o CALL { WITH o, x UNWIND range(1, 2) AS i "
+        "RETURN sum(i + o) AS s, collect(x.v) AS xs, count(o) AS n } RETURN o, s, xs, n ORDER BY o"
+    ) == [[1, 5, [1, 1], 2], [2, 7, [1, 1], 2]]
+    # Under a RETURN * after a WITH that names what it passes on; and a variable the CALL unwinds itself, of a name the
+    # row has.
+    assert rows_of(
+        "UNWIND [1, 2] AS o CALL { WITH o UNWIND range(1, 3) AS i WITH sum(i + o) AS s RETURN * } "
+        "RETURN o, s ORDER BY o"
+    ) == [[1, 9], [2, 12]]
+    assert rows_of(
+        "UNWIND [1, 2] AS o CALL (o) { UNWIND range(1, 3) AS i WITH sum(i + o) AS s, collect(o) AS c RETURN * } "
+        "RETURN o, s, c ORDER BY o"
+    ) == [[1, 9, [1, 1, 1]], [2, 12, [2, 2, 2]]]
+    assert rows_of("UNWIND [1, 2] AS o CALL { UNWIND [5, 6] AS o RETURN sum(o) AS s } RETURN o, s ORDER BY o") == [
+        [1, 11],
+        [2, 11],
+    ]
+
+
 def test_an_optional_call_in_a_writes_subquery_counts_what_it_finds_and_the_row_it_finds_nothing_for(
     cypher_pm: PersistenceManager,
 ):

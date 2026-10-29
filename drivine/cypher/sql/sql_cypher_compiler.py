@@ -493,7 +493,7 @@ class SqlCypherCompiler(ABC):
                     as_path=self.parameter_path,
                 )
             )
-            return self._with_functions(CompiledCypher(self._query(query), self._parameters.values))
+            return self._with_functions(CompiledCypher(self.planned(self._query(query)), self._parameters.values))
         self.procedural = True
         # A procedure takes its parameters as one object, and reads each from it.
         self._begin(
@@ -566,6 +566,14 @@ class SqlCypherCompiler(ABC):
         """
         return query
 
+    def planned(self, query: str) -> str:
+        """
+        The query, a statement of its own that opens with `SELECT`, with what the store's planner is told of it: nothing
+        here. A compiled query, a `UNION`, and each query of a procedure (a `SELECT … INTO`, a `FOR … IN` loop's, and
+        the rows it returns) are told.
+        """
+        return query
+
     def lateral(self, query: str, name: str, optional: bool) -> str:
         """
         The join of the lateral query `query`, named `name`, to the row: an `OPTIONAL CALL`'s or an `OPTIONAL MATCH`'s
@@ -620,7 +628,7 @@ class SqlCypherCompiler(ABC):
                 f"FROM (\n{indent(rows)}\n) u\nGROUP BY {key}"
             )
             sql = f"SELECT d.result FROM (\n{indent(grouped)}\n) d\nORDER BY d.k"
-        return CompiledCypher(sql, self._parameters.values)
+        return CompiledCypher(self.planned(sql), self._parameters.values)
 
     # ----- A store's SQL -----
 
@@ -2062,7 +2070,9 @@ class SqlCypherCompiler(ABC):
         select = _Select({})
         for clause in _creates(query.clauses):
             if isinstance(clause, Return):
-                for statement in self.return_rows(self._project(select, clause.projection, final=True).sql):
+                for statement in self.return_rows(
+                    self.planned(self._project(select, clause.projection, final=True).sql)
+                ):
                     self._emit(statement)
             else:
                 select = self._next(select, clause)
@@ -2087,7 +2097,15 @@ class SqlCypherCompiler(ABC):
         self._body.append("\n".join(prefix + line for line in statement.split("\n")) if prefix else statement)
 
     def _assign(self, variable: str, sql: str) -> None:
-        self._emit(f"SELECT {sql} INTO {variable};")
+        self._select_into(f"SELECT {sql} INTO {variable}")
+
+    def _select_into(self, query: str) -> None:
+        """The query, a `SELECT … INTO`, as a statement of the procedure, with what the store's planner is told."""
+        self._emit(f"{self.planned(query)};")
+
+    def _loop(self, query: str) -> None:
+        """The head of a loop over each row of the query, as `RECORD`, with what the store's planner is told of it."""
+        self._emit(f"FOR {RECORD} IN ({self.planned(query)}) LOOP")
 
     def _key(self, variable: str) -> str:
         if variable not in self._keys:
@@ -2116,8 +2134,8 @@ class SqlCypherCompiler(ABC):
                 self._kinds[variable] = _Kind.PATH
             entries.append((self._key(variable), self._held(value)))
         listed = self.comparable(Json(self.aggregate_list(self.json_object(entries), _order_of(select)), ordered=True))
-        self._emit(
-            "\n".join([f"SELECT {listed} INTO {ROWS}", *self._from(select), *_present(select.where_clause())]) + ";"
+        self._select_into(
+            "\n".join([f"SELECT {listed} INTO {ROWS}", *self._from(select), *_present(select.where_clause())])
         )
 
     def _held(self, value: Value) -> str:
@@ -2225,7 +2243,7 @@ class SqlCypherCompiler(ABC):
         else:
             needed = {name for it in read for name in variables_in(it)}
         select = self._row(needed, written=True)
-        self._emit("\n".join([f"SELECT {value(select.scope)} INTO {variable}", *self._from(select)]) + ";")
+        self._select_into("\n".join([f"SELECT {value(select.scope)} INTO {variable}", *self._from(select)]))
 
     def _write(self, clause: Clause) -> None:
         """One write: made for each row of ROWS in turn, and the rows it leaves put back there."""
@@ -2234,7 +2252,7 @@ class SqlCypherCompiler(ABC):
         if deleting:
             self._assign(DOOMED, self.literal_json([]))
         r = self._alias("r")
-        self._emit(f"FOR {RECORD} IN (SELECT {r}.item FROM {self.elements(ROWS, r)} ORDER BY {r}.item_no) LOOP")
+        self._loop(f"SELECT {r}.item FROM {self.elements(ROWS, r)} ORDER BY {r}.item_no")
         self._depth += 1
         self._emit(f"{ROW} := {RECORD}.item;")
         if isinstance(clause, Create):
@@ -2264,7 +2282,9 @@ class SqlCypherCompiler(ABC):
             # not be there.
             d = self._alias("d")
             doomed = f"SELECT {self.id_of(f'{d}.item', None)} FROM {self.elements(DOOMED, d)}"
-            self._emit(f"SELECT count(*) INTO {COUNT} FROM {self.edges} WHERE src IN ({doomed}) OR dst IN ({doomed});")
+            self._select_into(
+                f"SELECT count(*) INTO {COUNT} FROM {self.edges} WHERE src IN ({doomed}) OR dst IN ({doomed})"
+            )
             self._emit(f"IF {COUNT} > 0 THEN")
             self._emit(
                 "    "
@@ -2337,7 +2357,7 @@ class SqlCypherCompiler(ABC):
                     f"SELECT 2 AS part, {b}.item_no, {row} AS item FROM {self.elements(ROWS, b)}"
                 )
                 listed = self.comparable(Json(self.aggregate_list(f"{g}.item", f"{g}.part, {g}.item_no"), ordered=True))
-                self._emit(f"SELECT {listed} INTO {gathered} FROM ({both}) {g};")
+                self._select_into(f"SELECT {listed} INTO {gathered} FROM ({both}) {g}")
 
         self._each_row(kept, each)
         if returned is None:
@@ -2355,7 +2375,7 @@ class SqlCypherCompiler(ABC):
         writes a `FOREACH` or a `CALL { … }` for each row: what one row writes is there for the next to read.
         """
         r = self._alias("r")
-        self._emit(f"FOR {RECORD} IN (SELECT {r}.item FROM {self.elements(rows, r)} ORDER BY {r}.item_no) LOOP")
+        self._loop(f"SELECT {r}.item FROM {self.elements(rows, r)} ORDER BY {r}.item_no")
         self._depth += 1
         self._assign(ROWS, self.appended(self.literal_json([]), f"{RECORD}.item"))
         self._unread = None
@@ -2498,7 +2518,7 @@ class SqlCypherCompiler(ABC):
         held = self.with_entries(ROW, [(self._key(variable), self._held(value)) for variable, value in found.items()])
         match = [f"SELECT {held} AS item", *self._from(select), *_present(select.where_clause())]
         self._emit(f"{FOUND} := FALSE;")
-        self._emit(f"FOR {MATCHED} IN (\n{indent(chr(10).join(match))}\n) LOOP")
+        self._emit(f"FOR {MATCHED} IN (\n{indent(self.planned(chr(10).join(match)))}\n) LOOP")
         self._depth += 1
         self._emit(f"{FOUND} := TRUE;")
         self._emit(f"{ROW} := {MATCHED}.item;")

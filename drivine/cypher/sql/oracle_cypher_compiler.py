@@ -164,6 +164,8 @@ class OracleCypherCompiler(SqlCypherCompiler):
         self._nulls_equal_stored = nulls_equal_stored
         self._stored_nulls_equal = nulls_equal_name(graph)
         """The function the store keeps that compares two values that may hold a null: see `nulls_equal`."""
+        self._graph_table = re.compile(rf"\b(?:{re.escape(self.nodes)}|{re.escape(self.edges)}) \w")
+        """A read of the graph's node or relationship table: see `planned`."""
         self._calls_stored_nulls_equal = False
         """Whether the statement calls `_stored_nulls_equal`: see `compile_query`."""
         self._folding = False
@@ -1134,6 +1136,24 @@ class OracleCypherCompiler(SqlCypherCompiler):
         """
         return f"SELECT /*+ NO_MERGE */ * FROM (\n{indent(query)}\n)"
 
+    def planned(self, query: str) -> str:
+        """
+        A query that reads the graph's tables twice or more is not rewritten by Oracle's JSON table transformation
+        (`NO_JSON_TABLE_TRANSFORM`), which reads several JSON values of a column, `n1.props`, by one `JSON_TABLE`: so
+        rewritten, a node's table beside another table, or beside a subquery of one, lost the tests of that node's
+        labels and properties, and the query gave rows its pattern doesn't have, and values of the wrong node (#258,
+        liberation-data/drivine4j#415): `MATCH (a:N1), (b:N2) RETURN a.n + b.n` gave a row for each two nodes, and so
+        did `a.n - a.m`, `toUpper(a.s), size(a.s)` and `a.l + b.l`. Seen on Oracle 23.26.3 (gvenzl/oracle-free 23). The
+        hint is the statement's, whichever query of it holds it, so the outermost one holds it. A query of one table
+        reads as it did: none lost a test.
+        """
+        if len(self._graph_table.findall(query)) < 2:
+            return query
+        hinted = _HINTED.match(query)
+        if hinted:
+            return f"SELECT /*+ {hinted.group(1)} {_NO_JSON_TABLE_TRANSFORM} */{query[hinted.end() :]}"
+        return re.sub(r"^SELECT ", f"SELECT /*+ {_NO_JSON_TABLE_TRANSFORM} */ ", query, count=1)
+
     def lateral(self, query: str, name: str, optional: bool) -> str:
         """
         An optional join is on `1 = 1`, not `ON TRUE`: in a scalar subquery, as a `COUNT { … }` is, Oracle refuses a
@@ -1462,6 +1482,12 @@ _DOUBLE = "$numberDouble"
 
 _SHORT_TEXT = 4000
 """The most bytes a `VARCHAR2` holds in SQL, as a database is made by default (`MAX_STRING_SIZE = STANDARD`)."""
+
+_NO_JSON_TABLE_TRANSFORM = "NO_JSON_TABLE_TRANSFORM"
+"""The hint that turns Oracle's JSON table transformation off: see `OracleCypherCompiler.planned`."""
+
+_HINTED = re.compile(r"SELECT /\*\+ (.*?) \*/")
+"""A query that opens with hints, and those hints: Oracle reads the first hint comment of a query alone."""
 
 _BOUND_TEXT = 32_767
 """The most characters of a text `shared_sum` binds as JSON: one of 40,001, bound as JSON beside a long value, closed

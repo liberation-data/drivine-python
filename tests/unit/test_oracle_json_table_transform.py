@@ -47,6 +47,9 @@ def test_a_statement_that_writes_has_the_hint_in_each_of_its_queries_that_read_t
     # A MERGE's match of two tables loops over the query, which holds the hint.
     merged = compiled("MATCH (a:N1) MERGE (a)-[:R]->(b:N2) RETURN b.n")
     assert re.search(rf"FOR \w+ IN \(\s*SELECT /\*\+ {HINT} \*/", merged), merged
+    # The rows it returns, read from two tables, are a query of their own, which holds the hint.
+    created = compiled("CREATE (a:N1 {n: 1})-[:R]->(b:N2 {n: 2}) RETURN a.n, b.n")
+    assert re.search(rf"OPEN \w+ FOR[^;]*SELECT /\*\+ {HINT} \*/", created), created
 
 
 def test_the_graphs_own_tables_are_counted_and_the_hints_a_query_opens_with_are_joined():

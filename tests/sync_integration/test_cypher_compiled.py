@@ -3600,4 +3600,22 @@ def test_properties_of_a_node_beside_another_nodes_table_give_the_rows_of_the_pa
     assert rows(beside) == [[-9, 2], [-9, 3]], beside
     same = "MATCH (a:N2)-[r:R]->(b:N2) RETURN a.n - a.m, b.n - b.m, r.w"
     assert rows(same) == [[-18, -36, 3]], same
+    # A write reads its rows by a SELECT … INTO, a MERGE its match by a loop, and the rows it returns by a cursor. The
+    # first, unhinted, gave a row for each two nodes, and set x and y on the N2 and the N3 too.
+    clear(cypher_pm)
+    rows(
+        "CREATE (a:N1 {n: 1, m: 10, s: 'x', l: [1]}) CREATE (b:N2 {n: 2, m: 20, s: 'y', l: [2]}) "
+        "CREATE (c:N3 {n: 3, m: 30, s: 'z', l: [3]}) CREATE (a)-[:R]->(b), (a)-[:R]->(c)"
+    )
+    writes: list[tuple[str, list[Any]]] = [
+        ("MATCH (a:N1), (b:N2) WITH a, b, a.n + b.n AS s, a.n - b.n AS d SET a.x = s, a.y = d RETURN s, d", [[3, -1]]),
+        ("MATCH (a:N1) MERGE (a)-[:R]->(b:N2) RETURN b.n - b.m, b.s", [[-18, "y"]]),
+        ("MATCH (a:N1), (b:N2) SET a.z = 1 RETURN a.n + b.n, a.n - b.n", [[3, -1]]),
+        (
+            "MATCH (a) RETURN a.n, a.x, a.y, a.z ORDER BY a.n",
+            [[1, 3, -1, 1], [2, None, None, None], [3, None, None, None]],
+        ),
+    ]
+    for cypher, expected in writes:
+        assert rows(cypher) == expected, cypher
     clear(cypher_pm)

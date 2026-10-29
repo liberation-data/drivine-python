@@ -22,7 +22,7 @@ DATABASE_PASSWORD=app
 DATABASE_DEFAULT_GRAPH_PATH=drivine   # names the graph's tables; this is the default
 ```
 
-On Oracle 23ai or 26ai (`pip install "drivine[oracle]"`), `DATABASE_NAME` is the service:
+On Oracle 23.9 or later (`pip install "drivine[oracle]"`), `DATABASE_NAME` is the service:
 
 ```
 DATABASE_TYPE=ORACLE
@@ -33,6 +33,10 @@ DATABASE_USER=app
 DATABASE_PASSWORD=…
 DATABASE_DEFAULT_GRAPH_PATH=drivine
 ```
+
+Drivine needs Oracle 23.9 because Cypher's `randomUUID()` is Oracle's `UUID()`, a random version 4 UUID, which Oracle
+added in 23.9. A provider reads the version python-oracledb found on its first connection, which needs no grant. On an
+older Oracle, plain SQL still runs, and a Cypher statement is refused with the version found.
 
 Then hand the persistence manager a statement written with `cypher_statement` (or `cypher_file`). A plain string is
 taken for SQL on these stores, as it is taken for Cypher on a graph engine:

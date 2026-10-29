@@ -34,7 +34,8 @@ from drivine.query.statement import cypher_statement
 from tests.cypher.cypher_spec import load
 from tests.integration.conftest import ORACLE, POSTGRES, SQL_STORES
 
-UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
+"""A random version 4 UUID, in lower case, as Neo4j's `randomUUID()` gives one."""
 
 
 def spec(cypher: str, parameters: dict[str, Any] | None = None) -> QuerySpecification[Any]:
@@ -49,9 +50,57 @@ async def clear(pm: PersistenceManager) -> None:
         await pm.execute(QuerySpecification("DELETE FROM drivine_node"))
 
 
-async def test_random_uuid_gives_a_new_uuid_each_time(cypher_pm: PersistenceManager):
-    a, b = await cypher_pm.query(spec("UNWIND [1, 2] AS x RETURN randomUUID()"))
-    assert a != b and UUID.fullmatch(a), (a, b)
+def long_prefixes(values: list[str]) -> int:
+    """How many of the values share more than 4 leading characters with the one before."""
+    return sum(1 for a, b in zip(values, values[1:], strict=False) if a[:5] == b[:5])
+
+
+async def test_random_uuid_gives_a_new_random_version_4_uuid_each_time_seldom_sharing_a_long_prefix(
+    cypher_pm: PersistenceManager,
+):
+    # Oracle's SYS_GUID() gave version 0 values that shared their first 12 characters, a counter changing (#252).
+    uuids = await cypher_pm.query(spec("UNWIND range(1, 50) AS i RETURN randomUUID()"))
+    assert len(set(uuids)) == 50, uuids
+    assert all(UUID.fullmatch(it) for it in uuids), uuids
+    # Two random UUIDs share 5 characters once in about a million; three such pairs in 49, about once in 6e13 runs.
+    assert long_prefixes(uuids) <= 2, uuids
+
+
+@pytest.mark.parametrize("expression", ["randomUUID() + ''", "'id-' + randomUUID()"])
+async def test_random_uuid_read_into_a_longer_expression_is_made_again_for_each_row(
+    cypher_pm: PersistenceManager, expression: str
+):
+    # An Oracle expression for randomUUID() past SHARED_ABOVE is bound in a subquery of its own, which Oracle makes once
+    # for the statement, so each row would read the same one: one made of DBMS_RANDOM digits did
+    # (liberation-data/drivine4j#401).
+    values = await cypher_pm.query(spec(f"UNWIND range(1, 100) AS i RETURN {expression}"))
+    assert len(set(values)) == 100, values
+
+
+async def test_the_tokens_the_stamp_clauses_make_are_random_so_a_stale_objects_stamp_does_not_come_round_again(
+    cypher_pm: PersistenceManager,
+):
+    # On Oracle a token was the first 16 hex digits of a SYS_GUID(), of which a counter's 4 changed (#252).
+    await clear(cypher_pm)
+    stamp = f"`{stamps.PROPERTY}`"
+    await cypher_pm.query(spec("UNWIND range(1, 1000) AS i CREATE (:CyWrite {id: i})"))
+    await cypher_pm.query(spec(f"MATCH (n:CyWrite) SET {stamps.set_clause('n')}"))
+    await cypher_pm.query(spec(f"MATCH (n:CyWrite) SET {stamps.links_clause('n')}"))
+    found = await cypher_pm.query(spec(f"MATCH (n:CyWrite) RETURN n.{stamp}"))
+    tokens = [token for it in found for token in it.split(":")]
+    assert len(set(found)) == 1000
+    assert len(set(tokens)) == 2000
+    # Each hex digit but the 13th, a version 4 UUID's version, takes nearly every value across the tokens.
+    for position in (it for it in range(stamps.TOKEN) if it != 12):
+        digits = {it[position] for it in tokens}
+        assert len(digits) >= 12, f"position {position} of the tokens took only {sorted(digits)}"
+    # Saved one after another, a node's tokens seldom share a long prefix, where SYS_GUID()'s always did.
+    saved: list[str] = []
+    for _ in range(20):
+        await cypher_pm.query(spec(f"MATCH (n:CyWrite {{id: 1}}) SET {stamps.set_clause('n')}"))
+        saved.append((await cypher_pm.get_one(spec(f"MATCH (n:CyWrite {{id: 1}}) RETURN n.{stamp}"))).split(":")[0])
+    # Two random tokens share 5 digits once in about a million; three such pairs in 19, about once in 1e15 runs.
+    assert long_prefixes(saved) <= 2, saved
 
 
 async def test_a_day_and_a_moment_are_their_iso_text_on_a_sql_store(cypher_pm: PersistenceManager):

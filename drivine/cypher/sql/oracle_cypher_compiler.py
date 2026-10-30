@@ -180,8 +180,8 @@ class OracleCypherCompiler(SqlCypherCompiler):
         """The names of a procedure's parameters that hold a float as extended JSON writes one: see `property_of`."""
         self.parameter_path = self._parameter_path
         self._long = False
-        """Whether the texts `texts` gives its body are CLOBs: see `scalar`, `starts_with`, `ends_with`, `split`,
-        `replace_text` and `reversed_text`, which read them otherwise."""
+        """Whether the texts `texts` gives its body are CLOBs: see `scalar`, `starts_with`, `ends_with`,
+        `contains_text`, `split`, `replace_text` and `reversed_text`, which read them otherwise."""
 
     def compile_query(self, query: Query, parameters: Mapping[str, Any]) -> CompiledCypher:
         """As SqlCypherCompiler's, saying whether the statement calls the store's function: see `nulls_equal`."""
@@ -904,8 +904,32 @@ class OracleCypherCompiler(SqlCypherCompiler):
         return self.shared1(b, lambda x: f"(SUBSTR({a}, -LENGTH({x})) = {x})")
 
     def contains_text(self, a: str, b: str) -> str:
-        """Of CLOBs too (see `texts`), though `INSTR` looks for no text past 32 KB (ORA-22828)."""
-        return f"(INSTR({a}, {b}) > 0)"
+        """
+        By `INSTR`, of `VARCHAR2`s, and of CLOBs (see `texts`) where the text looked for is at most _SEARCHED_TEXT
+        UTF-16 units: `INSTR` refuses a longer one (ORA-22828, drivine4j#312), and `DBMS_LOB.INSTR` one past 4,000
+        bytes (ORA-22835). A longer one is in the text where the two are as long and `DBMS_LOB.COMPARE` finds them
+        equal, and where it is shorter, where `_searched` finds it. The CLOBs are bound, so a property is read inside
+        the bound subquery: see `texts`.
+
+        Each way gives a number, 1 where the text is found, and only the `CASE` that chooses between them is compared
+        with 1: `(SELECT … MODEL …) = 1` and `> 0` were false where the subquery alone gave 1, as was a `CASE` with the
+        comparison in a branch; a `CASE` of numbers compared outside gave the right answer in a select, a `WHERE`, a
+        cross join, a `COUNT(CASE …)` and a PL/SQL block.
+        """
+        if not self._long:
+            return f"(INSTR({a}, {b}) > 0)"
+
+        def found(values: list[str]) -> str:
+            t, x = values
+            return (
+                f"(CASE WHEN {t} IS NULL OR {x} IS NULL THEN NULL "
+                f"WHEN LENGTH({x}) <= {_SEARCHED_TEXT} THEN SIGN(INSTR({t}, {x})) "
+                f"WHEN LENGTH({x}) >= LENGTH({t}) THEN CASE WHEN LENGTH({x}) = LENGTH({t}) "
+                f"AND DBMS_LOB.COMPARE({t}, {x}) = 0 THEN 1 ELSE 0 END "
+                f"ELSE {_searched(t, x)} END = 1)"
+            )
+
+        return self.bound([a, b], found)
 
     def function(self, name: str, json: str) -> str | None:
         """Of a property, read from the properties by its own path: see `_direct`."""
@@ -1514,6 +1538,17 @@ _REVERSED_PIECE = 1000
 cut, and the `x` the piece is put together after, at most 3,002 bytes, as a unit is three bytes at most and a pair
 four."""
 
+_SEARCHED_TEXT = 32_767
+"""The most UTF-16 units of a text `INSTR` looks for in a CLOB: 32,767 of one byte, or of three, or 16,385 pairs, each
+two units; one more it refuses (ORA-22828). See `contains_text`."""
+
+_SEARCHED_PREFIX = 1000
+"""How many units of a longer text `contains_text` looks for first, with `INSTR`, before comparing it whole there."""
+
+_SEARCHED_PLACES = 4_294_967_295
+"""The most places `contains_text` compares a long text at, as `MODEL`'s `ITERATE` takes a number: 2^32 - 1, far more
+than a stored text has units, so the search stops where the text is found or no place is left first."""
+
 _NUMBER_TEXT = 32
 """The most bytes `_as_text` writes a number in: Java's text of a double, `-2.2250738585072014E-308`, and some to
 spare."""
@@ -1589,6 +1624,30 @@ def _read_through_text(json: str, path: str, typed: str, passing: str = "") -> s
         f"CASE WHEN JSON_VALUE({json}, {typed}{passing}) = 'string' "
         f"THEN JSON(JSON_QUERY(JSON_SERIALIZE({json} RETURNING CLOB), {path}{passing} RETURNING CLOB)) "
         f"ELSE JSON_QUERY({json}, {path}{passing} RETURNING JSON) END"
+    )
+
+
+def _searched(t: str, x: str) -> str:
+    """
+    1 where the CLOB `x`, longer than _SEARCHED_TEXT units and shorter than the CLOB `t`, is in `t`, else -1. At each
+    place in turn where its first _SEARCHED_PREFIX units are, `INSTR` finding each from the one before, it is compared
+    whole by `DBMS_LOB.COMPARE`. A recursive `WITH` would carry the place from one to the next, but reads no column of
+    the row it is in (ORA-00904); the `MODEL` clause carries it, and does. So the time grows with the length of `t` and
+    with how many places are compared, each as far as the two are equal: as `INSTR`'s own, which compares at each place.
+
+    The first units may end on the first of a pair, which `SUBSTR` of a CLOB cuts where `DBMS_LOB.SUBSTR` refuses to
+    (ORA-22831): `INSTR` finds the half where the whole pair is, and the comparison is of the whole text.
+    """
+    prefix = f"SUBSTR({x}, 1, {_SEARCHED_PREFIX})"
+    found = (
+        f"CASE WHEN cs_at[0] = 0 OR cs_at[0] > LENGTH({t}) - LENGTH({x}) + 1 THEN -1 "
+        f"WHEN DBMS_LOB.COMPARE({t}, {x}, LENGTH({x}), cs_at[0], 1) = 0 THEN 1 ELSE 0 END"
+    )
+    return (
+        f"(SELECT cs_found FROM DUAL MODEL DIMENSION BY (0 cs_i) MEASURES (INSTR({t}, {prefix}) cs_at, 0 cs_found) "
+        f"RULES ITERATE ({_SEARCHED_PLACES}) UNTIL (cs_found[0] <> 0) "
+        f"(cs_found[0] = {found}, "
+        f"cs_at[0] = CASE WHEN cs_found[0] = 0 THEN INSTR({t}, {prefix}, cs_at[0] + 1) ELSE cs_at[0] END))"
     )
 
 

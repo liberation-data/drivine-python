@@ -558,17 +558,144 @@ def test_an_aggregate_of_temporal_arithmetic_compiles_to_about_the_statement_wor
     assert size < 120_000 and size < reference * 1.2, f"{aggregating}: {size} characters, {reference} with a WITH first"
 
 
+def _four(function: str, over: str) -> str:
+    return f"{function}(" * 4 + over + ")" * 4
+
+
+_TEXTS = "max(n.title) + ': ' + max(n.first) + ' ' + max(n.last)"
+_WORKED = "WITH max(n.title) AS a, max(n.first) AS b, max(n.last) AS c"
+_DAYS = "((((n.day + duration('P1D')) + duration('P1D')) + duration('P1D')) + duration('P1D'))"
+
+OVER_AGGREGATES = [
+    (f"MATCH (n) RETURN {_TEXTS}", f"MATCH (n) {_WORKED} RETURN a + ': ' + b + ' ' + c"),
+    (
+        "MATCH (n) RETURN head(collect(n.title)) + ': ' + head(collect(n.first)) + ' ' + head(collect(n.last))",
+        "MATCH (n) WITH collect(n.title) AS a, collect(n.first) AS b, collect(n.last) AS c "
+        "RETURN head(a) + ': ' + head(b) + ' ' + head(c)",
+    ),
+    (
+        f"MATCH (n) RETURN {_four('toLower', 'max(n.name)')}",
+        f"MATCH (n) WITH max(n.name) AS m RETURN {_four('toLower', 'm')}",
+    ),
+    (
+        f"MATCH (n) RETURN {_four('toLower', 'head(collect(n.name))')}",
+        f"MATCH (n) WITH collect(n.name) AS c RETURN {_four('toLower', 'head(c)')}",
+    ),
+    (
+        f"MATCH (n) RETURN {_four('toLower', 'collect(n.name)[0]')}",
+        f"MATCH (n) WITH collect(n.name) AS c RETURN {_four('toLower', 'c[0]')}",
+    ),
+    (
+        f"MATCH (n) RETURN {_four('trim', 'max(n.name)')}",
+        f"MATCH (n) WITH max(n.name) AS m RETURN {_four('trim', 'm')}",
+    ),
+    (
+        f"MATCH (n) RETURN {_four('toString', 'head(collect(n.name))')}",
+        f"MATCH (n) WITH collect(n.name) AS c RETURN {_four('toString', 'head(c)')}",
+    ),
+    (
+        "MATCH (n) RETURN substring(substring(substring(substring(max(n.name), 0), 0), 0), 0)",
+        "MATCH (n) WITH max(n.name) AS m RETURN substring(substring(substring(substring(m, 0), 0), 0), 0)",
+    ),
+    (
+        "MATCH (n) RETURN (sum(n.a) + sum(n.b)) * 2 / count(*) - max(n.a)",
+        "MATCH (n) WITH sum(n.a) AS a, sum(n.b) AS b, count(*) AS c, max(n.a) AS m RETURN (a + b) * 2 / c - m",
+    ),
+    # Beside a grouping key, with DISTINCT, as an order term, and beside a variable-length walk.
+    (
+        f"MATCH (n) RETURN n.k AS k, {_TEXTS} AS t",
+        "MATCH (n) WITH n.k AS k, max(n.title) AS a, max(n.first) AS b, max(n.last) AS c "
+        "RETURN k, a + ': ' + b + ' ' + c AS t",
+    ),
+    (f"MATCH (n) RETURN DISTINCT {_TEXTS}", f"MATCH (n) {_WORKED} RETURN DISTINCT a + ': ' + b + ' ' + c"),
+    (
+        f"MATCH (n) RETURN n.k AS k ORDER BY {_TEXTS}",
+        "MATCH (n) WITH n.k AS k, max(n.title) AS a, max(n.first) AS b, max(n.last) AS c "
+        "RETURN k ORDER BY a + ': ' + b + ' ' + c",
+    ),
+    # An order term that reads an item by its name, which ran drivine4j's compiler out of memory.
+    (
+        f"MATCH (n) RETURN n.k AS k, count(*) AS c ORDER BY {_four('toString', 'count(*) * 10 + size(k)')}",
+        f"MATCH (n) WITH n.k AS k, count(*) AS x RETURN k, x AS c ORDER BY {_four('toString', 'x * 10 + size(k)')}",
+    ),
+    # And one where a comprehension's own name hides an item's, or the item's expression reads a name the
+    # comprehension binds.
+    (
+        f"MATCH (n) RETURN n.k AS k, sum(n.a) AS m ORDER BY {_four('toString', '[k IN [1] | k + m][0]')} "
+        "+ toString(sum(n.a))",
+        "MATCH (n) WITH n.k AS k, sum(n.a) AS x RETURN k, x AS m "
+        f"ORDER BY {_four('toString', '[k IN [1] | k + x][0]')} + toString(x)",
+    ),
+    (
+        f"MATCH (n) RETURN n.k AS k, sum(n.a) AS m ORDER BY {_four('toString', '[n IN [1] | n + size(k)][0]')} "
+        "+ toString(sum(n.a))",
+        "MATCH (n) WITH n.k AS k, sum(n.a) AS x RETURN k, x AS m "
+        f"ORDER BY {_four('toString', '[n IN [1] | n + size(k)][0]')} + toString(x)",
+    ),
+    # And one that reads an item nested deep, which drivine4j's trial compile once compiled with nothing bound.
+    (
+        f"MATCH (n) RETURN {_DAYS} AS k, count(*) AS c ORDER BY {_four('toString', 'count(*)')} + toString(k)",
+        f"MATCH (n) WITH {_DAYS} AS k, count(*) AS x RETURN k, x AS c ORDER BY {_four('toString', 'x')} + toString(k)",
+    ),
+    (
+        "MATCH (n)-[*1..3]->(m) RETURN max(m.title) + ': ' + max(m.first) + ' ' + max(m.last)",
+        "MATCH (n)-[*1..3]->(m) WITH max(m.title) AS a, max(m.first) AS b, max(m.last) AS c "
+        "RETURN a + ': ' + b + ' ' + c",
+    ),
+    (
+        f"MATCH (n)-[*1..3]->(m) RETURN {_four('toLower', 'max(m.name)')}",
+        f"MATCH (n)-[*1..3]->(m) WITH max(m.name) AS x RETURN {_four('toLower', 'x')}",
+    ),
+    (
+        f"MATCH (n)-[*1..3]->(m) RETURN n.k AS k ORDER BY {_four('toLower', 'max(m.name)')}",
+        f"MATCH (n)-[*1..3]->(m) WITH n.k AS k, max(m.name) AS x RETURN k ORDER BY {_four('toLower', 'x')}",
+    ),
+    # A text looked for in another, which Oracle's CONTAINS binds in a subquery past INSTR's 32,767 units
+    # (drivine4j#312): over an aggregate's result, only over its column.
+    (
+        "MATCH (n) RETURN max(n.title) CONTAINS min(n.first)",
+        "MATCH (n) WITH max(n.title) AS a, min(n.first) AS b RETURN a CONTAINS b",
+    ),
+]
+"""Each statement over an aggregate's result, and the same with a WITH working its aggregates out first."""
+
+
+@COMPILERS
+@pytest.mark.parametrize(("over", "first"), OVER_AGGREGATES)
+def test_text_functions_texts_added_and_arithmetic_over_an_aggregates_result_compile_to_about_a_with_first(
+    compiler: type[SqlCypherCompiler], over: str, first: str
+) -> None:
+    # drivine4j#373: an operation over an aggregate's result was compiled with nothing bound, as the aggregate is, so
+    # it wrote the aggregate out again at each level: max(n.title) + ': ' + max(n.first) + ' ' + max(n.last) compiled
+    # to megabytes here (#235). A compiler of its own for each: the subquery a value is bound in is named by a count
+    # a compiler keeps from one statement to the next.
+    size, reference = (len(compiler("g").compile(it).sql) for it in (over, first))
+    assert size < 120_000 and size < reference * 1.2, f"{over}: {size} characters, {reference} with a WITH first"
+
+
 def test_an_aggregates_argument_compiled_only_to_see_whether_it_binds_declares_each_oracle_function_once() -> None:
     # Compiled to see, then again: a reduce() in it was declared twice, under one name or a name no query calls.
     z = "datetime('2024-03-15T10:00:00Z') + duration({minutes: x})"
     for statement in [
         "UNWIND range(1, 3) AS i RETURN sum(reduce(a = 0, x IN [i] | a + x))",
         f"UNWIND range(1, 3) AS i RETURN sum(reduce(a = 0, x IN [i] | a + ({z}).minute))",
+        # And an operation over an aggregate's result, compiled to see whether it binds one (drivine4j#373).
+        "UNWIND range(1, 3) AS i RETURN toLower(toLower(toString(reduce(a = max(i), x IN [1] | a + x)))) + 'x'",
     ]:
         sql = OracleCypherCompiler("g").compile(statement).sql
         declared = re.findall(r"FUNCTION (cy_\w+)\(", sql)
         assert declared and declared == list(dict.fromkeys(declared)), f"{statement}: {sql}"
         assert all(len(re.findall(rf"\b{name}\(", sql)) > 1 for name in declared), f"{statement}: {sql}"
+
+    # Or an order term over one that reads an item declaring a function, compiled in the trial by the item's name: the
+    # statement declares what it does without the term, each once (drivine4j#373).
+    def declared_by(statement: str) -> list[str]:
+        return re.findall(r"FUNCTION (cy_\w+)\(", OracleCypherCompiler("g").compile(statement).sql)
+
+    grouped = "UNWIND range(1, 3) AS i RETURN reduce(a = 0, x IN [i] | a + x) AS r, count(*) AS c"
+    sorted_ = declared_by(f"{grouped} ORDER BY toLower(toLower(toString(count(*)))) + toString(r)")
+    assert sorted_ == list(dict.fromkeys(sorted_)), sorted_
+    assert len(declared_by(grouped)) == len(sorted_), sorted_
     # Without the store's function, the query declares its own once, where the aggregate's argument binds a value or
     # not.
     for statement in [

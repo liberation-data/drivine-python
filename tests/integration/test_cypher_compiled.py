@@ -4229,19 +4229,11 @@ async def test_an_order_term_over_an_aggregate_that_reads_a_grouping_key_is_sort
             ["D", "C", "B", "A"],
         ),
         # An aggregate that is no item; a comprehension that names its own variable as the key's; the key in a function.
-        # On Oracle the comprehension's term compiles to 4.7 MB, which Oracle is still parsing minutes later: + over an
-        # aggregate's result is written out at every level until #235 is fixed.
         (f"{match} RETURN me.age AS age, count(*) AS c ORDER BY me.age + count(you.age)", by_both),
-        *(
-            []
-            if cypher_pm.type is DatabaseType.ORACLE
-            else [
-                (
-                    f"{match} RETURN me.age AS age, count(you.age) AS cnt "
-                    "ORDER BY me.age + size([me IN [1] | me]) + count(you.age)",
-                    by_both,
-                )
-            ]
+        (
+            f"{match} RETURN me.age AS age, count(you.age) AS cnt "
+            "ORDER BY me.age + size([me IN [1] | me]) + count(you.age)",
+            by_both,
         ),
         (f"{match} RETURN me.age AS age, count(*) AS cnt ORDER BY toString(me.age) + count(*)", by_key),
         # Two keys, one a part of the other.

@@ -1,5 +1,10 @@
 """Which failures over Bolt, and of a SQL store's DDL, are contention, and that only those are run again."""
 
+from typing import Any
+
+import oracledb
+import psycopg
+import psycopg.errors
 import pytest
 from neo4j.exceptions import Neo4jError, ServiceUnavailable, SessionExpired
 
@@ -184,3 +189,30 @@ async def test_a_schema_statement_postgres_turned_away_for_a_deadlock_is_run_aga
             await run
         assert getattr(raised.value.root_cause, "sqlstate", None) == sqlstate
     assert ran == runs
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        lambda: oracledb.DatabaseError("ORA-04020: deadlock detected while trying to lock object X"),
+        lambda: psycopg.errors.DeadlockDetected("deadlock detected"),
+    ],
+)
+async def test_an_outer_run_does_not_run_again_a_drivers_own_deadlock_an_inner_run_gave_up_on(failure: Any):
+    # The mark is an attribute set on the driver's own exception: python-oracledb's and psycopg's take one.
+    calls = 0
+
+    async def statement() -> None:
+        nonlocal calls
+        calls += 1
+        raise failure()
+
+    async def inner() -> None:
+        try:
+            await when_not_contended(statement, ddl_deadlocked, no_pause)
+        except Exception as error:
+            raise DrivineError.with_root_cause(error) from error
+
+    with pytest.raises(DrivineError):
+        await when_not_contended(inner, ddl_deadlocked, no_pause)
+    assert calls == CONTENDED_ATTEMPTS

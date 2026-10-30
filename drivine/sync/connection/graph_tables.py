@@ -8,6 +8,7 @@ from collections.abc import Callable
 from typing import Any
 
 from drivine.sync import concurrency
+from drivine.sync.manager.contention import any_cause
 
 logger = logging.getLogger("drivine.connection")
 
@@ -21,14 +22,12 @@ def will_not_make(failure: BaseException) -> bool:
     same way: a user who may not make tables (ORA-01031 on Oracle, 42501 on Postgres), or a database open read-only
     (ORA-16000; 25006, as on a hot standby). The failure and each cause under it are looked at.
     """
-    cause: BaseException | None = failure
-    for _ in range(10):
-        if cause is None:
-            return False
-        if _ORACLE_WILL_NOT_MAKE.search(str(cause)) or getattr(cause, "sqlstate", None) in _POSTGRES_WILL_NOT_MAKE:
-            return True
-        cause = cause.__cause__
-    return False
+    return any_cause(
+        failure,
+        lambda it: (
+            bool(_ORACLE_WILL_NOT_MAKE.search(str(it))) or getattr(it, "sqlstate", None) in _POSTGRES_WILL_NOT_MAKE
+        ),
+    )
 
 
 class GraphTables:

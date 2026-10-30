@@ -39,7 +39,7 @@ def contended_pause(attempt: int, chance: Callable[[], float] = random.random) -
     return base + chance() * base
 
 
-def _any_cause(failure: BaseException | None, matches: Callable[[BaseException], bool]) -> bool:
+def any_cause(failure: BaseException | None, matches: Callable[[BaseException], bool]) -> bool:
     """Whether `failure`, or a cause under it, as deep as ten, is one `matches` takes."""
     cause = failure
     for _ in range(10):
@@ -60,7 +60,7 @@ def ddl_deadlocked(failure: BaseException | None) -> bool:
     `OracleGraph.DDL_WAIT_SECONDS`), and running it again would hold the app's first connection for that wait again
     each time. The failure and each cause under it are looked at.
     """
-    return _any_cause(
+    return any_cause(
         failure,
         lambda it: bool(_DDL_DEADLOCKED.search(str(it))) or getattr(it, "sqlstate", None) == _POSTGRES_DEADLOCK,
     )
@@ -72,7 +72,7 @@ def ddl_contended(failure: BaseException | None) -> bool:
     indexes together do, so that running them again may succeed: a deadlock (see ddl_deadlocked), or on Oracle a lock
     that was busy (ORA-00054). The failure and each cause under it are looked at.
     """
-    return ddl_deadlocked(failure) or _any_cause(failure, lambda it: bool(_DDL_BUSY.search(str(it))))
+    return ddl_deadlocked(failure) or any_cause(failure, lambda it: bool(_DDL_BUSY.search(str(it))))
 
 
 def _gave_up_on(failure: BaseException) -> bool:
@@ -80,7 +80,7 @@ def _gave_up_on(failure: BaseException) -> bool:
     Whether `failure`, or a cause under it, is one a run of when_not_contended inside this one already raised, as a
     graph's first-use block is under a schema statement that asked for the first connection.
     """
-    return _any_cause(failure, lambda it: getattr(it, _GIVEN_UP, False) is True)
+    return any_cause(failure, lambda it: getattr(it, _GIVEN_UP, False) is True)
 
 
 def _giving_up(failure: E) -> E:

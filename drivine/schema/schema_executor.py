@@ -9,7 +9,7 @@ from drivine.backend.postgres.postgres_statement import value_of
 from drivine.connection.connection_provider import ConnectionProvider
 from drivine.connection.database_type import DatabaseType
 from drivine.drivine_error import DrivineError
-from drivine.manager.contention import ddl_contended, when_not_contended
+from drivine.manager.contention import any_cause, ddl_contended, when_not_contended
 from drivine.query.query_specification import QuerySpecification
 from drivine.schema.native_operation import NativeOperation
 
@@ -22,16 +22,12 @@ def _contended(failure: BaseException) -> bool:
     failure, or a SQL store turning DDL away because of another session's (see ddl_contended), as when managers that
     start together each make the indexes of the store's key.
     """
-    if ddl_contended(failure):
-        return True
-    cause: BaseException | None = failure
-    for _ in range(10):
-        if cause is None:
-            return False
-        if NEO4J_GRAMMAR.contended(cause) or FALKORDB_GRAMMAR.contended(cause) or _ORACLE_SERIAL.search(str(cause)):
-            return True
-        cause = cause.__cause__
-    return False
+    return ddl_contended(failure) or any_cause(
+        failure,
+        lambda it: (
+            NEO4J_GRAMMAR.contended(it) or FALKORDB_GRAMMAR.contended(it) or bool(_ORACLE_SERIAL.search(str(it)))
+        ),
+    )
 
 
 class SchemaExecutor:

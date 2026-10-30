@@ -2681,6 +2681,10 @@ async def test_keys_gives_each_rows_own_keys_of_a_node_a_relationship_a_map_or_a
         [1, 2],
         [3],
     ]
+    # A nested map's paths are in its parent's data guide too, and only those one step from the top are keys.
+    assert await rows(
+        "UNWIND [{a: {x: 1}}, {b: {y: 2}, c: 3}] AS m RETURN size(keys(m)), keys(coalesce(m.a, m.b))"
+    ) == [[1, ["x"]], [2, ["y"]]]
 
 
 async def test_lists_and_maps_that_hold_a_null_compare_item_by_item_null_where_no_pair_differs(

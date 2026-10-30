@@ -3024,9 +3024,53 @@ class SqlCypherCompiler(ABC):
         see: the names it takes and the functions it declares (a `reduce`'s on Oracle) are given back, so a statement
         whose aggregates bind nothing compiles as it did.
         """
+        return self._binds_in(lambda: self._expression(expression, select.scope))
+
+    def _binds_over_aggregates(
+        self, term: Expression, select: _Select, named: Mapping[str, Expression] | None = None
+    ) -> bool:
+        """
+        Whether `shared` would bind a value in the term, over an aggregate's result, where the term is no aggregate
+        itself: each aggregate in it compiled as it is, with nothing bound (`_aggregating`), and the operations over
+        them with `shared` on. Compiled only to see, as `_binds` is. An order term reads each item it names, in
+        `named`, by its name: the item's value, compiled over the rows the select reads as `_project` compiles it, is
+        bound to that name, so a comprehension's own name hides it as it hides any variable, and the item's expression
+        is never read where a comprehension binds its variables.
+        """
+        if is_aggregate(term) or not contains(term, is_aggregate):
+            return False
+
+        def work() -> None:
+            # Each item compiled as `_project` compiles it, with shared on where it does not aggregate, lest one nested
+            # deep be written out again at each level; what it binds is its own, not the term's.
+            read = set(variables_in(term))
+            items: dict[str, Value] = {}
+            for name, item in (named or {}).items():
+                if name in read:
+                    was = self._shared_bindings
+                    items[name] = self._aggregating(item, lambda item=item: self._expression(item, select.scope))
+                    self._shared_bindings = was
+            results: dict[str, Value] = {}
+
+            def result(part: Expression) -> Expression | None:
+                if not is_aggregate(part):
+                    return None
+                # Named as no variable is, unless quoted so.
+                variable = Variable(f"#over{len(results) + 1}")
+                results[variable.name] = self._unshared(lambda: self._expression(part, select.scope))
+                return variable
+
+            over = replaced(term, result)
+            self._expression(over, {**select.scope, **items, **results})
+
+        return self._binds_in(work)
+
+    def _binds_in(self, work: Callable[[], object]) -> bool:
+        """Whether `shared` binds a value in what the work compiles, the names it takes and the functions it declares
+        given back."""
         counter, shares, bindings, functions = self._counter, self._shares, self._shared_bindings, len(self._functions)
         try:
-            self._expression(expression, select.scope)
+            work()
             return self._shared_bindings > bindings
         finally:
             self._counter, self._shares, self._shared_bindings = counter, shares, bindings
@@ -3045,11 +3089,22 @@ class SqlCypherCompiler(ABC):
         where it is first, as a graph engine does: by its id for a node or a relationship, not its properties. An order
         term, or a part of one, that is an item is read by the item's name. A store dedupes no aggregate in the query
         that makes it, and Oracle's `LISTAGG`, which does, gives at most 4,000 bytes; and Oracle reads no aggregate of
-        the query it is in from a subquery, which reading a list item by item is. None where the projection does
-        neither.
+        the query it is in from a subquery, which reading a list item by item is. So too where an operation over an
+        aggregate's result would bind a value (`_binds_over_aggregates`): in the query that aggregates, nothing is
+        bound (`_aggregating`), so `max(n.title) + ': ' + max(n.first) + ' ' + max(n.last)` wrote each aggregate out
+        again at every level, to 68 MB on Postgres, and ran the compiler out of memory on Oracle (drivine4j#373); and
+        Oracle's CONTAINS binds its CLOBs in a subquery (see its `contains_text`), which reads no aggregate of the query
+        it is in (ORA-00937). Over the aggregates' columns, the operation binds its values as any item does. None where
+        the projection does none of these.
         """
         terms = [*(it.expression for it in items), *(it.expression for it in projection.order_by)]
-        if not any(contains(it, _collects_distinct) or contains(it, _iterates_aggregate) for it in terms):
+        # An order term reads an item by its name.
+        by_name = {it.name: it.expression for it in items}
+        if (
+            not any(contains(it, _collects_distinct) or contains(it, _iterates_aggregate) for it in terms)
+            and not any(self._binds_over_aggregates(it.expression, select) for it in items)
+            and not any(self._binds_over_aggregates(it.expression, select, by_name) for it in projection.order_by)
+        ):
             return None
         # Named as no variable is, unless quoted so.
         keys: dict[Expression, str] = {}
@@ -3144,10 +3199,9 @@ class SqlCypherCompiler(ABC):
         # An order term, or a part of one, that is an item is read by the item's name, as over a DISTINCT projection it
         # can only be; a variable an item is named after is that item, not the variable of that name before it.
         item_names = {it.expression: it.name for it in items}
-        aliases = {it.name for it in items}
 
         def sorted_by(term: Expression) -> Expression | None:
-            if isinstance(term, Variable) and term.name in aliases:
+            if isinstance(term, Variable) and term.name in by_name:
                 return term
             return Variable(item_names[term]) if term in item_names else kept(term)
 

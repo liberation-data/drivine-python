@@ -1003,6 +1003,224 @@ def test_an_optional_call_in_a_writes_subquery_counts_what_it_finds_and_the_row_
         assert cypher_pm.query(spec("MATCH (n:CyWrite {id: 1}) RETURN [n.o, n.f, n.b]")) == [[0, 1, 1]]
 
 
+def test_texts_text_functions_and_arithmetic_over_an_aggregates_result_beside_keys_a_walk_distinct_and_an_order(
+    cypher_pm: PersistenceManager,
+):
+    # drivine4j#373 (#235 here): an operation over an aggregate's result is worked out over the aggregate's column,
+    # where it would bind a value; the three aggregates concatenated compiled to megabytes. drivine4j's
+    # CypherQueryContract of liberation-data/drivine4j#373.
+    clear(cypher_pm)
+    cypher_pm.query(
+        spec(
+            "CREATE (a:CyAgg {k: 'x', title: 'Dr', first: 'Ann', last: 'Bell', name: ' Bo ', a: 1, b: 10})-[:NEXT]->"
+            "(b:CyAgg {k: 'x', title: 'Mr', first: 'Cy', last: 'Ames', name: ' Al ', a: 3, b: 20})-[:NEXT]->"
+            "(:CyAgg {k: 'y', title: 'Ms', first: 'Di', last: 'Cole', name: ' Ed ', a: 5, b: 30})"
+        )
+    )
+
+    def query(cypher: str) -> list[Any]:
+        return cypher_pm.query(spec(cypher))
+
+    all_ = "MATCH (n:CyAgg)"
+    ordered = "MATCH (n:CyAgg) WITH n ORDER BY n.a"
+    assert query(f"{all_} RETURN max(n.title) + ': ' + max(n.first) + ' ' + max(n.last)") == ["Ms: Di Cole"]
+    heads = "head(collect(n.title)) + ': ' + head(collect(n.first)) + ' ' + head(collect(n.last))"
+    assert query(f"{ordered} RETURN {heads}") == ["Dr: Ann Bell"]
+    functions = (
+        f"{ordered} RETURN [toLower(toLower(toLower(toLower(collect(n.name)[0])))), trim(trim(max(n.name))), "
+        "substring(substring(toUpper(max(n.first)), 0), 1), toLower(trim(head(collect(n.name))))]"
+    )
+    assert query(functions) == [[" bo ", "Ed", "I", "bo"]]
+    arithmetic = f"{all_} RETURN [sum(n.a) / count(*), (sum(n.a) + sum(n.b)) * 2 / count(*) - max(n.a)]"
+    assert query(arithmetic) == [[3, 41]]
+    # Beside a grouping key, ordered by it, and by an operation over aggregates, which Neo4j sorts by only where it is
+    # an item.
+    keyed = f"{all_} RETURN n.k AS k, max(n.title) + ': ' + toLower(max(n.last)) AS t ORDER BY k"
+    assert query(keyed) == [["x", "Mr: bell"], ["y", "Ms: cole"]]
+    by_texts = (
+        f"{all_} RETURN n.k AS k, toLower(min(n.last)) + max(n.first) AS t "
+        "ORDER BY toLower(min(n.last)) + max(n.first) DESC"
+    )
+    assert query(by_texts) == [["y", "coleDi"], ["x", "amesCy"]]
+    by_mean = f"{all_} RETURN n.k AS k, sum(n.b) / count(*) AS m ORDER BY sum(n.b) / count(*) DESC"
+    assert query(by_mean) == [["y", 30], ["x", 15]]
+    # DISTINCT, with a key and without.
+    distinct = f"{all_} RETURN DISTINCT n.k AS k, toLower(max(n.first)) + toString(count(*)) AS t ORDER BY k"
+    assert query(distinct) == [["x", "cy2"], ["y", "di1"]]
+    distinct_texts = f"{all_} RETURN DISTINCT max(n.title) + ': ' + max(n.first) + ' ' + max(n.last)"
+    assert query(distinct_texts) == ["Ms: Di Cole"]
+    # Beside a variable-length walk, in an item, and in an order term too.
+    walk = "MATCH (s:CyAgg)-[:NEXT*1..2]->(e:CyAgg)"
+    assert query(f"{walk} RETURN min(e.title) + ': ' + min(e.first) + ' ' + min(e.last)") == ["Mr: Cy Ames"]
+    sorted_ = "toLower(toLower(max(e.last))) + toString(sum(e.a))"
+    assert query(f"{walk} RETURN s.first AS s, {sorted_} AS t ORDER BY {sorted_}") == [
+        ["Cy", "cole5"],
+        ["Ann", "cole8"],
+    ]
+    paged = f"{walk} RETURN s.first AS s, {sorted_} AS t ORDER BY {sorted_} DESC SKIP 1 LIMIT 1"
+    assert query(paged) == [["Cy", "cole5"]]
+    # An order term that reads an item by its name beside an aggregate, with a walk and without.
+    by_name = f"{all_} RETURN n.k AS k, sum(n.a) AS m ORDER BY toString(10 - sum(n.a)) + toLower(toLower(k))"
+    assert query(by_name) == [["y", 5], ["x", 4]]
+    walk_by_name = f"{walk} RETURN s.first AS s, sum(e.a) AS c ORDER BY toLower(toLower(s)) + toString(sum(e.a)) DESC"
+    assert query(walk_by_name) == [["Cy", 5], ["Ann", 8]]
+    # Where a comprehension's own name hides an item's, and where the item's expression reads a name the comprehension
+    # binds.
+    hidden = f"{all_} RETURN n.k AS k, sum(n.a) AS m ORDER BY toString([k IN [10] | k - m][0]) + toString(sum(n.a))"
+    assert query(hidden) == [["y", 5], ["x", 4]]
+    bound = f"{all_} RETURN n.k AS k, sum(n.a) AS m ORDER BY [n IN ['b'] | k + n][0] + toString(sum(n.a)) DESC"
+    assert query(bound) == [["y", 5], ["x", 4]]
+    # Beside a key that is an expression, in a CASE and in a map.
+    texts = "toLower(max(n.title)) + ': ' + toLower(max(n.last))"
+    assert query(f"{all_} RETURN n.a + 1 AS k, {texts} AS t ORDER BY k") == [
+        [2, "dr: bell"],
+        [4, "mr: ames"],
+        [6, "ms: cole"],
+    ]
+    cased = f"{all_} RETURN n.k AS k, CASE WHEN count(*) > 1 THEN {texts} ELSE '' END AS t ORDER BY k"
+    assert query(cased) == [["x", "mr: bell"], ["y", ""]]
+    mapped = f"{all_} RETURN n.k AS k, {{t: {texts}, c: count(*) + 1}} AS m ORDER BY k"
+    assert query(mapped) == [["x", {"t": "mr: bell", "c": 3}], ["y", {"t": "ms: cole", "c": 2}]]
+    # Over no rows, the aggregate is null, and so is what is worked out over it; a count is 0.
+    assert query(f"{all_} WHERE n.k = 'z' RETURN toLower(max(n.title)) + '!'") == [None]
+    counted = f"{all_} WHERE n.k = 'z' RETURN [toLower(toString(count(*))) + '!', count(*) + 1]"
+    assert query(counted) == [["0!", 1]]
+    # A text looked for in another over an aggregate's result: Oracle's CONTAINS binds its CLOBs in a subquery
+    # (drivine4j#312), which reads no aggregate of the query it is in.
+    contained = (
+        f"{all_} RETURN n.k AS k, max(n.last) CONTAINS min(n.first) AS c, toLower(max(n.name)) CONTAINS 'e' AS e"
+    )
+    assert query(f"{contained} ORDER BY k") == [["x", False, False], ["y", False, True]]
+    clear(cypher_pm)
+
+
+def test_contains_finds_a_text_past_32_kb_in_a_text_of_any_length_given_stored_on_several_rows_and_in_a_write(
+    cypher_pm: PersistenceManager,
+):
+    # On Oracle INSTR refuses to look for a text past 32,767 UTF-16 units (ORA-22828, drivine4j#312). Each text is
+    # looked for as a parameter, as a property on the node beside it, and of each node in a cross join, three times on
+    # one session. drivine4j's CypherQueryContract of liberation-data/drivine4j#312.
+    clear(cypher_pm)
+    long = "aB" * 20_000
+    pair = "\U0001f600"
+    cases: list[tuple[str | None, str | None]] = [
+        # A short text in a long one, and texts just within and just past what INSTR looks for.
+        (long, "aB"),
+        (long, "zz"),
+        (long, long[1:32_768]),
+        (long, long[1:32_769]),
+        (long, long[:32_768] + "z"),
+        # A long text in a longer one, found only at its end, and not found.
+        (long + "c", "aB" * 19_000 + "c"),
+        (long + "c", "aB" * 19_000 + "d"),
+        # As long: the issue's own, and one that differs in its last character.
+        (long, long),
+        (long, long[:-1] + "b"),
+        # Longer than the text.
+        (long, long + "x"),
+        ("abc", long),
+        # Empty and null.
+        (long, ""),
+        ("", long),
+        (long, None),
+        (None, long),
+        # Three-byte characters, past 32 KB within INSTR's units and past them.
+        ("€" * 40_000, "€" * 32_767),
+        ("€" * 40_000, "€" * 33_000),
+        ("€" * 40_000, "€" * 33_000 + "x"),
+        # Characters past U+FFFF: across the 1,000th unit the search starts with, across INSTR's 32,767th, and only
+        # those.
+        ("z" + "x" * 999 + pair + "y" * 40_000, "x" * 999 + pair + "y" * 39_000),
+        ("z" + "y" * 32_766 + pair + "y" * 100, "y" * 32_766 + pair + "y" * 10),
+        ("z" + pair * 20_000 + "q", pair * 19_000 + "q"),
+        ("z" + pair * 20_000 + "q", pair * 19_000 + "z"),
+        # A long text whose first units are nowhere in the text, so no place is compared.
+        (long, "c" * 33_000),
+    ]
+
+    def expected(t: str | None, x: str | None) -> bool | None:
+        if t is None or x is None:
+            return None
+        # Oracle's empty text is null, so CONTAINS of one is null there.
+        if cypher_pm.type is DatabaseType.ORACLE and (not t or not x):
+            return None
+        return x in t
+
+    parameters = {f"{side}{i}": text for i, case in enumerate(cases) for side, text in zip("tx", case, strict=True)}
+    # One node at a time: on Oracle, UNWIND of a list of texts past 32 KB into CREATE closes the session.
+    for i, (t, x) in enumerate(cases):
+        cypher_pm.query(spec("CREATE (:CyContains {i: $i, t: $t, x: $x})", {"i": i, "t": t, "x": x}))
+    each = [expected(t, x) for t, x in cases]
+    with one_session(cypher_pm):
+        for run in range(1, 4):
+            for i, (t, x) in enumerate(cases):
+                described = f"{None if x is None else len(x)} in {None if t is None else len(t)}, case {i}, run {run}"
+                given = asked_again(cypher_pm, f"WITH $t{i} AS t, $x{i} AS x RETURN t CONTAINS x", parameters)
+                assert given == [expected(t, x)], f"given, {described}"
+            stored = "MATCH (n:CyContains) RETURN n.t CONTAINS n.x ORDER BY n.i"
+            assert asked_again(cypher_pm, stored, parameters) == each, f"stored, run {run}"
+            # The text of one node, looked for in each other's; and in a write, which runs as a block of its own.
+            across = "MATCH (n:CyContains {i: 7}), (m:CyContains) RETURN m.t CONTAINS n.x ORDER BY m.i"
+            assert asked_again(cypher_pm, across, parameters) == [expected(t, long) for t, _ in cases], (
+                f"across nodes, run {run}"
+            )
+            written = "MATCH (n:CyContains) SET n.r = n.t CONTAINS n.x WITH n ORDER BY n.i RETURN n.r"
+            assert asked_again(cypher_pm, written, parameters) == each, f"written, run {run}"
+    clear(cypher_pm)
+
+
+def test_contains_of_a_text_past_32_kb_in_an_aggregates_argument_over_its_result_and_beside_a_grouping_key(
+    cypher_pm: PersistenceManager,
+):
+    # On Oracle the search of a text past 32,767 UTF-16 units is a subquery (drivine4j#312): here an aggregate reads
+    # it, it reads an aggregate's result, and it is a grouping key. drivine4j's CypherQueryContract of
+    # liberation-data/drivine4j#312.
+    clear(cypher_pm)
+    long = "aB" * 20_000
+    found = "aB" * 19_000 + "c"
+    texts = [(long + "c", found), (long, found), (long + "c", found)]
+    for i, (t, x) in enumerate(texts):
+        given = {"i": i, "k": i % 2, "t": t, "x": x}
+        cypher_pm.query(spec("CREATE (:CyContainsAgg {i: $i, k: $k, t: $t, x: $x})", given))
+    all_ = "MATCH (n:CyContainsAgg)"
+    counted = "count(CASE WHEN n.t CONTAINS n.x THEN 1 END)"
+    assert cypher_pm.query(spec(f"{all_} RETURN {counted}")) == [2]
+    assert cypher_pm.query(spec(f"{all_} RETURN n.k AS k, {counted} AS c ORDER BY k")) == [[0, 2], [1, 0]]
+    distinct = f"{all_} RETURN DISTINCT n.k AS k, n.t CONTAINS n.x AS c ORDER BY k"
+    assert cypher_pm.query(spec(distinct)) == [[0, True], [1, False]]
+    beside = f"{all_} RETURN n.i AS i, n.t CONTAINS n.x AS c, count(*) AS m ORDER BY i"
+    assert cypher_pm.query(spec(beside)) == [[0, True, 1], [1, False, 1], [2, True, 1]]
+    heads = f"{all_} WITH n ORDER BY n.i RETURN head(collect(n.t)) CONTAINS head(collect(n.x))"
+    assert cypher_pm.query(spec(heads)) == [True]
+    grouped = (
+        f"{all_} WITH n ORDER BY n.i RETURN n.k AS k, head(collect(n.t)) CONTAINS last(collect(n.x)) AS c ORDER BY k"
+    )
+    assert cypher_pm.query(spec(grouped)) == [[0, True], [1, False]]
+    clear(cypher_pm)
+
+
+def test_contains_of_a_text_past_32_kb_filters_in_a_where_and_runs_in_the_step_of_a_reduce(
+    cypher_pm: PersistenceManager,
+):
+    # On Oracle the search of a text past 32,767 UTF-16 units is a subquery (drivine4j#312): here a WHERE filters by
+    # it, and a reduce() runs it in its function's own query. drivine4j's CypherQueryContract of
+    # liberation-data/drivine4j#312.
+    clear(cypher_pm)
+    long = "aB" * 20_000
+    found = "aB" * 19_000 + "c"
+    for i, t in enumerate([long + "c", long, long + "c"]):
+        cypher_pm.query(spec("CREATE (:CyContainsWhere {i: $i, t: $t, x: $x})", {"i": i, "t": t, "x": found}))
+    all_ = "MATCH (n:CyContainsWhere)"
+    assert cypher_pm.query(spec(f"{all_} WHERE n.t CONTAINS n.x RETURN n.i ORDER BY n.i")) == [0, 2]
+    assert cypher_pm.query(spec(f"{all_} WHERE NOT n.t CONTAINS n.x RETURN n.i ORDER BY n.i")) == [1]
+    reduced = (
+        f"{all_} WITH n ORDER BY n.i WITH collect(n.t) AS ts, head(collect(n.x)) AS x "
+        "RETURN reduce(acc = [], s IN ts | acc + [s CONTAINS x])"
+    )
+    assert cypher_pm.query(spec(reduced)) == [[True, False, True]]
+    clear(cypher_pm)
+
+
 def test_a_stored_text_past_32_kb_a_text_function_or_a_sum_reads_beside_a_long_value_on_two_rows_is_read_whole(
     cypher_pm: PersistenceManager,
 ):

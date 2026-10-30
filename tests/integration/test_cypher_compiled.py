@@ -2944,6 +2944,89 @@ async def test_a_walk_read_through_a_with_then_sorted_by_to_string_in_a_second_w
     ]
 
 
+async def test_keys_gives_each_rows_own_keys_of_a_node_a_relationship_a_map_or_a_parameter_wherever_it_is_read(
+    cypher_pm: PersistenceManager,
+):
+    # On Oracle every row had the first row's keys (liberation-data/drivine4j#414, here #257): the map's data guide was
+    # worked out by a subquery in a lateral view's select list, which Oracle works out once. The spec's cases read one
+    # row's keys only. In a comprehension, a quantifier, a DISTINCT and an order as well.
+    async def rows(cypher: str, parameters: dict[str, Any] | None = None) -> list[Any]:
+        return await cypher_pm.query(spec(cypher, parameters))
+
+    await clear(cypher_pm)
+    await rows(
+        "CREATE (a:CyKeyed {id: 1, name: 'Andres', surname: 'Lopez'}), "
+        "(b:CyKeyed {id: 2, otherName: 'Andres', otherSurname: 'Lopez'}), (c:CyKeyed {id: 3, a: 1}), "
+        "(d:CyKeyed {id: 4, b: 2}), (a)-[:CY_KEYED {w: 1, p: 1}]->(b), (c)-[:CY_KEYED {w: 2, q: 2, z: 3}]->(d)"
+    )
+    assert await rows("MATCH (n:CyKeyed) UNWIND keys(n) AS k RETURN n.id, k ORDER BY n.id, k") == [
+        [1, "id"],
+        [1, "name"],
+        [1, "surname"],
+        [2, "id"],
+        [2, "otherName"],
+        [2, "otherSurname"],
+        [3, "a"],
+        [3, "id"],
+        [4, "b"],
+        [4, "id"],
+    ]
+    # The TCK's Graph8 #2.
+    assert await rows("MATCH (n:CyKeyed) UNWIND keys(n) AS x RETURN DISTINCT x ORDER BY x") == [
+        "a",
+        "b",
+        "id",
+        "name",
+        "otherName",
+        "otherSurname",
+        "surname",
+    ]
+    assert await rows("MATCH (n:CyKeyed) WITH n ORDER BY n.id RETURN collect(size(keys(n)))") == [[3, 3, 2, 2]]
+    assert await rows("MATCH (n:CyKeyed) RETURN 'b' IN keys(n) ORDER BY n.id") == [False, False, False, True]
+    assert await rows("MATCH (n:CyKeyed) RETURN [k IN keys(n) WHERE k IN ['a', 'b'] | k + '!'] ORDER BY n.id") == [
+        [],
+        [],
+        ["a!"],
+        ["b!"],
+    ]
+    assert await rows("MATCH (:CyKeyed)-[r:CY_KEYED]->() UNWIND keys(r) AS k RETURN r.w, k ORDER BY r.w, k") == [
+        [1, "p"],
+        [1, "w"],
+        [2, "q"],
+        [2, "w"],
+        [2, "z"],
+    ]
+    assert await rows("UNWIND [{a: 1}, {b: 2}] AS m RETURN keys(m)") == [["a"], ["b"]]
+    assert await rows("UNWIND $ms AS m RETURN keys(m)", {"ms": [{"a": 1}, {"b": 2}]}) == [["a"], ["b"]]
+    assert await rows("WITH [{a: 1}, {b: 2}] AS ms RETURN [m IN ms | keys(m)]") == [[["a"], ["b"]]]
+    assert await rows("UNWIND [{a: 1}, {b: 2}] AS m RETURN [x IN [m, {c: 3}] | keys(x)]") == [
+        [["a"], ["c"]],
+        [["b"], ["c"]],
+    ]
+    assert await rows("UNWIND [{b: 1}, {a: 2}, {b: 3}] AS m RETURN DISTINCT keys(m) ORDER BY keys(m)") == [
+        ["a"],
+        ["b"],
+    ]
+    assert await rows("UNWIND [{b: 1}, {a: 2}] AS m RETURN coalesce(m.a, m.b) ORDER BY keys(m)") == [2, 1]
+    # A quantifier over each row's keys in a WHERE, the keys of a relationship an OPTIONAL MATCH didn't find, and of
+    # maps in a list each row holds.
+    assert await rows(
+        "UNWIND $rows AS row MATCH (n:CyKeyed {id: row.id}) WHERE any(k IN keys(row.props) WHERE k = 'b') RETURN n.id",
+        {"rows": [{"id": 1, "props": {"a": 1}}, {"id": 4, "props": {"b": 2}}]},
+    ) == [4]
+    assert await rows(
+        "MATCH (n:CyKeyed) OPTIONAL MATCH (n)-[r:CY_KEYED]->() RETURN n.id, size(keys(r)) ORDER BY n.id"
+    ) == [[1, 2], [2, None], [3, 3], [4, None]]
+    assert await rows("UNWIND [[{a: 1}, {b: 2, c: 3}], [{d: 4, e: 5, f: 6}]] AS l RETURN [x IN l | size(keys(x))]") == [
+        [1, 2],
+        [3],
+    ]
+    # A nested map's paths are in its parent's data guide too, and only those one step from the top are keys.
+    assert await rows(
+        "UNWIND [{a: {x: 1}}, {b: {y: 2}, c: 3}] AS m RETURN size(keys(m)), keys(coalesce(m.a, m.b))"
+    ) == [[1, ["x"]], [2, ["y"]]]
+
+
 async def test_lists_and_maps_that_hold_a_null_compare_item_by_item_null_where_no_pair_differs(
     cypher_pm: PersistenceManager,
 ):

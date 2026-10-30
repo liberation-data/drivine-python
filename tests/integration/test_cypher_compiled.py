@@ -868,6 +868,128 @@ async def test_an_optional_call_or_an_optional_match_in_a_count_or_an_exists_kee
         assert await asked_again(cypher_pm, where) == [1]
 
 
+async def test_an_aggregate_in_a_call_reads_the_variables_the_call_imports(cypher_pm: PersistenceManager):
+    # Not in the spec yet (#253). On Oracle, an aggregate in a CALL read a variable of an unwound row as null, so sum()
+    # gave 0 and collect() gave []. Postgres refused an aggregate of an imported variable alone, count(o), as the row's
+    # query's. drivine4j's CypherQueryContract of liberation-data/drivine4j#368; the rows are Neo4j's (2026.10).
+    await seeded(cypher_pm)
+
+    async def rows_of(cypher: str, parameters: dict[str, Any] | None = None) -> list[Any]:
+        return await cypher_pm.query(spec(cypher, parameters))
+
+    aggregates = (
+        "RETURN sum(i + o) AS s, collect(o) AS c, count(o) AS n, max(i * o) AS m } RETURN o, s, c, n, m ORDER BY o"
+    )
+    rows = [[1, 9, [1, 1, 1], 3, 3], [2, 12, [2, 2, 2], 3, 6]]
+    assert await rows_of("UNWIND [2] AS o CALL { WITH o UNWIND range(1, 3) AS i RETURN sum(i + o) AS s } RETURN s") == [
+        12
+    ]
+    assert await rows_of("UNWIND [2] AS o CALL { WITH o UNWIND range(1, 3) AS i RETURN collect(o) AS s } RETURN s") == [
+        [2, 2, 2]
+    ]
+    # Imported by a WITH, or by the CALL's scope clause.
+    assert await rows_of(f"UNWIND [1, 2] AS o CALL {{ WITH o UNWIND range(1, 3) AS i {aggregates}") == rows
+    assert await rows_of(f"UNWIND [1, 2] AS o CALL (o) {{ UNWIND range(1, 3) AS i {aggregates}") == rows
+    assert await rows_of(
+        "UNWIND [1, 2] AS o OPTIONAL CALL (o) { UNWIND range(1, 3) AS i RETURN sum(i + o) AS s, collect(o) AS c } "
+        "RETURN o, s, c ORDER BY o"
+    ) == [[1, 9, [1, 1, 1]], [2, 12, [2, 2, 2]]]
+    # Aggregated in a WITH within the CALL.
+    assert await rows_of(
+        "UNWIND [1, 2] AS o CALL { WITH o UNWIND range(1, 3) AS i WITH sum(i + o) AS t RETURN t * 10 AS s } "
+        "RETURN o, s ORDER BY o"
+    ) == [[1, 90], [2, 120]]
+    # Grouped within the CALL, by a key worked out first where it holds a subquery or a parameter.
+    grouped = [[1, 0, [3, 5], 2], [1, 1, [2, 4], 2], [2, 0, [4, 6], 4], [2, 1, [3, 5], 4]]
+    each = "collect(o + i) AS xs, sum(o) AS s } RETURN o, k, xs, s ORDER BY o, k"
+    assert await rows_of(f"UNWIND [1, 2] AS o CALL (o) {{ UNWIND range(1, 4) AS i RETURN i % 2 AS k, {each}") == grouped
+    assert (
+        await rows_of(f"UNWIND [1, 2] AS o CALL {{ WITH o UNWIND range(1, 4) AS i RETURN i % 2 AS k, {each}") == grouped
+    )
+    assert (
+        await rows_of(f"UNWIND [1, 2] AS o CALL {{ WITH o UNWIND range(1, 4) AS i RETURN i % $m AS k, {each}", {"m": 2})
+        == grouped
+    )
+    # Over an imported node's property.
+    assert await rows_of(
+        "MATCH (p:Person) CALL (p) { UNWIND range(1, 2) AS i "
+        "RETURN sum(p.born + i) AS s, collect(p.name) AS ns, max(p.born) AS b } RETURN p.name, s, ns, b ORDER BY p.name"
+    ) == [
+        ["Carrie", 3937, ["Carrie", "Carrie"], 1967],
+        ["Hugo", 0, ["Hugo", "Hugo"], None],
+        ["Keanu", 3931, ["Keanu", "Keanu"], 1964],
+        ["Laurence", 3925, ["Laurence", "Laurence"], 1961],
+    ]
+    assert await rows_of(
+        "MATCH (p:Person) CALL { WITH p UNWIND [10, 20] AS i RETURN count(p) AS n, sum(i) + max(p.born) AS t } "
+        "RETURN p.name, n, t ORDER BY p.name"
+    ) == [["Carrie", 2, 1997], ["Hugo", 2, None], ["Keanu", 2, 1994], ["Laurence", 2, 1991]]
+    # Each row's own values, a null among them; two imports; a map and a relationship.
+    assert await rows_of(
+        "UNWIND [1, null] AS o CALL (o) { UNWIND range(1, 3) AS i RETURN count(o) AS n, collect(o) AS c, max(o) AS s } "
+        "RETURN o, n, c, s ORDER BY o"
+    ) == [[1, 3, [1, 1, 1], 1], [None, 0, [], None]]
+    assert await rows_of(
+        "UNWIND [1, 2] AS a UNWIND [10, 20] AS b CALL { WITH a, b UNWIND range(1, 2) AS i "
+        "RETURN sum(a * b + i) AS s, collect(a) AS ca, count(b) AS nb } RETURN a, b, s, ca, nb ORDER BY a, b"
+    ) == [[1, 10, 23, [1, 1], 2], [1, 20, 43, [1, 1], 2], [2, 10, 43, [2, 2], 2], [2, 20, 83, [2, 2], 2]]
+    assert await rows_of(
+        "UNWIND [{a: 1}, {a: 2}] AS o CALL { WITH o UNWIND range(1, 2) AS i "
+        "RETURN sum(o.a + i) AS s, collect(o) AS c } RETURN o.a, s, c ORDER BY o.a"
+    ) == [[1, 5, [{"a": 1}, {"a": 1}]], [2, 7, [{"a": 2}, {"a": 2}]]]
+    assert await rows_of(
+        "MATCH (p:Person {name: 'Laurence'})-[r:ACTED_IN]->() CALL { WITH r UNWIND [1, 2] AS i "
+        "RETURN collect(r.role) AS rs, count(r) AS n } RETURN p.name, rs, n"
+    ) == [["Laurence", ["Morpheus", "Morpheus"], 2]]
+    # In each query of a UNION in the CALL, in a CALL within the CALL, and in a CALL after a write.
+    assert await rows_of(
+        "UNWIND [1, 2] AS o CALL (o) { UNWIND [1, 2] AS i RETURN sum(i + o) AS s "
+        "UNION ALL UNWIND [3] AS i RETURN sum(i + o) AS s } RETURN o, s ORDER BY o, s"
+    ) == [[1, 4], [1, 5], [2, 5], [2, 7]]
+    assert await rows_of(
+        "UNWIND [1, 2] AS o CALL (o) { UNWIND [1, 2] AS j CALL (o, j) { UNWIND range(1, 3) AS i "
+        "RETURN sum(o * j + i) AS s } RETURN collect(s) AS ss } RETURN o, ss ORDER BY o"
+    ) == [[1, [9, 12]], [2, [12, 18]]]
+    assert await rows_of(
+        "CREATE (x:CyCallWrite {v: 1}) WITH x UNWIND range(1, 2) AS o CALL { WITH o, x UNWIND range(1, 2) AS i "
+        "RETURN sum(i + o) AS s, collect(x.v) AS xs, count(o) AS n } RETURN o, s, xs, n ORDER BY o"
+    ) == [[1, 5, [1, 1], 2], [2, 7, [1, 1], 2]]
+    # Under a RETURN * after a WITH that names what it passes on; and a variable the CALL unwinds itself, of a name the
+    # row has.
+    assert await rows_of(
+        "UNWIND [1, 2] AS o CALL { WITH o UNWIND range(1, 3) AS i WITH sum(i + o) AS s RETURN * } "
+        "RETURN o, s ORDER BY o"
+    ) == [[1, 9], [2, 12]]
+    assert await rows_of(
+        "UNWIND [1, 2] AS o CALL (o) { UNWIND range(1, 3) AS i WITH sum(i + o) AS s, collect(o) AS c RETURN * } "
+        "RETURN o, s, c ORDER BY o"
+    ) == [[1, 9, [1, 1, 1]], [2, 12, [2, 2, 2]]]
+    assert await rows_of(
+        "UNWIND [1, 2] AS o CALL { UNWIND [5, 6] AS o RETURN sum(o) AS s } RETURN o, s ORDER BY o"
+    ) == [[1, 11], [2, 11]]
+    # Under a RETURN that aggregates after a WITH *; an aggregate within a comprehension or a CASE; an import renamed by
+    # the first WITH; a boolean and a path imported.
+    assert await rows_of(
+        "UNWIND [1, 2] AS o CALL (o) { UNWIND range(1, 3) AS i WITH * RETURN sum(i + o) AS s } RETURN o, s ORDER BY o"
+    ) == [[1, 9], [2, 12]]
+    assert await rows_of(
+        "UNWIND [1, 2] AS o CALL (o) { UNWIND range(1, 3) AS i RETURN [x IN collect(o) | x + 1] AS c, "
+        "CASE WHEN count(o) > 2 THEN 'many' ELSE 'few' END AS k } RETURN o, c, k ORDER BY o"
+    ) == [[1, [2, 2, 2], "many"], [2, [3, 3, 3], "many"]]
+    assert await rows_of(
+        "UNWIND [1, 2] AS o CALL (o) { WITH o AS x UNWIND range(1, 3) AS i RETURN sum(x + i) AS s } "
+        "RETURN o, s ORDER BY o"
+    ) == [[1, 9], [2, 12]]
+    assert await rows_of(
+        "UNWIND [1, 2] AS o WITH o, o > 1 AS b CALL (o, b) { UNWIND [1, 2] AS i "
+        "RETURN collect(b) AS bs, sum(i + o) AS s } RETURN o, bs, s ORDER BY o"
+    ) == [[1, [False, False], 5], [2, [True, True], 7]]
+    assert await rows_of(
+        "MATCH path = (p:Person {name: 'Laurence'})-[:ACTED_IN]->() CALL (path) { UNWIND [1, 2] AS i "
+        "RETURN count(path) AS n, collect(length(path)) AS ls } RETURN n, ls"
+    ) == [[2, [1, 1]]]
+
+
 async def test_an_optional_call_in_a_writes_subquery_counts_what_it_finds_and_the_row_it_finds_nothing_for(
     cypher_pm: PersistenceManager,
 ):
@@ -886,6 +1008,224 @@ async def test_an_optional_call_in_a_writes_subquery_counts_what_it_finds_and_th
             statement = f"UNWIND $ts AS t MATCH (n:CyWrite {{id: t.id}}) SET n.{name} = COUNT {{ {subquery} }}"
             await asked_again(cypher_pm, statement, given)
         assert await cypher_pm.query(spec("MATCH (n:CyWrite {id: 1}) RETURN [n.o, n.f, n.b]")) == [[0, 1, 1]]
+
+
+async def test_texts_text_functions_and_arithmetic_over_an_aggregates_result_beside_keys_a_walk_distinct_and_an_order(
+    cypher_pm: PersistenceManager,
+):
+    # drivine4j#373 (#235 here): an operation over an aggregate's result is worked out over the aggregate's column,
+    # where it would bind a value; the three aggregates concatenated compiled to megabytes. drivine4j's
+    # CypherQueryContract of liberation-data/drivine4j#373.
+    await clear(cypher_pm)
+    await cypher_pm.query(
+        spec(
+            "CREATE (a:CyAgg {k: 'x', title: 'Dr', first: 'Ann', last: 'Bell', name: ' Bo ', a: 1, b: 10})-[:NEXT]->"
+            "(b:CyAgg {k: 'x', title: 'Mr', first: 'Cy', last: 'Ames', name: ' Al ', a: 3, b: 20})-[:NEXT]->"
+            "(:CyAgg {k: 'y', title: 'Ms', first: 'Di', last: 'Cole', name: ' Ed ', a: 5, b: 30})"
+        )
+    )
+
+    async def query(cypher: str) -> list[Any]:
+        return await cypher_pm.query(spec(cypher))
+
+    all_ = "MATCH (n:CyAgg)"
+    ordered = "MATCH (n:CyAgg) WITH n ORDER BY n.a"
+    assert await query(f"{all_} RETURN max(n.title) + ': ' + max(n.first) + ' ' + max(n.last)") == ["Ms: Di Cole"]
+    heads = "head(collect(n.title)) + ': ' + head(collect(n.first)) + ' ' + head(collect(n.last))"
+    assert await query(f"{ordered} RETURN {heads}") == ["Dr: Ann Bell"]
+    functions = (
+        f"{ordered} RETURN [toLower(toLower(toLower(toLower(collect(n.name)[0])))), trim(trim(max(n.name))), "
+        "substring(substring(toUpper(max(n.first)), 0), 1), toLower(trim(head(collect(n.name))))]"
+    )
+    assert await query(functions) == [[" bo ", "Ed", "I", "bo"]]
+    arithmetic = f"{all_} RETURN [sum(n.a) / count(*), (sum(n.a) + sum(n.b)) * 2 / count(*) - max(n.a)]"
+    assert await query(arithmetic) == [[3, 41]]
+    # Beside a grouping key, ordered by it, and by an operation over aggregates, which Neo4j sorts by only where it is
+    # an item.
+    keyed = f"{all_} RETURN n.k AS k, max(n.title) + ': ' + toLower(max(n.last)) AS t ORDER BY k"
+    assert await query(keyed) == [["x", "Mr: bell"], ["y", "Ms: cole"]]
+    by_texts = (
+        f"{all_} RETURN n.k AS k, toLower(min(n.last)) + max(n.first) AS t "
+        "ORDER BY toLower(min(n.last)) + max(n.first) DESC"
+    )
+    assert await query(by_texts) == [["y", "coleDi"], ["x", "amesCy"]]
+    by_mean = f"{all_} RETURN n.k AS k, sum(n.b) / count(*) AS m ORDER BY sum(n.b) / count(*) DESC"
+    assert await query(by_mean) == [["y", 30], ["x", 15]]
+    # DISTINCT, with a key and without.
+    distinct = f"{all_} RETURN DISTINCT n.k AS k, toLower(max(n.first)) + toString(count(*)) AS t ORDER BY k"
+    assert await query(distinct) == [["x", "cy2"], ["y", "di1"]]
+    distinct_texts = f"{all_} RETURN DISTINCT max(n.title) + ': ' + max(n.first) + ' ' + max(n.last)"
+    assert await query(distinct_texts) == ["Ms: Di Cole"]
+    # Beside a variable-length walk, in an item, and in an order term too.
+    walk = "MATCH (s:CyAgg)-[:NEXT*1..2]->(e:CyAgg)"
+    assert await query(f"{walk} RETURN min(e.title) + ': ' + min(e.first) + ' ' + min(e.last)") == ["Mr: Cy Ames"]
+    sorted_ = "toLower(toLower(max(e.last))) + toString(sum(e.a))"
+    assert await query(f"{walk} RETURN s.first AS s, {sorted_} AS t ORDER BY {sorted_}") == [
+        ["Cy", "cole5"],
+        ["Ann", "cole8"],
+    ]
+    paged = f"{walk} RETURN s.first AS s, {sorted_} AS t ORDER BY {sorted_} DESC SKIP 1 LIMIT 1"
+    assert await query(paged) == [["Cy", "cole5"]]
+    # An order term that reads an item by its name beside an aggregate, with a walk and without.
+    by_name = f"{all_} RETURN n.k AS k, sum(n.a) AS m ORDER BY toString(10 - sum(n.a)) + toLower(toLower(k))"
+    assert await query(by_name) == [["y", 5], ["x", 4]]
+    walk_by_name = f"{walk} RETURN s.first AS s, sum(e.a) AS c ORDER BY toLower(toLower(s)) + toString(sum(e.a)) DESC"
+    assert await query(walk_by_name) == [["Cy", 5], ["Ann", 8]]
+    # Where a comprehension's own name hides an item's, and where the item's expression reads a name the comprehension
+    # binds.
+    hidden = f"{all_} RETURN n.k AS k, sum(n.a) AS m ORDER BY toString([k IN [10] | k - m][0]) + toString(sum(n.a))"
+    assert await query(hidden) == [["y", 5], ["x", 4]]
+    bound = f"{all_} RETURN n.k AS k, sum(n.a) AS m ORDER BY [n IN ['b'] | k + n][0] + toString(sum(n.a)) DESC"
+    assert await query(bound) == [["y", 5], ["x", 4]]
+    # Beside a key that is an expression, in a CASE and in a map.
+    texts = "toLower(max(n.title)) + ': ' + toLower(max(n.last))"
+    assert await query(f"{all_} RETURN n.a + 1 AS k, {texts} AS t ORDER BY k") == [
+        [2, "dr: bell"],
+        [4, "mr: ames"],
+        [6, "ms: cole"],
+    ]
+    cased = f"{all_} RETURN n.k AS k, CASE WHEN count(*) > 1 THEN {texts} ELSE '' END AS t ORDER BY k"
+    assert await query(cased) == [["x", "mr: bell"], ["y", ""]]
+    mapped = f"{all_} RETURN n.k AS k, {{t: {texts}, c: count(*) + 1}} AS m ORDER BY k"
+    assert await query(mapped) == [["x", {"t": "mr: bell", "c": 3}], ["y", {"t": "ms: cole", "c": 2}]]
+    # Over no rows, the aggregate is null, and so is what is worked out over it; a count is 0.
+    assert await query(f"{all_} WHERE n.k = 'z' RETURN toLower(max(n.title)) + '!'") == [None]
+    counted = f"{all_} WHERE n.k = 'z' RETURN [toLower(toString(count(*))) + '!', count(*) + 1]"
+    assert await query(counted) == [["0!", 1]]
+    # A text looked for in another over an aggregate's result: Oracle's CONTAINS binds its CLOBs in a subquery
+    # (drivine4j#312), which reads no aggregate of the query it is in.
+    contained = (
+        f"{all_} RETURN n.k AS k, max(n.last) CONTAINS min(n.first) AS c, toLower(max(n.name)) CONTAINS 'e' AS e"
+    )
+    assert await query(f"{contained} ORDER BY k") == [["x", False, False], ["y", False, True]]
+    await clear(cypher_pm)
+
+
+async def test_contains_finds_a_text_past_32_kb_in_a_text_of_any_length_given_stored_on_several_rows_and_in_a_write(
+    cypher_pm: PersistenceManager,
+):
+    # On Oracle INSTR refuses to look for a text past 32,767 UTF-16 units (ORA-22828, drivine4j#312). Each text is
+    # looked for as a parameter, as a property on the node beside it, and of each node in a cross join, three times on
+    # one session. drivine4j's CypherQueryContract of liberation-data/drivine4j#312.
+    await clear(cypher_pm)
+    long = "aB" * 20_000
+    pair = "\U0001f600"
+    cases: list[tuple[str | None, str | None]] = [
+        # A short text in a long one, and texts just within and just past what INSTR looks for.
+        (long, "aB"),
+        (long, "zz"),
+        (long, long[1:32_768]),
+        (long, long[1:32_769]),
+        (long, long[:32_768] + "z"),
+        # A long text in a longer one, found only at its end, and not found.
+        (long + "c", "aB" * 19_000 + "c"),
+        (long + "c", "aB" * 19_000 + "d"),
+        # As long: the issue's own, and one that differs in its last character.
+        (long, long),
+        (long, long[:-1] + "b"),
+        # Longer than the text.
+        (long, long + "x"),
+        ("abc", long),
+        # Empty and null.
+        (long, ""),
+        ("", long),
+        (long, None),
+        (None, long),
+        # Three-byte characters, past 32 KB within INSTR's units and past them.
+        ("€" * 40_000, "€" * 32_767),
+        ("€" * 40_000, "€" * 33_000),
+        ("€" * 40_000, "€" * 33_000 + "x"),
+        # Characters past U+FFFF: across the 1,000th unit the search starts with, across INSTR's 32,767th, and only
+        # those.
+        ("z" + "x" * 999 + pair + "y" * 40_000, "x" * 999 + pair + "y" * 39_000),
+        ("z" + "y" * 32_766 + pair + "y" * 100, "y" * 32_766 + pair + "y" * 10),
+        ("z" + pair * 20_000 + "q", pair * 19_000 + "q"),
+        ("z" + pair * 20_000 + "q", pair * 19_000 + "z"),
+        # A long text whose first units are nowhere in the text, so no place is compared.
+        (long, "c" * 33_000),
+    ]
+
+    def expected(t: str | None, x: str | None) -> bool | None:
+        if t is None or x is None:
+            return None
+        # Oracle's empty text is null, so CONTAINS of one is null there.
+        if cypher_pm.type is DatabaseType.ORACLE and (not t or not x):
+            return None
+        return x in t
+
+    parameters = {f"{side}{i}": text for i, case in enumerate(cases) for side, text in zip("tx", case, strict=True)}
+    # One node at a time: on Oracle, UNWIND of a list of texts past 32 KB into CREATE closes the session.
+    for i, (t, x) in enumerate(cases):
+        await cypher_pm.query(spec("CREATE (:CyContains {i: $i, t: $t, x: $x})", {"i": i, "t": t, "x": x}))
+    each = [expected(t, x) for t, x in cases]
+    async with one_session(cypher_pm):
+        for run in range(1, 4):
+            for i, (t, x) in enumerate(cases):
+                described = f"{None if x is None else len(x)} in {None if t is None else len(t)}, case {i}, run {run}"
+                given = await asked_again(cypher_pm, f"WITH $t{i} AS t, $x{i} AS x RETURN t CONTAINS x", parameters)
+                assert given == [expected(t, x)], f"given, {described}"
+            stored = "MATCH (n:CyContains) RETURN n.t CONTAINS n.x ORDER BY n.i"
+            assert await asked_again(cypher_pm, stored, parameters) == each, f"stored, run {run}"
+            # The text of one node, looked for in each other's; and in a write, which runs as a block of its own.
+            across = "MATCH (n:CyContains {i: 7}), (m:CyContains) RETURN m.t CONTAINS n.x ORDER BY m.i"
+            assert await asked_again(cypher_pm, across, parameters) == [expected(t, long) for t, _ in cases], (
+                f"across nodes, run {run}"
+            )
+            written = "MATCH (n:CyContains) SET n.r = n.t CONTAINS n.x WITH n ORDER BY n.i RETURN n.r"
+            assert await asked_again(cypher_pm, written, parameters) == each, f"written, run {run}"
+    await clear(cypher_pm)
+
+
+async def test_contains_of_a_text_past_32_kb_in_an_aggregates_argument_over_its_result_and_beside_a_grouping_key(
+    cypher_pm: PersistenceManager,
+):
+    # On Oracle the search of a text past 32,767 UTF-16 units is a subquery (drivine4j#312): here an aggregate reads
+    # it, it reads an aggregate's result, and it is a grouping key. drivine4j's CypherQueryContract of
+    # liberation-data/drivine4j#312.
+    await clear(cypher_pm)
+    long = "aB" * 20_000
+    found = "aB" * 19_000 + "c"
+    texts = [(long + "c", found), (long, found), (long + "c", found)]
+    for i, (t, x) in enumerate(texts):
+        given = {"i": i, "k": i % 2, "t": t, "x": x}
+        await cypher_pm.query(spec("CREATE (:CyContainsAgg {i: $i, k: $k, t: $t, x: $x})", given))
+    all_ = "MATCH (n:CyContainsAgg)"
+    counted = "count(CASE WHEN n.t CONTAINS n.x THEN 1 END)"
+    assert await cypher_pm.query(spec(f"{all_} RETURN {counted}")) == [2]
+    assert await cypher_pm.query(spec(f"{all_} RETURN n.k AS k, {counted} AS c ORDER BY k")) == [[0, 2], [1, 0]]
+    distinct = f"{all_} RETURN DISTINCT n.k AS k, n.t CONTAINS n.x AS c ORDER BY k"
+    assert await cypher_pm.query(spec(distinct)) == [[0, True], [1, False]]
+    beside = f"{all_} RETURN n.i AS i, n.t CONTAINS n.x AS c, count(*) AS m ORDER BY i"
+    assert await cypher_pm.query(spec(beside)) == [[0, True, 1], [1, False, 1], [2, True, 1]]
+    heads = f"{all_} WITH n ORDER BY n.i RETURN head(collect(n.t)) CONTAINS head(collect(n.x))"
+    assert await cypher_pm.query(spec(heads)) == [True]
+    grouped = (
+        f"{all_} WITH n ORDER BY n.i RETURN n.k AS k, head(collect(n.t)) CONTAINS last(collect(n.x)) AS c ORDER BY k"
+    )
+    assert await cypher_pm.query(spec(grouped)) == [[0, True], [1, False]]
+    await clear(cypher_pm)
+
+
+async def test_contains_of_a_text_past_32_kb_filters_in_a_where_and_runs_in_the_step_of_a_reduce(
+    cypher_pm: PersistenceManager,
+):
+    # On Oracle the search of a text past 32,767 UTF-16 units is a subquery (drivine4j#312): here a WHERE filters by
+    # it, and a reduce() runs it in its function's own query. drivine4j's CypherQueryContract of
+    # liberation-data/drivine4j#312.
+    await clear(cypher_pm)
+    long = "aB" * 20_000
+    found = "aB" * 19_000 + "c"
+    for i, t in enumerate([long + "c", long, long + "c"]):
+        await cypher_pm.query(spec("CREATE (:CyContainsWhere {i: $i, t: $t, x: $x})", {"i": i, "t": t, "x": found}))
+    all_ = "MATCH (n:CyContainsWhere)"
+    assert await cypher_pm.query(spec(f"{all_} WHERE n.t CONTAINS n.x RETURN n.i ORDER BY n.i")) == [0, 2]
+    assert await cypher_pm.query(spec(f"{all_} WHERE NOT n.t CONTAINS n.x RETURN n.i ORDER BY n.i")) == [1]
+    reduced = (
+        f"{all_} WITH n ORDER BY n.i WITH collect(n.t) AS ts, head(collect(n.x)) AS x "
+        "RETURN reduce(acc = [], s IN ts | acc + [s CONTAINS x])"
+    )
+    assert await cypher_pm.query(spec(reduced)) == [[True, False, True]]
+    await clear(cypher_pm)
 
 
 async def test_a_stored_text_past_32_kb_a_text_function_or_a_sum_reads_beside_a_long_value_on_two_rows_is_read_whole(

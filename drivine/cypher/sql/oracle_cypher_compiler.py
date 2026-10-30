@@ -473,8 +473,8 @@ class OracleCypherCompiler(SqlCypherCompiler):
         property itself is read so: a property inside an item (`[n.a]`, `collect(n.a)`) is read as `property_of` reads
         it, and isn't worked around. Read so, a text past 32 KB still can't be sorted by, grouped by or made `DISTINCT`:
         Oracle refuses it (ORA-40180), as it does any JSON that large, and the session stays open. A write's block is
-        worked around too, where it takes a text from the row it is writing: see `row_value`; and so is an unwound
-        item's value an item gives: see `item_value`.
+        worked around too, where it takes a text from the row it is writing: see `row_value`; so is an unwound item's
+        value an item gives: see `item_value`; and so is an item of a list read by its place: see `_list_item`.
 
         To remove it, delete this override, so the item is read as `property_of` reads it, `JSON_QUERY … RETURNING
         JSON`, once an Oracle release no longer crashes on the repro, and the "a property past 32 KB read on two nodes"
@@ -543,26 +543,40 @@ class OracleCypherCompiler(SqlCypherCompiler):
         as JSON.
         """
 
-        def read(x: str) -> str:
-            path = _path_of(keys)
-            return (
-                f"CASE WHEN JSON_VALUE({x}, {_path_of(keys, '.type()')}) = 'string' "
-                f"THEN JSON(JSON_QUERY(JSON_SERIALIZE({x} RETURNING CLOB), {path} RETURNING CLOB)) "
-                f"ELSE JSON_QUERY({x}, {path} RETURNING JSON) END"
-            )
+        return self.shared1(json, lambda x: _read_through_text(x, _path_of(keys), _path_of(keys, ".type()")))
 
-        return self.shared1(json, read)
+    def _list_item(self, json: str, path: str, passing: str = "") -> str:
+        """
+        The item at the path `path` of the JSON list `json`, `'$[0]'`, with `passing` its `PASSING` clause where it has
+        one: read as `_through_text` reads a value, a text from the list written out as text, anything else as JSON, as
+        before.
+
+        **A workaround for the Oracle bug of `item_property` (#279, drivine4j#388), to be removed with it.** A statement
+        crashed the session where it took a text past 32 KB from a list as JSON, `JSON_QUERY(list, '$[$i]' RETURNING
+        JSON)`, for each of two or more rows, from the second run on: an item of a list `split` made, read by index, by
+        `head` or `last`, or after a slice, of a stored list, and of one a `WITH` passed on. Its text read straight from
+        the list by its path, `JSON_VALUE(list, '$[0]' RETURNING CLOB)`, ran clean too, but a value the item is read as
+        whole, returned or passed on, needs it as JSON. An item is read as text only where it is a text: the list is
+        written out whole for it, so a short text of a long list costs that list's length. An unwound item, which
+        `JSON_TABLE` takes out, ran clean, and is read as it was. To remove it, read the item with `JSON_QUERY(…
+        RETURNING JSON)` again, once an Oracle release no longer crashes on the repro in
+        `docs/oracle-long-json-string-crash.md`, and the "a text past 32 KB that is an item of a list" test still passes
+        without it.
+        """
+        return _read_through_text(json, path, f"{path[:-1]}.type()'", passing)
 
     def element(self, json: str, index: str) -> str:
-        """Counted from the end where negative: a JSON path counts from the start."""
+        """Counted from the end where negative: a JSON path counts from the start. Read as `_list_item` reads an
+        item."""
 
         def at(values: list[str]) -> str:
             list_, i = values
             number = f"JSON_VALUE({i}, '$' RETURNING NUMBER)"
-            return (
-                f"JSON_QUERY({list_}, '$[$i]' PASSING CASE WHEN {number} < 0 THEN "
-                f"JSON_VALUE({list_}, '$.size()' RETURNING NUMBER) + {number} ELSE {number} END "
-                'AS "i" RETURNING JSON)'
+            return self._list_item(
+                list_,
+                "'$[$i]'",
+                f" PASSING CASE WHEN {number} < 0 THEN JSON_VALUE({list_}, '$.size()' RETURNING NUMBER) + {number} "
+                f'ELSE {number} END AS "i"',
             )
 
         return self.shared([json, index], at)
@@ -941,8 +955,9 @@ class OracleCypherCompiler(SqlCypherCompiler):
             "tofloat": lambda: (
                 f"JSON_SCALAR(TO_BINARY_DOUBLE(JSON_VALUE({json}, '$') DEFAULT NULL ON CONVERSION ERROR))"
             ),
-            "head": lambda: f"JSON_QUERY({json}, '$[0]' RETURNING JSON)",
-            "last": lambda: f"JSON_QUERY({json}, '$[last]' RETURNING JSON)",
+            # An item read as JSON where it is a text past 32 KB crashed the session: see `_list_item`.
+            "head": lambda: self._list_item(json, "'$[0]'"),
+            "last": lambda: self._list_item(json, "'$[last]'"),
             "abs": lambda: (
                 f"CASE WHEN {_kind(json)} = 'double' THEN JSON_SCALAR(ABS(TO_BINARY_DOUBLE({self.number(json)}))) "
                 f"ELSE JSON_SCALAR(ABS({self.number(json)})) END"
@@ -1600,6 +1615,18 @@ def _direct(sql: str, json: str) -> str:
         return sql
     props, path = read
     return sql.replace(f"JSON_VALUE({json}, '$", f"JSON_VALUE({props}, {path[:-1]}")
+
+
+def _read_through_text(json: str, path: str, typed: str, passing: str = "") -> str:
+    """
+    The value at the path `path` in the JSON `json`, with `passing` its `PASSING` clause where it has one: a text read
+    with that path from `json` written out as text, anything else as JSON. `typed` is the path to its kind, `.type()`.
+    """
+    return (
+        f"CASE WHEN JSON_VALUE({json}, {typed}{passing}) = 'string' "
+        f"THEN JSON(JSON_QUERY(JSON_SERIALIZE({json} RETURNING CLOB), {path}{passing} RETURNING CLOB)) "
+        f"ELSE JSON_QUERY({json}, {path}{passing} RETURNING JSON) END"
+    )
 
 
 def _searched(t: str, x: str) -> str:

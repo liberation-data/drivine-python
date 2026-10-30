@@ -1275,6 +1275,69 @@ def test_a_stored_text_past_32_kb_a_text_function_or_a_sum_reads_beside_a_long_v
                 assert asked_again(cypher_pm, cypher, {"p": {"q": None}}) == expected, f"{cypher}, run {run}"
 
 
+def test_a_text_past_32_kb_that_is_an_item_of_a_list_read_by_its_place_on_two_rows_is_read_whole(
+    cypher_pm: PersistenceManager,
+):
+    # On Oracle an item of a list was taken out as JSON, JSON_QUERY(list, '$[$i]' RETURNING JSON): a text past 32 KB so
+    # closed the session from the second run on (ORA-03113, #279), as #144's did, given two rows or more. A node of
+    # another label holds the same values, and is not read. drivine4j's CypherQueryContract of
+    # liberation-data/drivine4j#388.
+    clear(cypher_pm)
+    a, b = "a" * 40_000, "b" * 33_000
+    props = "{bio: $bio, tags: $tags, i: 0}"
+    given = {"bio": a + "x" + b, "tags": [a, "y"]}
+    cypher_pm.query(spec(f"CREATE (:CyItem {props}), (:CyItem {props}), (:CyItemOther {props})", given))
+    all_ = "MATCH (n:CyItem)"
+
+    def each(value: Any) -> list[Any]:
+        return [value, value]
+
+    statements: list[tuple[str, list[Any]]] = [
+        # The issue's: by index, of a list split makes, and of one a WITH passes on.
+        (f"{all_} RETURN size(split(n.bio, 'x')[0])", each(40_000)),
+        (f"{all_} WITH split(n.bio, 'x') AS parts RETURN size(parts[0])", each(40_000)),
+        # Returned or passed on whole, counted from the end, and by an index the statement works out.
+        (f"{all_} RETURN split(n.bio, 'x')[0]", each(a)),
+        (f"{all_} WITH split(n.bio, 'x') AS parts RETURN parts[1]", each(b)),
+        (f"{all_} WITH split(n.bio, 'x')[1] AS part RETURN size(part)", each(33_000)),
+        (f"{all_} RETURN size(split(n.bio, 'x')[-1])", each(33_000)),
+        (f"{all_} RETURN size(split(n.bio, 'x')[n.i])", each(40_000)),
+        # By head and last, and after a slice.
+        (f"{all_} RETURN size(head(split(n.bio, 'x')))", each(40_000)),
+        (f"{all_} RETURN last(split(n.bio, 'x'))", each(b)),
+        (f"{all_} RETURN size(split(n.bio, 'x')[0..1][0])", each(40_000)),
+        (f"{all_} RETURN size(split(n.bio, 'x')[1..][0])", each(33_000)),
+        # Unwound, which read it whole already.
+        (
+            f"{all_} UNWIND split(n.bio, 'x') AS part RETURN size(part) AS s ORDER BY s",
+            [33_000, 33_000, 40_000, 40_000],
+        ),
+        # Read by text functions.
+        (
+            f"{all_} RETURN [size(split(n.bio, 'x')[0] + 'z'), split(n.bio, 'x')[1] ENDS WITH 'b', "
+            "substring(split(n.bio, 'x')[0], 39998), right(toUpper(split(n.bio, 'x')[1]), 2)]",
+            each([40_001, True, "aa", "BB"]),
+        ),
+        # Of a stored list.
+        (f"{all_} RETURN size(n.tags[0])", each(40_000)),
+        (f"{all_} RETURN n.tags[0]", each(a)),
+        (f"{all_} RETURN [size(head(n.tags)), last(n.tags)]", each([40_000, "y"])),
+        (f"{all_} RETURN count(split(n.bio, 'x')[0])", [2]),
+    ]
+    with one_session(cypher_pm):
+        # Oracle closed the session from the second run on.
+        for run in range(1, 4):
+            for cypher, expected in statements:
+                assert asked_again(cypher_pm, cypher) == expected, f"{cypher}, run {run}"
+    # An item of every other kind is read as it was.
+    others = (
+        "WITH [1, 'a', 2.0, [3], {k: 4}, null] AS l "
+        "RETURN [i IN range(0, 5) | l[i]] + [head(['y']), last([2, 1]), head([])]"
+    )
+    rows = cypher_pm.query(spec(others))
+    assert typed(rows) == typed([[1, "a", 2.0, [3], {"k": 4}, None, "y", 1, None]]), rows
+
+
 def test_collect_distinct_beside_keys_other_aggregates_an_order_a_page_and_a_variable_outside_its_aggregates(
     cypher_pm: PersistenceManager,
 ):

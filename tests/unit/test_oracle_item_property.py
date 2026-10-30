@@ -334,3 +334,46 @@ def test_a_map_whose_key_holds_a_parenthesis_is_read_by_its_path_and_two_values_
     two = "JSON_QUERY(a, '$.x' RETURNING JSON) || JSON_QUERY(b, '$.y' RETURNING JSON)"
     read = f"JSON_VALUE({two}, '$.type()')"
     assert _direct(read, two) == read
+
+
+def test_an_item_of_a_list_read_by_its_place_is_read_through_the_lists_text_where_it_is_a_text():
+    # Taken out of the list as JSON, a text past 32 KB closed the session from the second run on, given two rows (#279,
+    # drivine4j#388). So the item's kind is read first, and only an item of another kind is taken out as JSON, in the
+    # CASE's ELSE.
+    shapes = [
+        "RETURN size(split(n.a, 'x')[0])",
+        "WITH split(n.a, 'x') AS parts RETURN size(parts[0])",
+        "RETURN split(n.a, 'x')[0]",
+        "WITH split(n.a, 'x') AS parts RETURN parts[-1]",
+        "RETURN size(split(n.a, 'x')[n.i])",
+        "RETURN size(split(n.a, 'x')[0..1][0])",
+        "RETURN n.tags[0]",
+        "RETURN [x IN range(0, 1) | toUpper(n.tags[x])]",
+    ]
+    for shape in shapes:
+        sql = oracle(f"MATCH (n:Doc) {shape}")
+        # Each read of the item is its kind's, its text's, and in the ELSE, its JSON's.
+        kinds, texts, every = (
+            sql.count(it) for it in ("'$[$i].type()' PASSING ", "RETURNING CLOB), '$[$i]' PASSING ", "'$[$i]' PASSING ")
+        )
+        assert kinds > 0 and texts == kinds and every == 2 * kinds, f"{shape}: {sql}"
+        assert sql.count("ELSE JSON_QUERY(") >= kinds, f"{shape}: {sql}"
+        # The node's label test stays.
+        assert sql.count("JSON_EXISTS(") == 1, f"{shape}: {sql}"
+    # By head and last; of a stored list, its kind read by the property's own path (see `_direct`).
+    ends = oracle("MATCH (n:Doc) RETURN [size(head(split(n.a, 'x'))), last(split(n.a, 'x')), head(n.tags)]")
+    assert "'$[0].type()') = 'string'" in ends and "'$[last].type()') = 'string'" in ends, ends
+    assert "RETURNING CLOB), '$[0]' RETURNING CLOB)" in ends, ends
+    assert "RETURNING CLOB), '$[last]' RETURNING CLOB)" in ends, ends
+    assert "JSON_VALUE(n1.props, '$.tags[0].type()') = 'string'" in ends, ends
+    for end in ("0", "last"):
+        texts = ends.count(f"RETURNING CLOB), '$[{end}]' RETURNING CLOB)")
+        every = ends.count(f"'$[{end}]' RETURNING")
+        assert texts > 0 and every == 2 * texts, ends
+    # An unwound item is read as it was: JSON_TABLE's item did not close the session.
+    unwound = oracle("MATCH (n:Doc) UNWIND split(n.a, 'x') AS p RETURN size(p)")
+    assert "RETURNING CLOB), '$[" not in unwound, unwound
+    # Postgres reads an item as before.
+    items = "MATCH (n:Doc) RETURN [split(n.a, 'x')[0], head(n.tags), last(n.tags)]"
+    postgres = PostgresCypherCompiler("g").compile(items).sql
+    assert "-> 0)" in postgres and "-> -1)" in postgres and "CLOB" not in postgres, postgres

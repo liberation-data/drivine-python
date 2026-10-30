@@ -2782,6 +2782,7 @@ class SqlCypherCompiler(ABC):
             column = f"s{i + 1}"
             # An order term that is an item, as written, is that item: so it may be ordered by where rows are compared.
             item = next((j for j, it in enumerate(items) if it.expression == sort.expression), -1)
+            over_items = _over_items(sort.expression, items, item_columns) if aggregating else None
             if contains(sort.expression, lambda it: isinstance(it, Variable) and it.name in anew) and all(
                 it in item_columns for it in variables_in(sort.expression)
             ):
@@ -2791,17 +2792,27 @@ class SqlCypherCompiler(ABC):
                 carried(column, lambda item=item: compiled[item][1], sort.expression)
             elif compared and not contains(sort.expression, _aggregates):
                 after[column] = self._sortable(self._expression(sort.expression, item_columns))
+            elif over_items is not None:
+                # Where rows are grouped, so is one whose every aggregate and key is an item, each such part read by its
+                # item's name, as _aggregates_first reads it: worked out in the query, each key is read again as the
+                # GROUP BY reads it (_keys_read), on Oracle through its text (item_property), at each level of an
+                # operation over it, and `me.age + count(you.age)` compiled to twice what it did before
+                # (liberation-data/drivine4j#413).
+                after[column] = self._sortable(self._expression(over_items, item_columns))
             else:
                 # One that aggregates reads the rows it aggregates, as an item does; so does one that reads an aggregate
                 # _aggregates_first worked out first, which no item is. Beside a variable-length walk it binds no value
                 # in a subquery: carried out of a WITH's query, one so bound closes Oracle's (23.26) session
                 # (DPY-4011), as `WITH b ORDER BY toString(coalesce(b.name, b.title))` did, its argument long enough to
                 # be bound. Elsewhere it does, so operations nested in it compile to a statement that grows with them,
-                # not exponentially.
-                scope = {**select.scope, **dict(compiled)}
-                term = sort.expression
+                # not exponentially. Where rows are grouped, a part of it that is an item keying the groups reads that
+                # item's column value, as the GROUP BY does: Oracle refuses another read of the key (ORA-00979), as
+                # `me.age` read from the properties beside `me.age AS age` read through its text (item_property) was
+                # (liberation-data/drivine4j#413).
+                read, keys = _keys_read(sort.expression, items, columns) if aggregating else (sort.expression, {})
+                scope = {**select.scope, **dict(compiled), **keys}
                 carry = functools.partial(
-                    carried, column, lambda term=term, scope=scope: self._expression(term, scope), term
+                    carried, column, lambda read=read, scope=scope: self._expression(read, scope), sort.expression
                 )
                 if select.walks:
                     self._unshared(carry)
@@ -5818,6 +5829,53 @@ def _iterates_aggregate(expression: Expression) -> bool:
 def _aggregates(expression: Expression) -> bool:
     """Whether the expression is an aggregate, or a variable `_aggregates_first` worked one out into."""
     return is_aggregate(expression) or (isinstance(expression, Variable) and expression.name.startswith("#aggregate"))
+
+
+def _over_items(term: Expression, items: list[ProjectionItem], item_columns: dict[str, Value]) -> Expression | None:
+    """
+    The term, an order term of a grouping projection, with each part of it that is one of the items read by that
+    item's name, where so it reads no aggregate, no subquery and nothing but the items, `item_columns`; None where it
+    does. A variable an item is named after is that item, not the variable of that name before it.
+    """
+
+    def by_name(part: Expression) -> Expression | None:
+        if isinstance(part, Variable) and part.name in item_columns:
+            return part
+        return next((Variable(it.name) for it in items if it.expression == part), None)
+
+    read = replaced(term, by_name)
+    if holds_subquery(read) or contains(read, is_aggregate) or not all(it in item_columns for it in variables_in(read)):
+        return None
+    return read
+
+
+def _keys_read(
+    term: Expression, items: list[ProjectionItem], columns: list[tuple[str, Value]]
+) -> tuple[Expression, dict[str, Value]]:
+    """
+    The term, each part of it that is an item of a grouping projection keying the groups, one of the items, read by a
+    name no variable has, and what each such name is bound to: the item's value among the columns, as it is grouped
+    by. `replaced` reads no comprehension's, quantifier's or reduce's own expressions, so a part it reads is never one
+    whose variables such a one binds again: a key is read beside `[me IN [1] | me]` as anywhere else.
+    """
+    # The last of two items alike, as drivine4j's `associate` keeps it.
+    keys = [
+        (i, item.expression)
+        for i, item in reversed(list(enumerate(items)))
+        if not contains(item.expression, is_aggregate) and variables_in(item.expression)
+    ]
+    bound: dict[str, Value] = {}
+
+    def key(part: Expression) -> Expression | None:
+        i = next((i for i, expression in keys if expression == part), None)
+        if i is None:
+            return None
+        # Named as no variable is, unless quoted so.
+        name = f"#key {i + 1}"
+        bound[name] = columns[i][1]
+        return Variable(name)
+
+    return replaced(term, key), bound
 
 
 def children(expression: Expression) -> list[Expression]:

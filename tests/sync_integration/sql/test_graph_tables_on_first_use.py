@@ -7,18 +7,29 @@ drivine4j#296, ported.
 """
 
 from collections.abc import Iterator
-from typing import Any
+from typing import Annotated, Any
 
 import pytest
 
 from drivine.sync import (
     DatabaseRegistry,
+    NodeFragment,
+    NodeId,
     PersistenceManagerFactory,
     QuerySpecification,
     StatelessGraphObjectManager,
     cypher_statement,
 )
-from tests.sync_integration.sql.new_graph import drop_graph, new_graph_registry, tables_made
+from tests.sync_integration.sql.new_graph import (
+    drop_graph,
+    new_graph_registry,
+    tables_made,
+)
+
+
+class FirstUse(NodeFragment, labels=["FirstUse"]):
+    id: Annotated[str, NodeId()]
+    name: str | None = None
 
 
 def cypher(text: str, bindings: dict[str, Any] | None = None) -> QuerySpecification[Any]:

@@ -9,6 +9,7 @@ from drivine.connection.connection_provider import ConnectionProvider
 from drivine.connection.database_type import DatabaseType
 from drivine.connection.graph_tables import GraphTables
 from drivine.connection.postgres.postgres_connection import PostgresConnection
+from drivine.manager.contention import ddl_deadlocked, when_not_contended
 
 
 class PostgresConnectionProvider(ConnectionProvider):
@@ -53,13 +54,20 @@ class PostgresConnectionProvider(ConnectionProvider):
         self._tables = GraphTables(self.graph.ensuring)
 
     async def connect(self) -> Connection:
-        """A connection, the graph's tables made first if this is the pool's first (its block commits on its own)."""
+        """
+        A connection, the graph's tables made first if this is the pool's first. The block is one statement, so it is
+        applied whole or not at all. One turned away by a deadlock with other sessions' writes (40P01), as a session
+        that waited for another's making may be when it then runs the block's statements over tables in use, is run
+        again after a pause, and finds the store made (see ddl_deadlocked; #287, liberation-data/drivine#454).
+        """
         pool = self._pool_of()
         # Opening an open pool does nothing: two first connections open it once.
         await pool.open()
         connection = await pool.getconn()
         try:
-            await self._tables.ensure(connection.execute)
+            await self._tables.ensure(
+                lambda statement: when_not_contended(lambda: connection.execute(statement), ddl_deadlocked)
+            )
         except BaseException:
             await pool.putconn(connection)
             raise

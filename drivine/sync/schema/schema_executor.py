@@ -13,22 +13,24 @@ from drivine.drivine_error import DrivineError
 from drivine.query.query_specification import QuerySpecification
 from drivine.schema.native_operation import NativeOperation
 from drivine.sync.connection.connection_provider import ConnectionProvider
-from drivine.sync.manager.contention import when_not_contended
+from drivine.sync.manager.contention import ddl_contended, when_not_contended
 
-_ORACLE_CONTENDED = re.compile(r"ORA-(00060|08177|00054|04020)\b")
+_ORACLE_SERIAL = re.compile(r"ORA-08177\b")
 
 
 def _contended(failure: BaseException) -> bool:
     """
-    A transient error over Bolt, FalkorDB turning a write away while another is in progress, an Oracle deadlock or
-    serialization failure, or Oracle refusing DDL on a table another session's DDL holds: busy (ORA-00054), or each
-    waiting on the other (ORA-04020), as when managers that start together each make the indexes of the store's key.
+    A transient error over Bolt, FalkorDB turning a write away while another is in progress, an Oracle serialization
+    failure, or a SQL store turning DDL away because of another session's (see ddl_contended), as when managers that
+    start together each make the indexes of the store's key.
     """
+    if ddl_contended(failure):
+        return True
     cause: BaseException | None = failure
     for _ in range(10):
         if cause is None:
             return False
-        if NEO4J_GRAMMAR.contended(cause) or FALKORDB_GRAMMAR.contended(cause) or _ORACLE_CONTENDED.search(str(cause)):
+        if NEO4J_GRAMMAR.contended(cause) or FALKORDB_GRAMMAR.contended(cause) or _ORACLE_SERIAL.search(str(cause)):
             return True
         cause = cause.__cause__
     return False

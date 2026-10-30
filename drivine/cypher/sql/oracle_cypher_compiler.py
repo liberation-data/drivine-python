@@ -605,13 +605,25 @@ class OracleCypherCompiler(SqlCypherCompiler):
 
     def elements(self, json: str, alias: str) -> str:
         """
-        A list that holds a subquery is read from a lateral view first: a subquery in `JSON_TABLE`'s argument reads no
-        table beside it in the `FROM`.
+        A list that holds a subquery is read from a lateral view first, `_list_view`: a subquery in `JSON_TABLE`'s
+        argument reads no table beside it in the `FROM`.
         """
         items = f"COLUMNS (item_no FOR ORDINALITY, item JSON PATH '$')) {alias}"
         if "SELECT" not in json.upper():
             return f"JSON_TABLE({json}, '$[*]' {items}"
-        return f"LATERAL (SELECT {json} AS list) {alias}_l CROSS JOIN JSON_TABLE({alias}_l.list, '$[*]' {items}"
+        return f"{self._list_view(json, alias, '')} {alias}_l CROSS JOIN JSON_TABLE({alias}_l.list, '$[*]' {items}"
+
+    @staticmethod
+    def _list_view(json: str, alias: str, hint: str) -> str:
+        """
+        A lateral view of one column, `list`, the list `json` that holds a subquery, worked out in a derived table
+        inside it. Oracle 23 works out a subquery that reads the row outside it once, and not for each row, where it is
+        in the lateral view's own select list and that view is first in the `FROM` of a subquery: `WHERE 'b' IN
+        keys(n)` then found nothing (#272, liberation-data/drivine4j#433). Worked out in a derived table, it is worked
+        out for each row. A derived table alone reads no table beside it in the `FROM`, as `UNWIND` puts the list, so
+        the lateral view stays around it. `hint` goes in both select lists.
+        """
+        return f"LATERAL (SELECT {hint}{alias}_v.list FROM (SELECT {hint}{json} AS list FROM DUAL) {alias}_v)"
 
     def temporal_elements(self, json: str, alias: str) -> str:
         """
@@ -619,15 +631,21 @@ class OracleCypherCompiler(SqlCypherCompiler):
         to parse a `JSON_TABLE` over a list of temporal values worked out with temporal arithmetic, item by item in a
         comprehension (liberation-data/drivine4j#331), and neither a query timeout nor a kill ends the parse.
         `JSON_QUERY` reads the same list in moments, at about ten times the cost of `JSON_TABLE` for a short list, so a
-        list of other values is read by `elements`. The list is worked out once, in a lateral view of its own, and its
-        places counted in another: where they are counted over the list's own view, or the list is written out again
-        where it is read, Oracle reads an `EXISTS` over its items with the wrong row's columns. It reads as
-        `JSON_TABLE`'s `$[*]` does: no rows for null, and one for a value that is no list.
+        list of other values is read by `elements`. The list is worked out once, in a lateral view of its own
+        (`_list_view` where it holds a subquery), and its places counted in another: where they are counted over the
+        list's own view, or the list is written out again where it is read, Oracle reads an `EXISTS` over its items
+        with the wrong row's columns. It reads as `JSON_TABLE`'s `$[*]` does: no rows for null, and one for a value that
+        is no list.
         """
         list_, place = f"{alias}_l", f"{alias}_r"
         size = f"JSON_VALUE({list_}.list, '$.size()' RETURNING NUMBER)"
+        view = (
+            self._list_view(json, alias, "/*+ NO_MERGE */ ")
+            if "SELECT" in json.upper()
+            else f"LATERAL (SELECT /*+ NO_MERGE */ {json} AS list FROM DUAL)"
+        )
         return (
-            f"LATERAL (SELECT /*+ NO_MERGE */ {json} AS list FROM DUAL) {list_} CROSS JOIN "
+            f"{view} {list_} CROSS JOIN "
             f"LATERAL (SELECT {place}.n AS item_no, "
             f"JSON_QUERY({list_}.list, '$[$i]' PASSING {place}.n - 1 AS \"i\" RETURNING JSON) AS item "
             f"FROM (SELECT LEVEL n FROM DUAL CONNECT BY LEVEL <= GREATEST(NVL({size}, 0), 1)) {place} "

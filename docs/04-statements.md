@@ -134,6 +134,11 @@ people = await pm.query(spec.bind({"city": "Sydney"}))
   beside another node's table the query lost that node's label and property tests, giving rows its pattern doesn't
   have and values of the wrong node, or crashing the session (ORA-03113)
   ([#258](https://github.com/liberation-data/drivine-python/issues/258)). A query of one table carries no hint.
+- On Oracle a list worked out on each row by a subquery (`keys(n)`, `[i IN range(1, k) | i]`, `[(p)-->(q) | q.name]`)
+  is read from a derived table inside a lateral view. This works around an Oracle bug, seen on 23.26.3: a subquery
+  that reads the row, in the select list of a lateral view that begins a subquery's `FROM`, was worked out once for
+  the statement and not for each row, so `WHERE 'b' IN keys(n)` found nothing
+  ([#272](https://github.com/liberation-data/drivine-python/issues/272)).
 - What each statement gives is the [Cypher spec](https://github.com/liberation-data/drivine-cypher-spec), which the
   three Drivine libraries run alike.
 

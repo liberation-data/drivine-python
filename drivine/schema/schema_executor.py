@@ -9,27 +9,25 @@ from drivine.backend.postgres.postgres_statement import value_of
 from drivine.connection.connection_provider import ConnectionProvider
 from drivine.connection.database_type import DatabaseType
 from drivine.drivine_error import DrivineError
-from drivine.manager.contention import when_not_contended
+from drivine.manager.contention import any_cause, ddl_contended, when_not_contended
 from drivine.query.query_specification import QuerySpecification
 from drivine.schema.native_operation import NativeOperation
 
-_ORACLE_CONTENDED = re.compile(r"ORA-(00060|08177|00054|04020)\b")
+_ORACLE_SERIAL = re.compile(r"ORA-08177\b")
 
 
 def _contended(failure: BaseException) -> bool:
     """
-    A transient error over Bolt, FalkorDB turning a write away while another is in progress, an Oracle deadlock or
-    serialization failure, or Oracle refusing DDL on a table another session's DDL holds: busy (ORA-00054), or each
-    waiting on the other (ORA-04020), as when managers that start together each make the indexes of the store's key.
+    A transient error over Bolt, FalkorDB turning a write away while another is in progress, an Oracle serialization
+    failure, or a SQL store turning DDL away because of another session's (see ddl_contended), as when managers that
+    start together each make the indexes of the store's key.
     """
-    cause: BaseException | None = failure
-    for _ in range(10):
-        if cause is None:
-            return False
-        if NEO4J_GRAMMAR.contended(cause) or FALKORDB_GRAMMAR.contended(cause) or _ORACLE_CONTENDED.search(str(cause)):
-            return True
-        cause = cause.__cause__
-    return False
+    return ddl_contended(failure) or any_cause(
+        failure,
+        lambda it: (
+            NEO4J_GRAMMAR.contended(it) or FALKORDB_GRAMMAR.contended(it) or bool(_ORACLE_SERIAL.search(str(it)))
+        ),
+    )
 
 
 class SchemaExecutor:

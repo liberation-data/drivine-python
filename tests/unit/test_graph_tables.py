@@ -45,6 +45,18 @@ async def test_makes_the_tables_again_at_the_next_connection_when_making_them_fa
     assert recording.statements == ["MAKE TABLES", "MAKE TABLES"]
 
 
+async def test_does_not_make_the_tables_again_when_the_store_refused_to_make_them():
+    tables, statements = GraphTables("MAKE TABLES"), []
+
+    async def refused(statement: str) -> None:
+        statements.append(statement)
+        raise RuntimeError("ORA-06512: at line 22\nORA-01031: insufficient privileges")
+
+    await tables.ensure(refused)
+    await tables.ensure(refused)
+    assert statements == ["MAKE TABLES"]
+
+
 async def test_makes_the_tables_again_once_the_pool_is_forgotten():
     tables, recording = GraphTables("MAKE TABLES"), Recording()
     await tables.ensure(recording.run)

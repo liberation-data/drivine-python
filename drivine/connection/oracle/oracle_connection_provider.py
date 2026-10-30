@@ -11,6 +11,7 @@ from drivine.connection.connection_provider import ConnectionProvider
 from drivine.connection.database_type import DatabaseType
 from drivine.connection.graph_tables import GraphTables
 from drivine.connection.oracle.oracle_connection import OracleConnection
+from drivine.manager.contention import ddl_deadlocked, when_not_contended
 
 logger = logging.getLogger("drivine.connection")
 
@@ -126,9 +127,15 @@ class OracleConnectionProvider(ConnectionProvider):
         Runs `statement`, the graph's `ensuring`, and has every session asked again whether it may call the graph's
         functions (see OracleStoredFunctions), as the block makes them where they were missing. First it reads the
         database's version, which the driver found as it connected and which needs no grant: see oracle_refusal.
+
+        A block turned away by a deadlock with another session, as when the DDL of one pool's first connection and other
+        pools' first writes each wait on the other's lock on the node table (ORA-04020), is run again after a pause (see
+        ddl_deadlocked): what the block made before it was turned away stays, and the block makes the rest, or finds the
+        store another session finished meanwhile and does nothing (#287, liberation-data/drivine#454). One whose lock
+        stayed busy (ORA-00054) is not: it has waited OracleGraph.DDL_WAIT_SECONDS inside the block already.
         """
         self._check_version(connection)
-        await self._run(connection, statement)
+        await when_not_contended(lambda: self._run(connection, statement), ddl_deadlocked)
         self.graph.ensured()
 
     def _check_version(self, connection: Any) -> None:

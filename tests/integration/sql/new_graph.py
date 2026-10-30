@@ -15,9 +15,17 @@ def new_graph_registry(store: str) -> tuple[DatabaseRegistry, str]:
     name given as `<STORE>_DATABASE_DEFAULT_GRAPH_PATH`.
     """
     name = f"first_use_{uuid.uuid4().hex[:8]}"
+    return registry_on(store, name), name
+
+
+def registry_on(store: str, name: str, pool_max: int | None = None) -> DatabaseRegistry:
+    """A registry of its own, so a pool of its own, for the SQL store registered as `store`, over the graph `name`."""
+    env = {**os.environ, f"{store.upper()}_DATABASE_DEFAULT_GRAPH_PATH": name}
+    if pool_max is not None:
+        env[f"{store.upper()}_DATABASE_POOL_MAX"] = str(pool_max)
     registry = DatabaseRegistry()
-    registry.build_or_resolve_from_env(store, {**os.environ, f"{store.upper()}_DATABASE_DEFAULT_GRAPH_PATH": name})
-    return registry, name
+    registry.build_or_resolve_from_env(store, env)
+    return registry
 
 
 async def tables_made(pm: PersistenceManager, name: str) -> int:
@@ -31,6 +39,19 @@ async def tables_made(pm: PersistenceManager, name: str) -> int:
         QuerySpecification[Any](f"SELECT COUNT(*) AS made FROM pg_tables WHERE tablename IN ({tables})")
     )
     return row["made"]
+
+
+async def store_objects_made(pm: PersistenceManager, name: str) -> int:
+    """
+    How many of the graph's store objects there are: its node, edge and catalog tables, and on Oracle the property graph
+    over them, made last. A whole store has all four, or three on Postgres.
+    """
+    made = await tables_made(pm, name)
+    if pm.type is DatabaseType.ORACLE:
+        made += await pm.get_one(
+            QuerySpecification[Any](f"SELECT COUNT(*) FROM user_property_graphs WHERE graph_name = '{name.upper()}'")
+        )
+    return made
 
 
 async def drop_graph(pm: PersistenceManager, name: str) -> None:

@@ -4248,3 +4248,107 @@ def test_an_order_term_over_an_aggregate_that_reads_a_grouping_key_is_sorted_by_
     )
     assert [it[0] for it in rows(temporal)] == ["B", "C", "A", "D"], temporal
     clear(cypher_pm)
+
+
+def differing(pm: PersistenceManager, cases: list[tuple[str, list[Any]]]) -> list[str]:
+    """The cases whose rows differ, or that fail, so a store's every difference shows at once."""
+    found: list[str] = []
+    for cypher, expected in cases:
+        try:
+            given = pm.query(spec(cypher))
+        except Exception as e:  # noqa: BLE001
+            found.append(f"{cypher}: {str(e).splitlines()[0]}")
+            continue
+        if given != expected:
+            found.append(f"{cypher}: {given}")
+    return found
+
+
+def test_x_in_a_list_each_row_works_out_by_a_subquery_finds_the_rows_items_in_a_where_exists_return_and_unwind(
+    cypher_pm: PersistenceManager,
+):
+    # #272, drivine4j's CypherQueryContract of liberation-data/drivine4j#433. Not in the spec yet: on Oracle such a list
+    # was worked out by a subquery in a lateral view's select list, which Oracle works out once, not for each row, where
+    # that view is first in a subquery's FROM: the WHEREs found nothing.
+    clear(cypher_pm)
+    cypher_pm.query(
+        spec(
+            "CREATE (:K {a: 1}), (:K {b: 2}), (:K {a: 3, b: 4}), (:P {name: 'a'})-[:R]->(:Q {name: 'x'}), "
+            "(:P {name: 'b'})-[:R]->(:Q {name: 'y'})"
+        )
+    )
+    each = "UNWIND [1, 2, 3] AS k WITH k WHERE"
+    cases: list[tuple[str, list[Any]]] = [
+        # The issue's statements.
+        ("UNWIND [1, 2] AS k WITH k WHERE 2 IN [i IN range(1, k) | i] RETURN k", [2]),
+        ("MATCH (n:K) WHERE 'b' IN keys(n) RETURN count(n)", [2]),
+        ("MATCH (n:K) WHERE 'b' IN [k IN keys(n) | k] RETURN count(n)", [2]),
+        (
+            "UNWIND [{a: 1}, {b: 2}, {a: 3, b: 4}] AS m WITH m WHERE 'b' IN keys(m) RETURN m",
+            [{"b": 2}, {"a": 3, "b": 4}],
+        ),
+        # A comprehension that filters, and a list a pattern comprehension collects, in a WHERE, an EXISTS and a RETURN.
+        ("UNWIND [1, 2, 3] AS k WITH k WHERE 3 IN [i IN range(1, k) WHERE i > 1 | i] RETURN k", [3]),
+        ("MATCH (p:P) WHERE 'y' IN [(p)-[:R]->(q) | q.name] RETURN p.name", ["b"]),
+        ("MATCH (p:P) WHERE EXISTS { MATCH (p)-[:R]->(q) WHERE 'y' IN [(p)-->(r) | r.name] } RETURN p.name", ["b"]),
+        ("MATCH (n:K) WHERE EXISTS { MATCH (m:K) WHERE m.a = n.a AND 'b' IN keys(n) } RETURN n.a, n.b", [[3, 4]]),
+        ("UNWIND [1, 2] AS k RETURN k, 2 IN [i IN range(1, k) | i] ORDER BY k", [[1, False], [2, True]]),
+        ("MATCH (p:P) RETURN p.name, 'y' IN [(p)-[:R]->(q) | q.name] ORDER BY p.name", [["a", False], ["b", True]]),
+        # Quantifiers over such a list.
+        (f"{each} any(i IN [j IN range(1, k) | j] WHERE i = 3) RETURN k", [3]),
+        (f"{each} all(i IN [j IN range(1, k) | j] WHERE i < 3) RETURN k ORDER BY k", [1, 2]),
+        (f"{each} none(i IN [j IN range(1, k) | j] WHERE i = 2) RETURN k", [1]),
+        (f"{each} single(i IN [j IN range(1, k) | j] WHERE i >= 2) RETURN k", [2]),
+        ("MATCH (n:K) WHERE any(x IN keys(n) WHERE x = 'b') RETURN count(n)", [2]),
+        ("MATCH (n:K) WHERE none(x IN keys(n) WHERE x = 'b') RETURN count(n)", [1]),
+        # Unwound beside the table whose row it reads.
+        ("UNWIND [1, 2] AS k UNWIND [i IN range(1, k) | i] AS j RETURN k, j ORDER BY k, j", [[1, 1], [2, 1], [2, 2]]),
+        ("MATCH (p:P) UNWIND [(p)-[:R]->(q) | q.name] AS x RETURN p.name, x ORDER BY p.name", [["a", "x"], ["b", "y"]]),
+        # A list that may hold temporal values, which Oracle reads by its places.
+        (
+            "UNWIND [1, 2] AS k WITH k WHERE 2 IN "
+            "[i IN range(1, k) | CASE WHEN i = 2 THEN 2 ELSE date('2024-01-01') END] RETURN k",
+            [2],
+        ),
+        (
+            "UNWIND [1, 2] AS k WITH k WHERE 2 IN "
+            "[i IN range(1, k) | coalesce(CASE WHEN i = 2 THEN 2 END, date('2024-01-01'))] RETURN k",
+            [2],
+        ),
+        (
+            "UNWIND [1, 2] AS k UNWIND [i IN range(1, k) | date('2024-01-01') + duration({days: i - 1})] AS t "
+            "RETURN k, t.day ORDER BY k, t.day",
+            [[1, 1], [2, 1], [2, 2]],
+        ),
+    ]
+    assert differing(cypher_pm, cases) == []
+    clear(cypher_pm)
+
+
+def test_a_list_each_row_works_out_by_a_subquery_is_read_for_each_row_in_a_call_with_optional_match_and_count(
+    cypher_pm: PersistenceManager,
+):
+    # #272, liberation-data/drivine4j#433: each reads keys(n) where a subquery's FROM may begin with the list's view.
+    # Before the fix, Oracle gave the OPTIONAL MATCH no m.b and the COUNT 0 on every row.
+    clear(cypher_pm)
+    cypher_pm.query(spec("CREATE (:K {a: 1}), (:K {b: 2}), (:K {a: 3, b: 4})"))
+    cases: list[tuple[str, list[Any]]] = [
+        ("MATCH (n:K) CALL { WITH n RETURN keys(n) AS ks } WITH n, ks WHERE 'b' IN ks RETURN count(n)", [2]),
+        ("MATCH (n:K) WITH n, [k IN keys(n) | k] AS ks WHERE 'b' IN ks RETURN count(n)", [2]),
+        ("MATCH (n:K) WHERE size([k IN keys(n) WHERE k = 'b']) > 0 RETURN count(n)", [2]),
+        (
+            "MATCH (n:K) WHERE reduce(s = 0, k IN keys(n) | s + CASE WHEN k = 'b' THEN 1 ELSE 0 END) = 1 "
+            "RETURN count(n)",
+            [2],
+        ),
+        (
+            "MATCH (n:K) OPTIONAL MATCH (m:K) WHERE m.a = n.a AND 'b' IN keys(m) RETURN n.a, m.b ORDER BY n.a",
+            [[1, None], [3, 4], [None, None]],
+        ),
+        (
+            "MATCH (n:K) RETURN n.a, COUNT { MATCH (m:K) WHERE 'b' IN keys(n) } ORDER BY n.a",
+            [[1, 0], [3, 3], [None, 3]],
+        ),
+    ]
+    assert differing(cypher_pm, cases) == []
+    clear(cypher_pm)

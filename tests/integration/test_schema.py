@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import re
 import uuid
@@ -281,6 +282,35 @@ async def test_store_identity_is_stable(factory, pm):
     one = await StatelessGraphObjectManager(pm).store_identity()
     two = await StatelessGraphObjectManager(factory.get(pm.database)).store_identity()
     assert one.id == two.id and one.engine == pm.type
+
+
+RACE_ROUNDS = {DatabaseType.ORACLE: 2, DatabaseType.POSTGRES: 3}
+"""How many rounds of managers racing to make the store key's constraint a store runs: fewer on the SQL stores."""
+
+
+async def wipe_store_stamps(pm: PersistenceManager) -> None:
+    if pm.type in (DatabaseType.ORACLE, DatabaseType.POSTGRES):
+        await pm.execute(QuerySpecification("DELETE FROM drivine_node"))
+    else:
+        await pm.execute(QuerySpecification("MATCH (s:DrivineStore) DETACH DELETE s"))
+
+
+@pytest.mark.async_only
+async def test_store_identity_is_agreed_under_the_key_constraint_by_managers_racing_to_make_it(pm, caplog):
+    # #298, as drivine4j#473: on a store that has never had the key's constraint, the managers race to make it. On
+    # Neo4j they can deadlock doing so; elsewhere a loser's statement is refused for what the winner made meanwhile.
+    # Going on without the constraint, a loser's stamp was refused by the winner's and raised out of resolve(), or
+    # written before it was in force, leaving two stamps. Each manager must instead find the winner's constraint.
+    stamps = StatelessGraphObjectManager(pm).backend.store_stamps().spec()
+    with caplog.at_level(logging.WARNING, "drivine.store"):
+        for _ in range(RACE_ROUNDS.get(pm.type, 5)):
+            await StatelessGraphObjectManager(pm).constraints.drop(uniqueness_constraint("DrivineStore", "key"))
+            await wipe_store_stamps(pm)
+            managers = [StatelessGraphObjectManager(pm) for _ in range(16)]
+            identities = await asyncio.gather(*(it.store_identity() for it in managers))
+            assert len({it.id for it in identities}) == 1
+            assert len(await pm.query(stamps)) == 1
+    assert [it.getMessage() for it in caplog.records if "best-effort" in it.getMessage()] == []
 
 
 def neo4j_only(pm: PersistenceManager) -> None:

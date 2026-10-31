@@ -6,6 +6,7 @@ Aggregates.
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from typing import NoReturn
 
 from drivine.cypher.ast.clause import (
     Call,
@@ -49,7 +50,8 @@ def check_aggregates(
     InvalidAggregation), of a `MATCH`, a `WITH`, a comprehension, a quantifier, a pattern's or `EXISTS { … }`'s, in a
     `CALL { … }` or a subquery too. Read from the statement alone, before it is compiled, so a statement that compiles
     is compiled as it was. A subquery's own query, `COUNT { MATCH … RETURN count(*) }`, aggregates in its own
-    projections.
+    projections. The `WHERE` of a `WITH` that aggregates, or is `DISTINCT`, filters its groups, and holds an aggregate
+    as Neo4j has it (#313).
 
     `is_aggregate` and `children` are the compiler's, passed in so that neither module imports the other.
     """
@@ -79,7 +81,12 @@ class _Aggregates:
                 self._expression(clause.list)
             elif isinstance(clause, With):
                 self._projection(clause.projection)
-                self._where(clause.where)
+                # One that is DISTINCT groups its rows by its items, as one that aggregates does by those that do not.
+                projection = clause.projection
+                if projection.distinct or any(self._grouped(it.expression) is not None for it in projection.items):
+                    self._having(clause.where)
+                else:
+                    self._where(clause.where)
             elif isinstance(clause, Create):
                 for pattern in clause.patterns:
                     self._pattern(pattern)
@@ -129,11 +136,51 @@ class _Aggregates:
             return
         aggregate = self._aggregate_in(where)
         if aggregate is not None:
-            raise DrivineError(
-                f"{_named(aggregate)} aggregates, and a WHERE holds no aggregate, as in Neo4j: aggregate in a WITH "
-                "first, and filter what it gives in that WITH's WHERE, as in WITH x, count(*) AS c WHERE c > 1."
-            )
+            _refuse(aggregate)
         self._expression(where)
+
+    def _having(self, where: Expression | None) -> None:
+        """
+        The `WHERE` of a `WITH` that aggregates: it filters the groups, as SQL's HAVING does, so an aggregate is read in
+        it as Neo4j reads it (#313), but not in a comprehension's, a quantifier's, a reduce's or a pattern's own
+        expressions.
+        """
+        if where is None:
+            return
+        aggregate = self._beyond_groups(where)
+        if aggregate is not None:
+            _refuse(aggregate)
+        self._expression(where)
+
+    def _grouped(self, expression: Expression) -> Expression | None:
+        """
+        The first aggregate the expression holds outside a comprehension's, a quantifier's, a reduce's and a pattern's
+        own expressions and a subquery's own query, where `children` finds its parts: one the compiler reads over a
+        WITH's groups.
+        """
+        if self._is_aggregate(expression):
+            return expression
+        for part in self._children(expression):
+            found = self._grouped(part)
+            if found is not None:
+                return found
+        return None
+
+    def _beyond_groups(self, expression: Expression) -> Expression | None:
+        """The first aggregate the expression holds that `_grouped` does not find, but `_aggregate_in` does."""
+        if self._is_aggregate(expression):
+            return None
+        near = self._children(expression)
+        for part in near:
+            found = self._beyond_groups(part)
+            if found is not None:
+                return found
+        for part in self._parts(expression):
+            if part not in near:
+                found = self._aggregate_in(part)
+                if found is not None:
+                    return found
+        return None
 
     def _aggregate_in(self, expression: Expression) -> Expression | None:
         """The first aggregate the expression holds, a comprehension's, a pattern's or `EXISTS { … }`'s among them, but
@@ -194,6 +241,14 @@ class _Aggregates:
         if isinstance(expression, Subquery):
             return []
         return self._children(expression)
+
+
+def _refuse(aggregate: Expression) -> NoReturn:
+    raise DrivineError(
+        f"{_named(aggregate)} aggregates, and a WHERE holds no aggregate unless its WITH aggregates, as in Neo4j: "
+        "aggregate in a WITH first, and filter what it gives in that WITH's WHERE, as in WITH x, count(*) AS c WHERE "
+        "c > 1."
+    )
 
 
 def _named(aggregate: Expression) -> str:

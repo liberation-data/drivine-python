@@ -15,7 +15,16 @@ import pytest
 from drivine.backend.cypher import quote_name
 from drivine.query.statement import cypher_statement
 from drivine.sync import DatabaseType, PersistenceManager, QuerySpecification
-from tests.cypher.cypher_spec import Case, check_rows, expanded, failure_matches, load
+from tests.cypher.cypher_spec import (
+    HELD_FAILURES,
+    Case,
+    check_rows,
+    expanded,
+    failure_matches,
+    held_for,
+    held_passes,
+    load,
+)
 
 NAMES = {DatabaseType.NEO4J: "neo4j", DatabaseType.POSTGRES: "postgres", DatabaseType.ORACLE: "oracle"}
 """The name a step gives each store by."""
@@ -57,36 +66,54 @@ def clear(pm: PersistenceManager) -> None:
         pm.execute(QuerySpecification("DELETE FROM drivine_node"))
 
 
-def run(pm: PersistenceManager, case: Case) -> None:
-    """Each step of the case that runs on the store, in turn: its rows checked, or its failure."""
+def run(pm: PersistenceManager, file: str, case: Case) -> None:
+    """
+    Each step of the case of the spec file that runs on the store, in turn: its rows checked, or its failure. A step
+    held on the store (`HELD`) must fail, until its port lands.
+    """
     store = NAMES[pm.type]
     for index, step in enumerate(case.steps):
         if not step.runs_on(store):
             continue
-        where = f"{case.name}, step {index + 1}, on {store}: {step.cypher.strip()}"
-        parameters = expanded(step.parameters)
-        if step.error is not None:
-            with pytest.raises(Exception) as failed:  # noqa: PT011
-                query(pm, step.cypher, parameters)
-            assert failure_matches(step, failed.value), f"{where}\nexpected: {step.error}\nactual:   {failed.value}"
+        issue = held_for(file, case, index, store)
+        if issue is None:
+            check(pm, case, index, store)
             continue
-        check_rows(step, query(pm, step.cypher, parameters), where)
+        try:
+            check(pm, case, index, store)
+        except HELD_FAILURES:
+            # Held, as liberation-data/drivine-python#<issue> has it.
+            continue
+        pytest.fail(held_passes(file, case, index, store, issue))
+
+
+def check(pm: PersistenceManager, case: Case, index: int, store: str) -> None:
+    """The step at `index` of the case run on the store: its rows checked, or its failure."""
+    step = case.steps[index]
+    where = f"{case.name}, step {index + 1}, on {store}: {step.cypher.strip()}"
+    parameters = expanded(step.parameters)
+    if step.error is not None:
+        with pytest.raises(Exception) as failed:  # noqa: PT011
+            query(pm, step.cypher, parameters)
+        assert failure_matches(step, failed.value), f"{where}\nexpected: {step.error}\nactual:   {failed.value}"
+        return
+    check_rows(step, query(pm, step.cypher, parameters), where)
 
 
 @pytest.mark.parametrize("case", QUERIES.cases, ids=[it.name for it in QUERIES.cases])
 def test_queries(cypher_pm: PersistenceManager, case: Case):
     clear(cypher_pm)
     query(cypher_pm, QUERIES.graph or "")
-    run(cypher_pm, case)
+    run(cypher_pm, "queries.yaml", case)
 
 
 @pytest.mark.parametrize("case", WRITES.cases, ids=[it.name for it in WRITES.cases])
 def test_writes(cypher_pm: PersistenceManager, case: Case):
     clear(cypher_pm)
-    run(cypher_pm, case)
+    run(cypher_pm, "writes.yaml", case)
 
 
 @pytest.mark.parametrize("case", TEMPORAL.cases, ids=[it.name for it in TEMPORAL.cases])
 def test_temporal(cypher_pm: PersistenceManager, case: Case):
     clear(cypher_pm)
-    run(cypher_pm, case)
+    run(cypher_pm, "temporal.yaml", case)

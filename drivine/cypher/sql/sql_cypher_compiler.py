@@ -536,6 +536,10 @@ class SqlCypherCompiler(ABC):
         """The body over the sides of a `+`, as `shared` binds them: see Oracle's."""
         return self.shared([a, b], body)
 
+    def shared_compared(self, a: str, b: str, body: Body) -> str:
+        """The body over the sides of a comparison, an `IN` among them, as `shared` binds them: see Oracle's."""
+        return self.shared([a, b], body)
+
     def shared1(self, value: str, body: Callable[[str], str]) -> str:
         """`shared`, of one value."""
         return self.shared([value], lambda it: body(it[0]))
@@ -893,6 +897,20 @@ class SqlCypherCompiler(ABC):
         """Whether the JSON values, neither of them null, are equal as JSON: `'7'` is not `7`, and `1` is `1.0`."""
         return f"{x} = {y}"
 
+    def given_equals(self, x: str, y: str, given: Any) -> str:
+        """Whether the JSON value `x` is equal to `y`, the JSON of `given`, a value the statement gives that is not
+        null."""
+        return self.json_equals(x, y)
+
+    def given_items_test(self, value: str, items: Sequence[Any]) -> str | None:
+        """
+        A test of the JSON value `value` alone, where an `IN` of it in a list whose items the statement writes or is
+        given, `items`, each a text, a number, a truth value or null, compares each item with it as JSON only where the
+        test holds, and finds it in none where it doesn't: None where each item is compared by `json_equals`. See
+        Oracle's.
+        """
+        return None
+
     @abstractmethod
     def holds_null(self, json: str) -> str | None:
         """
@@ -1023,9 +1041,9 @@ class SqlCypherCompiler(ABC):
         `c.name + 1` compiles as it did before floats were so written. NaN and the infinities count as given neither
         way: Postgres binds them as texts, so a number may be added to one as text.
         """
-        if _is_given_number(given):
+        if is_given_number(given):
             return literal(java_text(given))
-        if isinstance(given, str) or given is MADE_TEXT or _is_given_number(other):
+        if isinstance(given, str) or given is MADE_TEXT or is_given_number(other):
             return plain(json)
         return written(json)
 
@@ -4221,7 +4239,7 @@ class SqlCypherCompiler(ABC):
                     f"THEN {self.ordered(x, sql, y)} END"
                 )
 
-            return Bool(self.shared([a, b], ordered))
+            return Bool(self.shared_compared(a, b, ordered))
         if operator is BinaryOperator.ADD:
             # Two lists of nodes, or of relationships, are together a list of them.
             if (
@@ -4255,8 +4273,8 @@ class SqlCypherCompiler(ABC):
                 temporals=_has_temporals(left_value) or _has_temporals(right_value),
                 list=_is_list(left_value) or _is_list(right_value),
                 item_lists=_holds_lists(left_value) and (_holds_lists(right_value) or not _is_list(right_value)),
-                text=(text_left and (text_right or _is_given_number(given_right)))
-                or (text_right and _is_given_number(given_left)),
+                text=(text_left and (text_right or is_given_number(given_right)))
+                or (text_right and is_given_number(given_left)),
                 texts=(_holds_texts(left_value) and (_holds_texts(right_value) or text_right))
                 or (text_left and _holds_texts(right_value)),
             )
@@ -4435,12 +4453,13 @@ class SqlCypherCompiler(ABC):
         # given that is not null needs no test of its own, and a property that is not there is SQL's null; any other
         # value is tested.
         if given is not None:
-            equal = self.json_equals(a, b)
+            equal = self.given_equals(a, b, given)
             if not stored:
                 equal = f"CASE WHEN NOT {self.is_json_null(a)} THEN {equal} END"
         else:
-            equal = self.shared(
-                [a, b],
+            equal = self.shared_compared(
+                a,
+                b,
                 lambda it: (
                     f"CASE WHEN NOT {self.is_json_null(it[0])} AND NOT {self.is_json_null(it[1])} "
                     f"THEN {self.json_equals(it[0], it[1])} END"
@@ -4682,9 +4701,42 @@ class SqlCypherCompiler(ABC):
         else:
             list_, x = self.comparable(self.json(right)), self.comparable(self.json(left))
         equals = self.identity_equals if identities else self.json_equals
+        # An item of a list whose items the statement writes or is given (see `_given_items`) is compared with the value
+        # as JSON, a plain equality, where the value meets the store's test, if it has one: see `given_items_test`.
+        items = None if id_ is not None or identities else self._given_items(binary.right)
+        test: Callable[[str], str] | None = None
+        if items is not None and self.given_items_test(x, items) is not None:
+            given_items = items
+
+            def tested(value: str) -> str:
+                return cast(str, self.given_items_test(value, given_items))
+
+            test = tested
 
         def matches(item: str, value: str) -> str:
-            return f"{item} = {value}" if id_ is not None else equals(item, value)
+            return f"{item} = {value}" if id_ is not None or test is not None else equals(item, value)
+
+        def found(around: Callable[[str, str], str] | None = None) -> str:
+            # Whether an item matches the value, as a semi-join the store answers: `EXISTS`, or with `around` that test
+            # and the value, each read once. Where there is a `test`, the value meets it too, tested once beside the
+            # `EXISTS`, not in it.
+            i = self._alias("i")
+
+            def exists(l_: str, v: str) -> str:
+                return f"EXISTS (SELECT 1 FROM {self._elements_of(right, l_, i)} WHERE {matches(f'{i}.item', v)})"
+
+            if test is not None:
+                test_ = test
+
+                def body(it: list[str]) -> str:
+                    found_ = f"({test_(it[1])} AND {exists(it[0], it[1])})"
+                    return found_ if around is None else around(found_, it[1])
+
+                return self.shared_compared(list_, x, body)
+            if around is None:
+                return exists(list_, x)
+            wrap = around
+            return self.shared_compared(list_, x, lambda it: wrap(exists(it[0], it[1]), it[1]))
 
         within = self._is_flat(right)
         # A node, a relationship or a value of one kind holds no null; nor does an item of a list that holds none.
@@ -4699,7 +4751,6 @@ class SqlCypherCompiler(ABC):
         # null: beside any list, read by a WHERE for its truth alone, it is equal as JSON only to an item Cypher finds
         # equal.
         if whole and (filter_ or (present_left and present_right and within)):
-            i = self._alias("i")
             # But JSON's null is equal as JSON to an item that is, so a value that may be JSON's null (not a property
             # read from the store, which is SQL's null where it is not there) is in a list that may hold a null only
             # where it is not null.
@@ -4711,25 +4762,12 @@ class SqlCypherCompiler(ABC):
                 and self.holds_null("x") is not None
             )
             if not nullable:
-                return f"EXISTS (SELECT 1 FROM {self._elements_of(right, list_, i)} WHERE {matches(f'{i}.item', x)})"
-            return self.shared(
-                [list_, x],
-                lambda it: (
-                    f"(EXISTS (SELECT 1 FROM {self._elements_of(right, it[0], i)} WHERE {matches(f'{i}.item', it[1])}) "
-                    f"AND NOT {self.is_json_null(it[1])})"
-                ),
-            )
+                return found()
+            return found(lambda exists, v: f"({exists} AND NOT {self.is_json_null(v)})")
         # A value that may be null, in a list that is not and holds none: in where an item is equal, null where the
         # value is null, else not, written so the store still answers the first as it did, as a semi-join.
         if present_right and within and whole and filled:
-            i = self._alias("i")
-            return self.shared(
-                [list_, x],
-                lambda it: (
-                    f"(EXISTS (SELECT 1 FROM {self._elements_of(right, it[0], i)} WHERE {matches(f'{i}.item', it[1])}) "
-                    f"OR CASE WHEN NOT {self.is_json_null(it[1])} THEN FALSE END)"
-                ),
-            )
+            return found(lambda exists, v: f"({exists} OR CASE WHEN NOT {self.is_json_null(v)} THEN FALSE END)")
 
         def body(values: list[str]) -> str:
             l_, v = values
@@ -4745,10 +4783,16 @@ class SqlCypherCompiler(ABC):
                     else f"CASE WHEN EXISTS (SELECT 1 FROM {self._elements_of(right, l_, j)}) THEN NULL ELSE FALSE END"
                 )
                 cases.append(f"WHEN {self.is_json_null(v)} THEN {empty}")
+            found_ = f"EXISTS (SELECT 1 FROM {self._elements_of(right, l_, i)} WHERE {matches(f'{i}.item', v)})"
+            # Items the statement gives, none a list or a map, are equal to no value that holds a null, and a comparison
+            # with one is null only where it is null: the value is not read for its nulls, a text past 32 KB taken out
+            # as JSON so closing Oracle's session (#291).
+            if test is not None:
+                cases.append(f"WHEN {test(v)} AND {found_} THEN TRUE")
+                return f"CASE {' '.join(cases)} ELSE {'NULL' if None in cast(list[Any], items) else 'FALSE'} END"
             # A value that holds a null is equal to no item.
             held = None if whole else self.holds_null(v)
-            found = f"EXISTS (SELECT 1 FROM {self._elements_of(right, l_, i)} WHERE {matches(f'{i}.item', v)})"
-            cases.append(f"WHEN {f'NOT ({held}) AND ' if held is not None else ''}{found} THEN TRUE")
+            cases.append(f"WHEN {f'NOT ({held}) AND ' if held is not None else ''}{found_} THEN TRUE")
             if not (within and whole):
                 k = self._alias("i")
                 undecided = (
@@ -4761,7 +4805,31 @@ class SqlCypherCompiler(ABC):
                 )
             return f"CASE {' '.join(cases)} ELSE FALSE END"
 
-        return self.shared([list_, x], body)
+        return self.shared_compared(list_, x, body)
+
+    def _given_items(self, expression: Expression) -> list[Any] | None:
+        """
+        The items of the list the expression is, where the statement writes or is given each: a list literal of literals
+        and parameters, or a parameter. None where it is not so given, or holds a list or a map, whose items
+        `given_items_test` doesn't know.
+        """
+        if isinstance(expression, ListLiteral):
+            items: list[Any] = []
+            for item in expression.items:
+                if isinstance(item, Literal):
+                    items.append(item.value)
+                elif isinstance(item, Parameter):
+                    items.append(self._parameters.tree(item.name))
+                else:
+                    return None
+        elif isinstance(expression, Parameter):
+            tree = self._parameters.tree(expression.name)
+            if not isinstance(tree, list):
+                return None
+            items = cast(list[Any], tree)
+        else:
+            return None
+        return None if any(isinstance(it, (list, dict)) for it in items) else items
 
     def _identity_of(self, value: Value) -> str | None:
         """
@@ -6088,7 +6156,7 @@ def utf8_bytes(given: Any) -> int | None:
     return len(given.encode("utf-8", "surrogatepass")) if isinstance(given, str) else None
 
 
-def _is_given_number(value: Any) -> bool:
+def is_given_number(value: Any) -> bool:
     """Whether the value, given by the statement, is a number JSON holds as one: NaN and the infinities it holds as
     none."""
     return _is_number(value) and math.isfinite(value)

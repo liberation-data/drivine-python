@@ -4782,6 +4782,15 @@ def test_a_with_star_at_the_start_of_a_call_passes_on_what_the_call_imports_and_
         ("RETURN 1 AS x UNION ALL WITH * WHERE false RETURN 2 AS x", [1]),
         ("UNWIND [1, 2] AS i CALL () { WITH * WHERE false RETURN 1 AS x } RETURN i, x", []),
         ("UNWIND [1, 2] AS i CALL (i) { WITH * WHERE i > 1 RETURN i AS x } RETURN x", [2]),
+        # A randomUUID() in its WHERE is made for each row it reads, and once for each call of it.
+        ("WITH * WHERE randomUUID() = randomUUID() RETURN 1 AS x", []),
+        (
+            "UNWIND range(1, 40) AS i CALL () { WITH * WHERE randomUUID() < '8' RETURN 1 AS x } "
+            "RETURN count(*) > 0 AND count(*) < 40 AS mixed",
+            [True],
+        ),
+        # A CALL without brackets that imports only the UUID the compiler made for it passes on nothing.
+        ("CALL { WITH * RETURN toUpper(randomUUID()) AS u } RETURN size(u) AS n", [36]),
         # Made for each row, beside a randomUUID(): not the compiler's own variables (drivine4j#412), which no star
         # shows.
         (

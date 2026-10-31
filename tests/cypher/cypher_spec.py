@@ -200,16 +200,6 @@ HELD: dict[str, dict[str, list[Hold]]] = {
     "writes.yaml": {
         "A null in a written row and a missing key are one null": [Hold(314, ("sql",), (1, 2))],
     },
-    "temporal.yaml": {
-        # v0.19.0, liberation-data/drivine-cypher-spec#44: a temporal value made from another.
-        "Dates, times and moments from another temporal value": [Hold(317, ("sql",))],
-        "Zoned times and moments from another temporal value": [Hold(317, ("sql",))],
-        "Temporal values from another an expression gives": [Hold(317, ("sql",), (2, 3, 4))],
-    },
-    "refusals.yaml": {
-        "Temporal map not compiled yet": [Hold(317, ("sql",), (1, 4))],
-        "Temporal map from another temporal value Neo4j does not take": [Hold(317, ("sql",))],
-    },
 }
 """
 The steps of a spec tag past what drivine-python runs that a port here has yet to make pass, by file and case. Each is

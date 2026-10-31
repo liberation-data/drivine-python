@@ -6,6 +6,7 @@ import logging
 import math
 import re
 from abc import ABC, abstractmethod
+from calendar import isleap
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
@@ -77,7 +78,7 @@ from drivine.cypher.sql.cypher_syntax import bracketed, imports, plain_with
 from drivine.cypher.sql.parameters import Parameters, cypher_json, jsonable
 from drivine.cypher.sql.temporal import Temporal
 from drivine.cypher.sql.temporal_sql import TRUNCATION_UNITS, TemporalSql
-from drivine.cypher.sql.temporals import FIELD_NAMES, NoNumber, Overrides, Temporals, canonical
+from drivine.cypher.sql.temporals import CALENDAR_FIELDS, FIELD_NAMES, NoNumber, Overrides, Temporals, canonical
 from drivine.cypher.sql.value import (
     Bool,
     Entities,
@@ -1415,13 +1416,21 @@ class SqlCypherCompiler(ABC):
         A variable of `_made_anew`'s, new: named as no variable of the statement's is, nor begins, so one quoted alike,
         `` `#anew2` `` or `` `#anew2 row` ``, is not taken for it, hidden from a star or read as its UUID.
         """
+        name = self._hidden(ANEW)
+        self._made_anew.add(name)
+        return name
+
+    def _hidden(self, prefix: str) -> str:
+        """
+        A name new to the statement, `prefix` and a number: named as no text of the queries given to compile is, nor
+        begins, so a variable quoted alike, `` `#having2` ``, stays the statement's.
+        """
         for query in self._queries:
             _texts_in(query, self._query_texts)
         self._queries.clear()
-        name = self._alias(ANEW)
+        name = self._alias(prefix)
         while name in self._query_texts:
-            name = self._alias(ANEW)
-        self._made_anew.add(name)
+            name = self._alias(prefix)
         return name
 
     def _query(self, query: Query) -> str:
@@ -1464,6 +1473,66 @@ class SqlCypherCompiler(ABC):
 
     def _with(self, select: _Select, with_: With, outer: Scope | None = None, apart: bool = False) -> _Select:
         """A `WITH`: a query of its own, which the rest of the statement reads from, as it reads `outer`."""
+        read, hidden = self._having(with_)
+        next_ = self._with_having(select, read, outer, apart)
+        for it in hidden:
+            next_.bound.pop(it, None)
+        return next_
+
+    def _having(self, with_: With) -> tuple[With, list[str]]:
+        """
+        A `WITH` that groups its rows, as one that aggregates or is `DISTINCT` does, read as Neo4j reads its `WHERE`,
+        which filters the groups, as SQL's HAVING does (#313), and the names of the items made for it. Each aggregate
+        the `WHERE` holds, outside a comprehension's or a quantifier's own expressions, is made an item of the `WITH`,
+        of its own where no item is that aggregate, named as no variable is, and the `WHERE` reads that item. A key the
+        `WITH` groups by, written there as the item is, before its name, is read as that item, as in `WITH i AS j,
+        count(*) AS c WHERE i > 1`; a variable an item is named after is that item, in a larger expression too. Keys and
+        aggregates are compared as grouping compares them (`_grouping_key`): `TOUPPER(x)` is the key `toUpper(x)`. The
+        items made are no variables of the statement's: the `WITH` is read, then they are left out of what it binds.
+        The `WITH` as it is where it groups nothing, or has no `WHERE`. As drivine4j's.
+        """
+        where = with_.where
+        items = with_.projection.items
+        if where is None or (
+            not with_.projection.distinct and not any(contains(it.expression, is_aggregate) for it in items)
+        ):
+            return with_, []
+        names = {it.name for it in items}
+        keys = {
+            _grouping_key(it.expression): it.name
+            for it in items
+            if not contains(it.expression, is_aggregate) and variables_in(it.expression)
+        }
+        # An aggregate an item is already is read by that item's name.
+        aggregates = {_grouping_key(it.expression): it.name for it in items if is_aggregate(it.expression)}
+        lifted: dict[Expression, ProjectionItem] = {}
+
+        def read(part: Expression) -> Expression | None:
+            key = _grouping_key(part)
+            if is_aggregate(part):
+                name = aggregates.get(key)
+                if name is None:
+                    if key not in lifted:
+                        # Named as no text of the statement's is, so an item quoted alike stays the statement's.
+                        lifted[key] = ProjectionItem(part, self._hidden(HAVING))
+                    name = lifted[key].name
+                return Variable(name)
+            # `WITH i + 10 AS i … WHERE i + 10 > 20` reads the item i, as Neo4j does: no key is read where an item is
+            # named.
+            if any(it in names for it in variables_in(part)):
+                return part if isinstance(part, Variable) else None
+            name = keys.get(key)
+            return Variable(name) if name is not None else None
+
+        condition = replaced(where, read)
+        if condition == where:
+            return with_, []
+        made = list(lifted.values())
+        projection = dataclasses.replace(with_.projection, items=(*items, *made))
+        return dataclasses.replace(with_, projection=projection, where=condition), [it.name for it in made]
+
+    def _with_having(self, select: _Select, with_: With, outer: Scope | None = None, apart: bool = False) -> _Select:
+        """A `WITH` `_having` has read: see `_with`."""
         projected = self._project(select, with_.projection, final=False)
         name = self._alias("w")
         next_ = _Select(outer or {})
@@ -2608,11 +2677,15 @@ class SqlCypherCompiler(ABC):
                 elif isinstance(clause, With) and rebound:
                     # What brackets import is seen throughout the call, as Neo4j has it, after a WITH that does not pass
                     # it on too: read again from the row the call is written for, so `CALL (a) { WITH 1 AS one CREATE
-                    # (a)-[:R]->() }` joins the row's a, not a new node. Its WHERE reads them too, so it is met after.
-                    w = self._with(select, dataclasses.replace(clause, where=None))
+                    # (a)-[:R]->() }` joins the row's a, not a new node. Its WHERE reads them too, so it is met after;
+                    # one that filters groups reads the aggregates `_having` made items of the WITH.
+                    read, hidden = self._having(clause)
+                    w = self._with_having(select, dataclasses.replace(read, where=None))
                     dropped = {it for it in imported if it not in w.scope}
                     self._bind_row(w, caller, dropped, kinds=before, values=carried_before)
-                    select = self._filtered_rows(w, clause.where) if clause.where is not None else w
+                    select = self._filtered_rows(w, read.where) if read.where is not None else w
+                    for it in hidden:
+                        select.bound.pop(it, None)
                 else:
                     select = self._next(select, clause)
             if returned is not None:
@@ -4554,10 +4627,7 @@ class SqlCypherCompiler(ABC):
             return Json(self.literal_json(worked), temporal=kind)
         if isinstance(written, MapLiteral):
             fields = {key: self._expression(value, scope) for key, value in written.entries}
-            known = DURATION_MAP_FIELDS if kind is Temporal.DURATION else INSTANT_MAP_FIELDS
-            unknown = next((it for it in fields if it not in known), None)
-            if unknown is not None:
-                unsupported(f"{function.name}() of a map with {unknown}")
+            _map_fields(kind, function.name, list(fields))
             numbers = {
                 key: self.number(self.comparable(self.json(value)))
                 for key, value in fields.items()
@@ -4567,7 +4637,17 @@ class SqlCypherCompiler(ABC):
                 return of(self.temporals.duration(numbers))
             timezone = fields.get("timezone")
             zone = self.text(self.comparable(self.json(timezone))) if timezone is not None else None
-            return of(self.temporals.of(numbers, zone, kind))
+            if not any(key in CALENDAR_FIELDS for key, _ in written.entries):
+                return of(self.temporals.of(numbers, zone, kind))
+            # A date or a moment takes a week, an ordinal day or a quarter in place of a month and a day: worked out
+            # here where the statement writes them, as `{year, month, day}` is made, else by the store.
+            _calendar_zone(written.entries)
+            date_ = _calendar_date(function.name, written.entries)
+            if date_ is None:
+                return of(self.temporals.of_calendar(numbers, zone, kind))
+            day = {key: value for key, value in numbers.items() if key not in CALENDAR_FIELDS}
+            day["year"], day["month"], day["day"] = (str(it) for it in date_)
+            return of(self.temporals.of(day, zone, kind))
         given = arguments[0]
         if not isinstance(given, Json):
             raise DrivineError(f"{function.name}() takes a text or a map of its fields.")
@@ -6178,6 +6258,12 @@ What the name of a variable begins with that holds a randomUUID() made first, fo
 `SqlCypherCompiler._anew_first`. Named as no variable is, unless quoted so: see `SqlCypherCompiler._anew_variable`.
 """
 
+HAVING = "#having"
+"""
+What the name of an item begins with that a `WITH` that groups is given for an aggregate of its `WHERE`: see
+`SqlCypherCompiler._having`. Named as no variable of the statement is: see `SqlCypherCompiler._hidden`.
+"""
+
 RANDOM_UUID = Function("randomUUID", False, ())
 """A call of `randomUUID()`, as a statement writes one."""
 
@@ -6323,7 +6409,7 @@ def _texts_in(value: Any, texts: set[str]) -> None:
     """
     Adds each text the value, a statement as read or any part of it, holds anywhere, as far as its first space: each of
     its variables' names, and more (a label, a key, a text it gives), which is as much as a name made for it, with no
-    space, needs to keep clear of: see `SqlCypherCompiler._anew_variable`.
+    space, needs to keep clear of: see `SqlCypherCompiler._hidden`.
     """
     if isinstance(value, str):
         texts.add(value.split(" ", 1)[0])
@@ -7186,6 +7272,178 @@ def _written_number(value: Expression) -> _Written | None:
     if isinstance(negated, Literal) and _is_number(negated.value) and not isinstance(negated.value, float):
         return _Written(-negated.value)
     return None
+
+
+def _map_fields(kind: Temporal, name: str, keys: list[str]) -> None:
+    """
+    Refuses `keys`, the fields of a map that the function `name` makes a value of `kind` of, where it makes none of
+    them: a time of day has no date to give, as Neo4j has it, and a field the stores have no SQL for yet is refused as
+    not compiled yet.
+    """
+    dated = kind in (Temporal.DATE, Temporal.LOCAL_DATE_TIME, Temporal.DATE_TIME)
+    if kind.instant and not dated:
+        calendar = next((it for it in keys if it in CALENDAR_FIELDS), None)
+        if calendar is not None:
+            raise DrivineError(f"{name}() takes no field {calendar}.")
+    if kind is Temporal.DURATION:
+        known = DURATION_MAP_FIELDS
+    else:
+        known = INSTANT_MAP_FIELDS | CALENDAR_FIELDS if dated else INSTANT_MAP_FIELDS
+    unknown = next((it for it in keys if it not in known), None)
+    if unknown is not None:
+        unsupported(f"{name}() of a map with {unknown}")
+
+
+def _calendar_zone(entries: Sequence[tuple[str, Expression]]) -> None:
+    """
+    Refuses the `timezone` of `entries`, a map of the calendar's fields, where it is a zone by name, which no store's
+    text holds yet, rather than give null.
+    """
+    zone = next((value for key, value in entries if key == "timezone"), None)
+    if not isinstance(zone, Literal) or not isinstance(zone.value, str):
+        return
+    if _offset_text(zone.value) is None and not zone.value.startswith(("+", "-")) and _named_zone(zone.value):
+        unsupported(f"The time zone '{zone.value}'")
+
+
+CALENDAR_LEAST = {"year": 0, "week": 1, "dayOfWeek": 1, "ordinalDay": 1, "quarter": 1, "dayOfQuarter": 1}
+"""The least of the year and each field of a date by the calendar's other fields, which a field given as null is."""
+
+CALENDARS = (
+    ("a month", ("month", "day")),
+    ("a week", ("week", "dayOfWeek")),
+    ("an ordinal day", ("ordinalDay",)),
+    ("a quarter", ("quarter", "dayOfQuarter")),
+)
+"""The calendars a map's fields may give a date by, beside a year, and the fields of each."""
+
+YEARS = 999_999_999
+"""The greatest year and the least, less its sign, that Java's dates reach, as Neo4j's do."""
+
+EPOCH_DAYS = (-365_243_219_162, 365_241_780_471)
+"""The days from 1970-01-01 to Java's least date, -999999999-01-01, and to its greatest, +999999999-12-31."""
+
+
+def _calendar_date(name: str, entries: Sequence[tuple[str, Expression]]) -> tuple[int, int, int] | None:
+    """
+    The date, `(year, month, day)`, that `entries`, the fields of a map given the function `name`, give by the
+    calendar's other fields beside the year (see `Temporals.of_calendar`), where it writes the year and each of them as
+    a whole number or null: None where an expression gives any of them, for the store to work out. As Neo4j has them, a
+    field that is null is given as its least (the year 0, the first week, day or quarter), a week runs to 53 and a day
+    of the quarter to 92 in any year, carried into the next where it has fewer, and an ordinal day runs to the year's
+    last. Fails, as Neo4j does, on fields of two calendars (a month beside a week), a day of the week or of the quarter
+    without its week or quarter, a week or a quarter without a year, and a number written that is not whole or is past
+    its field's range, the year's among them (Java's, as Neo4j's: ±999,999,999). As drivine4j's.
+    """
+    keys = {key for key, _ in entries}
+    calendar = _calendar_of(name, keys)
+    numbers = _calendar_numbers(name, entries)
+    if numbers is None:
+        return None
+    year = numbers["year"]
+    if not -YEARS <= year <= YEARS:
+        raise DrivineError(
+            f"{name}() takes no year {year}: Invalid value for Year (valid values -{YEARS} - {YEARS}): {year}"
+        )
+
+    def field(key: str, label: str, last: int, of: str = "") -> int:
+        given = numbers.get(key, 1)
+        if not 1 <= given <= last:
+            raise DrivineError(f"{name}() takes {label} from 1 to {last}{of}, not {given}.")
+        return given
+
+    if calendar == "a week":
+        january4 = _days_from_civil(year, 1, 4)
+        monday = january4 - (_iso_day_of_week(january4) - 1)
+        days = monday + (field("week", "a week", 53) - 1) * 7 + field("dayOfWeek", "a day of the week", 7) - 1
+    elif calendar == "an ordinal day":
+        last = 366 if isleap(year) else 365
+        days = _days_from_civil(year, 1, 1) + field("ordinalDay", "an ordinal day", last, f" in {year}") - 1
+    else:
+        first = _days_from_civil(year, (field("quarter", "a quarter", 4) - 1) * 3 + 1, 1)
+        days = first + field("dayOfQuarter", "a day of the quarter", 92) - 1
+    least, greatest = EPOCH_DAYS
+    if not least <= days <= greatest:
+        raise DrivineError(
+            f"{name}() takes no year {year}: Invalid value for EpochDay (valid values {least} - {greatest}): {days}"
+        )
+    return _civil_from_days(days)
+
+
+def _calendar_of(name: str, keys: set[str]) -> str:
+    """
+    The calendar, beside the year, that `keys`, the fields of a map given `name`, give a date by: refused where they
+    are of two, where a day of the week or of the quarter is without its week or quarter, or where they have no year.
+    """
+    calendars = [label for label, fields in CALENDARS if any(it in keys for it in fields)]
+    if len(calendars) > 1:
+        raise DrivineError(f"{name}() takes {calendars[0]} or {calendars[1]}, not both.")
+    if "dayOfWeek" in keys and "week" not in keys:
+        raise DrivineError(f"{name}() takes a day of the week beside a week.")
+    if "dayOfQuarter" in keys and "quarter" not in keys:
+        raise DrivineError(f"{name}() takes a day of the quarter beside a quarter.")
+    if "year" not in keys:
+        # Neo4j makes an ordinal day of no year one of the year 0, which no store's date reaches.
+        if "ordinalDay" in keys:
+            unsupported(f"{name}() of an ordinal day without a year")
+        raise DrivineError(f"{name}() takes a year beside {calendars[0]}.")
+    return calendars[0]
+
+
+def _calendar_numbers(name: str, entries: Sequence[tuple[str, Expression]]) -> dict[str, int] | None:
+    """
+    The year and the calendar's fields of `entries`, the fields of a map given `name`, where each is written as a whole
+    number or null, its least: None where an expression gives any. A number that is not whole is refused.
+    """
+    numbers: dict[str, int] = {}
+    for key, value in entries:
+        if key != "year" and key not in CALENDAR_FIELDS:
+            continue
+        written = _written_number(value)
+        if written is None:
+            return None
+        literal = written.value
+        if literal is None:
+            numbers[key] = CALENDAR_LEAST[key]
+        elif isinstance(literal, int) and not isinstance(literal, bool):
+            numbers[key] = literal
+        else:
+            shown = f"'{literal}'" if isinstance(literal, str) else _written_text(literal)
+            raise DrivineError(f"{name}() takes a whole number for {key}, not {shown}.")
+    return numbers
+
+
+def _written_text(value: Any) -> str:
+    """The value as Cypher writes it: `true` for a truth value."""
+    return str(value).lower() if isinstance(value, bool) else str(value)
+
+
+def _days_from_civil(year: int, month: int, day: int) -> int:
+    """The days from 1970-01-01 to the date `year`-`month`-`day` of the proleptic Gregorian calendar, at any year."""
+    y = year - 1 if month <= 2 else year
+    era = y // 400
+    year_of_era = y - era * 400
+    day_of_year = (153 * (month + (-3 if month > 2 else 9)) + 2) // 5 + day - 1
+    day_of_era = year_of_era * 365 + year_of_era // 4 - year_of_era // 100 + day_of_year
+    return era * 146097 + day_of_era - 719468
+
+
+def _civil_from_days(days: int) -> tuple[int, int, int]:
+    """The date, `(year, month, day)`, `days` after 1970-01-01, of the proleptic Gregorian calendar."""
+    z = days + 719468
+    era = z // 146097
+    day_of_era = z - era * 146097
+    year_of_era = (day_of_era - day_of_era // 1460 + day_of_era // 36524 - day_of_era // 146096) // 365
+    day_of_year = day_of_era - (365 * year_of_era + year_of_era // 4 - year_of_era // 100)
+    mp = (5 * day_of_year + 2) // 153
+    day = day_of_year - (153 * mp + 2) // 5 + 1
+    month = mp + 3 if mp < 10 else mp - 9
+    return year_of_era + era * 400 + (1 if month <= 2 else 0), month, day
+
+
+def _iso_day_of_week(days: int) -> int:
+    """The ISO day of the week, from 1 for Monday to 7, of the day `days` after 1970-01-01, a Thursday."""
+    return (days + 3) % 7 + 1
 
 
 def _truncation_zone(function: Function, value: Expression) -> str:

@@ -306,13 +306,7 @@ class _Reader:
         return Projection(
             distinct=context.DISTINCT() is not None,
             star=bool(items.children) and items.children[0].getText() == "*",
-            items=tuple(
-                ProjectionItem(
-                    self.expression(item.oC_Expression()),
-                    self.name(item.oC_Variable()) if item.oC_Variable() is not None else item.oC_Expression().getText(),
-                )
-                for item in items.oC_ProjectionItem()
-            ),
+            items=tuple(self.projection_item(item) for item in items.oC_ProjectionItem()),
             order_by=tuple(
                 SortItem(
                     self.expression(sort.oC_Expression()), sort.DESC() is not None or sort.DESCENDING() is not None
@@ -322,6 +316,18 @@ class _Reader:
             skip=self.expression(skip.oC_Expression()) if skip is not None else None,
             limit=self.expression(limit.oC_Expression()) if limit is not None else None,
         )
+
+    def projection_item(self, item: Context) -> ProjectionItem:
+        """
+        The item, named as Neo4j names it: by its alias; unnamed, a map projection after its variable, so `ORDER BY
+        p.name` after `RETURN p {.name}, count(*)` reads the item; any other expression as it is written.
+        """
+        expression = self.expression(item.oC_Expression())
+        if item.oC_Variable() is not None:
+            return ProjectionItem(expression, self.name(item.oC_Variable()))
+        if isinstance(expression, MapProjection):
+            return ProjectionItem(expression, expression.variable)
+        return ProjectionItem(expression, item.oC_Expression().getText())
 
     # ----- Patterns -----
 

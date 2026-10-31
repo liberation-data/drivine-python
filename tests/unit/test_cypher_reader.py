@@ -154,6 +154,11 @@ def test_a_projection_reads_its_names_distinct_order_skip_and_limit():
     assert [it.name for it in ret.items] == ["name", "n.age"]
     assert [it.descending for it in ret.order_by] == [True, False]
     assert ret.skip == Literal(2) and ret.limit == Parameter("n")
+    # As Neo4j names them (#311): an unnamed map projection after its variable, an alias before it, any other item as
+    # written.
+    maps = read_cypher("MATCH (p) RETURN p {.name}, p {.name, .age} AS q, p {.name}.name").clauses[-1]
+    assert isinstance(maps, Return)
+    assert [it.name for it in maps.projection.items] == ["p", "q", "p {.name}.name"]
 
 
 def test_the_writes_read_as_their_clauses_in_order_with_or_without_a_return():

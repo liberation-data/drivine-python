@@ -46,23 +46,27 @@ class Field:
 
 FIELD_NAMES = frozenset(
     {
-        "year", "quarter", "month", "week", "weekYear", "day", "ordinalDay", "dayOfWeek", "weekDay", "hour", "minute",
-        "second", "millisecond", "microsecond", "nanosecond", "epochSeconds", "epochMillis", "timezone", "offset",
-        "offsetMinutes", "offsetSeconds", "years", "quarters", "months", "weeks", "days", "hours", "minutes", "seconds",
-        "milliseconds", "microseconds", "nanoseconds", "quartersOfYear", "monthsOfQuarter", "monthsOfYear",
-        "daysOfWeek", "minutesOfHour", "secondsOfMinute", "millisecondsOfSecond", "microsecondsOfSecond",
-        "nanosecondsOfSecond",
+        "year", "quarter", "month", "week", "weekYear", "day", "ordinalDay", "dayOfQuarter", "dayOfWeek", "weekDay",
+        "hour", "minute", "second", "millisecond", "microsecond", "nanosecond", "epochSeconds", "epochMillis",
+        "timezone", "offset", "offsetMinutes", "offsetSeconds", "years", "quarters", "months", "weeks", "days", "hours",
+        "minutes", "seconds", "milliseconds", "microseconds", "nanoseconds", "quartersOfYear", "monthsOfQuarter",
+        "monthsOfYear", "daysOfWeek", "minutesOfHour", "secondsOfMinute", "millisecondsOfSecond",
+        "microsecondsOfSecond", "nanosecondsOfSecond",
     }
 )  # fmt: skip
 """The names of the fields a temporal value may have, of a moment's or a duration's."""
 
 INSTANT_FIELDS = frozenset(
     {
-        "year", "quarter", "month", "week", "weekYear", "day", "ordinalDay", "dayOfWeek", "weekDay", "hour", "minute",
-        "second", "millisecond", "microsecond", "nanosecond",
+        "year", "quarter", "month", "week", "weekYear", "day", "ordinalDay", "dayOfQuarter", "dayOfWeek", "weekDay",
+        "hour", "minute", "second", "millisecond", "microsecond", "nanosecond",
     }
 )  # fmt: skip
 """The fields of a moment or a time of day read off its wall clock."""
+
+CALENDAR_FIELDS = frozenset({"week", "dayOfWeek", "ordinalDay", "quarter", "dayOfQuarter"})
+"""The fields that give a date by the calendar's other fields, beside the year, in place of a month and a day: see
+`Temporals.of_calendar`."""
 
 _TIMES = (Temporal.TIME, Temporal.LOCAL_TIME)
 """The kinds of a time of day, which no months are between."""
@@ -204,6 +208,97 @@ class Temporals:
             raise ValueError("a duration is made of its own fields")
         return self.convert(text, kind, kind)
 
+    def of_calendar(self, fields: dict[str, str], timezone: str | None, kind: Temporal) -> str:
+        """
+        `of` for fields that give the date by the calendar's other fields beside the `year`, SQL numbers each: a `week`
+        of the ISO week-based year and its `dayOfWeek`, an `ordinalDay`, or a `quarter` and its `dayOfQuarter`. The
+        date is so many days after the first of the year, of the quarter, or of the year's first ISO week, the week of
+        January 4th. As Neo4j has them, a field that is null is given as its least (the year 0, the first week, day or
+        quarter), and a week runs to 53 and a day of the quarter to 92 in any year, carried into the next where it has
+        fewer. A field that is not whole or is past its range gives the day 0, which the store fails on as it fails on
+        `{day: 0}`.
+        """
+        time = {name: value for name, value in fields.items() if name != "year" and name not in CALENDAR_FIELDS}
+
+        def given(name: str, least: int) -> str:
+            return f"COALESCE({fields[name]}, {least})" if name in fields else str(least)
+
+        def january(y: str, day: int) -> str:
+            return self.sql.local(f"to_char({y}, 'FM0000') || '-01-0{day}'", Temporal.DATE)
+
+        def whole(*values: str) -> str:
+            return " AND ".join(f"{it} = TRUNC({it})" for it in values)
+
+        year = given("year", 0)
+        if "week" in fields:
+
+            def week(v: list[str]) -> str:
+                y, w, d = v
+
+                def of_january4(j: list[str]) -> str:
+                    days = f"({w} - 1) * 7 + {d} - {self.sql.day_of_week(j[0])}"
+                    valid = f"{whole(y, w, d)} AND {w} BETWEEN 1 AND 53 AND {d} BETWEEN 1 AND 7"
+                    return self._calendar_date(
+                        self.sql.add_time(j[0], days, "0"), time, timezone, kind, lambda _: valid
+                    )
+
+                return self.shared([january(y, 4)], of_january4)
+
+            return self.shared([year, given("week", 1), given("dayOfWeek", 1)], week)
+        if "ordinalDay" in fields:
+
+            def ordinal(v: list[str]) -> str:
+                y, n = v
+                return self._calendar_date(
+                    self.sql.add_time(january(y, 1), f"{n} - 1", "0"),
+                    time,
+                    timezone,
+                    kind,
+                    lambda day: f"{whole(y, n)} AND {n} >= 1 AND EXTRACT(YEAR FROM {day}) = {y}",
+                )
+
+            return self.shared([year, given("ordinalDay", 1)], ordinal)
+
+        def quarter(v: list[str]) -> str:
+            y, q, n = v
+            first = self.sql.add_months(january(y, 1), f"({q} - 1) * 3")
+            valid = f"{whole(y, q, n)} AND {q} BETWEEN 1 AND 4 AND {n} BETWEEN 1 AND 92"
+            return self._calendar_date(self.sql.add_time(first, f"{n} - 1", "0"), time, timezone, kind, lambda _: valid)
+
+        return self.shared([year, given("quarter", 1), given("dayOfQuarter", 1)], quarter)
+
+    def _calendar_date(
+        self, date_: str, time: dict[str, str], timezone: str | None, kind: Temporal, valid: Callable[[str], str]
+    ) -> str:
+        """
+        `of` the date the timestamp `date_` reads where `valid` holds of it, else of the day 0, and the fields of the
+        time `time`. A moment's date is read as a date first: every store fails on a date's day 0, where Oracle reads a
+        moment's text as a JSON value's, null where it is no moment.
+        """
+
+        def dated(d: list[str]) -> str:
+            day = d[0]
+            fields = {
+                "year": f"EXTRACT(YEAR FROM {day})",
+                "month": f"EXTRACT(MONTH FROM {day})",
+                "day": f"CASE WHEN NOT ({valid(day)}) THEN 0 ELSE EXTRACT(DAY FROM {day}) END",
+            }
+            if kind is Temporal.DATE:
+                return self.of(fields, None, kind)
+
+            def timed(c: list[str]) -> str:
+                checked = c[0]
+                day_of = {
+                    "year": f"EXTRACT(YEAR FROM {checked})",
+                    "month": f"EXTRACT(MONTH FROM {checked})",
+                    "day": f"EXTRACT(DAY FROM {checked})",
+                }
+                return self.of({**time, **day_of}, timezone, kind)
+
+            return self.shared([self.sql.local(self.of(fields, None, Temporal.DATE), Temporal.DATE)], timed)
+
+        return self.shared([date_], dated)
+
     def field(self, text: str, kind: Temporal, name: str) -> Field | None:
         """
         A field of the text of the kind, by Cypher's name for it: a number, or for `timezone` and `offset` a text; None
@@ -242,6 +337,12 @@ class Temporals:
             return f"EXTRACT(DAY FROM {t})"
         if name == "ordinalDay":
             return self.sql.number(f"to_char({t}, 'DDD')")
+        if name == "dayOfQuarter":
+            quarter = self.sql.truncate("quarter", t)
+            assert quarter is not None
+            day = self.sql.number(f"to_char({t}, 'DDD')")
+            first = self.sql.number(f"to_char({quarter}, 'DDD')")
+            return f"({day} - {first} + 1)"
         if name in ("dayOfWeek", "weekDay"):
             return self.sql.day_of_week(t)
         if name == "hour":

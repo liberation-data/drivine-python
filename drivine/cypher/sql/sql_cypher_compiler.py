@@ -7,6 +7,7 @@ import math
 import re
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
@@ -64,12 +65,13 @@ from drivine.cypher.ast.expression import (
 )
 from drivine.cypher.ast.node_pattern import NodePattern
 from drivine.cypher.ast.pattern import Pattern, Shortest
-from drivine.cypher.ast.projection import Projection, ProjectionItem
+from drivine.cypher.ast.projection import Projection, ProjectionItem, SortItem
 from drivine.cypher.ast.query import Query
 from drivine.cypher.ast.relationship_pattern import Direction, RelationshipPattern
 from drivine.cypher.ast.remove_item import RemoveItem, RemoveProperty
 from drivine.cypher.ast.set_item import SetAdd, SetItem, SetProperty, SetReplace
 from drivine.cypher.cypher_reader import read_cypher
+from drivine.cypher.sql.aggregates import check_aggregates
 from drivine.cypher.sql.compiled_cypher import CompiledCypher
 from drivine.cypher.sql.cypher_syntax import bracketed, imports, plain_with
 from drivine.cypher.sql.parameters import Parameters, cypher_json, jsonable
@@ -500,6 +502,8 @@ class SqlCypherCompiler(ABC):
         # A variable used as two kinds, or made where it is bound already, is refused for that, before what is not
         # compiled yet.
         check_variable_kinds(query)
+        # An aggregate in a WHERE too.
+        check_aggregates(query, is_aggregate, children)
         if query.unions:
             return self._with_functions(self._union(query, parameters))
         if not any(writes(it) for it in query.clauses):
@@ -2955,7 +2959,7 @@ class SqlCypherCompiler(ABC):
         if not items:
             raise DrivineError("A projection has at least one item.")
         # Before _aggregates_first, which names each variable it groups by as an item of its own.
-        _require_explicit_grouping(items)
+        _require_explicit_grouping(items, projection.order_by, select.scope.keys())
         made = self._anew_first(select, projection, items)
         if made is not None:
             return self._project(made[0], made[1], final)
@@ -6682,20 +6686,30 @@ def _order_of(select: _Select) -> str | None:
     return ", ".join(f"{term} DESC" if descending else term for term, descending in select.order) or None
 
 
-def _require_explicit_grouping(items: Sequence[ProjectionItem]) -> None:
+def _require_explicit_grouping(
+    items: Sequence[ProjectionItem], order_by: Sequence[SortItem], scope: AbstractSet[str]
+) -> None:
     """
-    Refuses what Cypher refuses: an item that aggregates and names a variable outside its aggregates, where that
-    variable is not an item of its own, which a graph engine would have to group by without being told.
+    Refuses what Cypher refuses (Neo4j's 42I18): an item that aggregates and names a variable outside its aggregates
+    that is not an item of its own, which a graph engine would have to group by without being told; in a
+    comprehension's, a quantifier's, a reduce's or a pattern's body, a variable of `scope` outside an item that does
+    not aggregate. So too a term of `order_by` that aggregates, beside items that aggregate, and names a variable of
+    `scope` outside an item's name and an item that does not aggregate, as Neo4j takes them. As drivine4j's
+    requireExplicitGrouping.
     """
-    keys = {
-        it.expression.name
-        for it in items
-        if not contains(it.expression, is_aggregate) and isinstance(it.expression, Variable)
-    }
+    grouping = [it for it in items if not contains(it.expression, is_aggregate)]
+    keys = {it.expression.name for it in grouping if isinstance(it.expression, Variable)}
+    grouped = [it.expression for it in grouping]
     for item in items:
         if not contains(item.expression, is_aggregate):
             continue
-        implicit = [it for it in variables_outside_aggregates(item.expression) if it not in keys]
+        implicit = [
+            it
+            for it in _ordered(
+                variables_outside_aggregates(item.expression), _named_in_bodies(item.expression, scope, grouped)
+            )
+            if it not in keys
+        ]
         if implicit:
             named = ", ".join(implicit)
             raise DrivineError(
@@ -6703,6 +6717,104 @@ def _require_explicit_grouping(items: Sequence[ProjectionItem]) -> None:
                 f"would group by it without being told. Aggregate in a WITH first, as in WITH {named}, collect(…) AS "
                 "items RETURN { … }."
             )
+    if len(grouping) == len(items):
+        return
+    names = {it.name for it in items}
+    for sort in order_by:
+        if not contains(sort.expression, is_aggregate):
+            continue
+        # Not less the variables an item is: one an item renames, named in an order term's pattern, is a new variable
+        # of the pattern's to Neo4j, which matches any node, so it is refused rather than read as the key.
+        implicit = _named_outside(sort.expression, names, scope, grouped)
+        if implicit:
+            raise DrivineError(
+                f"A term of an ORDER BY aggregates, and names {', '.join(implicit)} outside its aggregates and the "
+                "items: Cypher would group by it without being told. Order by an item's name, or by an expression of "
+                "the items and aggregates."
+            )
+
+
+def _named_in_bodies(expression: Expression, scope: AbstractSet[str], keys: Sequence[Expression]) -> list[str]:
+    """
+    The variables of `scope` that the expression names outside its aggregates and each part of it `keys` holds, in a
+    comprehension's, a quantifier's, a reduce's or a pattern's body, which `variables_outside_aggregates` does not
+    read.
+    """
+    if is_aggregate(expression) or expression in keys:
+        return []
+    if isinstance(expression, ListComprehension):
+        return _ordered(
+            _named_in_bodies(expression.list, scope, keys),
+            *(
+                _named_outside(it, {expression.variable}, scope, keys)
+                for it in _present(expression.where, expression.projection)
+            ),
+        )
+    if isinstance(expression, Quantifier):
+        return _ordered(
+            _named_in_bodies(expression.list, scope, keys),
+            *(_named_outside(it, {expression.variable}, scope, keys) for it in _present(expression.where)),
+        )
+    if isinstance(expression, Reduce):
+        return _ordered(
+            _named_in_bodies(expression.initial, scope, keys),
+            _named_in_bodies(expression.list, scope, keys),
+            _named_outside(expression.expression, {expression.accumulator, expression.variable}, scope, keys),
+        )
+    if isinstance(expression, (PatternComprehension, PatternPredicate, Exists)):
+        return _named_outside(expression, set(), scope, keys)
+    return _ordered(*(_named_in_bodies(it, scope, keys) for it in children(expression)))
+
+
+def _named_outside(
+    expression: Expression, local: AbstractSet[str], scope: AbstractSet[str], keys: Sequence[Expression]
+) -> list[str]:
+    """
+    The variables of `scope` that the expression names outside its aggregates, and outside each part of it `keys`
+    holds, a comprehension's, a quantifier's, a reduce's or a pattern's body among them, but for those it binds or
+    `local` holds. A pattern binds each of its variables not of `scope`. A subquery's own query is read for none.
+    """
+
+    def outside(part: Expression, inner: AbstractSet[str] = local) -> list[str]:
+        return _named_outside(part, inner, scope, keys)
+
+    def patterned(pattern: Pattern, parts: Sequence[Expression]) -> list[str]:
+        named = _ordered(variables_in_pattern(pattern), _present(pattern.variable))
+        bound = {*local, *(it for it in named if it not in scope)}
+        return _ordered([it for it in named if it in scope and it not in local], *(outside(it, bound) for it in parts))
+
+    if is_aggregate(expression) or expression in keys:
+        return []
+    if isinstance(expression, Variable):
+        return [] if expression.name in local or expression.name not in scope else [expression.name]
+    if isinstance(expression, MapProjection):
+        # A map projection of a key reads the key, as Neo4j reads it.
+        variable = expression.variable
+        read = variable not in local and variable in scope and Variable(variable) not in keys
+        return _ordered([variable] if read else [], *(outside(it) for it in children(expression)))
+    if isinstance(expression, ListComprehension):
+        return _ordered(
+            outside(expression.list),
+            *(outside(it, {*local, expression.variable}) for it in _present(expression.where, expression.projection)),
+        )
+    if isinstance(expression, Quantifier):
+        return _ordered(
+            outside(expression.list),
+            *(outside(it, {*local, expression.variable}) for it in _present(expression.where)),
+        )
+    if isinstance(expression, Reduce):
+        return _ordered(
+            outside(expression.initial),
+            outside(expression.list),
+            outside(expression.expression, {*local, expression.accumulator, expression.variable}),
+        )
+    if isinstance(expression, PatternComprehension):
+        return patterned(expression.pattern, _present(expression.where, expression.projection))
+    if isinstance(expression, PatternPredicate):
+        return patterned(expression.pattern, [])
+    if isinstance(expression, Exists):
+        return _ordered(*(patterned(it, _present(expression.where)) for it in expression.patterns))
+    return _ordered(*(outside(it) for it in children(expression)))
 
 
 def _kind_of(values: Sequence[tuple[Expression, Value]]) -> Temporal | None:

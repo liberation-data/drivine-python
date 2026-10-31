@@ -607,3 +607,186 @@ def test_a_truncations_fields_given_as_an_expression_a_negated_number_utc_or_non
         "RETURN date.truncate('month', date(), {day: -2.0})",
     ):
         compiler("g").compile(cypher)
+
+
+def _in_where(aggregate: str) -> str:
+    return (
+        f"{aggregate} aggregates, and a WHERE holds no aggregate, as in Neo4j: aggregate in a WITH first, and filter "
+        "what it gives in that WITH's WHERE, as in WITH x, count(*) AS c WHERE c > 1."
+    )
+
+
+@pytest.mark.parametrize("compiler", COMPILERS.values(), ids=COMPILERS.keys())
+@pytest.mark.parametrize(
+    ("cypher", "message"),
+    [
+        ("UNWIND [1, 2] AS i WITH i WHERE sum(i) > 1 RETURN i", _in_where("sum()")),
+        ("UNWIND [1, 2] AS i WITH i WHERE i > 1 AND count(*) > 0 RETURN i", _in_where("count(*)")),
+        ("MATCH (n) WHERE count(*) > 1 RETURN n", _in_where("count(*)")),
+        ("MATCH (a) WHERE a.x IN collect(a.y) RETURN a", _in_where("collect()")),
+        ("MATCH (n) RETURN [(n)-->(m) WHERE count(m) > 1 | m] AS ms", _in_where("count()")),
+        ("UNWIND [[1, 2]] AS l RETURN all(x IN l WHERE sum(x) > 1) AS a", _in_where("sum()")),
+        ("UNWIND [[1, 2]] AS l RETURN [x IN l WHERE count(x) > 1 | x] AS a", _in_where("count()")),
+        ("MATCH (a) ((x)-[:R]->(y) WHERE count(x) > 1)+ (b) RETURN a", _in_where("count()")),
+        ("MATCH (n) WHERE EXISTS { (n)-->(m) WHERE count(m) > 1 } RETURN n", _in_where("count()")),
+        ("MATCH (n) WHERE COUNT { (n)-->(m) WHERE count(m) > 1 } > 0 RETURN n", _in_where("count()")),
+        ("MATCH (n) RETURN COUNT { MATCH (n)-->(m) WHERE count(m) > 1 RETURN m } AS c", _in_where("count()")),
+        ("MATCH (n) RETURN COUNT { MATCH (n)-->(m) WITH m WHERE count(m) > 1 RETURN m } AS c", _in_where("count()")),
+        ("UNWIND [1, 2] AS i CALL (i) { WITH i WHERE sum(i) > 1 RETURN i AS j } RETURN j", _in_where("sum()")),
+        ("UNWIND [1, 2] AS i CALL { WITH i MATCH (n) WHERE max(n.x) > i RETURN n } RETURN n", _in_where("max()")),
+        (
+            "UNWIND [1, 2] AS i CALL (i) { CALL (i) { UNWIND [1, 2] AS x WITH x WHERE sum(x) > i RETURN x } RETURN x } "
+            "RETURN x",
+            _in_where("sum()"),
+        ),
+        (
+            "MATCH (p:Person) RETURN p.name AS n UNION MATCH (m:Movie) WHERE count(*) > 1 RETURN m.title AS n",
+            _in_where("count(*)"),
+        ),
+        ("UNWIND [x IN [1, 2] WHERE count(x) > 0 | x] AS y RETURN y", _in_where("count()")),
+        ("MATCH (n) SET n.v = [x IN [1, 2] WHERE sum(x) > 0 | x]", _in_where("sum()")),
+        ("MERGE (n:N) ON CREATE SET n.v = [x IN [1, 2] WHERE min(x) > 0 | x]", _in_where("min()")),
+        ("CREATE (n:N {v: [x IN [1, 2] WHERE avg(x) > 0 | x]})", _in_where("avg()")),
+        ("FOREACH (i IN [1] | CREATE (:N {v: [x IN [1, 2] WHERE max(x) > 0 | x]}))", _in_where("max()")),
+    ],
+)
+def test_an_aggregate_in_a_where_is_refused_as_neo4j_refuses_it(
+    compiler: type[SqlCypherCompiler], cypher: str, message: str
+) -> None:
+    # drivine4j's #489: Neo4j's 42I24, "invalid use of aggregate function". Postgres failed with an error of its own,
+    # and Oracle gave rows. The spec's "Aggregate in a WHERE" holds most of these; the rest are drivine4j's.
+    with pytest.raises(DrivineError) as refused:
+        compiler("g").compile(cypher)
+    assert str(refused.value) == message
+
+
+@pytest.mark.parametrize("compiler", COMPILERS.values(), ids=COMPILERS.keys())
+@pytest.mark.parametrize(
+    "cypher",
+    [
+        "UNWIND [1, 2] AS i WITH count(*) AS c WHERE c > 1 RETURN c",
+        "UNWIND [1, 2] AS i WITH collect(i) AS l WHERE size(l) > 1 RETURN l",
+        "MATCH (n) RETURN COUNT { MATCH (n)-->(m) WITH count(m) AS c WHERE c > 0 RETURN c } AS k",
+        "MATCH (n) WHERE EXISTS { MATCH (n)-->(m) WITH count(m) AS c WHERE c > 0 RETURN c } RETURN n.x",
+        "MATCH (n) CALL (n) { MATCH (n)-->(m) WITH count(m) AS c WHERE c > 0 RETURN c } RETURN n.x, c",
+        "MATCH (n) WITH n, count { (n)-->() } AS c WHERE c > 0 RETURN n.x",
+    ],
+)
+def test_a_where_over_what_an_aggregate_gave_or_in_a_query_that_aggregates_in_its_own_projection_is_compiled(
+    compiler: type[SqlCypherCompiler], cypher: str
+) -> None:
+    # Beside drivine4j's #489, as Neo4j runs them.
+    compiler("g").compile(cypher)
+
+
+def _ungrouped_item(name: str, variable: str) -> str:
+    return (
+        f"{name} aggregates, and names {variable} outside its aggregates, which no other item is: Cypher would group "
+        f"by it without being told. Aggregate in a WITH first, as in WITH {variable}, collect(…) AS items "
+        "RETURN { … }."
+    )
+
+
+def _ungrouped_term(variable: str) -> str:
+    return (
+        f"A term of an ORDER BY aggregates, and names {variable} outside its aggregates and the items: Cypher would "
+        "group by it without being told. Order by an item's name, or by an expression of the items and aggregates."
+    )
+
+
+@pytest.mark.parametrize("compiler", COMPILERS.values(), ids=COMPILERS.keys())
+@pytest.mark.parametrize(
+    ("cypher", "message"),
+    [
+        ("UNWIND [1, 2] AS x UNWIND [3] AS z RETURN x, [y IN collect(z) | y + z] AS l", _ungrouped_item("l", "z")),
+        (
+            "UNWIND [1, 2] AS x UNWIND [3] AS z WITH x, [y IN collect(z) | y + z] AS l RETURN x, l",
+            _ungrouped_item("l", "z"),
+        ),
+        (
+            "UNWIND [1, 2] AS x UNWIND [3] AS z RETURN x, [y IN collect(x) WHERE y > z | y] AS l",
+            _ungrouped_item("l", "z"),
+        ),
+        (
+            "UNWIND [1, 2] AS x UNWIND [3] AS z RETURN x, any(y IN collect(x) WHERE y > z) AS l",
+            _ungrouped_item("l", "z"),
+        ),
+        (
+            "UNWIND [1, 2] AS x UNWIND [3] AS z RETURN x, reduce(s = 0, y IN collect(x) | s + z) AS l",
+            _ungrouped_item("l", "z"),
+        ),
+        ("UNWIND [{a: 1, b: 2}] AS x RETURN x.a, [y IN collect(x) | y.a + x.b] AS l", _ungrouped_item("l", "x")),
+        ("MATCH (n) RETURN size([(n)-->(m) | m]) + count(*) AS c", _ungrouped_item("c", "n")),
+        ("MATCH (n) RETURN n.x, size([(n)-->(m) | m.x]) + count(*) AS c", _ungrouped_item("c", "n")),
+        ("MATCH (n) RETURN EXISTS { (n)-->() } AND count(*) > 0 AS b", _ungrouped_item("b", "n")),
+        ("UNWIND [{a: 1}, {a: 2}] AS x RETURN x.a AS a, count(*) AS c ORDER BY x.b + count(*)", _ungrouped_term("x")),
+        (
+            "UNWIND [{a: 1, b: 2}] AS x WITH x.a AS a, count(*) AS c ORDER BY x.b + count(*) RETURN a",
+            _ungrouped_term("x"),
+        ),
+        ("UNWIND [1, 2] AS x UNWIND [3] AS z RETURN x, count(*) AS c ORDER BY z + count(*)", _ungrouped_term("z")),
+        (
+            "UNWIND [1, 2] AS x UNWIND [3] AS z RETURN x, count(*) AS c ORDER BY [w IN collect(z) | w + z]",
+            _ungrouped_term("z"),
+        ),
+        (
+            "MATCH (me:Person)--(you:Person) RETURN count(you.age) AS agg ORDER BY me.age + count(you.age)",
+            _ungrouped_term("me"),
+        ),
+        (
+            "MATCH (p:Person)-[:ACTED_IN]->(m) RETURN p AS q, count(*) AS c ORDER BY size(keys(m {.title})) + count(*)",
+            _ungrouped_term("m"),
+        ),
+        # Neo4j runs these, but reads p in the pattern as a new variable that matches any node, not as the key q is.
+        (
+            "MATCH (p:Person)-[:ACTED_IN]->(m) RETURN p AS q, count(*) AS c "
+            "ORDER BY size([(p)-[:KNOWS]->(k) | k]) + count(*)",
+            _ungrouped_term("p"),
+        ),
+        (
+            "MATCH (p:Person)-[:ACTED_IN]->(m) RETURN p AS q, count(*) AS c "
+            "ORDER BY EXISTS { (p)-[:KNOWS]->() } AND count(*) > 1",
+            _ungrouped_term("p"),
+        ),
+    ],
+)
+def test_an_aggregating_item_or_order_term_that_names_a_variable_no_item_groups_by_in_a_body_too_is_refused(
+    compiler: type[SqlCypherCompiler], cypher: str, message: str
+) -> None:
+    # drivine4j's #482: Neo4j's 42I18, "reference to non-grouping sub-expression". The body of a comprehension, a
+    # quantifier, a reduce() or a pattern was not read for the variables it names, nor an order term at all. The spec's
+    # "Implicit grouping key in a body or an ORDER BY" holds most of these; the rest are drivine4j's.
+    with pytest.raises(DrivineError) as refused:
+        compiler("g").compile(cypher)
+    assert str(refused.value) == message
+
+
+@pytest.mark.parametrize("compiler", COMPILERS.values(), ids=COMPILERS.keys())
+@pytest.mark.parametrize(
+    "cypher",
+    [
+        "UNWIND [1, 2] AS x RETURN x, [y IN collect(x) | y + x] AS l",
+        "UNWIND [1, 2] AS x RETURN x, collect(x) AS c",
+        "UNWIND [1, 2] AS x RETURN [x IN collect(x) | x + 1] AS l",
+        "UNWIND [1, 2] AS x RETURN x, reduce(s = 0, y IN collect(x) | s + y + x) AS l",
+        "UNWIND [{a: 1}, {a: 2}] AS x RETURN x.a, count(*) AS c",
+        "UNWIND [{a: 1}] AS x RETURN x.a, [y IN collect(x) | y.a + x.a] AS l",
+        "MATCH (n) RETURN n, size([(n)-->(m) | m]) + count(*) AS c",
+        "MATCH (n) RETURN n, EXISTS { (n)-->() } AND count(*) > 0 AS b",
+        "UNWIND [{a: 1}, {a: 2}] AS x RETURN x.a AS a, count(*) AS c ORDER BY x.a + count(*)",
+        "UNWIND [1, 2] AS x RETURN x AS y, count(*) AS c ORDER BY x + count(*)",
+        "UNWIND [1, 2] AS x RETURN x AS y, count(*) AS c ORDER BY y + count(*)",
+        "UNWIND [{a: 1, b: 2}] AS x RETURN x.a + x.b, count(*) AS cnt ORDER BY x.a + x.b + count(*)",
+        "UNWIND [1, 2] AS x UNWIND [3] AS z RETURN x, count(*) AS c ORDER BY [w IN collect(z) | w + x]",
+        # A key an item renames, named by an order term's map projection, or by a pattern where no item renames it.
+        "MATCH (p:Person)-[:ACTED_IN]->(m) RETURN p AS q, count(*) AS c ORDER BY size(keys(p {.name})) + count(*)",
+        "MATCH (p:Person)-[:ACTED_IN]->(m) RETURN p AS q, count(*) AS c ORDER BY p {.born}.born + count(*)",
+        "MATCH (p:Person)-[:ACTED_IN]->(m) RETURN p, count(*) AS c ORDER BY size([(p)-[:KNOWS]->(k) | k]) + count(*)",
+    ],
+)
+def test_a_body_or_order_term_that_names_only_what_the_projection_groups_by_is_compiled(
+    compiler: type[SqlCypherCompiler], cypher: str
+) -> None:
+    # Beside drivine4j's #482: a body or an order term that names only a grouping key, an item's name, or a variable of
+    # its own, as Neo4j runs it.
+    compiler("g").compile(cypher)

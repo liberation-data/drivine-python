@@ -984,6 +984,67 @@ def test_an_aggregate_in_a_call_reads_the_variables_the_call_imports(cypher_pm: 
     ) == [[2, [1, 1]]]
 
 
+def test_an_aggregate_beside_a_where_a_grouping_keys_body_or_an_order_term_that_neo4j_takes_gives_neo4js_rows(
+    cypher_pm: PersistenceManager,
+):
+    # #306, #307: beside the aggregates now refused, those Neo4j takes. drivine4j's CypherQueryContract of
+    # liberation-data/drivine4j#489 and #482; the rows are Neo4j's (2026.10).
+    seeded(cypher_pm)
+
+    def query(cypher: str) -> list[Any]:
+        return cypher_pm.query(spec(cypher))
+
+    # A WHERE over what an aggregate gave, and one in a subquery's or a CALL's own query, which aggregates in its
+    # projection.
+    assert query("UNWIND [1, 2] AS i WITH count(*) AS c WHERE c > 1 RETURN c") == [2]
+    assert query(
+        "MATCH (p:Person)-[:ACTED_IN]->(m) WITH p, collect(m.title) AS ts WHERE size(ts) > 1 RETURN p.name "
+        "ORDER BY p.name"
+    ) == ["Carrie", "Keanu"]
+    assert query(
+        "MATCH (p:Person) RETURN p.name, COUNT { MATCH (p)-[:ACTED_IN]->(m) WITH count(m) AS c WHERE c > 1 RETURN c } "
+        "AS k ORDER BY p.name"
+    ) == [["Carrie", 1], ["Hugo", 0], ["Keanu", 1], ["Laurence", 0]]
+    assert query(
+        "MATCH (p:Person) WHERE EXISTS { MATCH (p)-[:ACTED_IN]->(m) WITH count(m) AS c WHERE c > 1 RETURN c } "
+        "RETURN p.name ORDER BY p.name"
+    ) == ["Carrie", "Keanu"]
+    assert query(
+        "MATCH (p:Person) CALL (p) { MATCH (p)-[:ACTED_IN]->(m) WITH count(m) AS c WHERE c > 1 RETURN c } "
+        "RETURN p.name, c ORDER BY p.name"
+    ) == [["Carrie", 2], ["Keanu", 3]]
+    # An aggregate beside its grouping keys, and a body that names only them, or a variable of its own.
+    assert query("UNWIND [1, 2] AS x RETURN x, collect(x) AS c ORDER BY x") == [[1, [1]], [2, [2]]]
+    assert query("MATCH (p:Person)-[:ACTED_IN]->(m) RETURN p.name, count(*) ORDER BY p.name") == [
+        ["Carrie", 2],
+        ["Keanu", 3],
+        ["Laurence", 1],
+    ]
+    assert query("UNWIND [1, 2] AS x RETURN x, [y IN collect(x) | y + x] AS l ORDER BY x") == [[1, [2]], [2, [4]]]
+    assert query("UNWIND [1, 2] AS x UNWIND [3] AS z RETURN x, [y IN collect(z) | y + x] AS l ORDER BY x") == [
+        [1, [4]],
+        [2, [5]],
+    ]
+    assert query("UNWIND [1, 2] AS x RETURN x, reduce(s = 0, y IN collect(x) | s + y + x) AS l ORDER BY x") == [
+        [1, 2],
+        [2, 4],
+    ]
+    assert query(
+        "MATCH (p:Person)-[:ACTED_IN]->(m) RETURN p.name, size([x IN collect(m.title) WHERE x <> p.name | x + p.name]) "
+        "ORDER BY p.name"
+    ) == [["Carrie", 2], ["Keanu", 3], ["Laurence", 1]]
+    # An order term that names an item's name, or what an item that does not aggregate is.
+    assert query("UNWIND [{a: 1}, {a: 2}] AS x RETURN x.a AS a, count(*) AS c ORDER BY x.a + count(*) DESC") == [
+        [2, 1],
+        [1, 1],
+    ]
+    assert query("UNWIND [1, 2] AS x RETURN x AS y, count(*) AS c ORDER BY x + count(*) DESC") == [[2, 1], [1, 1]]
+    assert query("UNWIND [1, 2] AS x RETURN x AS y, count(*) AS c ORDER BY y + count(*) DESC") == [[2, 1], [1, 1]]
+    assert query(
+        "UNWIND [1, 2] AS x UNWIND [3] AS z RETURN x, count(*) AS c ORDER BY [w IN collect(z) | w + x][0] DESC"
+    ) == [[2, 1], [1, 1]]
+
+
 def test_an_optional_call_in_a_writes_subquery_counts_what_it_finds_and_the_row_it_finds_nothing_for(
     cypher_pm: PersistenceManager,
 ):

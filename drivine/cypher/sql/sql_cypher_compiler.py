@@ -3510,21 +3510,50 @@ class SqlCypherCompiler(ABC):
                 )
             return None
 
-        # A list comprehension's WHERE reads a key by its name too, where it binds no variable the key reads. In its
-        # projection, a quantifier's WHERE or a reduce's step, Neo4j groups by each variable the key reads as well, so
-        # the body is kept as it is, and those variables beside: `[t IN collect(m.title) | r.role]` beside `r.role`
-        # gives a row for each `r`.
-        def rekeyed(term: Expression, bound: AbstractSet[str] = frozenset()) -> Expression:
+        # Each key `term` reads, by its name, in a comprehension's, a quantifier's or a reduce's body too, where the
+        # body binds no variable the key reads.
+        def reading_keys(term: Expression, bound: AbstractSet[str]) -> Expression:
             def replacement(part: Expression) -> Expression | None:
-                if (not bound or _grouping_key(part) in key_names) and not any(
-                    it in bound for it in variables_in(part)
-                ):
-                    found = kept(part)
-                    if found is not None:
-                        return found
+                if _grouping_key(part) in key_names and not any(it in bound for it in variables_in(part)):
+                    return kept(part)
+                if isinstance(part, ListComprehension):
+                    inner = {*bound, part.variable}
+                    return dataclasses.replace(
+                        part,
+                        list=reading_keys(part.list, bound),
+                        where=reading_keys(part.where, inner) if part.where is not None else None,
+                        projection=reading_keys(part.projection, inner) if part.projection is not None else None,
+                    )
+                if isinstance(part, Quantifier):
+                    where = reading_keys(part.where, {*bound, part.variable}) if part.where is not None else None
+                    return dataclasses.replace(part, list=reading_keys(part.list, bound), where=where)
+                if isinstance(part, Reduce):
+                    return dataclasses.replace(
+                        part,
+                        initial=reading_keys(part.initial, bound),
+                        list=reading_keys(part.list, bound),
+                        expression=reading_keys(part.expression, {*bound, part.accumulator, part.variable}),
+                    )
+                return None
+
+            return replaced(term, replacement)
+
+        # As Neo4j reads a key in an item that aggregates: by its name in a part that holds no aggregate, and in a list
+        # comprehension's WHERE, all through. In the projection of a comprehension that holds one, or its quantifier's
+        # WHERE or reduce's step, Neo4j groups by each variable the key reads as well, so the body is kept as it is,
+        # and those variables beside: `[t IN collect(m.title) | r.role]` beside `r.role` gives a row for each `r`, where
+        # `[t IN collect(m.title) WHERE t STARTS WITH r.role]` and `count(*) + [y IN [1] | r.role][0]` give one for
+        # each role.
+        def rekeyed(term: Expression) -> Expression:
+            def replacement(part: Expression) -> Expression | None:
+                found = kept(part)
+                if found is not None:
+                    return found
+                if not contains(part, is_aggregate):
+                    return reading_keys(part, frozenset())
                 if isinstance(part, ListComprehension) and part.where is not None:
                     return dataclasses.replace(
-                        part, list=rekeyed(part.list, bound), where=rekeyed(part.where, {*bound, part.variable})
+                        part, list=rekeyed(part.list), where=reading_keys(part.where, {part.variable})
                     )
                 return None
 

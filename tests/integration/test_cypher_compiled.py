@@ -1138,10 +1138,49 @@ async def test_an_aggregating_item_over_a_key_that_is_a_property_groups_by_the_p
         "MATCH (:Person)-[r:ACTED_IN]->(m) RETURN r.role AS role, "
         "size([t IN collect(m.title) WHERE size([u IN [t] WHERE u CONTAINS r.role]) > 0]) AS n ORDER BY role"
     ) == [[role, n] for role, n in zip(roles, [1, 0, 0, 0], strict=True)]
+    # So too in a quantifier's WHERE, a reduce's step or a comprehension's projection inside a comprehension's WHERE;
+    # but in a comprehension's WHERE inside a quantifier's WHERE, Neo4j groups by the variable.
+    assert await query(
+        "MATCH (:Person)-[r:ACTED_IN]->(m) RETURN r.role AS role, "
+        "size([t IN collect(m.title) WHERE any(u IN [t] WHERE u CONTAINS r.role)]) AS n ORDER BY role"
+    ) == [[role, n] for role, n in zip(roles, [1, 0, 0, 0], strict=True)]
+    assert await query(
+        "MATCH (:Person)-[r:ACTED_IN]->(m) RETURN r.role AS role, "
+        "size([t IN collect(m.title) WHERE reduce(s = false, u IN [t] | s OR u CONTAINS r.role)]) AS n ORDER BY role"
+    ) == [[role, n] for role, n in zip(roles, [1, 0, 0, 0], strict=True)]
+    assert await query(
+        "MATCH (:Person)-[r:ACTED_IN]->(m) RETURN r.role AS role, "
+        "size([t IN collect(m.title) WHERE size([u IN [t] | r.role]) > 0]) AS n ORDER BY role"
+    ) == [[role, n] for role, n in zip(roles, [1, 1, 2, 2], strict=True)]
+    assert await query(
+        "MATCH (:Person)-[r:ACTED_IN]->(m) RETURN r.role AS role, "
+        "any(t IN collect(m.title) WHERE size([u IN [t] WHERE u CONTAINS r.role]) > 0) AS n ORDER BY role"
+    ) == [[it, it == "Johnny"] for it in each]
     assert await query(
         "UNWIND [{a: 1}, {a: 2}, {a: 2}] AS x RETURN x.a AS a, size([x IN [{a: 5}] WHERE x.a > 1]) + count(*) AS n "
         "ORDER BY a"
     ) == [[1, 2], [2, 3]]
+    # A comprehension, a quantifier or a reduce that holds no aggregate reads the key by its name in each body, at the
+    # top level too; but in the projection of a comprehension over an aggregate, or a quantifier's WHERE over one,
+    # Neo4j groups by the variable. The two `x` with `a: 2` differ, so grouped by `x` they are two rows.
+    xs = "UNWIND [{a: 1, b: 1}, {a: 2, b: 2}, {a: 2, b: 3}] AS x RETURN x.a AS a, "
+    assert await query(xs + "count(*) + [y IN [1] | x.a][0] AS n ORDER BY a") == [[1, 2], [2, 4]]
+    assert await query(xs + "count(*) + reduce(s = 0, y IN [1] | s + x.a) AS n ORDER BY a") == [[1, 2], [2, 4]]
+    assert await query(xs + "[count(*), any(y IN [0, 1, 2] WHERE y > x.a)] AS n ORDER BY a") == [
+        [1, [1, True]],
+        [2, [2, False]],
+    ]
+    assert await query(xs + "count(*) + reduce(s = 0, y IN [1] | s + [z IN [y] | z + x.a][0]) AS n ORDER BY a") == [
+        [1, 3],
+        [2, 5],
+    ]
+    assert await query(xs + "count(*) + [x IN [{a: 7}] | x.a][0] AS n ORDER BY a") == [[1, 8], [2, 9]]
+    assert await query(xs + "[t IN collect(1) | [y IN [1] | x.a][0]] AS n ORDER BY a") == [[1, [1]], [2, [2]], [2, [2]]]
+    assert await query(xs + "any(t IN collect(1) WHERE t < [y IN [1] | x.a][0]) AS n ORDER BY a") == [
+        [1, False],
+        [2, True],
+        [2, True],
+    ]
     # A function named in another case is the same function.
     assert await query(
         "MATCH (p:Person)-[:ACTED_IN]->(m) RETURN toUpper(p.name) AS u, count(*) AS c "

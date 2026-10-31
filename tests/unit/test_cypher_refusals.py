@@ -897,3 +897,46 @@ def test_an_aggregating_item_that_reads_a_key_that_is_a_variables_property_is_co
 ) -> None:
     # #311, drivine4j's #491: as Neo4j runs them. drivine4j's CompilerRefusalTest.
     compiler("g").compile(cypher)
+
+
+@pytest.mark.parametrize("compiler", COMPILERS.values(), ids=COMPILERS.keys())
+@pytest.mark.parametrize(
+    ("item", "term"),
+    [
+        ("[t IN [x] | toUpper(t)]", "[t IN [x] | TOUPPER(t)]"),
+        ("[t IN [x] WHERE toUpper(t) = 'B']", "[t IN [x] WHERE TOUPPER(t) = 'B']"),
+        ("any(t IN [x] WHERE toUpper(t) = 'B')", "any(t IN [x] WHERE TOUPPER(t) = 'B')"),
+        ("reduce(s = '', t IN [x] | s + toUpper(t))", "reduce(s = '', t IN [x] | s + TOUPPER(t))"),
+    ],
+)
+def test_an_order_term_written_as_an_item_but_for_a_functions_case_in_a_body_reads_the_item(
+    compiler: type[SqlCypherCompiler], item: str, term: str
+) -> None:
+    # #311: `_grouping_key` lowers a function's name in a comprehension's, a quantifier's or a reduce's body too, as
+    # drivine4j's keyOf does, so `_project` reads the term as the item.
+    compiler("g").compile(f"UNWIND ['b', 'a'] AS x RETURN {item} AS u, count(*) AS c ORDER BY {term}")
+
+
+@pytest.mark.parametrize("compiler", COMPILERS.values(), ids=COMPILERS.keys())
+@pytest.mark.parametrize(
+    ("cypher", "message"),
+    [
+        (
+            "UNWIND [{a: 1, A: 2}] AS x RETURN [t IN [x] | t.a] AS u, count(*) AS c ORDER BY [t IN [x] | t.A]",
+            "x is not defined: a variable is bound by a pattern, a WITH or an UNWIND before it is used.",
+        ),
+        (
+            "UNWIND [{a: 1, A: 2}] AS x RETURN any(t IN [x] WHERE t.a = 1) AS u, count(*) AS c "
+            "ORDER BY any(t IN [x] WHERE t.A = 1)",
+            "x is not defined: a variable is bound by a pattern, a WITH or an UNWIND before it is used.",
+        ),
+        ("UNWIND [{a: 1, A: 2}] AS x RETURN x.a AS a, [t IN collect(1) WHERE t < x.A] AS b", _ungrouped_item("b", "x")),
+    ],
+)
+def test_a_property_named_in_another_case_in_a_body_is_another_property(
+    compiler: type[SqlCypherCompiler], cypher: str, message: str
+) -> None:
+    # #311: `_grouping_key` lowers only a function's name, in a body too: `x.A` is not the item or key `x.a`.
+    with pytest.raises(DrivineError) as refused:
+        compiler("g").compile(cypher)
+    assert str(refused.value) == message

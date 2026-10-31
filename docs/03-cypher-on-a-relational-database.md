@@ -79,7 +79,7 @@ FalkorDB.
 
 **What compiles.** What each statement gives, on each store, is the
 [Cypher spec](https://github.com/liberation-data/drivine-cypher-spec), shared by the three Drivine libraries;
-drivine-python passes it at v0.6.5 (pinned in [`tests/cypher/VERSION`](../tests/cypher/VERSION)). Reads, writes,
+drivine-python passes it at v0.6.19 (pinned in [`tests/cypher/VERSION`](../tests/cypher/VERSION)). Reads, writes,
 `UNION`, `CALL { … }`, `EXISTS { … }`, variable-length relationships, `shortestPath` and quantified path patterns all
 compile. Cypher the compiler doesn't take yet is refused by name, with a `DrivineError`, before anything is sent to the
 database.
@@ -87,22 +87,25 @@ database.
 **How complete is it?** The [openCypher TCK](https://github.com/opencypher/openCypher/tree/main/tck) is openCypher's
 own test suite: 3,896 scenarios, each a graph, a query, and the rows or the error the query must give.
 [drivine4j](https://github.com/liberation-data/drivine4j) runs all of them through its compiler on each store. The
-scores below are measured on drivine4j; drivine-python's compiler follows it through the shared spec above. They are
-drivine4j's `main` on 31 October 2026.
+scores below are measured on drivine4j; drivine-python's compiler follows it through the shared spec above, though
+`truncate()` with a map of fields, which 221 of these scenarios call, is still refused here
+([#265](https://github.com/liberation-data/drivine-python/issues/265)). They are drivine4j's `main` on 31 October 2026.
 
-| store | scenarios passed | of all 3,896 | leaving out the 482 refused on purpose |
+| store | scenarios passed | of all 3,896 | leaving out the 583 refused on purpose |
 |---|---:|---:|---:|
-| Postgres | 2,684 | 68.9% | 78.6% |
-| Oracle | 2,666 | 68.4% | 78.1% |
+| Postgres | 2,905 | 74.6% | 87.7% |
+| Oracle | 2,887 | 74.1% | 87.1% |
 | Neo4j | 3,821 | 98.1% | (none refused) |
 
-The 482 refused on purpose are Cypher the compiler doesn't take yet, refused by name with a clear error: temporal values
-built from a week, a quarter or another date, `rand()`, a path as a value, and a few more.
+The 583 refused on purpose are Cypher the compiler doesn't take yet, refused by name with a clear error: temporal values
+built from a week, a quarter or another date, a truncation that sets nanoseconds or a named time zone, `rand()`, a path
+as a value, and a few more.
 
-Most of the rest are not wrong answers. Of the 730 left on Postgres:
+Most of the rest are not wrong answers. Of the 408 left on Postgres:
 
-- 494 are in openCypher's temporal features, which are being compiled now: 364 call `truncate()` with a map of fields,
-  which Drivine fails with an error of its own, and 130 give another result.
+- 172 are in openCypher's temporal features, which are being compiled now: 130 give another result, and 42 write a date
+  or a time in a form Drivine doesn't read yet, such as `2015-W30-2`, `20150721` or a named zone, and fail with an error
+  of Drivine's own.
 - 116 are about errors: 77 statements that run where the TCK expects an error, and 39 that Drivine fails where the TCK
   expects rows.
 - 59 are steps the harness can't run through Drivine, such as a test procedure or a CSV file.
@@ -110,7 +113,7 @@ Most of the rest are not wrong answers. Of the 730 left on Postgres:
 
 Oracle's are split alike. The comparison is lenient where Drivine's results are shaped differently from the TCK's: a
 node is compared by its properties, and any error meets an expected one. Counting an expected error only where Drivine
-raised it, before the database, Postgres passes 2,644 and Oracle 2,631.
+raised it, before the database, Postgres passes 2,865 and Oracle 2,852.
 
 Neo4j runs the same scenarios through the same harness and misses only the 59 it can't run and 16 where Neo4j itself
 differs from the TCK, so the harness is sound and the gap on the SQL stores is the compiler's. Every night drivine4j

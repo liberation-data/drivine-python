@@ -251,3 +251,128 @@ def test_round_takes_a_precision_above_minus_1_as_0_places_and_compiles_one_that
 ) -> None:
     # -0.5 and -0.9 cut toward zero are 0 places; NaN is no precision below 0, and is left to the store.
     assert compiler("g").compile("RETURN [round(1234.5, -0.5), round(1234.5, $p, 'HALF_UP')]", {"p": p}).sql
+
+
+def refusal(compiler: type[SqlCypherCompiler], cypher: str) -> str | None:
+    """Why the compiler refuses the statement, or None where it compiles it."""
+    try:
+        compiler("g").compile(cypher)
+        return None
+    except Exception as e:  # noqa: BLE001
+        return str(e)
+
+
+@pytest.mark.parametrize("compiler", COMPILERS.values(), ids=COMPILERS.keys())
+@pytest.mark.parametrize(
+    ("cypher", "name"),
+    [
+        # A CALL's brackets import only variables of its row; a nested CALL imports from the outer CALL's scope.
+        ("MATCH (a) CALL (x) { RETURN 1 AS n } RETURN n", "x"),
+        ("MATCH (a), (b) CALL (a) { CALL (b) { MATCH (b)-->(d) RETURN d } RETURN d.x AS x } RETURN x", "b"),
+        # A procedure's call sees the whole row, which holds no a after a WITH that does not pass it on.
+        ("MATCH (a) WITH 1 AS x CALL db.labels() YIELD label WHERE label = a.kind RETURN label", "a"),
+        # A CALL holding a randomUUID() reads the UUID made for its row, and still imports only what it names.
+        ("UNWIND [1] AS i CALL { RETURN toString(i) + randomUUID() AS u } RETURN u", "i"),
+        ("UNWIND [1] AS i CALL (x) { RETURN randomUUID() AS u } RETURN u", "x"),
+        # A variable quoted as the compiler names its own is imported as any other is.
+        ("UNWIND [1] AS `#anew9` CALL () { RETURN `#anew9` AS x } RETURN x", "#anew9"),
+    ],
+)
+def test_a_call_sees_only_the_variables_of_the_row_it_imports_and_a_bracketed_name_not_of_the_row_is_refused(
+    compiler: type[SqlCypherCompiler], cypher: str, name: str
+) -> None:
+    # drivine4j's #410 (#294 here). A CALL saw every variable of its row, so a name it does not import joined the row's.
+    with pytest.raises(DrivineError) as refused:
+        compiler("g").compile(cypher)
+    assert str(refused.value) == (
+        f"{name} is not defined: a variable is bound by a pattern, a WITH or an UNWIND before it is used."
+    )
+
+
+@pytest.mark.parametrize("compiler", COMPILERS.values(), ids=COMPILERS.keys())
+@pytest.mark.parametrize(
+    "cypher",
+    [
+        # A name a CALL does not import is a new variable in it, of any kind.
+        "MATCH (a) CALL { MATCH ()-[a]->() RETURN 1 AS x } RETURN a, x",
+        "MATCH (a) CALL () { MATCH ()-[a]->() RETURN 1 AS x } RETURN a, x",
+        "MATCH (a), (b) CALL (a) { MATCH ()-[b]->() RETURN 1 AS x } RETURN x",
+        "MATCH (a) CALL { WITH a WITH 1 AS one MATCH ()-[a]->() RETURN 1 AS x } RETURN x",
+        "MATCH (a) CALL () { CREATE (a) RETURN 1 AS x } RETURN x",
+        "MATCH (a) CALL { WITH a MATCH (a)-->(b) RETURN b } MATCH (b)-->() RETURN b",
+        "MATCH (a) CALL (a) { MATCH (a)-->(b) RETURN b } MATCH (b)-->() RETURN b",
+        "MATCH (a) CALL (a) { CREATE (a)-[:R]->(b) RETURN b } RETURN b",
+        # A procedure's call imports each variable of the row, so its WHERE reads them.
+        "MATCH (a) CALL db.labels() YIELD label WHERE label = a.kind RETURN label",
+    ],
+)
+def test_a_name_a_call_does_not_import_is_a_new_variable_in_it(compiler: type[SqlCypherCompiler], cypher: str) -> None:
+    # drivine4j's #410 (#294 here): each was refused, as a variable bound already, or as one used as two kinds.
+    assert refusal(compiler, cypher) is None
+
+
+IMPORTING_WITH = (
+    "The importing WITH of a CALL { … } names variables of the row alone, as in Cypher: no alias, expression, "
+    "DISTINCT, WHERE, ORDER BY, SKIP or LIMIT. Import them with CALL (a, b) { … }, and work on them in a WITH after."
+)
+
+
+@pytest.mark.parametrize("compiler", COMPILERS.values(), ids=COMPILERS.keys())
+@pytest.mark.parametrize(
+    "cypher",
+    [
+        "MATCH (a), (b) CALL { WITH a, b AS c MATCH (a)-->(c) RETURN c.x AS x } RETURN x",
+        "MATCH (a) CALL { WITH a AS c MATCH (c)-->(d) RETURN d.x AS x } RETURN x",
+        "MATCH (a) CALL { WITH a WHERE a.x > 1 RETURN count(*) AS n } RETURN a, n",
+        "MATCH (a) CALL { WITH a ORDER BY a.x LIMIT 1 MATCH (a)-->(d) RETURN d.x AS x } RETURN x",
+        "MATCH (a) CALL { WITH a SKIP 0 RETURN 1 AS x } RETURN x",
+        "MATCH (a) CALL { WITH DISTINCT a MATCH (a)-->(d) RETURN d.x AS x } RETURN x",
+        "MATCH (a) CALL { WITH a, 1 AS one MATCH (a)-->(d) RETURN d.x + one AS x } RETURN x",
+        "MATCH (a) CALL { WITH * WHERE true RETURN 1 AS x } RETURN x",
+        "MATCH (a) CALL { UNWIND [1] AS x RETURN x UNION WITH a WHERE true RETURN 1 AS x } RETURN x",
+        "MATCH (a) CALL { WITH a WHERE a.x > 1 SET a.y = 1 } RETURN a",
+        # One holding a randomUUID() too, whose query reads a UUID made for the row before its WITH.
+        "MATCH (a) CALL { WITH a AS c RETURN c.x + randomUUID() AS x } RETURN x",
+    ],
+)
+def test_a_calls_leading_with_that_imports_names_variables_of_the_row_alone_as_neo4j_has_it(
+    compiler: type[SqlCypherCompiler], cypher: str
+) -> None:
+    # drivine4j's #410 (#294 here): Neo4j refuses an importing WITH with anything more (its 42I28), which was compiled
+    # as any WITH.
+    with pytest.raises(DrivineError) as refused:
+        compiler("g").compile(cypher)
+    assert str(refused.value) == IMPORTING_WITH
+
+
+@pytest.mark.parametrize("compiler", COMPILERS.values(), ids=COMPILERS.keys())
+@pytest.mark.parametrize(
+    "cypher",
+    [
+        # A leading WITH that names no variable of the row as it is imports nothing, and is any WITH; so is one of a
+        # CALL with brackets.
+        "MATCH (a) CALL { WITH 1 AS one WHERE one > 0 RETURN one } RETURN one",
+        "MATCH (a) CALL { WITH DISTINCT 1 AS one RETURN one } RETURN one",
+        "MATCH (a) CALL { WITH a AS a RETURN 1 AS one } RETURN one",
+        "MATCH (a) CALL (a) { WITH a WHERE a.x > 1 RETURN a.x AS x } RETURN x",
+        "MATCH (a) CALL (a) { WITH DISTINCT a, 1 AS one ORDER BY a.x LIMIT 1 RETURN one } RETURN one",
+    ],
+)
+def test_a_leading_with_that_imports_nothing_or_follows_brackets_is_any_with(
+    compiler: type[SqlCypherCompiler], cypher: str
+) -> None:
+    assert refusal(compiler, cypher) is None
+
+
+@pytest.mark.parametrize("compiler", COMPILERS.values(), ids=COMPILERS.keys())
+def test_a_compiler_compiling_again_keeps_none_of_the_names_it_made_for_the_statement_before(
+    compiler: type[SqlCypherCompiler],
+) -> None:
+    # The first makes #anew2 for its CALL's UUID; the second quotes a variable so. Kept from the first, the second's
+    # star left it out, and gave no item; its texts kept from the second, the first's names were made otherwise.
+    made = "UNWIND [1] AS i CALL { RETURN toUpper(randomUUID()) AS u } RETURN u"
+    quoted = "UNWIND [1, 2] AS `#anew2` WITH * RETURN *"
+    for first, second in [(made, quoted), (quoted, made)]:
+        again = compiler("g")
+        again.compile(first)
+        assert again.compile(second).sql == compiler("g").compile(second).sql

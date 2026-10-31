@@ -493,6 +493,7 @@ class SqlCypherCompiler(ABC):
                     as_path=self.parameter_path,
                 )
             )
+            self._give(query)
             return self._with_functions(CompiledCypher(self.planned(self._query(query)), self._parameters.values))
         self.procedural = True
         # A procedure takes its parameters as one object, and reads each from it.
@@ -509,6 +510,7 @@ class SqlCypherCompiler(ABC):
         # The parameters' text is written before the procedure's body is: on Oracle, writing it is what says whether the
         # body reads it as extended JSON.
         values = self._parameters.values
+        self._give(query)
         body = self._procedure(query)
         return self.procedure(body, values)
 
@@ -613,6 +615,8 @@ class SqlCypherCompiler(ABC):
                 as_path=self.parameter_path,
             )
         )
+        # Every query's names, before any is compiled: a name made in one is no variable of a later one's.
+        self._give(query)
         rows = "\nUNION ALL\n".join(
             f"SELECT {i + 1} AS part, {self.row_number} AS n, q.result "
             f"FROM (\n{indent(self._query(Query(clauses)))}\n) q"
@@ -1360,10 +1364,42 @@ class SqlCypherCompiler(ABC):
         self._filtered = False
         """Whether the expression `_value_of` has begun is read by a `WHERE` for its truth alone, as `_filtering` said
         as it began."""
+        self._made_anew: set[str] = set()
+        """
+        The variables made here for a randomUUID() made first, for each row: no variable of the statement's, though one
+        may be quoted as named alike: see `_anew_variable`.
+        """
+        self._queries: list[Query] = []
+        """The queries given to compile (`_give`), whose names `_anew_variable` keeps clear of, not yet in
+        `_query_texts`."""
+        self._query_texts: set[str] = set()
+        """Each text of the queries given to compile, as far as its first space, gathered when `_anew_variable` needs
+        it."""
 
     def _alias(self, prefix: str) -> str:
         self._counter += 1
         return f"{prefix}{self._counter}"
+
+    def _give(self, query: Query) -> None:
+        """
+        Holds the query among the `_queries`: the statement's whole, before any query of it is compiled, so a name made
+        in one query of a `UNION` is named as no later one's variable is.
+        """
+        self._queries.append(query)
+
+    def _anew_variable(self) -> str:
+        """
+        A variable of `_made_anew`'s, new: named as no variable of the statement's is, nor begins, so one quoted alike,
+        `` `#anew2` `` or `` `#anew2 row` ``, is not taken for it, hidden from a star or read as its UUID.
+        """
+        for query in self._queries:
+            _texts_in(query, self._query_texts)
+        self._queries.clear()
+        name = self._alias(ANEW)
+        while name in self._query_texts:
+            name = self._alias(ANEW)
+        self._made_anew.add(name)
+        return name
 
     def _query(self, query: Query) -> str:
         select = _Select({})
@@ -1381,16 +1417,16 @@ class SqlCypherCompiler(ABC):
         its own. `outer` is what a subquery reads from the row it is in.
         """
         if isinstance(clause, Match):
-            self._match(select, clause)
-            return select
+            return self._match(select, clause)
         if isinstance(clause, Unwind):
-            self._unwind(select, clause)
-            return select
+            made = self._anew_before(select, [clause.list], whole=True)
+            rows, (listed,) = made if made is not None else (select, [clause.list])
+            self._unwind(rows, dataclasses.replace(clause, list=listed))
+            return rows
         if isinstance(clause, With):
             return self._with(select, clause, outer or {})
         if isinstance(clause, Call):
-            self._call(select, clause)
-            return select
+            return self._anew_call(select, clause)
         raise DrivineError(f"{type(clause).__name__} reads nothing")
 
     def _with(self, select: _Select, with_: With, outer: Scope | None = None, apart: bool = False) -> _Select:
@@ -1401,44 +1437,135 @@ class SqlCypherCompiler(ABC):
         next_.walks = select.walks
         # A value made anew for each row is one value however often the clauses after read it: see `once`. Kept apart
         # from the query that reads it, where that query must not have it merged in: see `_cases_first`.
-        anew = any(contains(it.expression, is_anew) for it in with_.projection.items)
+        anew = any(holds_anew(it.expression) for it in with_.projection.items)
         sql = self.once(projected.sql) if anew else projected.sql
         next_.source(f"(\n{indent(self.called(sql) if apart else sql)}\n) {name}")
         for variable, value in projected.scope.items():
             next_.bind(variable, _columns_of(value, name))
         for column, descending in projected.order:
             next_.order.append((f"{name}.{column}", descending))
-        if with_.where is not None:
-            next_.where.append(self._condition(with_.where, next_.scope))
-        return next_
+        return self._filtered_rows(next_, with_.where) if with_.where is not None else next_
 
-    def _match(self, select: _Select, match: Match) -> None:
+    def _filtered_rows(
+        self, select: _Select, where: Expression, anew: Callable[[Expression], bool] | None = None
+    ) -> _Select:
+        """
+        The rows the select reads kept where `where` holds; each randomUUID() it reads (`anew` tells one, `is_anew`
+        where not given) made first, for each row, as `_anew_before` makes it, then the condition over those rows.
+        """
+        made = self._anew_before(select, [where], whole=True, anew=anew)
+        rows, (read,) = made if made is not None else (select, [where])
+        rows.where.append(self._condition(read, rows.scope))
+        return rows
+
+    def _seeded_rows(self, select: _Select) -> tuple[_Select, str]:
+        """
+        The rows the select reads with a UUID made for each, in a `WITH *` of its own, and its variable's name, which is
+        no variable of the statement's: see `_project`.
+        """
+        seed = self._anew_variable()
+        made = Projection(False, True, (ProjectionItem(RANDOM_UUID, seed),), (), None, None)
+        return self._with(select, With(made, None), self._around(select), apart=True), seed
+
+    @staticmethod
+    def _around(select: _Select) -> dict[str, Value]:
+        """What the select reads from around it: the variables of its scope it does not bind itself."""
+        return {variable: value for variable, value in select.scope.items() if variable not in select.bound}
+
+    def _anew_call(self, select: _Select, call: Call) -> _Select:
+        """
+        A `CALL { … }` over the rows the select reads; one whose query holds a randomUUID() (`query_holds_anew`) first
+        given a UUID made for each row, in a `WITH *` of its own, which its query unwinds before its own clauses. A
+        query that reads nothing of the row it is joined to is worked out once for the statement, by each store, and
+        every row was given the same UUID (drivine4j#412): so it reads the row. That UUID, and the variable its query
+        unwinds it to, are no variables of the statement's: see `_project`, and `_called_scope`, which carries them into
+        the query whatever it imports.
+        """
+        if not query_holds_anew(call.query):
+            self._call(select, call)
+            return select
+        rows, seed = self._seeded_rows(select)
+        row = f"{seed} row"
+        self._made_anew.add(row)
+
+        def read(clauses: Sequence[Clause]) -> tuple[Clause, ...]:
+            return (Unwind(ListLiteral((Variable(seed),)), row), *clauses)
+
+        query = dataclasses.replace(
+            call.query,
+            clauses=read(call.query.clauses),
+            unions=tuple(dataclasses.replace(it, clauses=read(it.clauses)) for it in call.query.unions),
+        )
+        self._call(rows, dataclasses.replace(call, query=query))
+        return rows
+
+    def _match(self, select: _Select, match: Match) -> _Select:
+        """
+        A `MATCH` over the rows the select reads. Each randomUUID() its condition reads is made for each row it finds,
+        first (`_filtered_rows`). An `OPTIONAL MATCH` finds its rows in a lateral query, which reads nothing of the row
+        where its pattern does not: Oracle worked it out once for the statement, and kept every row's match or none
+        (drivine4j#412). There each is read beside a UUID made first for the row (`_seeded_rows`, `seeded`), so the
+        lateral query reads the row, then made for each row it finds. A shortest path's condition is met where its
+        paths are found, in a lateral query too, which Postgres worked out once where each row joins the same two
+        nodes: each is read beside the row's UUID there as well, and made in the condition.
+        """
         # A shortest path is the shortest of the paths that meet the WHERE, as Cypher finds it: the WHERE is met where
         # they are found.
         shortest_where = match.where if match.patterns[-1].shortest is not None else None
         where = match.where if shortest_where is None else None
+        seeded_first = (
+            match.where is not None and holds_anew(match.where) and (match.optional or shortest_where is not None)
+        )
+        row, seed = self._seeded_rows(select) if seeded_first else (select, None)
+        met_by_paths = (
+            seeded(shortest_where, seed, self._made_anew, True)
+            if shortest_where is not None and seed is not None
+            else shortest_where
+        )
         if not match.optional:
-            self._patterns(select, match.patterns, shortest_where)
-            if where is not None:
-                select.where.append(self._condition(where, select.scope))
-            return
-        # What is found is read by a lateral query, joined to keep the row when it finds nothing.
-        inner = _Select(select.scope)
-        self._patterns(inner, match.patterns, shortest_where)
+            self._patterns(row, match.patterns, met_by_paths)
+            return self._filtered_rows(row, where) if where is not None else row
+        return self._optional_match(row, match.patterns, met_by_paths, where, seed)
+
+    def _optional_match(
+        self,
+        row: _Select,
+        patterns: Sequence[Pattern],
+        met_by_paths: Expression | None,
+        where: Expression | None,
+        seed: str | None,
+    ) -> _Select:
+        """
+        An `OPTIONAL MATCH` of the patterns over the rows `row` reads, those of a shortest path's meeting `met_by_paths`
+        and all of them `where`: what it finds read by a lateral query, joined to keep the row when it finds nothing.
+        With `seed`, the variable of a UUID made first for each row, each randomUUID() of `where` is read beside it.
+        """
+        inner = _Select(row.scope)
+        self._patterns(inner, patterns, met_by_paths)
         if where is not None:
-            inner.where.append(self._condition(where, inner.scope))
-        scope = select.scope
-        found = {variable: value for variable, value in inner.bound.items() if variable not in scope}
+            if seed is None:
+                inner = self._filtered_rows(inner, where)
+            else:
+                inner = self._filtered_rows(
+                    inner, seeded(where, seed, self._made_anew, True), lambda it: is_seeded(it, self._made_anew)
+                )
+        scope = row.scope
+        found = {
+            variable: value
+            for variable, value in inner.bound.items()
+            if variable not in scope and variable not in self._made_anew
+        }
         if not found and not inner.sources:
-            return
+            return row
         name = self._alias("o")
         # Each variable found under a name of its own: a variable may be called what SQL will not take.
         named = [(variable, value, self._alias("v")) for variable, value in found.items()]
         columns = [it for _, value, column in named for it in _columns(value, column, self._identities)] or ["1 AS one"]
         text = [f"SELECT {', '.join(columns)}", *inner.from_(), *_present(inner.where_clause())]
-        select.join(self.lateral("\n".join(text), name, optional=True))
+        row.join(self.lateral("\n".join(text), name, optional=True))
         for variable, value, column in named:
-            select.bind(variable, _columns_of(value, name, column, self._identities))
+            row.bind(variable, _columns_of(value, name, column, self._identities))
+        return row
 
     def _correlated(self, query: Query, scope: Scope, what: str) -> str:
         """
@@ -1478,9 +1605,9 @@ class SqlCypherCompiler(ABC):
             unsupported("A write in CALL { … }")
         order = self._row_order
         if not call.query.unions:
-            projected = self._called_part(select, call.query.clauses, None, distinct=False)
+            projected = self._called_part(select, call, call.query.clauses, None, distinct=False)
         else:
-            projected = self._called_union(select, call.query)
+            projected = self._called_union(select, call)
         self._row_order = order
         _redeclared(projected.scope, select.bound)
         name = self._alias("c")
@@ -1494,21 +1621,26 @@ class SqlCypherCompiler(ABC):
             select.order.append((f"{name}.{column}", descending))
 
     def _called_part(
-        self, select: _Select, clauses: Sequence[Clause], names: list[str] | None, distinct: bool
+        self, select: _Select, call: Call, clauses: Sequence[Clause], names: list[str] | None, distinct: bool
     ) -> _Projected:
         """
-        One query of a `CALL { … }`, for the row the select reads: its returned items in the order `names` lists them,
-        where a `UNION` names them so, and kept distinct with `distinct`.
+        One query of the call, `clauses`, for the row the select reads: its returned items in the order `names` lists
+        them, where a `UNION` names them so, and kept distinct with `distinct`. It sees only the variables of the row it
+        imports (`_called_scope`): any other name in it is a new variable, as in Cypher (#294). What its brackets
+        import it sees throughout, after a `WITH` that does not pass it on too, as Neo4j has it; what a leading `WITH`
+        imports is gone after one.
         """
-        inner = _Select(select.scope)
-        apart = self._imports_apart(select.scope, clauses)
+        imported = self._called_scope(call, clauses, select.scope)
+        inner = _Select(imported)
+        apart = self._imports_apart(imported, clauses)
         if apart is not None:
-            source, imports = apart
+            source, values = apart
             inner.source(source)
-            for variable, value in imports.items():
+            for variable, value in values.items():
                 inner.bind(variable, value)
+        outer: Scope = imported if bracketed(call) else {}
         for clause in clauses[:-1]:
-            inner = self._read(inner, clause, select.scope)
+            inner = self._read(inner, clause, outer)
         projection = _returned(clauses).projection
         if names is not None:
             items = tuple(next(it for it in projection.items if it.name == name) for name in names)
@@ -1517,6 +1649,23 @@ class SqlCypherCompiler(ABC):
         return self._project(
             inner, dataclasses.replace(projection, items=items, distinct=distinct or projection.distinct), final=False
         )
+
+    def _called_scope(self, call: Call, clauses: Sequence[Clause], scope: Scope) -> dict[str, Value]:
+        """
+        The variables of the row, `scope`, that the query `clauses` of the call sees: those it imports (`imports`), and
+        each the compiler made for it, whatever it imports. Those are no variables of the statement's: the UUID made for
+        each row that `_anew_call` unwinds before the clauses, so a query holding a randomUUID() reads the row
+        (drivine4j#412). Imports are read from the clauses after that `UNWIND`, as the statement wrote them, so a
+        leading `WITH` imports still.
+        """
+        first = next(
+            (i for i, it in enumerate(clauses) if not (isinstance(it, Unwind) and it.variable in self._made_anew)),
+            len(clauses),
+        )
+        imported = imports(call, clauses[first:], [it for it in scope if it not in self._made_anew])
+        return {
+            variable: value for variable, value in scope.items() if variable in imported or variable in self._made_anew
+        }
 
     def _imports_apart(self, scope: Scope, clauses: Sequence[Clause]) -> tuple[str, dict[str, Value]] | None:
         """
@@ -1555,9 +1704,10 @@ class SqlCypherCompiler(ABC):
         imports = {variable: _columns_of(value, name, column, self._identities) for variable, value, column in named}
         return f"({self.bound_select(', '.join(columns))}) {name}", imports
 
-    def _called_union(self, select: _Select, query: Query) -> _Projected:
+    def _called_union(self, select: _Select, call: Call) -> _Projected:
         """A `UNION` in a `CALL { … }`: each query's rows, the same items of the same kinds, matched by name as Cypher
         matches them."""
+        query = call.query
         parts = [query.clauses, *(it.clauses for it in query.unions)]
         if len({it.all for it in query.unions}) > 1:
             raise DrivineError("UNION and UNION ALL are not mixed in one statement, as in Cypher.")
@@ -1568,7 +1718,7 @@ class SqlCypherCompiler(ABC):
         if any({item.name for item in it.projection.items} != set(names) for it in returns):
             raise DrivineError("Each query of a UNION returns the same names, as in Cypher.")
         distinct = not query.unions[0].all
-        projected = [self._called_part(select, it, names, distinct) for it in parts]
+        projected = [self._called_part(select, call, it, names, distinct) for it in parts]
         kinds = {tuple(type(value) for value in it.scope.values()) for it in projected}
         if len(kinds) > 1:
             unsupported("A UNION in CALL { … } whose queries return values of different kinds")
@@ -1583,7 +1733,7 @@ class SqlCypherCompiler(ABC):
             was = self._identities
             self._identities = False
             try:
-                projected = [self._called_part(select, it, names, distinct) for it in parts]
+                projected = [self._called_part(select, call, it, names, distinct) for it in parts]
             finally:
                 self._identities = was
         sql = ("\nUNION\n" if distinct else "\nUNION ALL\n").join(
@@ -2220,13 +2370,23 @@ class SqlCypherCompiler(ABC):
         self._bind_row(select, ROW, needed, written)
         return select
 
-    def _bind_row(self, select: _Select, row: str, needed: set[str] | None = None, written: bool = False) -> None:
+    def _bind_row(
+        self,
+        select: _Select,
+        row: str,
+        needed: set[str] | None = None,
+        written: bool = False,
+        kinds: dict[str, _Kind] | None = None,
+        values: dict[str, Json] | None = None,
+    ) -> None:
         """
         Binds into the select each variable the row holds, of `needed` where given: a node or a relationship is read
         from its table, as it is now. With `written`, the row is ROW, and a value and each property of it are read as
-        `row_value` reads them, for a statement that works out what a write writes.
+        `row_value` reads them, for a statement that works out what a write writes. Each is of its kind in `kinds`, and
+        a value as it was carried in `values`: those of the rows now, but for a row held from before.
         """
-        for variable, kind in self._kinds.items():
+        values = self._carried if values is None else values
+        for variable, kind in (self._kinds if kinds is None else kinds).items():
             if needed is not None and variable not in needed:
                 continue
             key = self._key(variable)
@@ -2239,7 +2399,7 @@ class SqlCypherCompiler(ABC):
                 select.join(f"LEFT JOIN {self.edges} {e} ON {e}.eid = {self.id_of(row, key)}")
                 select.bind(variable, _relationship(e))
             elif kind is _Kind.VALUE:
-                carried = self._carried.get(variable)
+                carried = values.get(variable)
                 select.bind(
                     variable,
                     Json(
@@ -2366,14 +2526,31 @@ class SqlCypherCompiler(ABC):
         self._emit(f"{kept} := {ROWS};")
         if returned is not None:
             self._assign(gathered, self.literal_json([]))
+        # Only what the call imports is seen in it: any other name in it is a new variable, as in Cypher (#294).
+        imported = imports(call, call.query.clauses, before)
+        clauses = _imported(call.query.clauses, imported)
+        # Read again after each WITH, where brackets import them: see below.
+        rebound = bracketed(call) and any(isinstance(it, With) for it in clauses)
 
         def each() -> None:
-            if returned is not None:
+            if returned is not None or rebound:
                 self._emit(f"{caller} := {RECORD}.item;")
+            self._restore(
+                {k: v for k, v in before.items() if k in imported},
+                {k: v for k, v in carried_before.items() if k in imported},
+            )
             select = self._rows()
-            for clause in _imported(call.query.clauses):
+            for clause in clauses:
                 if isinstance(clause, Return):
                     select = self._with(select, With(clause.projection, None))
+                elif isinstance(clause, With) and rebound:
+                    # What brackets import is seen throughout the call, as Neo4j has it, after a WITH that does not pass
+                    # it on too: read again from the row the call is written for, so `CALL (a) { WITH 1 AS one CREATE
+                    # (a)-[:R]->() }` joins the row's a, not a new node. Its WHERE reads them too, so it is met after.
+                    w = self._with(select, dataclasses.replace(clause, where=None))
+                    dropped = {it for it in imported if it not in w.scope}
+                    self._bind_row(w, caller, dropped, kinds=before, values=carried_before)
+                    select = self._filtered_rows(w, clause.where) if clause.where is not None else w
                 else:
                     select = self._next(select, clause)
             if returned is not None:
@@ -2708,13 +2885,21 @@ class SqlCypherCompiler(ABC):
         ordered, skipped and limited. Rows it does not order, group or keep distinct stay in the order the select reads
         them, as a graph engine keeps them.
         """
-        # As in Neo4j, a star gives the variables in the order of their names, before the items named after it.
-        starred = [ProjectionItem(Variable(it), it) for it in sorted(select.bound)] if projection.star else []
+        # As in Neo4j, a star gives the variables in the order of their names, before the items named after it: not a
+        # randomUUID() made first for a CALL or a condition (see `_anew_call`), which the statement never named.
+        starred = (
+            [ProjectionItem(Variable(it), it) for it in sorted(select.bound) if it not in self._made_anew]
+            if projection.star
+            else []
+        )
         items = [*starred, *projection.items]
         if not items:
             raise DrivineError("A projection has at least one item.")
         # Before _aggregates_first, which names each variable it groups by as an item of its own.
         _require_explicit_grouping(items)
+        made = self._anew_first(select, projection, items)
+        if made is not None:
+            return self._project(made[0], made[1], final)
         cased = self._cases_first(select, projection, items)
         if cased is not None:
             return self._project(cased[0], cased[1], final)
@@ -2888,6 +3073,92 @@ class SqlCypherCompiler(ABC):
         }
         return _Projected("\n".join(outer_lines), scope_out, order)
 
+    def _anew_first(
+        self, select: _Select, projection: Projection, items: list[ProjectionItem]
+    ) -> tuple[_Select, Projection] | None:
+        """
+        The rows the select reads with each randomUUID() that a term of the projection reads inside a larger expression
+        made first (`_anew_before`), and the projection with the term reading that UUID's column; None where there is
+        none. A term that is a randomUUID() alone is a column of the projection already. Two items written alike are
+        given a UUID each, as in Neo4j; an order term written as an item reads that item's, as Neo4j sorts by the item.
+        """
+        item_terms = [it.expression for it in items]
+        order_terms = list(
+            dict.fromkeys(it.expression for it in projection.order_by if it.expression not in item_terms)
+        )
+        made = self._anew_before(select, [*item_terms, *order_terms], whole=False)
+        if made is None:
+            return None
+        rows, read = made
+        reads: dict[Expression, Expression] = {}
+        for term, term_read in zip([*item_terms, *order_terms], read, strict=True):
+            reads.setdefault(term, term_read)
+        kept = dataclasses.replace(
+            projection,
+            star=False,
+            items=tuple(dataclasses.replace(item, expression=term) for item, term in zip(items, read, strict=False)),
+            order_by=tuple(dataclasses.replace(it, expression=reads[it.expression]) for it in projection.order_by),
+        )
+        return rows, kept
+
+    def _anew_before(
+        self,
+        select: _Select,
+        terms: Sequence[Expression],
+        whole: bool,
+        anew: Callable[[Expression], bool] | None = None,
+    ) -> tuple[_Select, list[Expression]] | None:
+        """
+        The rows the select reads with each randomUUID() that `terms` read made first, for each row, in a `WITH *` of
+        its own, and each term as it reads that UUID's column, in their order; None where there is none, or, where not
+        `whole`, where each is a term alone. Worked out in the term, the UUID could be bound in a subquery that reads
+        nothing of the row (`shared`), or read in a comprehension's subquery that reads nothing of it either, and each
+        store works such a subquery out once for the statement: every row was given the same UUID (drivine4j#412). Made
+        first, it is a column of the row, as a `WITH`'s own randomUUID() is (`once`). One in a comprehension's, a
+        quantifier's, a reduce's or a pattern comprehension's own expressions is made again for each item there, as in
+        Neo4j: it is read beside a UUID made first for the row (`seeded`), so that subquery reads the row. Each call is
+        a UUID of its own, in two terms written alike too, as in Neo4j, where `randomUUID() = randomUUID()` is false.
+        `anew` tells a call, `is_anew` where not given: see `_optional_match` for another.
+        """
+        call: Callable[[Expression], bool] = anew or is_anew
+
+        # A call read beside a row's UUID already (is_seeded) reads the row: left as it is, as a call alone is.
+        def is_seeded_here(e: Expression) -> bool:
+            return is_seeded(e, self._made_anew)
+
+        def alone(term: Expression) -> bool:
+            return call(term) or is_seeded_here(term)
+
+        def holds(e: Expression) -> bool:
+            return call(e) or (not is_seeded_here(e) and any(holds(it) for it in children(e)))
+
+        in_bodies = any(seeded(it, ANEW, self._made_anew) != it for it in terms)
+        if not in_bodies and not any((whole or not alone(it)) and holds(it) for it in terms):
+            return None
+        made: list[ProjectionItem] = []
+        seed: str | None = None
+        if in_bodies:
+            seed = self._anew_variable()
+            made.append(ProjectionItem(RANDOM_UUID, seed))
+
+        def made_first(e: Expression) -> Expression | None:
+            if call(e):
+                name = self._anew_variable()
+                made.append(ProjectionItem(e, name))
+                return Variable(name)
+            return e if is_seeded_here(e) else None
+
+        reads: list[Expression] = []
+        for term in terms:
+            if not whole and alone(term):
+                reads.append(term)
+                continue
+            read = replaced(term, made_first)
+            reads.append(seeded(read, seed, self._made_anew) if seed is not None else read)
+        projection = Projection(False, True, tuple(made), (), None, None)
+        # Kept apart, as _shared_first keeps its own, so no store merges it back into the query that reads it.
+        return self._with(select, With(projection, None), self._around(select), apart=True), reads
+
     def _cases_first(
         self, select: _Select, projection: Projection, items: list[ProjectionItem]
     ) -> tuple[_Select, Projection] | None:
@@ -3026,8 +3297,7 @@ class SqlCypherCompiler(ABC):
             order_by=tuple(dataclasses.replace(it, expression=shared(it.expression)) for it in projection.order_by),
         )
         # Kept apart, as _cases_first keeps its own, so no store merges it back into the query that aggregates.
-        outer = {variable: value for variable, value in select.scope.items() if variable not in select.bound}
-        return self._with(select, With(with_, None), outer, apart=True), kept
+        return self._with(select, With(with_, None), self._around(select), apart=True), kept
 
     def _binds(self, expression: Expression, select: _Select) -> bool:
         """
@@ -5614,6 +5884,230 @@ def is_anew(expression: Expression) -> bool:
     return isinstance(expression, Function) and expression.name.lower() == "randomuuid"
 
 
+ANEW = "#anew"
+"""
+What the name of a variable begins with that holds a randomUUID() made first, for each row: see
+`SqlCypherCompiler._anew_first`. Named as no variable is, unless quoted so: see `SqlCypherCompiler._anew_variable`.
+"""
+
+RANDOM_UUID = Function("randomUUID", False, ())
+"""A call of `randomUUID()`, as a statement writes one."""
+
+
+def holds_anew(expression: Expression) -> bool:
+    """
+    Whether the expression holds a call of randomUUID() anywhere: in a comprehension's, a quantifier's, a reduce's or a
+    pattern comprehension's own expressions too, where `contains` does not look. Not in a subquery's query.
+    """
+    if isinstance(expression, ListComprehension):
+        return any(holds_anew(it) for it in _present(expression.list, expression.where, expression.projection))
+    if isinstance(expression, Quantifier):
+        return any(holds_anew(it) for it in _present(expression.list, expression.where))
+    if isinstance(expression, Reduce):
+        return any(holds_anew(it) for it in [expression.initial, expression.list, expression.expression])
+    if isinstance(expression, PatternComprehension):
+        return any(holds_anew(it) for it in _present(expression.where, expression.projection))
+    return is_anew(expression) or any(holds_anew(it) for it in children(expression))
+
+
+def query_holds_anew(query: Query) -> bool:
+    """Whether a clause of the query, or of a query it calls, holds a call of randomUUID() (`holds_anew`) in its
+    expressions."""
+
+    def projected(projection: Projection) -> bool:
+        terms = [*(it.expression for it in projection.items), *(it.expression for it in projection.order_by)]
+        return any(holds_anew(it) for it in terms)
+
+    for clause in [*query.clauses, *(c for u in query.unions for c in u.clauses)]:
+        if isinstance(clause, With):
+            found = projected(clause.projection) or (clause.where is not None and holds_anew(clause.where))
+        elif isinstance(clause, Return):
+            found = projected(clause.projection)
+        elif isinstance(clause, Unwind):
+            found = holds_anew(clause.list)
+        elif isinstance(clause, Match):
+            found = clause.where is not None and holds_anew(clause.where)
+        elif isinstance(clause, Call):
+            found = query_holds_anew(clause.query)
+        else:
+            found = False
+        if found:
+            return True
+    return False
+
+
+def seeded(
+    expression: Expression, seed: str, made: Iterable[str], in_body: bool = False, own: Sequence[str] = ()
+) -> Expression:
+    """
+    The expression with each randomUUID() in a comprehension's, a quantifier's, a reduce's or a pattern comprehension's
+    own expressions read beside the variable `seed`, made anew for each row: `CASE WHEN seed IS NULL THEN null ELSE
+    randomUUID() END`, which is randomUUID() still, as `seed` is never null. So the subquery that works the body out
+    reads the row, and a store works it out again for each row, as it does not for a subquery that reads nothing of it
+    (drivine4j#412). One so read already is left as it is (`is_seeded`, of the variables the compiler `made`). Each
+    item's variable is read beside `seed` too (`own`), the path's of a pattern comprehension, named here where it has
+    none: read beside the row's alone, a value bound in a subquery (`SqlCypherCompiler.shared`) reads nothing of the
+    item, and Postgres and Oracle worked it out once for all of them, so `[x IN range(1, 20) WHERE left(randomUUID(), 1)
+    < '8' | x]` kept every item or none; and an aggregate of a pattern comprehension's body that reads only the row's
+    columns is an aggregate of the row's query, which Postgres refuses.
+    """
+    made = set(made)
+
+    def body(part: Expression, variable: str) -> Expression:
+        return seeded(part, seed, made, True, [*own, variable])
+
+    def same(part: Expression) -> Expression:
+        return seeded(part, seed, made, in_body, own)
+
+    def replacement(e: Expression) -> Expression | None:
+        if is_seeded(e, made):
+            return e
+        if in_body and is_anew(e):
+            conditions: list[Expression] = [Unary(UnaryOperator.IS_NULL, Variable(it)) for it in [seed, *own]]
+            condition = functools.reduce(lambda a, b: Binary(BinaryOperator.AND, a, b), conditions)
+            return Case(None, ((condition, Literal(None)),), e)
+        return _seeded_body(e, seed, len(own), same, body)
+
+    return replaced(expression, replacement)
+
+
+def _seeded_body(
+    e: Expression,
+    seed: str,
+    depth: int,
+    same: Callable[[Expression], Expression],
+    body: Callable[[Expression, str], Expression],
+) -> Expression | None:
+    """
+    The expression, a comprehension, a quantifier, a reduce or a pattern comprehension, with its own expressions read
+    beside `seed` as `seeded` reads them: `same` for those read in its own scope, `body` for those read for each item. A
+    pattern comprehension's path is named after `seed` and how deep in bodies it is, `depth`, where it has no name.
+    None for any other expression, and for a pattern comprehension whose own expressions hold no randomUUID().
+    """
+    if isinstance(e, ListComprehension):
+        return dataclasses.replace(
+            e,
+            list=same(e.list),
+            where=body(e.where, e.variable) if e.where is not None else None,
+            projection=body(e.projection, e.variable) if e.projection is not None else None,
+        )
+    if isinstance(e, Quantifier):
+        return dataclasses.replace(
+            e, list=same(e.list), where=body(e.where, e.variable) if e.where is not None else None
+        )
+    if isinstance(e, Reduce):
+        return dataclasses.replace(
+            e, initial=same(e.initial), list=same(e.list), expression=body(e.expression, e.variable)
+        )
+    if isinstance(e, PatternComprehension):
+        # Named only where its body holds one, so a statement without randomUUID() is compiled as it was.
+        if not any(holds_anew(it) for it in _present(e.where, e.projection)):
+            return None
+        path = e.pattern.variable if e.pattern.variable is not None else f"{seed} path{depth}"
+        return dataclasses.replace(
+            e,
+            pattern=dataclasses.replace(e.pattern, variable=path),
+            where=body(e.where, path) if e.where is not None else None,
+            projection=body(e.projection, path),
+        )
+    return None
+
+
+def is_seeded(expression: Expression, made: Iterable[str]) -> bool:
+    """
+    Whether the expression is a randomUUID() read beside a variable made first for the row, as `seeded` reads one: of
+    those the compiler `made`, never a variable of the statement's named alike.
+    """
+    if not isinstance(expression, Case) or len(expression.alternatives) != 1:
+        return False
+    condition = expression.alternatives[0][0]
+    while isinstance(condition, Binary) and condition.operator is BinaryOperator.AND:
+        condition = condition.left
+    return (
+        isinstance(condition, Unary)
+        and condition.operator is UnaryOperator.IS_NULL
+        and isinstance(condition.operand, Variable)
+        and condition.operand.name in set(made)
+    )
+
+
+def imports(call: Call, clauses: Sequence[Clause], names: Iterable[str]) -> set[str]:
+    """
+    The variables of the row, of `names`, that the query `clauses` of the call imports, as Neo4j has it: those its
+    brackets name, `CALL (a, b) { … }`, or each with `CALL (*) { … }`; with no brackets, those its leading `WITH` names
+    as they are, or each with `WITH *`; none where it has neither, `CALL () { … }` or `CALL { MATCH … }`. In a `UNION`,
+    each query's own leading `WITH`. Refuses a bracketed name not of the row, and, as Neo4j does (its 42I28), a leading
+    `WITH` that names a variable of the row, or `*`, with anything more: such a `WITH` imports, and one that names none
+    is any `WITH`, `CALL { WITH 1 AS one WHERE … }`.
+    """
+    all_ = set(names)
+    if call.imports_all:
+        return all_
+    if call.imports is not None:
+        missing = next((it for it in call.imports if it not in all_), None)
+        if missing is not None:
+            raise DrivineError(
+                f"{missing} is not defined: a variable is bound by a pattern, a WITH or an UNWIND before it is used."
+            )
+        return set(call.imports)
+    first = clauses[0] if clauses else None
+    if not isinstance(first, With):
+        return set()
+    leading = first.projection
+
+    def named(item: ProjectionItem) -> str | None:
+        return item.expression.name if isinstance(item.expression, Variable) else None
+
+    if not leading.star and not any(named(it) in all_ for it in leading.items):
+        return set()
+    if not all(named(it) == it.name for it in leading.items) or not plain_with(first):
+        raise DrivineError(
+            "The importing WITH of a CALL { … } names variables of the row alone, as in Cypher: no alias, expression, "
+            "DISTINCT, WHERE, ORDER BY, SKIP or LIMIT. Import them with CALL (a, b) { … }, and work on them in a WITH "
+            "after."
+        )
+    return all_ if leading.star else {it.name for it in leading.items if it.name in all_}
+
+
+def plain_with(clause: With) -> bool:
+    """Whether the `WITH` has no `WHERE`, `DISTINCT`, `ORDER BY`, `SKIP` or `LIMIT`: one that only names what it passes
+    on."""
+    projection = clause.projection
+    return (
+        clause.where is None
+        and not projection.distinct
+        and not projection.order_by
+        and projection.skip is None
+        and projection.limit is None
+    )
+
+
+def bracketed(call: Call) -> bool:
+    """Whether the call imports by its brackets, `CALL (a) { … }` or `CALL (*) { … }`: what it imports so it sees
+    throughout."""
+    return call.imports is not None or call.imports_all
+
+
+def _texts_in(value: Any, texts: set[str]) -> None:
+    """
+    Adds each text the value, a statement as read or any part of it, holds anywhere, as far as its first space: each of
+    its variables' names, and more (a label, a key, a text it gives), which is as much as a name made for it, with no
+    space, needs to keep clear of: see `SqlCypherCompiler._anew_variable`.
+    """
+    if isinstance(value, str):
+        texts.add(value.split(" ", 1)[0])
+    elif dataclasses.is_dataclass(value) and not isinstance(value, type):
+        for field in dataclasses.fields(value):
+            _texts_in(getattr(value, field.name), texts)
+    elif isinstance(value, (tuple, list, set, frozenset)):
+        for it in cast(Iterable[Any], value):
+            _texts_in(it, texts)
+    elif isinstance(value, dict):
+        for key, it in cast(dict[Any, Any], value).items():
+            _texts_in(key, texts)
+            _texts_in(it, texts)
+
+
 def _redeclared(returned: Iterable[str], bound: Iterable[str]) -> None:
     """
     Fails where a `CALL` returns or yields a variable of `returned` that is bound around it, in `bound`, as Neo4j fails:
@@ -5954,20 +6448,20 @@ def _creates(clauses: Sequence[Clause]) -> list[Clause]:
     return merged
 
 
-def _imported(clauses: Sequence[Clause]) -> Sequence[Clause]:
-    """The clauses without an importing `WITH` of variables alone that opens them: every variable of the row is
-    seen."""
+def _imported(clauses: Sequence[Clause], imported: set[str]) -> Sequence[Clause]:
+    """
+    The clauses of a `CALL { … }` without a `WITH` that opens them and passes on variables it `imported` alone, as they
+    are: the row holds those already, and what brackets import is seen after it anyway, as Neo4j has it, so
+    `CALL (a, b) { WITH a SET b.x = 1 }` sets b's.
+    """
     first = clauses[0] if clauses else None
     if not isinstance(first, With):
         return clauses
     projection = first.projection
     importing = (
-        first.where is None
-        and not projection.distinct
-        and not projection.order_by
-        and projection.skip is None
-        and projection.limit is None
+        plain_with(first)
         and all(isinstance(it.expression, Variable) and it.expression.name == it.name for it in projection.items)
+        and (projection.star or all(it.name in imported for it in projection.items))
     )
     return clauses[1:] if importing else clauses
 

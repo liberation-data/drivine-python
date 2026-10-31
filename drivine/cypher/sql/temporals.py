@@ -86,7 +86,8 @@ class TemporalBase:
     """
     A temporal value that a map's `date`, `time` or `datetime` gives `Temporals.over`: its `text`, and the `kinds` it
     may be, one where the statement tells its kind, else those of the kind that give what it is to give (a date, a time
-    of day, both), its text telling which, as a value read from the store does.
+    of day, both), its text telling which, as a value read from the store does. Told apart by identity (`eq=False`), as
+    drivine4j's `Base` is, so `over` binds the one a map's `datetime` gives as both date and time once.
     """
 
     text: str

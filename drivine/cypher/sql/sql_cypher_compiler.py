@@ -4720,13 +4720,30 @@ class SqlCypherCompiler(ABC):
         written that is not whole, or past its field's range (OVER_RANGES; beside a millisecond or a microsecond given,
         a microsecond or a nanosecond runs to the next one's), fails. `keys` are the map's fields.
         """
-        least = OVER_LEAST.get(key, 0)
+        range_, beside = _over_range(key, keys)
+        return self._map_number(name, key, value, OVER_LEAST.get(key, 0), range_, beside, scope)
+
+    def _map_number(
+        self,
+        name: str,
+        key: str,
+        value: Expression,
+        least: int,
+        range_: tuple[int, int] | None,
+        beside: str | None,
+        scope: Scope,
+    ) -> str:
+        """
+        The SQL number of the field `key` of a temporal map given `name` (a truncation's, or one laid over another
+        temporal value), written as `value`: `least` where it is written as null or an expression gives null, else a
+        number written that `_whole_field` takes in `range_`, the range it has `beside` another field where one is
+        named.
+        """
         written = _written_number(value)
         if written is None:
             return f"COALESCE({self.number(self.comparable(self.json(self._expression(value, scope))))}, {least})"
         if written.value is None:
             return f"{least}"
-        range_, beside = _over_range(key, keys)
         return f"{_whole_field(name, key, written.value, range_, beside)}"
 
     def _over_base(
@@ -6047,13 +6064,10 @@ class SqlCypherCompiler(ABC):
         The SQL number of the field `key` of a truncation of the function, which the value gives: see
         `_truncation_fields`. With `millis`, a millisecond is given or kept, beside which a microsecond runs to 999.
         """
+        beside = key == "microsecond" and millis
+        range_ = (0, 999) if beside else TRUNCATION_RANGES.get(key)
         least = TRUNCATION_LEAST.get(key, 0)
-        written = _written_number(value)
-        if written is None:
-            return f"COALESCE({self.number(self.comparable(self.json(self._expression(value, scope))))}, {least})"
-        if written.value is None:
-            return f"{least}"
-        return f"{_truncation_whole(function, key, written.value, millis)}"
+        return self._map_number(function.name, key, value, least, range_, "millisecond" if beside else None, scope)
 
     def _between(self, function: Function, arguments: list[Value], name: str) -> Value:
         """`duration.between(a, b)` and `duration.inMonths`, `inDays` and `inSeconds`: the duration from one value to
@@ -7371,17 +7385,6 @@ def _truncation_keys(function: Function, kind: Temporal, entries: Sequence[tuple
         if it in keys and "dayOfWeek" in keys:
             raise DrivineError(f"{function.name}() takes a {it} or a day of the week, not both.")
     return keys
-
-
-def _truncation_whole(function: Function, key: str, written: Any, millis: bool) -> int:
-    """
-    The value written as the field `key` of a truncation of the function, where it is a whole number in the field's
-    range (see TRUNCATION_RANGES); with `millis`, a millisecond is given or kept, beside which a microsecond runs to
-    999.
-    """
-    beside = key == "microsecond" and millis
-    range_ = (0, 999) if beside else TRUNCATION_RANGES.get(key)
-    return _whole_field(function.name, key, written, range_, "millisecond" if beside else None)
 
 
 def _whole_field(name: str, key: str, written: Any, range_: tuple[int, int] | None, beside: str | None) -> int:

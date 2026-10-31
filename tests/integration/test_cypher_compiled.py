@@ -195,6 +195,24 @@ async def test_a_parameter_of_a_time_a_local_or_zoned_datetime_or_a_timedelta_is
     assert found == {"minute": 30, "hour": 10, "zoned": "+02:00", "later": 16, "days": 1, "hours": 12}
 
 
+async def test_a_temporal_value_is_made_from_a_parameter_of_pythons_temporal_types(cypher_pm: PersistenceManager):
+    # #317: a parameter's kind is told by its Python type, so `Temporals.over` reads it as that kind alone.
+    found = await cypher_pm.get_one(
+        spec(
+            "WITH date({date: $day, day: 1}) AS d, localtime({time: $z, hour: 3}) AS l, "
+            "datetime({datetime: $ldt, timezone: '+01:00'}) AS m, datetime({date: $day, time: $time}) AS t "
+            "RETURN [[d.month, d.day], [l.hour, l.minute], [m.day, m.hour, m.timezone], [t.day, t.minute, t.timezone]]",
+            {
+                "day": date(2024, 3, 15),
+                "time": time(10, 30),
+                "ldt": datetime(2024, 3, 15, 10, 0),
+                "z": datetime(2024, 3, 15, 10, 5, tzinfo=timezone(timedelta(hours=2))),
+            },
+        )
+    )
+    assert found == [[3, 1], [3, 5], [15, 10, "+01:00"], [15, 30, "Z"]]
+
+
 async def test_a_zoned_parameter_keeps_its_kind_in_reduce(cypher_pm: PersistenceManager):
     found = await cypher_pm.query(
         spec(
@@ -1269,6 +1287,25 @@ async def test_a_date_or_a_moment_from_calendar_fields_an_expression_gives_is_ne
         [[2016, 1, 1], [2024, 2, 29, 12], [2015, 1, 1, 5, "-05:00"]],
         [[2025, 12, 29], [2025, 1, 1, 12], [2026, 4, 1, 5, "-05:00"]],
     ]
+
+
+async def test_a_moment_from_calendar_fields_an_expression_gives_beside_a_time_is_worked_out_by_the_store(
+    cypher_pm: PersistenceManager,
+):
+    # #317: a week, an ordinal day or a quarter that an expression gives can't be worked out as the statement is
+    # compiled, so `Temporals.over` gives it the store's `of_calendar`, with the time of the value given.
+    rows = await cypher_pm.query(
+        spec(
+            "UNWIND [[2020, 53, 7, 2024, 60, 4]] AS p "
+            "WITH localdatetime({year: p[0], week: p[1], dayOfWeek: p[2], time: localtime('10:30')}) AS w, "
+            "datetime({year: p[3], ordinalDay: p[4], time: time('10:00+02:00')}) AS o, "
+            "datetime({year: 2024, quarter: p[5], dayOfQuarter: 92, time: localtime('01:00'), timezone: '-05:00'}) "
+            "AS q "
+            "RETURN [[w.year, w.month, w.day, w.hour, w.minute], [o.year, o.month, o.day, o.hour, o.timezone], "
+            "[q.year, q.month, q.day, q.hour, q.timezone]]"
+        )
+    )
+    assert rows == [[[2021, 1, 3, 10, 30], [2024, 2, 29, 10, "+02:00"], [2024, 12, 31, 1, "-05:00"]]]
 
 
 async def test_an_optional_call_in_a_writes_subquery_counts_what_it_finds_and_the_row_it_finds_nothing_for(

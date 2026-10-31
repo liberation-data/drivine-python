@@ -16,7 +16,7 @@ from drivine.cypher.cypher_reader import read_cypher
 from drivine.cypher.sql.oracle_cypher_compiler import OracleCypherCompiler
 from drivine.cypher.sql.postgres_cypher_compiler import PostgresCypherCompiler
 from drivine.cypher.sql.sql_cypher_compiler import SqlCypherCompiler, holds_subquery
-from tests.cypher.cypher_spec import Case, expanded, failure_matches, load
+from tests.cypher.cypher_spec import HELD_FAILURES, Case, expanded, failure_matches, held_for, held_passes, load
 
 SPEC = load("refusals.yaml")
 
@@ -29,10 +29,25 @@ def test_refusals(case: Case, store: str) -> None:
     for index, step in enumerate(case.steps):
         if not step.runs_on(store):
             continue
-        where = f"{case.name}, step {index + 1}, on {store}: {step.cypher.strip()}"
-        with pytest.raises(Exception) as refused:  # noqa: PT011
-            COMPILERS[store]("g").compile(step.cypher, expanded(step.parameters))
-        assert failure_matches(step, refused.value), f"{where}\nexpected: {step.error}\nactual:   {refused.value}"
+        issue = held_for("refusals.yaml", case, index, store)
+        if issue is None:
+            refuses(case, index, store)
+            continue
+        try:
+            refuses(case, index, store)
+        except HELD_FAILURES:
+            # Held, as liberation-data/drivine-python#<issue> has it.
+            continue
+        pytest.fail(held_passes("refusals.yaml", case, index, store, issue))
+
+
+def refuses(case: Case, index: int, store: str) -> None:
+    """That the step at `index` of the case is refused on the store, as it says."""
+    step = case.steps[index]
+    where = f"{case.name}, step {index + 1}, on {store}: {step.cypher.strip()}"
+    with pytest.raises(Exception) as refused:  # noqa: PT011
+        COMPILERS[store]("g").compile(step.cypher, expanded(step.parameters))
+    assert failure_matches(step, refused.value), f"{where}\nexpected: {step.error}\nactual:   {refused.value}"
 
 
 @pytest.mark.parametrize("compiler", COMPILERS.values(), ids=COMPILERS.keys())
@@ -609,11 +624,77 @@ def test_a_truncations_fields_given_as_an_expression_a_negated_number_utc_or_non
         compiler("g").compile(cypher)
 
 
+@pytest.mark.parametrize("compiler", COMPILERS.values(), ids=COMPILERS.keys())
+@pytest.mark.parametrize(
+    ("cypher", "message"),
+    [
+        # A year past Java's, as Neo4j's, and one whose date would be past Java's last.
+        (
+            "RETURN date({year: 4294969319, week: 1})",
+            "date() takes no year 4294969319: Invalid value for Year (valid values -999999999 - 999999999): 4294969319",
+        ),
+        (
+            "RETURN date({year: -1000000000, ordinalDay: 1})",
+            "date() takes no year -1000000000: Invalid value for Year (valid values -999999999 - 999999999): "
+            "-1000000000",
+        ),
+        (
+            "RETURN date({year: 999999999, week: 53, dayOfWeek: 7})",
+            "date() takes no year 999999999: Invalid value for EpochDay (valid values -365243219162 - 365241780471): "
+            "365241780480",
+        ),
+        ("RETURN date({year: 2023, week: true})", "date() takes a whole number for week, not true."),
+        ("RETURN date({year: 2023, quarter: 2.0})", "date() takes a whole number for quarter, not 2.0."),
+        (
+            "RETURN date({ordinalDay: 2})",
+            "date() of an ordinal day without a year is Cypher, and is not compiled to SQL yet.",
+        ),
+        (
+            "RETURN date({date: date('2024-03-15'), week: 2})",
+            "date() of a map with date is Cypher, and is not compiled to SQL yet.",
+        ),
+        (
+            "RETURN datetime({year: 1984, week: 10, timezone: 'Europe/Stockholm'})",
+            "The time zone 'Europe/Stockholm' is Cypher, and is not compiled to SQL yet.",
+        ),
+        ("RETURN localtime({hour: 12, dayOfQuarter: 2})", "localtime() takes no field dayOfQuarter."),
+    ],
+)
+def test_a_temporal_map_of_the_calendars_fields_past_what_the_spec_holds_is_refused_as_neo4j_refuses_it(
+    compiler: type[SqlCypherCompiler], cypher: str, message: str
+) -> None:
+    # #312, drivine4j's #495: the spec's "Temporal map of calendar fields Neo4j does not take" holds the rest. Neo4j
+    # makes an ordinal day of no year one of the year 0, which no store's date reaches, and a zone by name no store's
+    # text holds yet.
+    with pytest.raises(DrivineError) as refused:
+        compiler("g").compile(cypher)
+    assert str(refused.value) == message
+
+
+@pytest.mark.parametrize("compiler", COMPILERS.values(), ids=COMPILERS.keys())
+def test_a_temporal_map_of_the_calendars_fields_that_runs_on_or_that_an_expression_gives_is_compiled(
+    compiler: type[SqlCypherCompiler],
+) -> None:
+    # #312, drivine4j's #495: week 53 of a year of 52 weeks and a day of the quarter past its last run on, and what an
+    # expression gives is the store's to check.
+    for cypher in (
+        "RETURN date({year: 2019, week: 53}), date({year: 2023, quarter: 1, dayOfQuarter: 92}), "
+        "date({year: 2024, ordinalDay: 366})",
+        "WITH 54 AS w RETURN date({year: 2020, week: w}), datetime({year: $y, ordinalDay: 366, timezone: '+01:00'})",
+        "RETURN date({year: -1, week: -1 + 2, dayOfWeek: 7}), datetime({year: 1984, week: 10, timezone: 'Z'})",
+    ):
+        compiler("g").compile(cypher, {"y": 2023})
+
+
 def _in_where(aggregate: str) -> str:
     return (
-        f"{aggregate} aggregates, and a WHERE holds no aggregate, as in Neo4j: aggregate in a WITH first, and filter "
-        "what it gives in that WITH's WHERE, as in WITH x, count(*) AS c WHERE c > 1."
+        f"{aggregate} aggregates, and a WHERE holds no aggregate unless its WITH aggregates, as in Neo4j: aggregate in "
+        "a WITH first, and filter what it gives in that WITH's WHERE, as in WITH x, count(*) AS c WHERE c > 1."
     )
+
+
+def _undefined(variable: str) -> str:
+    return f"{variable} is not defined: a variable is bound by a pattern, a WITH or an UNWIND before it is used."
 
 
 @pytest.mark.parametrize("compiler", COMPILERS.values(), ids=COMPILERS.keys())
@@ -651,6 +732,56 @@ def _in_where(aggregate: str) -> str:
         ("UNWIND [1, 2] AS i RETURN i SKIP size([x IN [1] WHERE sum(x) > 0])", _in_where("sum()")),
         ("CREATE (n:N {v: [x IN [1, 2] WHERE avg(x) > 0 | x]})", _in_where("avg()")),
         ("FOREACH (i IN [1] | CREATE (:N {v: [x IN [1, 2] WHERE max(x) > 0 | x]}))", _in_where("max()")),
+        # #313, drivine4j's #497: a WITH whose only aggregate is in its WHERE groups nothing; in the WHERE of one that
+        # groups, a comprehension's, a quantifier's or a pattern's own WHERE or body holds no aggregate either.
+        ("UNWIND [1, 1, 2] AS i WITH i WHERE count(*) > 1 RETURN i", _in_where("count(*)")),
+        ("UNWIND [1, 1, 2] AS i WITH * WHERE count(*) > 1 RETURN i", _in_where("count(*)")),
+        (
+            "UNWIND [1, 1, 2] AS i WITH i, count(*) AS c WHERE all(x IN [1] WHERE count(*) > x) RETURN i, c",
+            _in_where("count(*)"),
+        ),
+        (
+            "UNWIND [1, 1, 2] AS i WITH i, count(*) AS c WHERE size([x IN [1] WHERE count(*) > x | x]) > 0 RETURN i, c",
+            _in_where("count(*)"),
+        ),
+        (
+            "UNWIND [1, 1, 2] AS i WITH i, count(*) AS c WHERE [x IN [1] | x + count(*)][0] > 2 RETURN i, c",
+            _in_where("count(*)"),
+        ),
+        (
+            "UNWIND [1, 1, 2] AS i WITH DISTINCT i WHERE reduce(s = 0, x IN [1] | s + count(*)) > 0 RETURN i",
+            _in_where("count(*)"),
+        ),
+        (
+            "MATCH (p)-[:ACTED_IN]->(m) WITH p, count(*) AS c "
+            "WHERE size([(p)-[:ACTED_IN]->(x) WHERE count(x) > 1 | x]) > 0 RETURN p.name",
+            _in_where("count()"),
+        ),
+        (
+            "MATCH (p)-[:ACTED_IN]->(m) WITH p, count(*) AS c WHERE EXISTS { (p)-[:KNOWS]->(q) WHERE count(q) > 0 } "
+            "RETURN p.name",
+            _in_where("count()"),
+        ),
+        (
+            "UNWIND [1, 2] AS i CALL (i) { UNWIND [i, i] AS x WITH x WHERE count(*) > 1 RETURN x } RETURN x",
+            _in_where("count(*)"),
+        ),
+        # #313, drivine4j's #497: there a variable from before the WITH is read only inside an aggregate, or where it is
+        # a key, written as its item is.
+        ("UNWIND [1, 2, 3] AS i WITH i % 2 AS k, count(*) AS c WHERE i > 0 RETURN k, c", _undefined("i")),
+        (
+            "UNWIND [1, 2, 3] AS i WITH i % 2 AS k, count(*) AS c WHERE sum(i) > 2 AND i > 0 RETURN k, c",
+            _undefined("i"),
+        ),
+        ("UNWIND [1, 2, 3] AS i WITH DISTINCT i % 2 AS k WHERE i > 0 RETURN k", _undefined("i")),
+        ("MATCH (p)-[:ACTED_IN]->(m) WITH p.name AS n, count(*) AS c WHERE p.born > 1965 RETURN n, c", _undefined("p")),
+        ("MATCH (p)-[:ACTED_IN]->(m) WITH p, count(*) AS c WHERE m.released > 1996 RETURN p.name", _undefined("m")),
+        ("UNWIND [1, 1, 2] AS i WITH i, count(*) AS c WHERE sum(c) > 1 RETURN i, c", _undefined("c")),
+        ("UNWIND [1, 1, 2] AS i WITH i AS j, count(*) AS c WHERE sum(j) > 1 RETURN j, c", _undefined("j")),
+        (
+            "UNWIND [1, 1, 2] AS i WITH i AS j, count(*) AS c WHERE any(x IN [1] WHERE x = i) RETURN j, c",
+            _undefined("i"),
+        ),
     ],
 )
 def test_an_aggregate_in_a_where_is_refused_as_neo4j_refuses_it(
@@ -673,6 +804,18 @@ def test_an_aggregate_in_a_where_is_refused_as_neo4j_refuses_it(
         "MATCH (n) WHERE EXISTS { MATCH (n)-->(m) WITH count(m) AS c WHERE c > 0 RETURN c } RETURN n.x",
         "MATCH (n) CALL (n) { MATCH (n)-->(m) WITH count(m) AS c WHERE c > 0 RETURN c } RETURN n.x, c",
         "MATCH (n) WITH n, count { (n)-->() } AS c WHERE c > 0 RETURN n.x",
+        # #313, drivine4j's #497: the WHERE of a WITH that aggregates, or is DISTINCT, filters its groups, an aggregate
+        # in it among them.
+        "UNWIND [1, 1, 2] AS i WITH i, count(*) AS c WHERE count(*) > 1 RETURN i",
+        "UNWIND [1, 1, 2] AS i WITH i, count(*) AS c WHERE sum(i) > 1 RETURN i",
+        "UNWIND [1, 2] AS i WITH i AS j, count(*) AS c WHERE j > count(*) RETURN j",
+        "UNWIND [1, 1, 2] AS i WITH DISTINCT i WHERE count(*) > 1 RETURN i",
+        "UNWIND [1, 1, 2] AS i WITH i AS j, count(*) AS c WHERE i > 1 RETURN j, c",
+        "UNWIND [1, 1, 2] AS i WITH i, count(*) AS c WHERE all(x IN collect(i) WHERE x > 1) RETURN i, c",
+        "MATCH (n) WITH n, count(*) AS c "
+        "WHERE EXISTS { MATCH (n)-->(m) WITH m, count(*) AS k WHERE count(*) > 0 RETURN m } RETURN n.x",
+        "UNWIND [1, 2] AS i CALL (i) { UNWIND [i, i] AS x WITH x, count(*) AS c WHERE count(*) > 1 RETURN c } "
+        "RETURN i, c",
     ],
 )
 def test_a_where_over_what_an_aggregate_gave_or_in_a_query_that_aggregates_in_its_own_projection_is_compiled(

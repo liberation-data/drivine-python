@@ -1149,6 +1149,122 @@ def test_an_aggregating_item_over_a_key_that_is_a_property_groups_by_the_propert
     ) == [["X", 2], ["Y", 1]]
 
 
+def test_an_aggregate_in_the_where_of_a_with_that_groups_compares_keys_as_grouping_does_and_makes_no_variable(
+    cypher_pm: PersistenceManager,
+):
+    # #313: the WHERE of a WITH that aggregates, or is DISTINCT, filters its groups, as SQL's HAVING does. drivine4j's
+    # CypherQueryContract of liberation-data/drivine4j#497, less the statements the spec holds since v0.16.0; the rows
+    # are Neo4j's (2026.10.1).
+    seeded(cypher_pm)
+
+    def query(cypher: str) -> list[Any]:
+        return cypher_pm.query(spec(cypher))
+
+    ordered: list[tuple[str, list[Any]]] = [
+        # A key's property, read through the item it is renamed to, of a map and of a node.
+        (
+            "UNWIND [{a: 1}, {a: 1}, {a: 2}] AS x WITH x AS y, count(*) AS c WHERE x.a > 1 AND count(*) = 1 "
+            "RETURN y.a, c",
+            [[2, 1]],
+        ),
+        (
+            "MATCH (p:Person)-[:ACTED_IN]->(m) WITH p AS q, count(*) AS c WHERE p.born > 1965 RETURN q.name, c "
+            "ORDER BY q.name",
+            [["Carrie", 2]],
+        ),
+        # A key and an aggregate compared as grouping compares them, a function's name in any case; count(DISTINCT i)
+        # is not count(i).
+        (
+            "UNWIND ['a', 'A', 'b'] AS x WITH toUpper(x) AS u, count(*) AS c WHERE TOUPPER(x) = 'A' RETURN u, c",
+            [["A", 2]],
+        ),
+        ("UNWIND [1, 1, 2] AS i WITH i, Sum(i) AS s WHERE SUM(i) > 1 RETURN i, s ORDER BY i", [[1, 2], [2, 2]]),
+        (
+            "UNWIND [1, 1, 2] AS i WITH i, count(i) AS c WHERE count(DISTINCT i) = 1 AND count(i) > 1 RETURN i, c",
+            [[1, 2]],
+        ),
+        # A property's name keeps its case: sum(x.A) is not sum(x.a).
+        (
+            "UNWIND [{a: 1, A: 10}, {a: 2, A: 20}] AS x WITH count(*) AS c, sum(x.a) AS s WHERE sum(x.A) > 25 "
+            "RETURN c, s",
+            [[2, 3]],
+        ),
+        # An item quoted as a made item would be named is the statement's own.
+        *(
+            (
+                f"UNWIND [1, 1, 2] AS i WITH i, count(*) AS `#having{n}` WHERE sum(i) > 1 RETURN i, `#having{n}` "
+                "ORDER BY i",
+                [[1, 2], [2, 1]],
+            )
+            for n in range(1, 7)
+        ),
+    ]
+    for cypher, rows in ordered:
+        assert (cypher, query(cypher)) == (cypher, rows)
+    unordered: list[tuple[str, list[Any]]] = [
+        ("UNWIND [1, 1, 2] AS i WITH i, count(*) AS c WHERE sum(i) > 1 WITH * RETURN *", [[1, 2], [2, 1]]),
+        (
+            "UNWIND [1, 1, 2] AS i WITH i, count(*) AS c WHERE sum(i) > 1 RETURN i UNION UNWIND [5] AS `#having2` "
+            "RETURN `#having2` AS i",
+            [1, 2, 5],
+        ),
+        ("UNWIND [1, 1, 2] AS i WITH i, count(*) AS c WHERE count(DISTINCT i) = 1 RETURN i, c", [[1, 2], [2, 1]]),
+    ]
+    for cypher, rows in unordered:
+        given = sorted(json.dumps(it) for it in query(cypher))
+        assert (cypher, given) == (cypher, sorted(json.dumps(it) for it in rows))
+
+
+def test_a_date_or_a_moment_from_calendar_fields_an_expression_gives_fails_past_their_range_as_it_runs(
+    cypher_pm: PersistenceManager,
+):
+    # #312: worked out by the store, which fails on a field past its range as Neo4j does. drivine4j's
+    # CypherTemporalContract of liberation-data/drivine4j#495, less the statements the spec holds since v0.15.0.
+    differing: list[str] = []
+    for cypher in (
+        "UNWIND [[2023, 2, 0]] AS p RETURN date({year: p[0], week: p[1], dayOfWeek: p[2]})",
+        "UNWIND [[2024, 4, 93]] AS p RETURN date({year: p[0], quarter: p[1], dayOfQuarter: p[2]})",
+        "UNWIND [[2023, 2.5]] AS p RETURN date({year: p[0], week: p[1]})",
+        # A moment's too, which Oracle reads as a JSON value's, null where it is no moment.
+        "UNWIND [[2023, 366]] AS p RETURN localdatetime({year: p[0], ordinalDay: p[1], hour: 3})",
+        "UNWIND [[2020, 54]] AS p RETURN datetime({year: p[0], week: p[1], timezone: '+01:00'})",
+        "UNWIND [[2024, 4, 93]] AS p RETURN localdatetime({year: p[0], quarter: p[1], dayOfQuarter: p[2]})",
+    ):
+        try:
+            differing.append(f"{cypher} gave {cypher_pm.query(spec(cypher))}")
+        except Exception as e:  # noqa: BLE001
+            # Fails as it runs, as on Neo4j: the store's failure, not a refusal, which is a DrivineError at the root.
+            cause: BaseException = e
+            while cause.__cause__ is not None:
+                cause = cause.__cause__
+            if isinstance(cause, DrivineError):
+                differing.append(f"{cypher} was refused: {cause}")
+    assert differing == []
+
+
+def test_a_date_or_a_moment_from_calendar_fields_an_expression_gives_is_neo4js_at_the_turn_of_a_year(
+    cypher_pm: PersistenceManager,
+):
+    # #312: the least a null gives, and a moment beside its time. Neo4j's rows (2026.10.1).
+    rows = cypher_pm.query(
+        spec(
+            "UNWIND [[2020, 53, 7, 2024, 366, 4, 92], [2019, 53, 1, 2023, 365, 1, 91], "
+            "[2015, 53, 5, 2024, 60, null, null], [2026, 1, 1, 2025, null, 2, 1]] AS p "
+            "WITH date({year: p[0], week: p[1], dayOfWeek: p[2]}) AS w, localdatetime({year: p[3], ordinalDay: p[4], "
+            "hour: 12}) AS o, datetime({year: p[0], quarter: p[5], dayOfQuarter: p[6], hour: 0, minute: 5, "
+            "timezone: '-05:00'}) AS q "
+            "RETURN [[w.year, w.month, w.day], [o.year, o.month, o.day, o.hour], [q.year, q.month, q.day, q.minute, "
+            "q.timezone]]"
+        )
+    )
+    assert rows == [
+        [[2021, 1, 3], [2024, 12, 31, 12], [2020, 12, 31, 5, "-05:00"]],
+        [[2019, 12, 30], [2023, 12, 31, 12], [2019, 4, 1, 5, "-05:00"]],
+        [[2016, 1, 1], [2024, 2, 29, 12], [2015, 1, 1, 5, "-05:00"]],
+        [[2025, 12, 29], [2025, 1, 1, 12], [2026, 4, 1, 5, "-05:00"]],
+    ]
+
+
 def test_an_optional_call_in_a_writes_subquery_counts_what_it_finds_and_the_row_it_finds_nothing_for(
     cypher_pm: PersistenceManager,
 ):

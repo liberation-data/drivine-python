@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import pytest
 import yaml
 
 SPEC = Path(__file__).parent
@@ -165,6 +166,77 @@ def failure_matches(step: Step, failure: BaseException) -> bool:
     if isinstance(step.error, list):
         return message in step.error
     return True
+
+
+@dataclass(frozen=True)
+class Hold:
+    """Steps of a case held on some stores until the issue whose port makes them pass lands: see `HELD`."""
+
+    issue: int
+    """The issue of drivine-python's whose port makes the steps pass."""
+    on: tuple[str, ...]
+    """The stores or groups the steps are held on."""
+    steps: tuple[int, ...] | None = None
+    """The steps, from 1; every step of the case where None."""
+
+
+def _steps(first: int, last: int) -> tuple[int, ...]:
+    """The steps from `first` to `last`."""
+    return tuple(range(first, last + 1))
+
+
+HELD: dict[str, dict[str, list[Hold]]] = {
+    "queries.yaml": {
+        # v0.17.0, liberation-data/drivine-cypher-spec#42: JSON's null and a missing key group, de-duplicate and sort
+        # apart.
+        "A null in a map and a missing key are one null": [
+            Hold(314, ("postgres",), (*_steps(1, 23), 25, 26)),
+            Hold(314, ("oracle",), (*_steps(1, 27), 29)),
+        ],
+        # v0.18.0, liberation-data/drivine-cypher-spec#43: a key read in a body nested in a list comprehension's WHERE,
+        # in an order term's body, and any(y IN … WHERE y = e).
+        "Implicit grouping key": [Hold(316, ("sql",), (29, 30, 31, 33, 34, 35, 37, 38, 39, 40, 42, 43, 44))],
+    },
+    "writes.yaml": {
+        "A null in a written row and a missing key are one null": [Hold(314, ("sql",), (1, 2))],
+    },
+    "temporal.yaml": {
+        # v0.19.0, liberation-data/drivine-cypher-spec#44: a temporal value made from another.
+        "Dates, times and moments from another temporal value": [Hold(317, ("sql",))],
+        "Zoned times and moments from another temporal value": [Hold(317, ("sql",))],
+        "Temporal values from another an expression gives": [Hold(317, ("sql",), (2, 3, 4))],
+    },
+    "refusals.yaml": {
+        "Temporal map not compiled yet": [Hold(317, ("sql",), (1, 4))],
+        "Temporal map from another temporal value Neo4j does not take": [Hold(317, ("sql",))],
+    },
+}
+"""
+The steps of a spec tag past what drivine-python runs that a port here has yet to make pass, by file and case. Each is
+run, and must fail; one that passes fails, so that its hold is taken out when its port lands. As Drivine for
+TypeScript's.
+"""
+
+
+def held_for(file: str, case: Case, index: int, store: str) -> int | None:
+    """The issue the step at `index` (from 0) of the case of `file` is held for on `store`, if it is: see `HELD`."""
+    for hold in HELD.get(file, {}).get(case.name, []):
+        named = any(it == store or store in GROUPS.get(it, set()) for it in hold.on)
+        if named and (hold.steps is None or index + 1 in hold.steps):
+            return hold.issue
+    return None
+
+
+HELD_FAILURES = (Exception, pytest.fail.Exception)
+"""What a held step fails with: the store's or the compiler's failure, or the check's."""
+
+
+def held_passes(file: str, case: Case, index: int, store: str, issue: int) -> str:
+    """What is said of a held step that passes."""
+    return (
+        f"{file}, {case.name}, step {index + 1} is held on {store} for liberation-data/drivine-python#{issue}, and "
+        "passes: take it out of HELD."
+    )
 
 
 def check_rows(step: Step, rows: list[Any], where: str) -> None:

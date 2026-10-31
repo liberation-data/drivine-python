@@ -32,6 +32,11 @@ class Temporal(Enum):
         self.zoned = zoned
 
     @property
+    def function(self) -> str:
+        """The name of the function that makes a value of this kind: `date`, `localdatetime`…"""
+        return self.name.lower().replace("_", "")
+
+    @property
     def instant(self) -> bool:
         """Whether a value of this kind is a moment or a time of day, which a duration is added to."""
         return self is not Temporal.DURATION

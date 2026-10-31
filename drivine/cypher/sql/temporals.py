@@ -68,8 +68,31 @@ CALENDAR_FIELDS = frozenset({"week", "dayOfWeek", "ordinalDay", "quarter", "dayO
 """The fields that give a date by the calendar's other fields, beside the year, in place of a month and a day: see
 `Temporals.of_calendar`."""
 
+SELECTORS = ("date", "time", "datetime")
+"""The fields of a map that give another temporal value to make one of: see `Temporals.over`."""
+
+_DAY = ("year", "month", "day")
+"""The fields of a date by its month: see `Temporals.over`."""
+
+_FRACTION = ("millisecond", "microsecond", "nanosecond")
+"""The fields of a fraction of a second, which make the whole fraction where any is given: see `Temporals.over`."""
+
 _TIMES = (Temporal.TIME, Temporal.LOCAL_TIME)
 """The kinds of a time of day, which no months are between."""
+
+
+@dataclass(frozen=True, eq=False)
+class TemporalBase:
+    """
+    A temporal value that a map's `date`, `time` or `datetime` gives `Temporals.over`: its `text`, and the `kinds` it
+    may be, one where the statement tells its kind, else those of the kind that give what it is to give (a date, a time
+    of day, both), its text telling which, as a value read from the store does. Told apart by identity (`eq=False`), as
+    drivine4j's `Base` is, so `over` binds the one a map's `datetime` gives as both date and time once.
+    """
+
+    text: str
+    kinds: tuple[Temporal, ...]
+
 
 _Body = Callable[[Temporal, str], str]
 """What a value of a kind is, of the kind and the value's text."""
@@ -283,21 +306,218 @@ class Temporals:
                 "month": f"EXTRACT(MONTH FROM {day})",
                 "day": f"CASE WHEN NOT ({valid(day)}) THEN 0 ELSE EXTRACT(DAY FROM {day}) END",
             }
-            if kind is Temporal.DATE:
-                return self.of(fields, None, kind)
-
-            def timed(c: list[str]) -> str:
-                checked = c[0]
-                day_of = {
-                    "year": f"EXTRACT(YEAR FROM {checked})",
-                    "month": f"EXTRACT(MONTH FROM {checked})",
-                    "day": f"EXTRACT(DAY FROM {checked})",
-                }
-                return self.of({**time, **day_of}, timezone, kind)
-
-            return self.shared([self.sql.local(self.of(fields, None, Temporal.DATE), Temporal.DATE)], timed)
+            return self._dated(fields, time, timezone, kind)
 
         return self.shared([date_], dated)
+
+    def _dated(self, date_: dict[str, str], time: dict[str, str], timezone: str | None, kind: Temporal) -> str:
+        """
+        `of` the date of the fields `date_` (`year`, `month`, `day`) and the fields of the time `time`, the date read as
+        a date first where the kind has a time too, so a store fails on a day its month has none of: see
+        `_calendar_date`.
+        """
+        if kind is Temporal.DATE:
+            return self.of(date_, None, kind)
+        return self.shared(
+            [self.sql.local(self.of(date_, None, Temporal.DATE), Temporal.DATE)],
+            lambda c: self.of({**time, **self._date_of(c[0])}, timezone, kind),
+        )
+
+    @staticmethod
+    def _date_of(timestamp: str) -> dict[str, str]:
+        """The year, the month and the day of the month of the timestamp, as `of` takes them."""
+        return {
+            "year": f"EXTRACT(YEAR FROM {timestamp})",
+            "month": f"EXTRACT(MONTH FROM {timestamp})",
+            "day": f"EXTRACT(DAY FROM {timestamp})",
+        }
+
+    # ----- Values made from another -----
+
+    def over(
+        self,
+        date_: TemporalBase | None,
+        time: TemporalBase | None,
+        fields: dict[str, str],
+        timezone: str | None,
+        kind: Temporal,
+    ) -> str:
+        """
+        The text of the kind made of the value `date_` gives its date and the value `time` gives its time of day (one
+        value where a map's `datetime` gives both), with the fields `fields` laid over theirs, SQL numbers each by
+        Cypher's names, and the offset's text `timezone`, as Neo4j lays them:
+
+        - A `week` is of the base's week-based year or the `year` given, and keeps its day of the week unless one is
+          given; an `ordinalDay` is of its year or the one given; a `dayOfQuarter` of its quarter or the one given.
+          Each is worked out as `of_calendar` works it out.
+        - Else a `year`, a `month` and a `day` given make a date with the base's others, which fails where it is none
+          (February 29th of another year); then a `quarter` alone moves it so many quarters, to the month's last day
+          where it has fewer, and a `dayOfWeek` alone to that day of its week. Beside a `dayOfWeek` the `year` moves
+          the date so many years, to the month's last day where it has fewer, and doesn't fail.
+        - A millisecond, a microsecond or a nanosecond given makes the whole fraction of the second.
+        - A time of day or a moment that gives the time keeps its offset, else UTC's; with a `timezone` it is moved
+          there, the same moment, where it has an offset, and given that offset where it has none.
+
+        Without `date_`, the fields give the date as a map's fields do; without `time`, the time. Fails as the
+        statement runs where a value given is null, or of a kind that hasn't what it is to give, or the `timezone` is
+        null or no offset, as Neo4j fails. As drivine4j's.
+        """
+        bases = [date_] if date_ is not None and date_ is time else [it for it in (date_, time) if it is not None]
+
+        def index(base: TemporalBase) -> int:
+            return next(i for i, it in enumerate(bases) if it is base)
+
+        def of_texts(texts: list[str]) -> str:
+            def of_clocks(bound: list[str]) -> str:
+                day = bound[index(date_)] if date_ is not None else None
+                clock = bound[index(time)] if time is not None else None
+                own = self._own_offset(texts[index(time)], time.kinds) if time is not None and kind.zoned else None
+                # Where what gives the time may be local, as its text tells.
+                open_ = own is not None and time is not None and any(not it.zoned for it in time.kinds)
+                if not kind.zoned:
+                    made = self._over_fields(day, clock, fields, None, kind)
+                elif timezone is None:
+                    offset = f"COALESCE({own}, 'Z')" if open_ else own
+                    made = self._over_fields(day, clock, fields, offset, kind)
+                elif own is None:
+                    made = self._over_fields(day, clock, fields, timezone, kind)
+                else:
+                    offset = f"COALESCE({own}, {timezone})" if open_ else own
+                    made = self._moved_to(self._over_fields(day, clock, fields, offset, kind), kind, timezone)
+
+                # A value given that is null, or of a kind that hasn't what it is to give, or a time zone an expression
+                # gives that is null or none, fails as on Neo4j: its date is the day 0, which every store fails on,
+                # written of the condition so that a store can't fail on it where it isn't reached.
+                def checked(v: list[str]) -> str:
+                    # The time zone too, which Oracle's `||` would drop where it is null, not make the text null.
+                    given = " AND ".join(
+                        f"{it} IS NOT NULL" for it in [*bound, *([timezone] if timezone is not None else []), v[0]]
+                    )
+                    none = self.of({"day": f"CASE WHEN {given} THEN 1 ELSE 0 END"}, None, Temporal.DATE)
+                    return f"CASE WHEN {given} THEN {v[0]} ELSE {none} END"
+
+                return self.shared([made], checked)
+
+            return self.shared([self._clock(texts[i], it.kinds) for i, it in enumerate(bases)], of_clocks)
+
+        return self.shared([it.text for it in bases], of_texts)
+
+    def _own_offset(self, text: str, kinds: tuple[Temporal, ...]) -> str | None:
+        """
+        The offset of the text of one of `kinds`, which gives a value made `over` its time: None where none of them has
+        one, and null where its text tells it is local.
+        """
+        zoned = [it for it in kinds if it.zoned]
+        if not zoned:
+            return None
+        if len(zoned) == len(kinds):
+            return self.offset(text)
+        return f"CASE WHEN {' OR '.join(self.is_kind(text, it) for it in zoned)} THEN {self.offset(text)} END"
+
+    def _clock(self, text: str, kinds: tuple[Temporal, ...]) -> str:
+        """The wall clock the text reads, of the one of `kinds` it is: null where it is none."""
+        if len(kinds) == 1:
+            return self.sql.local(text, kinds[0])
+        whens = " ".join(
+            f"WHEN {self.is_kind(text, it)} THEN {self.sql.local(text, it)}" for it in INSTANTS if it in kinds
+        )
+        return f"CASE {whens} END"
+
+    def _over_fields(
+        self, day: str | None, clock: str | None, fields: dict[str, str], offset: str | None, kind: Temporal
+    ) -> str:
+        """`over`'s value of the wall clocks `day` and `clock` (None where none is given), laid over by `fields`, with
+        the offset."""
+        time = self._over_time(clock, fields)
+        if kind in _TIMES:
+            return self.of(time, offset, kind)
+        if day is None:
+            calendar = {name: value for name, value in fields.items() if name == "year" or name in CALENDAR_FIELDS}
+            if any(it in CALENDAR_FIELDS for it in calendar):
+                return self.of_calendar({**calendar, **time}, offset, kind)
+            return self.of({**{name: value for name, value in fields.items() if name in _DAY}, **time}, offset, kind)
+        return self._over_day(day, fields, time, offset, kind)
+
+    def _over_time(self, clock: str | None, fields: dict[str, str]) -> dict[str, str]:
+        """`over`'s fields of the time of the wall clock `clock` (None where none is given), laid over by `fields`."""
+        time: dict[str, str] = {}
+        for name, part in (("hour", "HOUR"), ("minute", "MINUTE")):
+            value = fields.get(name, f"EXTRACT({part} FROM {clock})" if clock is not None else None)
+            if value is not None:
+                time[name] = value
+        second = fields.get("second", f"TRUNC(EXTRACT(SECOND FROM {clock}))" if clock is not None else None)
+        if second is not None:
+            time["second"] = second
+        if any(it in fields for it in _FRACTION):
+            time.update({name: value for name, value in fields.items() if name in _FRACTION})
+        elif clock is not None:
+            time["microsecond"] = self.sql.number(self.sql.micros(clock))
+        return time
+
+    def _over_day(
+        self, day: str, fields: dict[str, str], time: dict[str, str], offset: str | None, kind: Temporal
+    ) -> str:
+        """`over`'s value of the wall clock `day` that gives the date, laid over by `fields`, and the time `time`."""
+
+        def own(name: str) -> str:
+            return fields[name] if name in fields else self._clock_field(day, name)
+
+        if "week" in fields:
+            year = fields["year"] if "year" in fields else self._clock_field(day, "weekYear")
+            week = {"year": year, "week": own("week"), "dayOfWeek": own("dayOfWeek")}
+            return self.of_calendar({**week, **time}, offset, kind)
+        if "ordinalDay" in fields:
+            return self.of_calendar({"year": own("year"), "ordinalDay": own("ordinalDay"), **time}, offset, kind)
+        if "dayOfQuarter" in fields:
+            quarter = {"year": own("year"), "quarter": own("quarter"), "dayOfQuarter": own("dayOfQuarter")}
+            return self.of_calendar({**quarter, **time}, offset, kind)
+        if not any(it in fields for it in _DAY):
+            return self._move_day(day, fields, time, offset, kind)
+        if "dayOfWeek" in fields:
+            # Beside a day of the week (no month or day can be), a year moves the date so many years, to February 28th
+            # from the 29th of a common year, as Neo4j moves it, where alone it fails there.
+            years = f"({own('year')} - {self._clock_field(day, 'year')}) * 12"
+            return self._move_day(self.sql.add_months(day, years), fields, time, offset, kind)
+        date_ = {it: own(it) for it in _DAY}
+        return self.shared(
+            [self.sql.local(self.of(date_, None, Temporal.DATE), Temporal.DATE)],
+            lambda c: self._move_day(c[0], fields, time, offset, kind),
+        )
+
+    def _move_day(
+        self, day: str, fields: dict[str, str], time: dict[str, str], offset: str | None, kind: Temporal
+    ) -> str:
+        """`over`'s value of the date `day`, moved by a `quarter` or a `dayOfWeek` among `fields` where one is."""
+
+        def whole(value: str, last: int) -> str:
+            return f"{value} = TRUNC({value}) AND {value} BETWEEN 1 AND {last}"
+
+        if "quarter" in fields:
+
+            def by_quarter(q: list[str]) -> str:
+                moved = self.sql.add_months(day, f"({q[0]} - {self._clock_field(day, 'quarter')}) * 3")
+                return self._calendar_date(moved, time, offset, kind, lambda _: whole(q[0], 4))
+
+            return self.shared([fields["quarter"]], by_quarter)
+        if "dayOfWeek" in fields:
+
+            def by_day_of_week(d: list[str]) -> str:
+                moved = self.sql.add_time(day, f"{d[0]} - {self.sql.day_of_week(day)}", "0")
+                return self._calendar_date(moved, time, offset, kind, lambda _: whole(d[0], 7))
+
+            return self.shared([fields["dayOfWeek"]], by_day_of_week)
+        return self.of({**self._date_of(day), **time}, offset, kind)
+
+    def _moved_to(self, text: str, kind: Temporal, timezone: str) -> str:
+        """The text of the kind, zoned, the same moment as the text of it at the offset's text `timezone`."""
+        return self.shared(
+            [text, timezone],
+            lambda v: self.format(
+                self.sql.add_time(self.sql.utc(v[0], kind), "0", self._zone_field(v[1], "offsetSeconds").sql),
+                kind,
+                self.offset(v[1]),
+            ),
+        )
 
     def field(self, text: str, kind: Temporal, name: str) -> Field | None:
         """

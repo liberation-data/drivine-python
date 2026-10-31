@@ -1433,7 +1433,10 @@ class SqlCypherCompiler(ABC):
     def _read(self, select: _Select, clause: Clause, outer: Scope | None = None) -> _Select:
         """
         A reading clause over the rows the select reads, and the rows the clauses after it read: a `WITH` is a query of
-        its own. `outer` is what a subquery reads from the row it is in.
+        its own. `outer` is what a subquery reads from the row it is in. A `WITH *` alone where nothing is bound passes
+        on nothing, as Neo4j has it, and is left out: SQL has no query of no column (#304). Its `WHERE` is met on the
+        rows it reads, which hold what that reads; with `DISTINCT`, an order, `SKIP` or `LIMIT` it is refused, as it
+        was.
         """
         if isinstance(clause, Match):
             return self._match(select, clause)
@@ -1443,6 +1446,13 @@ class SqlCypherCompiler(ABC):
             self._unwind(rows, dataclasses.replace(clause, list=listed))
             return rows
         if isinstance(clause, With):
+            if (
+                clause.projection.star
+                and not clause.projection.items
+                and plain_with(dataclasses.replace(clause, where=None))
+                and all(it in self._made_anew for it in select.bound)
+            ):
+                return self._filtered_rows(select, clause.where) if clause.where is not None else select
             return self._with(select, clause, outer or {})
         if isinstance(clause, Call):
             return self._anew_call(select, clause)
@@ -1647,7 +1657,7 @@ class SqlCypherCompiler(ABC):
         them, where a `UNION` names them so, and kept distinct with `distinct`. It sees only the variables of the row it
         imports (`_called_scope`): any other name in it is a new variable, as in Cypher (#294). What its brackets
         import it sees throughout, after a `WITH` that does not pass it on too, as Neo4j has it; what a leading `WITH`
-        imports is gone after one.
+        imports is gone after one. A leading `WITH *` passes on what it imports (`_starred_imports`).
         """
         imported = self._called_scope(call, clauses, select.scope)
         inner = _Select(imported)
@@ -1658,7 +1668,8 @@ class SqlCypherCompiler(ABC):
             for variable, value in values.items():
                 inner.bind(variable, value)
         outer: Scope = imported if bracketed(call) else {}
-        for clause in clauses[:-1]:
+        reading = clauses[:-1] if bracketed(call) else self._starred_imports(clauses[:-1], list(imported))
+        for clause in reading:
             inner = self._read(inner, clause, outer)
         projection = _returned(clauses).projection
         if names is not None:
@@ -1668,6 +1679,30 @@ class SqlCypherCompiler(ABC):
         return self._project(
             inner, dataclasses.replace(projection, items=items, distinct=distinct or projection.distinct), final=False
         )
+
+    def _starred_imports(self, clauses: Sequence[Clause], imports: list[str]) -> Sequence[Clause]:
+        """
+        The reading `clauses` of a `CALL { … }` without brackets, its leading `WITH *` naming each variable it `imports`
+        in place of its star (#304): those are no variables its query binds, so the star gave none of them, and was
+        refused where nothing else was bound. Not one the compiler made (see `_anew_call`), which the statement never
+        named. Where it imports none, the `WITH` is as it was, and passes on nothing (`_read`). With brackets, Neo4j's
+        star gives none of what they import, which the query sees throughout anyway, so their clauses are as they were.
+        """
+        leading = next(
+            (i for i, it in enumerate(clauses) if not (isinstance(it, Unwind) and it.variable in self._made_anew)),
+            None,
+        )
+        clause = clauses[leading] if leading is not None else None
+        named = sorted(it for it in imports if it not in self._made_anew)
+        if leading is None or not isinstance(clause, With) or not clause.projection.star or not named:
+            return clauses
+        items = tuple(
+            ProjectionItem(Variable(name), name)
+            for name in named
+            if not any(it.name == name for it in clause.projection.items)
+        )
+        projection = dataclasses.replace(clause.projection, star=False, items=items + clause.projection.items)
+        return [*clauses[:leading], dataclasses.replace(clause, projection=projection), *clauses[leading + 1 :]]
 
     def _called_scope(self, call: Call, clauses: Sequence[Clause], scope: Scope) -> dict[str, Value]:
         """
@@ -4086,13 +4121,24 @@ class SqlCypherCompiler(ABC):
         if expression.where is not None:
             inner.where.append(self._condition(expression.where, inner.scope))
         projected = self._expression(expression.projection, inner.scope)
+        # A body that reads no variable of the pattern's own, `[(p)-->() | p.name]`, is worked out for each of the
+        # pattern's rows in a derived table, and gathered from there: an aggregate that reads only the row's columns is
+        # an aggregate of the row's query, which Postgres refuses (#305). One that reads nothing of any row, a literal
+        # or a parameter, is the comprehension's aggregate as it is. Its path variable is its own even where the row
+        # holds that name, which it leaves to a new variable.
+        own = [it for it in variables_in_pattern(expression.pattern) if it not in scope]
+        own += _present(expression.pattern.variable)
+        read = variables_read_in(expression.projection)
+        apart = not any(it in own for it in read) and (len(read) > 0 or holds_subquery(expression.projection))
 
         def gathered(value: str) -> str:
-            return (
-                "("
-                + " ".join([f"SELECT {self.aggregate_list(value)}", *inner.from_(), *_present(inner.where_clause())])
-                + ")"
-            )
+            def rows(select: str) -> str:
+                return " ".join([select, *inner.from_(), *_present(inner.where_clause())])
+
+            if not apart:
+                return f"({rows(f'SELECT {self.aggregate_list(value)}')})"
+            each = self._alias("pc")
+            return f"(SELECT {self.aggregate_list(f'{each}.v')} FROM ({rows(f'SELECT {value} AS v')}) {each})"
 
         # A comprehension of nodes or relationships is a list of them, so a write to an item of it reaches them.
         if isinstance(projected, Node):
@@ -6295,6 +6341,49 @@ def variables_in(expression: Expression) -> list[str]:
             variables_in(expression.where) if expression.where is not None else [],
         )
     return _ordered_of(variables_in, children(expression))
+
+
+def variables_read_in(expression: Expression) -> list[str]:
+    """
+    The variables the expression reads of the scope it is in, each once, in the order it names them: those
+    `variables_in` gives, but for a name that a comprehension, a quantifier or a reduce binds of its own and reads only
+    inside, so `[m IN [p.name] | m]` reads `p` alone. A pattern's new variables can't be named so in Cypher, nor a
+    subquery's, so a pattern's are as `variables_in_pattern` gives them.
+    """
+
+    def without(names: list[str], *own: str) -> list[str]:
+        return [it for it in names if it not in own]
+
+    if isinstance(expression, Variable):
+        return [expression.name]
+    if isinstance(expression, MapProjection):
+        named = [it.name for it in expression.elements if isinstance(it, VariableElement)]
+        return _ordered([expression.variable], named, _ordered_of(variables_read_in, children(expression)))
+    if isinstance(expression, ListComprehension):
+        body = _ordered_of(variables_read_in, _present(expression.where, expression.projection))
+        return _ordered(variables_read_in(expression.list), without(body, expression.variable))
+    if isinstance(expression, Quantifier):
+        body = _ordered_of(variables_read_in, _present(expression.where))
+        return _ordered(variables_read_in(expression.list), without(body, expression.variable))
+    if isinstance(expression, Reduce):
+        body = variables_read_in(expression.expression)
+        return _ordered(
+            _ordered_of(variables_read_in, [expression.initial, expression.list]),
+            without(body, expression.accumulator, expression.variable),
+        )
+    if isinstance(expression, PatternComprehension):
+        return _ordered(
+            variables_in_pattern(expression.pattern),
+            _ordered_of(variables_read_in, _present(expression.where, expression.projection)),
+        )
+    if isinstance(expression, PatternPredicate):
+        return variables_in_pattern(expression.pattern)
+    if isinstance(expression, Exists):
+        return _ordered(
+            *(variables_in_pattern(it) for it in expression.patterns),
+            variables_read_in(expression.where) if expression.where is not None else [],
+        )
+    return _ordered_of(variables_read_in, children(expression))
 
 
 def parameters_in(expression: Expression) -> set[str]:

@@ -123,6 +123,22 @@ people = await pm.query(spec.bind({"city": "Sydney"}))
   1.4 to 2.5 times a plain read as drivine4j measured it, and the list is written out whole for it. Any other item is
   read as before, and so is an unwound item. A list made of a long property (`[n.bio, 'y']`) still takes the property
   out as JSON, as above.
+- On Oracle two texts are compared (`=`, `<>`, `<`, `>=`, `IN` …) as `VARCHAR2`s, and as CLOBs with
+  `DBMS_LOB.COMPARE` where either is past 4,000 bytes
+  ([#291](https://github.com/liberation-data/drivine-python/issues/291)).
+  As JSON, `=` of a text past about 32 KB was refused (ORA-40180), even `n.bio = 'abc'` where one node's bio was that
+  long, and `<` of one read from the store over two rows or more crashed the session (ORA-03113), as the bug above did.
+  A property compared so is read by its own path, and such a query carries `NO_JSON_TABLE_TRANSFORM` (see below).
+  Beside a number, a truth value or a short text the statement gives or writes, a list or a map it writes, or an `IN`
+  of such items, only the other side is read for its kind (`n.name = $x`, `n.name = 'abc'`, `n.name IN $names`): over
+  20,000 rows that costs about a fifth more for `=` and `IN`, and an order (`n.name > $x`, `n.i < 10000`) takes three
+  fifths to two thirds of the time it took.
+  A statement that writes, and the step of a `reduce`, which run as PL/SQL, compare as JSON, as before, and refuse a
+  text past 32 KB: there a CLOB read from an unwound row's JSON crashed the session. A list or a map that holds such
+  a text is compared as JSON anywhere, and refused. Between two texts, either past 4,000 bytes, that first differ where
+  one has a character past U+FFFF and the other one from U+E000 to U+FFFF, the order is the other way round from
+  Cypher's, as a CLOB compares by UTF-16 units. See "Two texts, compared" in
+  [docs/oracle-long-json-string-crash.md](../docs/oracle-long-json-string-crash.md).
 - On Oracle an `OPTIONAL CALL` or an `OPTIONAL MATCH` is joined `ON 1 = 1`, where Postgres joins `ON TRUE`. This works
   around an Oracle bug, seen on 23.26.3: in a scalar subquery, as a `COUNT { … }` is compiled, a join `ON TRUE` is
   refused (ORA-00907) or crashes the session (ORA-03113, with ORA-07445 in the alert log)
@@ -133,7 +149,9 @@ people = await pm.query(spec.bind({"city": "Sydney"}))
   Oracle's JSON table transformation reads several JSON values of one node's row by one `JSON_TABLE`, and so rewritten
   beside another node's table the query lost that node's label and property tests, giving rows its pattern doesn't
   have and values of the wrong node, or crashing the session (ORA-03113)
-  ([#258](https://github.com/liberation-data/drivine-python/issues/258)). A query of one table carries no hint.
+  ([#258](https://github.com/liberation-data/drivine-python/issues/258)). A query of one table carries no hint, unless
+  it compares a property (see above): there the transformation lost the property's reads beside a quantifier's
+  subquery.
 - On Oracle a list worked out on each row by a subquery (`keys(n)`, `[i IN range(1, k) | i]`, `[(p)-->(q) | q.name]`)
   is read from a derived table inside a lateral view. This works around an Oracle bug, seen on 23.26.3: a subquery
   that reads the row, in the select list of a lateral view that begins a subquery's `FROM`, was worked out once for

@@ -33,6 +33,37 @@ _VIOLATED_THE_KEY = re.compile(r"unique constraint|already exists", re.IGNORECAS
 _WRITE_CONFLICT = re.compile(r"conflict|another write", re.IGNORECASE)
 _MADE_MEANWHILE = re.compile(r"already (exists|indexed)|ORA-00955\b", re.IGNORECASE)
 _UNIQUE_VIOLATION = "23505"
+_ORACLE_UNIQUE_VIOLATION = "ORA-00001"
+
+
+def _sqlstate(failure: BaseException) -> str | None:
+    """The SQLSTATE psycopg gives a Postgres failure; None for another store's."""
+    return getattr(failure, "sqlstate", None)
+
+
+def _oracle_code(failure: BaseException) -> str | None:
+    """
+    The code python-oracledb gives an Oracle failure, its error's `full_code` ("ORA-00001"): the code that leads the
+    message, not another quoted further on, such as a stacked error's. None for another store's.
+    """
+    detail = failure.args[0] if failure.args else None
+    code = getattr(detail, "full_code", None)
+    return code if isinstance(code, str) and code.startswith("ORA-") else None
+
+
+def _unique_violation(failure: BaseException) -> bool:
+    """
+    Whether a uniqueness constraint refused a write. A store that gives a code is judged by it alone: Postgres's
+    SQLSTATE 23505, whose message (psycopg's carries the DETAIL) says "already exists" as other failures' do, such as
+    42P07's "relation ... already exists"; Oracle's ORA-00001 "unique constraint violated", not ORA-02261's "such unique
+    or primary key already exists". The graph engines are judged by their message: Neo4j's "already exists with
+    label", Memgraph's and FalkorDB's "unique constraint violation". The failure and each cause under it are looked at.
+    """
+    if any_cause(failure, lambda it: _sqlstate(it) is not None):
+        return any_cause(failure, lambda it: _sqlstate(it) == _UNIQUE_VIOLATION)
+    if any_cause(failure, lambda it: _oracle_code(it) is not None):
+        return any_cause(failure, lambda it: _oracle_code(it) == _ORACLE_UNIQUE_VIOLATION)
+    return any_cause(failure, lambda it: bool(_VIOLATED_THE_KEY.search(str(it))))
 
 
 def _made_meanwhile(failure: BaseException) -> bool:
@@ -46,11 +77,11 @@ def _made_meanwhile(failure: BaseException) -> bool:
     failure and each cause under it are looked at. A refusal for something else that already exists is ensured again
     too, in vain: it is raised after _ENSURE_ATTEMPTS, and `_ensure_unique_key` warns of it.
     """
-    if any_cause(failure, lambda it: getattr(it, "sqlstate", None) is not None):
+    if any_cause(failure, lambda it: _sqlstate(it) is not None):
         return any_cause(
             failure,
             lambda it: (
-                getattr(it, "sqlstate", None) == _UNIQUE_VIOLATION
+                _sqlstate(it) == _UNIQUE_VIOLATION
                 and str(getattr(getattr(it, "diag", None), "constraint_name", None) or "").startswith("pg_")
             ),
         )
@@ -182,12 +213,11 @@ class StoreIdentityResolver:
 
     def _violated_the_key(self, error: BaseException) -> bool:
         """
-        Whether a uniqueness constraint refused the stamp: Neo4j's "already exists with label", Memgraph's and
-        FalkorDB's "unique constraint violation", Oracle's ORA-00001 "unique constraint violated", Postgres's "violates
-        unique constraint". Not another constraint, such as a not-null one, which would refuse it each time it was
-        written again. Only a manager with schema management can have made one.
+        Whether a uniqueness constraint refused the stamp (see `_unique_violation`). Not another constraint, such as a
+        not-null one, nor another failure that says "already exists", which would refuse it each time it was written
+        again. Only a manager with schema management can have made one.
         """
-        return self.constraints is not None and bool(_VIOLATED_THE_KEY.search(str(error)))
+        return self.constraints is not None and _unique_violation(error)
 
     def _lost_the_race(self, error: BaseException) -> bool:
         """Whether a peer's boot won: a violation, or a write conflict (Memgraph's, or FalkorDB's "another write")."""

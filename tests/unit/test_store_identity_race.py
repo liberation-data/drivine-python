@@ -296,6 +296,68 @@ async def test_a_stamp_refused_by_a_constraint_that_is_not_a_uniqueness_one_is_r
     assert raised.value.root_cause is refused and store.merges == 1
 
 
+class PostgresFailure(Exception):
+    """A failure as psycopg raises one: its SQLSTATE beside its message."""
+
+    def __init__(self, sqlstate: str, message: str) -> None:
+        super().__init__(message)
+        self.sqlstate = sqlstate
+
+
+class OracleFailure(Exception):
+    """A failure as python-oracledb raises one: its error, which carries the code that leads the message."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(SimpleNamespace(full_code=message.split(":")[0], message=message))
+        self.message = message
+
+    def __str__(self) -> str:
+        return self.message
+
+
+@pytest.mark.parametrize("api", APIS)
+@pytest.mark.parametrize(
+    "refused",
+    [
+        pytest.param(PostgresFailure("42P07", 'relation "drivine_node" already exists'), id="postgres-42P07"),
+        pytest.param(
+            OracleFailure("ORA-02261: such unique or primary key already exists in the table"), id="oracle-ORA-02261"
+        ),
+        pytest.param(
+            OracleFailure("ORA-02261: such unique or primary key already exists\nORA-06512: after ORA-00001"),
+            id="oracle-ORA-02261-quoting-ORA-00001",
+        ),
+    ],
+)
+async def test_a_stamp_refused_for_something_else_that_already_exists_is_raised_at_once(
+    api: Api, refused: BaseException
+):
+    # Where the store gives a code, only its uniqueness violation's (23505, ORA-00001) proves the key's constraint.
+    store = Store(EVERY_TIME, [refused])
+
+    with pytest.raises(DrivineError) as raised:
+        await resolve(store, api)
+
+    assert raised.value.root_cause is refused and store.merges == 1
+
+
+@pytest.mark.parametrize("api", APIS)
+@pytest.mark.parametrize(
+    "refused",
+    [
+        pytest.param(PostgresUniqueViolation("drivine_node_store_key"), id="postgres-23505"),
+        pytest.param(
+            OracleFailure("ORA-00001: unique constraint (DRIVINE.DRIVINE_STORE_KEY) violated"), id="oracle-ORA-00001"
+        ),
+    ],
+)
+async def test_a_stamp_the_sql_stores_key_constraint_refuses_is_written_again(api: Api, refused: BaseException):
+    store = Store(EVERY_TIME, [refused])
+
+    assert await resolve(store, api) == "store-8"
+    assert store.merges == 2
+
+
 @pytest.mark.parametrize("api", APIS)
 async def test_a_store_without_schema_management_raises_a_refused_stamp_at_once(api: Api):
     # No constraint of its own can have refused it.

@@ -145,7 +145,8 @@ class _Reader:
             )
         where = self.where(items.oC_Where())
         arguments = [self.expression(it) for it in invocation.oC_Expression()]
-        return Call(False, procedure.query(arguments, self.yields(items), where))
+        # Its WHERE may read any variable of the row.
+        return Call(False, procedure.query(arguments, self.yields(items), where), imports_all=True)
 
     def procedure(self, name: Context) -> Procedure:
         """The procedure a call names, or the call refused where the compiler does not take it."""
@@ -223,7 +224,7 @@ class _Reader:
             return Remove(tuple(self.remove_item(it) for it in context.oC_Remove().oC_RemoveItem()))
         call = context.oC_SubqueryCall()
         if call is not None:
-            return Call(call.OPTIONAL() is not None, self.regular(call.oC_RegularQuery()))
+            return self.subquery(call)
         foreach = context.oC_Foreach()
         if foreach is not None:
             return Foreach(
@@ -264,10 +265,23 @@ class _Reader:
     def labels(self, context: Context) -> tuple[str, ...]:
         return tuple(self.schema_name(it.oC_LabelName().oC_SchemaName()) for it in context.oC_NodeLabel())
 
+    def subquery(self, call: Context) -> Call:
+        """
+        `CALL { … }`, with the variables its brackets import where it has them, `CALL (a, b) { … }` or
+        `CALL (*) { … }`.
+        """
+        texts = [it.getText() for it in call.children]
+        return Call(
+            call.OPTIONAL() is not None,
+            self.regular(call.oC_RegularQuery()),
+            tuple(self.name(it) for it in call.oC_Variable()) if "(" in texts else None,
+            "*" in texts,
+        )
+
     def reading(self, context: Context) -> Clause:
         call = context.oC_SubqueryCall()
         if call is not None:
-            return Call(call.OPTIONAL() is not None, self.regular(call.oC_RegularQuery()))
+            return self.subquery(call)
         match = context.oC_Match()
         if match is not None:
             return Match(match.OPTIONAL() is not None, self.patterns(match.oC_Pattern()), self.where(match.oC_Where()))

@@ -79,7 +79,7 @@ FalkorDB.
 
 **What compiles.** What each statement gives, on each store, is the
 [Cypher spec](https://github.com/liberation-data/drivine-cypher-spec), shared by the three Drivine libraries;
-drivine-python passes it at v0.6.5 (pinned in [`tests/cypher/VERSION`](../tests/cypher/VERSION)). Reads, writes,
+drivine-python passes it at v0.10.0 (pinned in [`tests/cypher/VERSION`](../tests/cypher/VERSION)). Reads, writes,
 `UNION`, `CALL { … }`, `EXISTS { … }`, variable-length relationships, `shortestPath` and quantified path patterns all
 compile. Cypher the compiler doesn't take yet is refused by name, with a `DrivineError`, before anything is sent to the
 database.

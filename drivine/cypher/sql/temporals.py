@@ -25,6 +25,18 @@ class Parts:
 
 
 @dataclass(frozen=True)
+class Overrides:
+    """
+    The fields the third argument of a truncation gives the value cut short, in place of its own: SQL numbers by
+    Cypher's names (`year`, `month`, `day`, `hour`, `minute`, `second`, `millisecond`, `microsecond`), `dayOfWeek`, and
+    `timezone`, an offset's text.
+    """
+
+    fields: dict[str, str]
+    timezone: str | None = None
+
+
+@dataclass(frozen=True)
 class Field:
     """A field of a value: its SQL, and whether it is a text, where it is not a number."""
 
@@ -211,38 +223,38 @@ class Temporals:
         if name not in INSTANT_FIELDS:
             return None
 
-        def number(values: list[str]) -> str:
-            t = values[0]
-            second = f"EXTRACT(SECOND FROM {t})"
-            if name == "year":
-                return f"EXTRACT(YEAR FROM {t})"
-            if name == "quarter":
-                return f"TRUNC((EXTRACT(MONTH FROM {t}) + 2) / 3)"
-            if name == "month":
-                return f"EXTRACT(MONTH FROM {t})"
-            if name == "week":
-                return self.sql.number(f"to_char({t}, 'IW')")
-            if name == "weekYear":
-                return self.sql.number(f"to_char({t}, 'IYYY')")
-            if name == "day":
-                return f"EXTRACT(DAY FROM {t})"
-            if name == "ordinalDay":
-                return self.sql.number(f"to_char({t}, 'DDD')")
-            if name in ("dayOfWeek", "weekDay"):
-                return self.sql.day_of_week(t)
-            if name == "hour":
-                return f"EXTRACT(HOUR FROM {t})"
-            if name == "minute":
-                return f"EXTRACT(MINUTE FROM {t})"
-            if name == "second":
-                return f"TRUNC({second})"
-            if name == "millisecond":
-                return f"(TRUNC({second} * 1000) - TRUNC({second}) * 1000)"
-            if name == "microsecond":
-                return f"(TRUNC({second} * 1000000) - TRUNC({second}) * 1000000)"
-            return f"((TRUNC({second} * 1000000) - TRUNC({second}) * 1000000) * 1000)"
+        return Field(self.shared([self.sql.local(text, kind)], lambda t: self._clock_field(t[0], name)), text=False)
 
-        return Field(self.shared([self.sql.local(text, kind)], number), text=False)
+    def _clock_field(self, t: str, name: str) -> str:
+        """A field of the wall clock `t`, a timestamp, by Cypher's name for it."""
+        second = f"EXTRACT(SECOND FROM {t})"
+        if name == "year":
+            return f"EXTRACT(YEAR FROM {t})"
+        if name == "quarter":
+            return f"TRUNC((EXTRACT(MONTH FROM {t}) + 2) / 3)"
+        if name == "month":
+            return f"EXTRACT(MONTH FROM {t})"
+        if name == "week":
+            return self.sql.number(f"to_char({t}, 'IW')")
+        if name == "weekYear":
+            return self.sql.number(f"to_char({t}, 'IYYY')")
+        if name == "day":
+            return f"EXTRACT(DAY FROM {t})"
+        if name == "ordinalDay":
+            return self.sql.number(f"to_char({t}, 'DDD')")
+        if name in ("dayOfWeek", "weekDay"):
+            return self.sql.day_of_week(t)
+        if name == "hour":
+            return f"EXTRACT(HOUR FROM {t})"
+        if name == "minute":
+            return f"EXTRACT(MINUTE FROM {t})"
+        if name == "second":
+            return f"TRUNC({second})"
+        if name == "millisecond":
+            return f"(TRUNC({second} * 1000) - TRUNC({second}) * 1000)"
+        if name == "microsecond":
+            return f"(TRUNC({second} * 1000000) - TRUNC({second}) * 1000000)"
+        return f"((TRUNC({second} * 1000000) - TRUNC({second}) * 1000000) * 1000)"
 
     def _zone_field(self, text: str, name: str) -> Field:
         def zone(values: list[str]) -> str:
@@ -313,15 +325,73 @@ class Temporals:
             self.sql.add_months(timestamp, f"{s}({parts.months})"), f"{s}({parts.days})", f"{s}({seconds})"
         )
 
-    def truncate(self, unit: str, text: str, from_: Temporal, to: Temporal) -> str | None:
-        """The text of `to` the text of `from_` is, cut short to the unit: None where the store truncates to no such
-        unit."""
+    def truncate(
+        self, unit: str, text: str, from_: Temporal, to: Temporal, overrides: Overrides | None = None
+    ) -> str | None:
+        """
+        The text of `to` the text of `from_` is, cut short to the unit, with `overrides` in place of its fields where it
+        has any: None where the store truncates to no such unit.
+        """
         if self.sql.truncate(unit, "NULL") is None:
             return None
+        if overrides is None or (not overrides.fields and overrides.timezone is None):
+            return self.shared(
+                [text],
+                lambda t: self.format(
+                    self.sql.truncate(unit, self.sql.local(t[0], from_)) or "", to, self._offset_of(t[0], from_, to)
+                ),
+            )
+        given = overrides
         return self.shared(
             [text],
-            lambda t: self.format(
-                self.sql.truncate(unit, self.sql.local(t[0], from_)) or "", to, self._offset_of(t[0], from_, to)
+            lambda t: self.shared(
+                [self.sql.truncate(unit, self.sql.local(t[0], from_)) or ""],
+                lambda cut: self._overridden(
+                    cut[0],
+                    unit,
+                    to,
+                    given,
+                    given.timezone if given.timezone is not None else self._offset_of(t[0], from_, to),
+                ),
+            ),
+        )
+
+    def _overridden(self, cut: str, unit: str, kind: Temporal, overrides: Overrides, offset: str | None) -> str:
+        """
+        The text of the kind of the timestamp `cut`, cut short to the unit, with the fields `overrides` gives in place
+        of its own, and the offset, as Neo4j lays a truncation's fields over the value: the year, month and day, then
+        the time, then the day of the week, which moves the value within its ISO week. A millisecond or a microsecond
+        given makes the whole fraction of the second, but a microsecond given a value cut to the millisecond is added
+        to the millisecond kept.
+        """
+        given = overrides.fields
+        own = {
+            it: given[it] if it in given else self._clock_field(cut, it)
+            for it in ("year", "month", "day", "hour", "minute", "second")
+        }
+        micros = self.sql.number(self.sql.micros(cut))
+        carried = unit == "millisecond" and "microsecond" in given
+        if "millisecond" in given:
+            fraction = f"{given['millisecond']} * 1000"
+            if not carried and "microsecond" in given:
+                fraction += f" + {given['microsecond']}"
+        elif "microsecond" in given:
+            fraction = f"({micros} + {given['microsecond']})" if carried else given["microsecond"]
+        else:
+            fraction = micros
+        made = self.of({**own, "microsecond": fraction}, offset, kind)
+        day = given.get("dayOfWeek")
+        if day is None:
+            return made
+        return self.shared(
+            [made],
+            lambda m: self.shared(
+                [self.sql.local(m[0], kind)],
+                lambda clock: self.format(
+                    self.sql.add_time(clock[0], f"{day} - {self.sql.day_of_week(clock[0])}", "0"),
+                    kind,
+                    self.offset(m[0]) if kind.zoned else None,
+                ),
             ),
         )
 

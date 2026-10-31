@@ -1,8 +1,46 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any, Literal
 
 from drivine.cypher.sql.temporal import Temporal
+
+Known = Literal["INTEGER", "FLOAT", "TEXT", "BOOLEAN", "LIST", "MAP"]
+"""A kind of value the statement writes: see Json.known."""
+
+_KNOWN_NOUNS: dict[Known, str] = {
+    "INTEGER": "an integer",
+    "FLOAT": "a float",
+    "TEXT": "a text",
+    "BOOLEAN": "a truth value",
+    "LIST": "a list",
+    "MAP": "a map",
+}
+
+
+def noun_of(known: Known) -> str:
+    """A value of the kind, as a message names it: `an integer`, `a truth value`."""
+    return _KNOWN_NOUNS[known]
+
+
+def capital_noun_of(known: Known) -> str:
+    """`noun_of`, as a sentence begins with it: `An integer`."""
+    noun = noun_of(known)
+    return noun[0].upper() + noun[1:]
+
+
+def known_of(value: Any) -> Known | None:
+    """
+    The kind of the value, a literal the reader gives or a parameter's value: an int is an integer, a float a float.
+    None for null, and for any other, a Decimal among them, which is written as a whole number where it is one.
+    """
+    if isinstance(value, bool):
+        return "BOOLEAN"
+    if isinstance(value, int):
+        return "INTEGER"
+    if isinstance(value, float):
+        return "FLOAT"
+    return "TEXT" if isinstance(value, str) else None
 
 
 @dataclass(frozen=True)
@@ -58,6 +96,12 @@ class Json:
     Whether it is read from an item of a list the query unwinds, an `UNWIND`'s or the rows a write carries on, and
     passed on as it is: it reads no node's or relationship's properties, so a property of it a `RETURN` or a `WITH`
     gives is read as `SqlCypherCompiler.item_value` reads it.
+    """
+    known: Known | None = None
+    """
+    Where the statement writes it as a value of one kind, so that its kind is known when compiling, as Neo4j knows it
+    when it plans the statement: a number, a text or a truth value written, a list or a map written, or a variable a
+    `WITH` binds to one. None where the statement leaves its kind open, as for a property or a parameter.
     """
 
 

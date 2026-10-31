@@ -646,6 +646,9 @@ def _in_where(aggregate: str) -> str:
         ("UNWIND [x IN [1, 2] WHERE count(x) > 0 | x] AS y RETURN y", _in_where("count()")),
         ("MATCH (n) SET n.v = [x IN [1, 2] WHERE sum(x) > 0 | x]", _in_where("sum()")),
         ("MERGE (n:N) ON CREATE SET n.v = [x IN [1, 2] WHERE min(x) > 0 | x]", _in_where("min()")),
+        ("MERGE (n:N) ON MATCH SET n.v = [x IN [1, 2] WHERE min(x) > 0 | x]", _in_where("min()")),
+        ("MATCH (n) DELETE [x IN [n] WHERE count(x) > 0 | x][0]", _in_where("count()")),
+        ("UNWIND [1, 2] AS i RETURN i SKIP size([x IN [1] WHERE sum(x) > 0])", _in_where("sum()")),
         ("CREATE (n:N {v: [x IN [1, 2] WHERE avg(x) > 0 | x]})", _in_where("avg()")),
         ("FOREACH (i IN [1] | CREATE (:N {v: [x IN [1, 2] WHERE max(x) > 0 | x]}))", _in_where("max()")),
     ],
@@ -730,6 +733,14 @@ def _ungrouped_term(variable: str) -> str:
             _ungrouped_term("z"),
         ),
         (
+            "UNWIND [1, 2] AS x UNWIND [3] AS z RETURN x, count(*) AS c ORDER BY reduce(s = 0, w IN collect(x) | z)",
+            _ungrouped_term("z"),
+        ),
+        (
+            "UNWIND [1, 2] AS x UNWIND [3] AS z RETURN x, count(*) AS c ORDER BY any(w IN collect(x) WHERE w > z)",
+            _ungrouped_term("z"),
+        ),
+        (
             "MATCH (me:Person)--(you:Person) RETURN count(you.age) AS agg ORDER BY me.age + count(you.age)",
             _ungrouped_term("me"),
         ),
@@ -782,6 +793,9 @@ def test_an_aggregating_item_or_order_term_that_names_a_variable_no_item_groups_
         "MATCH (p:Person)-[:ACTED_IN]->(m) RETURN p AS q, count(*) AS c ORDER BY size(keys(p {.name})) + count(*)",
         "MATCH (p:Person)-[:ACTED_IN]->(m) RETURN p AS q, count(*) AS c ORDER BY p {.born}.born + count(*)",
         "MATCH (p:Person)-[:ACTED_IN]->(m) RETURN p, count(*) AS c ORDER BY size([(p)-[:KNOWS]->(k) | k]) + count(*)",
+        # A key named in another case, or spaced and bracketed otherwise: Neo4j names a function in any case.
+        "UNWIND [{a: 'x'}] AS x RETURN toUpper(x.a) AS u, count(*) AS c ORDER BY TOUPPER(x.a) + count(*)",
+        "UNWIND [{a: 'x'}] AS x RETURN toUpper( x.a ) AS u, count(*) AS c ORDER BY (toUpper(x.a)) + count(*)",
     ],
 )
 def test_a_body_or_order_term_that_names_only_what_the_projection_groups_by_is_compiled(

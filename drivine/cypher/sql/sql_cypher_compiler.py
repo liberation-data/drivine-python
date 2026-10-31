@@ -3530,9 +3530,13 @@ class SqlCypherCompiler(ABC):
             limit=None,
         )
 
+        # A key is read where it is written in another case too: see `_grouping_key`.
+        key_names = {_grouping_key(it): name for it, name in keys.items()}
+
         def kept(term: Expression) -> Expression | None:
-            if term in keys:
-                return Variable(keys[term])
+            key = key_names.get(_grouping_key(term)) if key_names else None
+            if key is not None:
+                return Variable(key)
             if term in aggregates:
                 name = aggregates[term]
                 return (
@@ -3542,12 +3546,13 @@ class SqlCypherCompiler(ABC):
 
         # An order term, or a part of one, that is an item is read by the item's name, as over a DISTINCT projection it
         # can only be; a variable an item is named after is that item, not the variable of that name before it.
-        item_names = {it.expression: it.name for it in items}
+        item_names = {_grouping_key(it.expression): it.name for it in items}
 
         def sorted_by(term: Expression) -> Expression | None:
             if isinstance(term, Variable) and term.name in by_name:
                 return term
-            return Variable(item_names[term]) if term in item_names else kept(term)
+            item = item_names.get(_grouping_key(term))
+            return Variable(item) if item is not None else kept(term)
 
         keeping = dataclasses.replace(
             projection,
@@ -6699,7 +6704,7 @@ def _require_explicit_grouping(
     """
     grouping = [it for it in items if not contains(it.expression, is_aggregate)]
     keys = {it.expression.name for it in grouping if isinstance(it.expression, Variable)}
-    grouped = [it.expression for it in grouping]
+    grouped = [_grouping_key(it.expression) for it in grouping]
     for item in items:
         if not contains(item.expression, is_aggregate):
             continue
@@ -6734,13 +6739,34 @@ def _require_explicit_grouping(
             )
 
 
+def _grouping_key(expression: Expression) -> Expression:
+    """
+    The expression as it is compared with a key that groups rows: each function's name in lower case, as Neo4j names a
+    function in any case, so `ORDER BY TOUPPER(x.a) + count(*)` reads the key `toUpper(x.a)`, in
+    `_require_explicit_grouping` and `_aggregates_first`. The AST keeps the name as written.
+    """
+
+    def lowered(part: Expression) -> Expression | None:
+        if not isinstance(part, Function):
+            return None
+        arguments = tuple(_grouping_key(it) for it in part.arguments)
+        return dataclasses.replace(part, name=part.name.lower(), arguments=arguments)
+
+    return replaced(expression, lowered)
+
+
+def _is_key(expression: Expression, keys: Sequence[Expression]) -> bool:
+    """Whether the expression is one of `keys`, each a `_grouping_key`."""
+    return bool(keys) and _grouping_key(expression) in keys
+
+
 def _named_in_bodies(expression: Expression, scope: AbstractSet[str], keys: Sequence[Expression]) -> list[str]:
     """
     The variables of `scope` that the expression names outside its aggregates and each part of it `keys` holds, in a
     comprehension's, a quantifier's, a reduce's or a pattern's body, which `variables_outside_aggregates` does not
     read.
     """
-    if is_aggregate(expression) or expression in keys:
+    if is_aggregate(expression) or _is_key(expression, keys):
         return []
     if isinstance(expression, ListComprehension):
         return _ordered(
@@ -6783,7 +6809,7 @@ def _named_outside(
         bound = {*local, *(it for it in named if it not in scope)}
         return _ordered([it for it in named if it in scope and it not in local], *(outside(it, bound) for it in parts))
 
-    if is_aggregate(expression) or expression in keys:
+    if is_aggregate(expression) or _is_key(expression, keys):
         return []
     if isinstance(expression, Variable):
         return [] if expression.name in local or expression.name not in scope else [expression.name]

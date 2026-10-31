@@ -1043,6 +1043,14 @@ def test_an_aggregate_beside_a_where_a_grouping_keys_body_or_an_order_term_that_
     assert query(
         "UNWIND [1, 2] AS x UNWIND [3] AS z RETURN x, count(*) AS c ORDER BY [w IN collect(z) | w + x][0] DESC"
     ) == [[2, 1], [1, 1]]
+    # A key named in another case: Neo4j names a function in any case.
+    assert query(
+        "UNWIND [{a: 'b'}, {a: 'a'}] AS x RETURN toUpper(x.a) AS u, count(*) AS c ORDER BY TOUPPER(x.a) + count(*) DESC"
+    ) == [["B", 1], ["A", 1]]
+    assert query(
+        "UNWIND [{a: 'b'}, {a: 'a'}] AS x RETURN toUpper(x.a) AS u, collect(DISTINCT x.a) AS c "
+        "ORDER BY TOUPPER(x.a) + size(collect(DISTINCT x.a)) DESC"
+    ) == [["B", ["b"]], ["A", ["a"]]]
 
 
 def test_an_optional_call_in_a_writes_subquery_counts_what_it_finds_and_the_row_it_finds_nothing_for(

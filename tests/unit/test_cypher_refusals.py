@@ -386,11 +386,15 @@ def test_a_compiler_compiling_again_keeps_none_of_the_names_it_made_for_the_stat
         # and an index given of another kind is refused as one written is.
         ("RETURN range(2, 8, $s)", {"s": 0}, "range() takes a step other than 0, as in Neo4j."),
         ("RETURN range(2, 8, $s)", {"s": 0.0}, "range() takes a step other than 0, as in Neo4j."),
+        # A Decimal is given as the number it is, as a bigint is in Drivine for TypeScript.
+        ("RETURN range(2, 8, $s)", {"s": Decimal(0)}, "range() takes a step other than 0, as in Neo4j."),
         ("WITH [1] AS l RETURN l[$k]", {"k": "a"}, "A list is indexed by an integer, not a text, as in Neo4j."),
         ("WITH {a: 1} AS m RETURN m[$k]", {"k": 1}, "A map is indexed by a text, not an integer, as in Neo4j."),
         ("WITH [1] AS l RETURN l[$k]", {"k": True}, "A list is indexed by an integer, not a truth value, as in Neo4j."),
         # A value carried across a write is of the kind the statement made it.
         ("WITH 1 AS x CREATE (n) RETURN x.num", {}, "An integer has no properties."),
+        # A variable each query of a UNION in a CALL makes of the same kind is of that kind.
+        ("CALL { RETURN 1 AS x UNION ALL RETURN 2 AS x } RETURN x.num", {}, "An integer has no properties."),
     ],
 )
 def test_a_value_the_statement_writes_as_one_of_a_kind_an_operator_or_a_function_does_not_take_is_refused(
@@ -598,5 +602,8 @@ def test_a_truncations_fields_given_as_an_expression_a_negated_number_utc_or_non
         "RETURN datetime.truncate('day', datetime(), {timezone: '-00:00'}), "
         "datetime.truncate('day', datetime(), {timezone: '+18:00'})",
         "RETURN localdatetime.truncate('day', localdatetime(), {}), localtime.truncate('hour', localtime(), null)",
+        # A float negated is an expression, as drivine4j and Drivine for TypeScript read it: only a whole number
+        # negated is written.
+        "RETURN date.truncate('month', date(), {day: -2.0})",
     ):
         compiler("g").compile(cypher)

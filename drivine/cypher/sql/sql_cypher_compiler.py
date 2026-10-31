@@ -71,6 +71,7 @@ from drivine.cypher.ast.remove_item import RemoveItem, RemoveProperty
 from drivine.cypher.ast.set_item import SetAdd, SetItem, SetProperty, SetReplace
 from drivine.cypher.cypher_reader import read_cypher
 from drivine.cypher.sql.compiled_cypher import CompiledCypher
+from drivine.cypher.sql.cypher_syntax import bracketed, imports, plain_with
 from drivine.cypher.sql.parameters import Parameters, cypher_json, jsonable
 from drivine.cypher.sql.temporal import Temporal
 from drivine.cypher.sql.temporal_sql import TRUNCATION_UNITS, TemporalSql
@@ -5456,8 +5457,8 @@ class SqlCypherCompiler(ABC):
                 raise DrivineError("range() takes a start, an end and a step.")
             for it in arguments:
                 self._require_kind(it, "INTEGER", lambda kind: f"range() takes integers, not {kind}, as in Neo4j.")
-            # A step written or given as 0 would never reach the end.
-            step_given = self._known(function.arguments[2]) if len(arguments) == 3 else None
+            # A step written or given as 0 would never reach the end: a Decimal is given as the number it is.
+            step_given = jsonable(self._known(function.arguments[2])) if len(arguments) == 3 else None
             if _is_number(step_given) and step_given == 0:
                 raise DrivineError("range() takes a step other than 0, as in Neo4j.")
             # Each argument read as a number first, as drivine4j reads them, so a statement's SQL is the same as its.
@@ -6209,63 +6210,6 @@ def is_seeded(expression: Expression, made: Iterable[str]) -> bool:
     )
 
 
-def imports(call: Call, clauses: Sequence[Clause], names: Iterable[str]) -> set[str]:
-    """
-    The variables of the row, of `names`, that the query `clauses` of the call imports, as Neo4j has it: those its
-    brackets name, `CALL (a, b) { … }`, or each with `CALL (*) { … }`; with no brackets, those its leading `WITH` names
-    as they are, or each with `WITH *`; none where it has neither, `CALL () { … }` or `CALL { MATCH … }`. In a `UNION`,
-    each query's own leading `WITH`. Refuses a bracketed name not of the row, and, as Neo4j does (its 42I28), a leading
-    `WITH` that names a variable of the row, or `*`, with anything more: such a `WITH` imports, and one that names none
-    is any `WITH`, `CALL { WITH 1 AS one WHERE … }`.
-    """
-    all_ = set(names)
-    if call.imports_all:
-        return all_
-    if call.imports is not None:
-        missing = next((it for it in call.imports if it not in all_), None)
-        if missing is not None:
-            raise DrivineError(
-                f"{missing} is not defined: a variable is bound by a pattern, a WITH or an UNWIND before it is used."
-            )
-        return set(call.imports)
-    first = clauses[0] if clauses else None
-    if not isinstance(first, With):
-        return set()
-    leading = first.projection
-
-    def named(item: ProjectionItem) -> str | None:
-        return item.expression.name if isinstance(item.expression, Variable) else None
-
-    if not leading.star and not any(named(it) in all_ for it in leading.items):
-        return set()
-    if not all(named(it) == it.name for it in leading.items) or not plain_with(first):
-        raise DrivineError(
-            "The importing WITH of a CALL { … } names variables of the row alone, as in Cypher: no alias, expression, "
-            "DISTINCT, WHERE, ORDER BY, SKIP or LIMIT. Import them with CALL (a, b) { … }, and work on them in a WITH "
-            "after."
-        )
-    return all_ if leading.star else {it.name for it in leading.items if it.name in all_}
-
-
-def plain_with(clause: With) -> bool:
-    """Whether the `WITH` has no `WHERE`, `DISTINCT`, `ORDER BY`, `SKIP` or `LIMIT`: one that only names what it passes
-    on."""
-    projection = clause.projection
-    return (
-        clause.where is None
-        and not projection.distinct
-        and not projection.order_by
-        and projection.skip is None
-        and projection.limit is None
-    )
-
-
-def bracketed(call: Call) -> bool:
-    """Whether the call imports by its brackets, `CALL (a) { … }` or `CALL (*) { … }`: what it imports so it sees
-    throughout."""
-    return call.imports is not None or call.imports_all
-
-
 def _texts_in(value: Any, texts: set[str]) -> None:
     """
     Adds each text the value, a statement as read or any part of it, holds anywhere, as far as its first space: each of
@@ -6934,13 +6878,13 @@ class _Written:
 
 def _written_number(value: Expression) -> _Written | None:
     """
-    The value the expression is written as, where it is a literal or a negated number, `-1`, which is written as much
-    as `1` is: None for any other expression.
+    The value the expression is written as, where it is a literal or a negated whole number, `-1`, which is written as
+    much as `1` is: None for any other expression, a negated float among them, as drivine4j reads it.
     """
     if isinstance(value, Literal):
         return _Written(value.value)
     negated = value.operand if isinstance(value, Unary) and value.operator is UnaryOperator.NEGATE else None
-    if isinstance(negated, Literal) and _is_number(negated.value):
+    if isinstance(negated, Literal) and _is_number(negated.value) and not isinstance(negated.value, float):
         return _Written(-negated.value)
     return None
 

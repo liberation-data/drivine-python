@@ -46,6 +46,7 @@ from drivine.cypher.ast.projection import Projection
 from drivine.cypher.ast.query import Query
 from drivine.cypher.ast.relationship_pattern import Group
 from drivine.cypher.ast.set_item import SetItem, SetLabels
+from drivine.cypher.sql.cypher_syntax import bracketed, imports
 from drivine.cypher.sql.value import Known, known_of, noun_of
 from drivine.drivine_error import DrivineError
 
@@ -149,9 +150,6 @@ def _called(call: Call, scope: Scope) -> Scope:
     its brackets import, `CALL (a) { … }` or `CALL (*) { … }`, or where it has none its leading `WITH` imports as it is,
     or with `*`, of the kind it is; any other of the row is a new variable there, as in Neo4j.
     """
-    # The compiler's reading of what a call imports, read here as it reads it; imported here, as it imports this module.
-    from drivine.cypher.sql.sql_cypher_compiler import bracketed, imports
-
     parts: list[Scope] = []
     for clauses in (call.query.clauses, *(it.clauses for it in call.query.unions)):
         imported = imports(call, clauses, scope)

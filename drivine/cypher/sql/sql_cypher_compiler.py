@@ -2958,6 +2958,21 @@ class SqlCypherCompiler(ABC):
         items = [*starred, *projection.items]
         if not items:
             raise DrivineError("A projection has at least one item.")
+        # An order term, or a part of one, written as an item but for its functions' names' case is that item, as Neo4j
+        # names a function in any case: so `ORDER BY toupper(p.name)` after `TOUPPER(p.name) AS u` reads the item.
+        item_keys = [(_grouping_key(it.expression), it.expression) for it in items]
+
+        def as_written(part: Expression) -> Expression | None:
+            key = _grouping_key(part)
+            return next((written for k, written in item_keys if written != part and k == key), None)
+
+        projection = dataclasses.replace(
+            projection,
+            order_by=tuple(
+                dataclasses.replace(sort, expression=replaced(sort.expression, as_written))
+                for sort in projection.order_by
+            ),
+        )
         # Before _aggregates_first, which names each variable it groups by as an item of its own.
         _require_explicit_grouping(items, projection.order_by, select.scope.keys())
         made = self._anew_first(select, projection, items)
@@ -3438,16 +3453,29 @@ class SqlCypherCompiler(ABC):
         bound (`_aggregating`), so `max(n.title) + ': ' + max(n.first) + ' ' + max(n.last)` wrote each aggregate out
         again at every level, to 68 MB on Postgres, and ran the compiler out of memory on Oracle (drivine4j#373); and
         Oracle's CONTAINS binds its CLOBs in a subquery (see its `contains_text`), which reads no aggregate of the query
-        it is in (ORA-00937). Over the aggregates' columns, the operation binds its values as any item does. None where
-        the projection does none of these.
+        it is in (ORA-00937). Over the aggregates' columns, the operation binds its values as any item does. So too
+        where an item that aggregates reads a key that is a property (`_reads_outside_aggregates`), as `r.role +
+        count(*)` beside `r.role`: grouped in place, it would be grouped by the variable `r` it names, a row for each
+        relationship, where Neo4j gives one for each role (drivine4j#491); over the keys' columns, it reads the key's.
+        None where the projection does none of these.
         """
         terms = [*(it.expression for it in items), *(it.expression for it in projection.order_by)]
         # An order term reads an item by its name.
         by_name = {it.name: it.expression for it in items}
+        # A key that is a property, read by an item that aggregates: grouped by as itself, not by its variable.
+        properties = {
+            it.expression
+            for it in items
+            if isinstance(it.expression, Property) and not contains(it.expression, is_aggregate)
+        }
         if (
             not any(contains(it, _collects_distinct) or contains(it, _iterates_aggregate) for it in terms)
             and not any(self._binds_over_aggregates(it.expression, select) for it in items)
             and not any(self._binds_over_aggregates(it.expression, select, by_name) for it in projection.order_by)
+            and not any(
+                contains(it.expression, is_aggregate) and _reads_outside_aggregates(it.expression, properties)
+                for it in items
+            )
         ):
             return None
         # Named as no variable is, unless quoted so.
@@ -3468,9 +3496,45 @@ class SqlCypherCompiler(ABC):
             contains(term, found)
         keyed = [it.name for it in keys if isinstance(it, Variable)]
 
-        # A comprehension's, a quantifier's or a reduce's body is kept as it is, so a variable it names outside its own
-        # is kept too, and so is a pattern's or a subquery's. A subquery may name any variable: each the projection
-        # groups by is kept.
+        # A key is read where it is written in another case too: see `_grouping_key`.
+        key_names = {_grouping_key(it): name for it, name in keys.items()}
+
+        def kept(term: Expression) -> Expression | None:
+            key = key_names.get(_grouping_key(term)) if key_names else None
+            if key is not None:
+                return Variable(key)
+            if term in aggregates:
+                name = aggregates[term]
+                return (
+                    Function(DISTINCT_ITEMS, False, (Variable(name),)) if _collects_distinct(term) else Variable(name)
+                )
+            return None
+
+        # A list comprehension's WHERE reads a key by its name too, where it binds no variable the key reads. In its
+        # projection, a quantifier's WHERE or a reduce's step, Neo4j groups by each variable the key reads as well, so
+        # the body is kept as it is, and those variables beside: `[t IN collect(m.title) | r.role]` beside `r.role`
+        # gives a row for each `r`.
+        def rekeyed(term: Expression, bound: AbstractSet[str] = frozenset()) -> Expression:
+            def replacement(part: Expression) -> Expression | None:
+                if (not bound or _grouping_key(part) in key_names) and not any(
+                    it in bound for it in variables_in(part)
+                ):
+                    found = kept(part)
+                    if found is not None:
+                        return found
+                if isinstance(part, ListComprehension) and part.where is not None:
+                    return dataclasses.replace(
+                        part, list=rekeyed(part.list, bound), where=rekeyed(part.where, {*bound, part.variable})
+                    )
+                return None
+
+            return replaced(term, replacement)
+
+        rekeyed_items = [dataclasses.replace(it, expression=rekeyed(it.expression)) for it in items]
+
+        # A variable a comprehension's, a quantifier's or a reduce's body names outside its own is kept, but where it is
+        # read only in a key that `rekeyed` reads by its name; so is a pattern's or a subquery's. A subquery may name
+        # any variable: each the projection groups by is kept.
         def named(expression: Expression) -> list[str]:
             if is_aggregate(expression):
                 return []
@@ -3500,7 +3564,11 @@ class SqlCypherCompiler(ABC):
         beside = [
             it
             for it in _ordered(
-                *(named(item.expression) for item in items if contains(item.expression, is_aggregate)),
+                *(
+                    named(rekeyed_item.expression)
+                    for item, rekeyed_item in zip(items, rekeyed_items, strict=True)
+                    if contains(item.expression, is_aggregate)
+                ),
                 *(
                     [name for name in named(sort.expression) if name in keyed]
                     for sort in projection.order_by
@@ -3530,20 +3598,6 @@ class SqlCypherCompiler(ABC):
             limit=None,
         )
 
-        # A key is read where it is written in another case too: see `_grouping_key`.
-        key_names = {_grouping_key(it): name for it, name in keys.items()}
-
-        def kept(term: Expression) -> Expression | None:
-            key = key_names.get(_grouping_key(term)) if key_names else None
-            if key is not None:
-                return Variable(key)
-            if term in aggregates:
-                name = aggregates[term]
-                return (
-                    Function(DISTINCT_ITEMS, False, (Variable(name),)) if _collects_distinct(term) else Variable(name)
-                )
-            return None
-
         # An order term, or a part of one, that is an item is read by the item's name, as over a DISTINCT projection it
         # can only be; a variable an item is named after is that item, not the variable of that name before it.
         item_names = {_grouping_key(it.expression): it.name for it in items}
@@ -3557,7 +3611,7 @@ class SqlCypherCompiler(ABC):
         keeping = dataclasses.replace(
             projection,
             star=False,
-            items=tuple(dataclasses.replace(it, expression=replaced(it.expression, kept)) for it in items),
+            items=tuple(rekeyed_items),
             order_by=tuple(
                 dataclasses.replace(sort, expression=replaced(sort.expression, sorted_by))
                 for sort in projection.order_by
@@ -6306,6 +6360,25 @@ def contains(expression: Expression, test: Callable[[Expression], bool]) -> bool
     return test(expression) or any(contains(it, test) for it in children(expression))
 
 
+def _reads_outside_aggregates(expression: Expression, parts: AbstractSet[Expression]) -> bool:
+    """
+    Whether the expression, outside its aggregates, holds one of `parts`, in a comprehension's, a quantifier's or a
+    reduce's body too.
+    """
+    if is_aggregate(expression):
+        return False
+    if expression in parts:
+        return True
+    bodies: list[Expression] = []
+    if isinstance(expression, ListComprehension):
+        bodies = _present(expression.where, expression.projection)
+    elif isinstance(expression, Quantifier):
+        bodies = _present(expression.where)
+    elif isinstance(expression, Reduce):
+        bodies = [expression.expression]
+    return any(_reads_outside_aggregates(it, parts) for it in [*children(expression), *bodies])
+
+
 def variables_outside_aggregates(expression: Expression) -> list[str]:
     """
     The variables the expression names outside its aggregates, each once, in the order it names them: what an
@@ -6695,26 +6768,23 @@ def _require_explicit_grouping(
     items: Sequence[ProjectionItem], order_by: Sequence[SortItem], scope: AbstractSet[str]
 ) -> None:
     """
-    Refuses what Cypher refuses (Neo4j's 42I18): an item that aggregates and names a variable outside its aggregates
-    that is not an item of its own, which a graph engine would have to group by without being told; in a
-    comprehension's, a quantifier's, a reduce's or a pattern's body, a variable of `scope` outside an item that does
-    not aggregate. So too a term of `order_by` that aggregates, beside items that aggregate, and names a variable of
-    `scope` outside an item's name and an item that does not aggregate, as Neo4j takes them. As drivine4j's
+    Refuses what Cypher refuses (Neo4j's 42I18): an item that aggregates and names a variable of `scope` outside its
+    aggregates and each key it reads, in a comprehension's, a quantifier's, a reduce's or a pattern's body too, which a
+    graph engine would have to group by without being told. A key is an item that does not aggregate, and Neo4j reads
+    one there only where it is a variable or a variable's property (`_is_plain_key`): `x.a + count(*)` beside `x.a`,
+    but not `toUpper(p.name) + count(*)` beside `toUpper(p.name)`; in a pattern's parts, only where it is a variable.
+    So too a term of `order_by` that aggregates, beside items that aggregate, and names a variable of `scope` outside an
+    item's name and an item that does not aggregate, whatever that item is, as Neo4j takes them. As drivine4j's
     requireExplicitGrouping.
     """
     grouping = [it for it in items if not contains(it.expression, is_aggregate)]
-    keys = {it.expression.name for it in grouping if isinstance(it.expression, Variable)}
     grouped = [_grouping_key(it.expression) for it in grouping]
+    keys = [it for it in grouped if _is_plain_key(it)]
+    variables = {it.name for it in keys if isinstance(it, Variable)}
     for item in items:
         if not contains(item.expression, is_aggregate):
             continue
-        implicit = [
-            it
-            for it in _ordered(
-                variables_outside_aggregates(item.expression), _named_in_bodies(item.expression, scope, grouped)
-            )
-            if it not in keys
-        ]
+        implicit = [it for it in _named_outside(item.expression, set(), scope, keys) if it not in variables]
         if implicit:
             named = ", ".join(implicit)
             raise DrivineError(
@@ -6742,15 +6812,33 @@ def _require_explicit_grouping(
 def _grouping_key(expression: Expression) -> Expression:
     """
     The expression as it is compared with a key that groups rows: each function's name in lower case, as Neo4j names a
-    function in any case, so `ORDER BY TOUPPER(x.a) + count(*)` reads the key `toUpper(x.a)`, in
-    `_require_explicit_grouping` and `_aggregates_first`. The AST keeps the name as written.
+    function in any case, so `ORDER BY TOUPPER(x.a) + count(*)` reads the key `toUpper(x.a)`, in `_project`,
+    `_require_explicit_grouping` and `_aggregates_first`; in a comprehension's, a quantifier's or a reduce's body too.
+    The AST keeps the name as written. As drivine4j's keyOf.
     """
 
     def lowered(part: Expression) -> Expression | None:
-        if not isinstance(part, Function):
-            return None
-        arguments = tuple(_grouping_key(it) for it in part.arguments)
-        return dataclasses.replace(part, name=part.name.lower(), arguments=arguments)
+        if isinstance(part, Function):
+            arguments = tuple(_grouping_key(it) for it in part.arguments)
+            return dataclasses.replace(part, name=part.name.lower(), arguments=arguments)
+        if isinstance(part, ListComprehension):
+            return dataclasses.replace(
+                part,
+                list=_grouping_key(part.list),
+                where=_grouping_key(part.where) if part.where is not None else None,
+                projection=_grouping_key(part.projection) if part.projection is not None else None,
+            )
+        if isinstance(part, Quantifier):
+            where = _grouping_key(part.where) if part.where is not None else None
+            return dataclasses.replace(part, list=_grouping_key(part.list), where=where)
+        if isinstance(part, Reduce):
+            return dataclasses.replace(
+                part,
+                initial=_grouping_key(part.initial),
+                list=_grouping_key(part.list),
+                expression=_grouping_key(part.expression),
+            )
+        return None
 
     return replaced(expression, lowered)
 
@@ -6760,36 +6848,14 @@ def _is_key(expression: Expression, keys: Sequence[Expression]) -> bool:
     return bool(keys) and _grouping_key(expression) in keys
 
 
-def _named_in_bodies(expression: Expression, scope: AbstractSet[str], keys: Sequence[Expression]) -> list[str]:
+def _is_plain_key(expression: Expression) -> bool:
     """
-    The variables of `scope` that the expression names outside its aggregates and each part of it `keys` holds, in a
-    comprehension's, a quantifier's, a reduce's or a pattern's body, which `variables_outside_aggregates` does not
-    read.
+    Whether the expression, an item that does not aggregate, is a key that an item that aggregates may read, as Neo4j
+    takes one there: a variable, or a variable's property. Not `x.a.b`, `x['a']` or `toUpper(x.a)`.
     """
-    if is_aggregate(expression) or _is_key(expression, keys):
-        return []
-    if isinstance(expression, ListComprehension):
-        return _ordered(
-            _named_in_bodies(expression.list, scope, keys),
-            *(
-                _named_outside(it, {expression.variable}, scope, keys)
-                for it in _present(expression.where, expression.projection)
-            ),
-        )
-    if isinstance(expression, Quantifier):
-        return _ordered(
-            _named_in_bodies(expression.list, scope, keys),
-            *(_named_outside(it, {expression.variable}, scope, keys) for it in _present(expression.where)),
-        )
-    if isinstance(expression, Reduce):
-        return _ordered(
-            _named_in_bodies(expression.initial, scope, keys),
-            _named_in_bodies(expression.list, scope, keys),
-            _named_outside(expression.expression, {expression.accumulator, expression.variable}, scope, keys),
-        )
-    if isinstance(expression, (PatternComprehension, PatternPredicate, Exists)):
-        return _named_outside(expression, set(), scope, keys)
-    return _ordered(*(_named_in_bodies(it, scope, keys) for it in children(expression)))
+    return isinstance(expression, Variable) or (
+        isinstance(expression, Property) and isinstance(expression.subject, Variable)
+    )
 
 
 def _named_outside(
@@ -6798,7 +6864,9 @@ def _named_outside(
     """
     The variables of `scope` that the expression names outside its aggregates, and outside each part of it `keys`
     holds, a comprehension's, a quantifier's, a reduce's or a pattern's body among them, but for those it binds or
-    `local` holds. A pattern binds each of its variables not of `scope`. A subquery's own query is read for none.
+    `local` holds. A pattern binds each of its variables not of `scope`, and in its parts, as Neo4j reads them, a key
+    is only one that is a variable: `q.name = p.name` in a pattern comprehension's WHERE names `p`, though `p.name` is
+    a key. A subquery's own query is read for none.
     """
 
     def outside(part: Expression, inner: AbstractSet[str] = local) -> list[str]:
@@ -6807,7 +6875,11 @@ def _named_outside(
     def patterned(pattern: Pattern, parts: Sequence[Expression]) -> list[str]:
         named = _ordered(variables_in_pattern(pattern), _present(pattern.variable))
         bound = {*local, *(it for it in named if it not in scope)}
-        return _ordered([it for it in named if it in scope and it not in local], *(outside(it, bound) for it in parts))
+        variables = [it for it in keys if isinstance(it, Variable)]
+        return _ordered(
+            [it for it in named if it in scope and it not in local],
+            *(_named_outside(it, bound, scope, variables) for it in parts),
+        )
 
     if is_aggregate(expression) or _is_key(expression, keys):
         return []

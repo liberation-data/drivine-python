@@ -1060,6 +1060,101 @@ async def test_an_aggregate_beside_a_where_a_grouping_keys_body_or_an_order_term
     ) == [["B", ["b"]], ["A", ["a"]]]
 
 
+async def test_an_aggregating_item_over_a_key_that_is_a_property_groups_by_the_property_as_neo4j_does(
+    cypher_pm: PersistenceManager,
+):
+    # #311: beside the shapes now refused, those Neo4j takes. drivine4j's CypherQueryContract of
+    # liberation-data/drivine4j#491; the rows are Neo4j's (2026.10).
+    await seeded(cypher_pm)
+
+    async def query(cypher: str) -> list[Any]:
+        return await cypher_pm.query(spec(cypher))
+
+    roles = ["Johnny", "Morpheus", "Neo", "Trinity"]
+    # Grouped by the property, not by its variable: one row for "Neo", which two relationships have.
+    assert await query("UNWIND [{a: 1}, {a: 1}, {a: 2}] AS x RETURN x.a AS a, x.a + count(*) AS b ORDER BY a") == [
+        [1, 3],
+        [2, 3],
+    ]
+    assert await query(
+        "UNWIND [{a: 1}, {a: 1}, {a: 2}] AS x WITH x.a AS a, x.a + count(*) AS b RETURN a, b ORDER BY a"
+    ) == [[1, 3], [2, 3]]
+    assert await query(
+        "MATCH (:Person)-[r:ACTED_IN]->() RETURN r.role AS role, r.role + count(*) AS n ORDER BY role"
+    ) == [[role, n] for role, n in zip(roles, ["Johnny1", "Morpheus1", "Neo2", "Trinity2"], strict=True)]
+    assert await query(
+        "MATCH (:Person)-[r:ACTED_IN]->() RETURN r.role AS role, {role: r.role, n: count(*)} AS n ORDER BY role"
+    ) == [[role, {"role": role, "n": n}] for role, n in zip(roles, [1, 1, 2, 2], strict=True)]
+    assert await query(
+        "MATCH (p:Person)-[:ACTED_IN]->(m) RETURN p.name, size(reduce(s = p.name, t IN collect(m.title) | s + t)) AS r "
+        "ORDER BY p.name"
+    ) == [["Carrie", 35], ["Keanu", 49], ["Laurence", 18]]
+    assert await query(
+        "MATCH (p:Person)-[:ACTED_IN]->(m) RETURN p.name, p.name IN collect(m.title) AS r ORDER BY p.name"
+    ) == [["Carrie", False], ["Keanu", False], ["Laurence", False]]
+    assert await query(
+        "UNWIND [{a: {b: 1}}, {a: {b: 1}}, {a: {b: 2}}] AS x RETURN x.a AS k, x.a.b + count(*) AS c ORDER BY k.b"
+    ) == [[{"b": 1}, 3], [{"b": 2}, 3]]
+    # In a list comprehension's WHERE, the key; in its projection or a quantifier's WHERE, Neo4j groups by its variable
+    # too.
+    assert await query(
+        "MATCH (:Person)-[r:ACTED_IN]->(m) RETURN r.role AS role, "
+        "size([t IN collect(m.title) WHERE t STARTS WITH r.role | t]) AS n ORDER BY role"
+    ) == [[role, n] for role, n in zip(roles, [1, 0, 0, 0], strict=True)]
+    each = ["Johnny", "Morpheus", "Neo", "Neo", "Trinity", "Trinity"]
+    assert await query(
+        "MATCH (:Person)-[r:ACTED_IN]->(m) RETURN r.role AS role, [t IN collect(m.title) | r.role] AS n ORDER BY role"
+    ) == [[it, [it]] for it in each]
+    assert await query(
+        "MATCH (:Person)-[r:ACTED_IN]->(m) RETURN r.role AS role, any(t IN collect(m.title) WHERE t CONTAINS r.role) "
+        "AS n ORDER BY role"
+    ) == [[it, it == "Johnny"] for it in each]
+    # Unnamed, a map projection is the item p, which an order term reads.
+    assert await query("MATCH (p:Person)-[:ACTED_IN]->(m) RETURN p {.name}, count(*) AS c ORDER BY p.name") == [
+        [{"name": "Carrie"}, 2],
+        [{"name": "Keanu"}, 3],
+        [{"name": "Laurence"}, 1],
+    ]
+    assert await query("MATCH (p:Person)-[:ACTED_IN]->(m) RETURN p {.name, .born}, count(*) AS c ORDER BY p.born") == [
+        [{"name": "Laurence", "born": 1961}, 1],
+        [{"name": "Keanu", "born": 1964}, 3],
+        [{"name": "Carrie", "born": 1967}, 2],
+    ]
+    assert await query(
+        "MATCH (p:Person)-[:ACTED_IN]->(m) WITH p {.name}, count(*) AS c RETURN p.name, c ORDER BY p.name"
+    ) == [["Carrie", 2], ["Keanu", 3], ["Laurence", 1]]
+    # A null key is one group; two keys of one variable group by both, not by the variable (two rows have a = 1, b = 1).
+    assert await query("MATCH (m:Movie) RETURN m.tagline AS t, {t: m.tagline, n: count(*)} AS n ORDER BY t") == [
+        ["Welcome to the Real World", {"t": "Welcome to the Real World", "n": 1}],
+        [None, {"t": None, "n": 2}],
+    ]
+    assert await query(
+        "UNWIND [{a: 1, b: 1, c: 1}, {a: 1, b: 1, c: 2}, {a: 1, b: 2, c: 1}, {a: 2, b: 2, c: 1}] AS x "
+        "RETURN x.a AS a, x.b AS b, x.a * 10 + x.b + count(*) AS n ORDER BY a, b"
+    ) == [[1, 1, 13], [1, 2, 13], [2, 2, 23]]
+    # In a comprehension's WHERE inside another's WHERE, the key too; but not where a comprehension binds the key's
+    # variable.
+    assert await query(
+        "MATCH (:Person)-[r:ACTED_IN]->(m) RETURN r.role AS role, "
+        "size([t IN collect(m.title) WHERE size([u IN [t] WHERE u CONTAINS r.role]) > 0]) AS n ORDER BY role"
+    ) == [[role, n] for role, n in zip(roles, [1, 0, 0, 0], strict=True)]
+    assert await query(
+        "UNWIND [{a: 1}, {a: 2}, {a: 2}] AS x RETURN x.a AS a, size([x IN [{a: 5}] WHERE x.a > 1]) + count(*) AS n "
+        "ORDER BY a"
+    ) == [[1, 2], [2, 3]]
+    # A function named in another case is the same function.
+    assert await query(
+        "MATCH (p:Person)-[:ACTED_IN]->(m) RETURN toUpper(p.name) AS u, count(*) AS c "
+        "ORDER BY TOUPPER(p.name) + count(*) DESC"
+    ) == [["LAURENCE", 1], ["KEANU", 3], ["CARRIE", 2]]
+    assert await query(
+        "MATCH (p:Person)-[:ACTED_IN]->(m) RETURN TOUPPER(p.name) AS u, count(*) AS c ORDER BY toupper(p.name)"
+    ) == [["CARRIE", 2], ["KEANU", 3], ["LAURENCE", 1]]
+    assert await query(
+        "UNWIND [{a: 'x'}, {a: 'x'}, {a: 'y'}] AS x RETURN toUpper(x.a), count(*) ORDER BY TOUPPER(x.a) + count(*)"
+    ) == [["X", 2], ["Y", 1]]
+
+
 async def test_an_optional_call_in_a_writes_subquery_counts_what_it_finds_and_the_row_it_finds_nothing_for(
     cypher_pm: PersistenceManager,
 ):

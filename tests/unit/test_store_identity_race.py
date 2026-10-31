@@ -1,0 +1,307 @@
+"""
+Managers resolving the store identity at once, each making the key's constraint: #298, as drivine4j#473. The fake store
+runs its schema statements through the real ConstraintManager and SchemaExecutor, async and sync, so a deadlock making
+the constraint is run again as it would be.
+"""
+
+import logging
+from types import SimpleNamespace
+from typing import Any, Literal
+
+import pytest
+from neo4j.exceptions import Neo4jError
+
+from drivine.backend.backends import backend_for
+from drivine.connection.database_type import DatabaseType
+from drivine.drivine_error import DrivineError
+from drivine.query.query_specification import QuerySpecification
+from drivine.schema.constraint_manager import ConstraintManager
+from drivine.schema.schema_executor import SchemaExecutor
+from drivine.schema.schema_grammar import NEO4J_SCHEMA
+from drivine.store.store_identity_resolver import StoreIdentityResolver
+from drivine.sync.schema.constraint_manager import ConstraintManager as SyncConstraintManager
+from drivine.sync.schema.schema_executor import SchemaExecutor as SyncSchemaExecutor
+from drivine.sync.store.store_identity_resolver import StoreIdentityResolver as SyncStoreIdentityResolver
+
+Api = Literal["async", "sync"]
+APIS: list[Api] = ["async", "sync"]
+EVERY_TIME = 1_000_000
+
+DEADLOCK = "Neo.TransientError.Transaction.DeadlockDetected"
+CONFLICT = "Cannot resolve conflicting transactions. You can retry this transaction."
+
+
+def bolt(code: str, message: str | None = None) -> Neo4jError:
+    """An error as the driver makes one from the server's failure."""
+    return Neo4jError._hydrate_neo4j(code=code, message=message or code)  # pyright: ignore[reportPrivateUsage]
+
+
+def violated() -> Neo4jError:
+    return bolt(
+        "Neo.ClientError.Schema.ConstraintValidationFailed",
+        "Node(0) already exists with label `DrivineStore` and property `key` = 'singleton'",
+    )
+
+
+class PostgresUniqueViolation(Exception):
+    """
+    A unique violation as psycopg raises one: its SQLSTATE, the constraint it names in its diagnostics, and a message
+    that carries the DETAIL, which says "already exists" of any violation.
+    """
+
+    def __init__(self, constraint: str) -> None:
+        super().__init__(
+            f'duplicate key value violates unique constraint "{constraint}"\nDETAIL:  Key (id)=(7) already exists.'
+        )
+        self.sqlstate = "23505"
+        self.diag = SimpleNamespace(constraint_name=constraint)
+
+
+class Store:
+    """
+    A Neo4j store whose stamp MERGE fails with the next of `merge_failures`, if any. The first `create_failures`
+    CREATE CONSTRAINTs deadlock, or, given `made_meanwhile`, are refused with it, another session having made the
+    constraint, unless `found_after` is False: then nothing made it, and the refusal is for something else.
+    """
+
+    def __init__(
+        self,
+        create_failures: int,
+        merge_failures: list[BaseException],
+        made_meanwhile: BaseException | None = None,
+        found_after: bool = True,
+    ) -> None:
+        self.create_failures = create_failures
+        self.merge_failures = merge_failures
+        self.made_meanwhile = made_meanwhile
+        self.found_after = found_after
+        self.created = False
+        self.creates = 0
+        self.merges = 0
+
+    def query(self, spec: QuerySpecification[Any]) -> list[Any]:
+        assert spec.statement is not None
+        statement = spec.statement.text
+        if statement.startswith("CREATE CONSTRAINT"):
+            self.creates += 1
+            if self.creates <= self.create_failures:
+                self.created = self.made_meanwhile is not None and self.found_after
+                raise self.made_meanwhile or bolt(DEADLOCK, "Deadlock wait cycle.")
+            self.created = True
+        if statement.startswith("SHOW CONSTRAINTS") and self.created:
+            return [{"name": "DrivineStore_key", "labels": ["DrivineStore"], "properties": ["key"]}]
+        return []
+
+    def execute(self) -> None:
+        self.merges += 1
+        if self.merge_failures:
+            failure = self.merge_failures.pop(0)
+            raise DrivineError.with_root_cause(failure) from failure
+
+    def stamps(self) -> list[dict[str, str]]:
+        return [{"id": "store-8", "assignedAt": "2026-01-01T00:00:00Z"}]
+
+
+class AsyncConnection:
+    def __init__(self, store: Store) -> None:
+        self.store = store
+
+    async def query(self, spec: QuerySpecification[Any]) -> list[Any]:
+        return self.store.query(spec)
+
+    async def release(self, error: BaseException | None = None) -> None:
+        pass
+
+
+class SyncConnection:
+    def __init__(self, store: Store) -> None:
+        self.store = store
+
+    def query(self, spec: QuerySpecification[Any]) -> list[Any]:
+        return self.store.query(spec)
+
+    def release(self, error: BaseException | None = None) -> None:
+        pass
+
+
+class AsyncProvider:
+    name = "neo4j"
+    type = DatabaseType.NEO4J
+
+    def __init__(self, store: Store) -> None:
+        self.store = store
+
+    async def connect(self) -> AsyncConnection:
+        return AsyncConnection(self.store)
+
+
+class SyncProvider:
+    name = "neo4j"
+    type = DatabaseType.NEO4J
+
+    def __init__(self, store: Store) -> None:
+        self.store = store
+
+    def connect(self) -> SyncConnection:
+        return SyncConnection(self.store)
+
+
+class AsyncPm:
+    database = "neo4j"
+    type = DatabaseType.NEO4J
+
+    def __init__(self, store: Store) -> None:
+        self.store = store
+
+    async def execute(self, spec: QuerySpecification[Any]) -> None:
+        self.store.execute()
+
+    async def query(self, spec: QuerySpecification[Any]) -> list[Any]:
+        return self.store.stamps()
+
+
+class SyncPm:
+    database = "neo4j"
+    type = DatabaseType.NEO4J
+
+    def __init__(self, store: Store) -> None:
+        self.store = store
+
+    def execute(self, spec: QuerySpecification[Any]) -> None:
+        self.store.execute()
+
+    def query(self, spec: QuerySpecification[Any]) -> list[Any]:
+        return self.store.stamps()
+
+
+async def resolve(store: Store, api: Api, schema_management: bool = True) -> str:
+    """The id the API's resolver gives over the store, with schema management or (as on Neptune) without it."""
+    backend = backend_for(DatabaseType.NEO4J)
+    if api == "async":
+        constraints = ConstraintManager(SchemaExecutor(AsyncProvider(store)), NEO4J_SCHEMA)  # pyright: ignore[reportArgumentType]
+        resolver = StoreIdentityResolver(AsyncPm(store), backend, constraints if schema_management else None)  # pyright: ignore[reportArgumentType]
+        return (await resolver.resolve()).id
+    sync_constraints = SyncConstraintManager(SyncSchemaExecutor(SyncProvider(store)), NEO4J_SCHEMA)  # pyright: ignore[reportArgumentType]
+    sync_resolver = SyncStoreIdentityResolver(SyncPm(store), backend, sync_constraints if schema_management else None)  # pyright: ignore[reportArgumentType]
+    return sync_resolver.resolve().id
+
+
+def best_effort(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [it.getMessage() for it in caplog.records if "best-effort" in it.getMessage()]
+
+
+@pytest.fixture(autouse=True)
+def warnings(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.WARNING, "drivine.store")
+
+
+@pytest.mark.parametrize("api", APIS)
+async def test_a_stamp_the_constraint_refuses_is_written_again_though_its_making_deadlocked(api: Api):
+    # The refusal itself proves a constraint in force, so it is taken for a lost race though none was confirmed.
+    store = Store(EVERY_TIME, [violated()])
+
+    assert await resolve(store, api) == "store-8"
+    assert store.creates > 1, "the schema executor ran the deadlocked statement again"
+    assert store.merges == 2
+
+
+@pytest.mark.parametrize("api", APIS)
+async def test_a_constraint_whose_making_deadlocked_once_is_made_again_so_the_stamp_is_written_under_it(api: Api):
+    # Only under a constraint confirmed is a conflict taken for a lost race, and the stamp written again.
+    store = Store(1, [Exception(CONFLICT)])
+
+    assert await resolve(store, api) == "store-8"
+    assert store.creates == 2 and store.merges == 2
+
+
+@pytest.mark.parametrize("api", APIS)
+async def test_the_constraint_is_ensured_again_when_another_manager_made_it_meanwhile(api: Api, caplog):
+    # As FalkorDB refuses a second constraint on the key.
+    store = Store(1, [Exception(CONFLICT)], made_meanwhile=Exception("Constraint already exists."))
+
+    assert await resolve(store, api) == "store-8"
+    # The second ensure finds the other's constraint, so it isn't made again, and the stamp is written under it.
+    assert store.creates == 1 and store.merges == 2
+    assert best_effort(caplog) == []
+
+
+@pytest.mark.parametrize("api", APIS)
+async def test_the_constraint_is_ensured_again_when_another_manager_made_the_index_it_needs_meanwhile(api: Api, caplog):
+    store = Store(1, [], made_meanwhile=Exception("Attribute 'key' is already indexed"))
+
+    assert await resolve(store, api) == "store-8"
+    assert store.creates == 1 and best_effort(caplog) == []
+
+
+@pytest.mark.parametrize("api", APIS)
+async def test_the_constraint_is_ensured_again_when_postgres_refused_its_index_for_a_name_taken_in_pg_class(
+    api: Api, caplog
+):
+    raced = PostgresUniqueViolation("pg_class_relname_nsp_index")
+    store = Store(1, [], made_meanwhile=DrivineError.with_root_cause(raced))
+
+    assert await resolve(store, api) == "store-8"
+    assert store.creates == 1 and best_effort(caplog) == []
+
+
+@pytest.mark.parametrize("api", APIS)
+async def test_a_unique_violation_in_a_users_table_is_not_taken_for_one_made_meanwhile(api: Api, caplog):
+    violation = PostgresUniqueViolation("orders_pkey")
+    store = Store(1, [], made_meanwhile=DrivineError.with_root_cause(violation))
+
+    assert await resolve(store, api) == "store-8"
+    assert store.creates == 1
+    assert len(best_effort(caplog)) == 1 and "orders_pkey" in best_effort(caplog)[0]
+
+
+@pytest.mark.parametrize("api", APIS)
+async def test_identity_is_best_effort_once_its_making_is_refused_as_made_meanwhile_three_times(api: Api, caplog):
+    # A real misconfiguration: something in the way that ensure can't find, so the constraint is never there.
+    refusal = Exception("There already exists an index (:DrivineStore {key}).")
+    store = Store(EVERY_TIME, [], made_meanwhile=refusal, found_after=False)
+
+    assert await resolve(store, api) == "store-8"
+    assert store.creates == 3 and store.merges == 1
+    assert len(best_effort(caplog)) == 1 and "There already exists an index" in best_effort(caplog)[0]
+
+
+@pytest.mark.parametrize("api", APIS)
+async def test_a_constraint_refusal_of_another_kind_is_not_ensured_again(api: Api, caplog):
+    store = Store(EVERY_TIME, [], made_meanwhile=bolt("Neo.ClientError.Security.Forbidden", "Schema operation denied"))
+
+    assert await resolve(store, api) == "store-8"
+    assert store.creates == 1 and len(best_effort(caplog)) == 1
+
+
+@pytest.mark.parametrize("api", APIS)
+async def test_a_stamp_refused_for_another_reason_after_the_deadlock_is_raised_at_once(api: Api):
+    refused = bolt("Neo.ClientError.Statement.SyntaxError", "Invalid input")
+    store = Store(EVERY_TIME, [refused])
+
+    with pytest.raises(DrivineError) as raised:
+        await resolve(store, api)
+
+    assert raised.value.root_cause is refused and store.merges == 1
+
+
+@pytest.mark.parametrize("api", APIS)
+async def test_a_stamp_refused_by_a_constraint_that_is_not_a_uniqueness_one_is_raised_at_once(api: Api):
+    # Only a uniqueness violation proves the key's constraint in force; a not-null one fails the same way each time.
+    refused = Exception('null value in column "props" of relation "drivine_node" violates not-null constraint')
+    store = Store(EVERY_TIME, [refused])
+
+    with pytest.raises(DrivineError) as raised:
+        await resolve(store, api)
+
+    assert raised.value.root_cause is refused and store.merges == 1
+
+
+@pytest.mark.parametrize("api", APIS)
+async def test_a_store_without_schema_management_raises_a_refused_stamp_at_once(api: Api):
+    # No constraint of its own can have refused it.
+    store = Store(0, [violated()])
+
+    with pytest.raises(DrivineError):
+        await resolve(store, api, schema_management=False)
+
+    assert store.merges == 1 and store.creates == 0

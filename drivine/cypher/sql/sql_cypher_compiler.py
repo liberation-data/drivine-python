@@ -4,6 +4,7 @@ import dataclasses
 import functools
 import logging
 import math
+import re
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -11,6 +12,7 @@ from decimal import Decimal
 from enum import Enum
 from functools import cached_property
 from typing import Any, NoReturn, TypeVar, cast
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from drivine.backend.sql.sql_graph import sql_text as literal
 from drivine.cypher.ast.clause import (
@@ -69,11 +71,25 @@ from drivine.cypher.ast.remove_item import RemoveItem, RemoveProperty
 from drivine.cypher.ast.set_item import SetAdd, SetItem, SetProperty, SetReplace
 from drivine.cypher.cypher_reader import read_cypher
 from drivine.cypher.sql.compiled_cypher import CompiledCypher
+from drivine.cypher.sql.cypher_syntax import bracketed, imports, plain_with
 from drivine.cypher.sql.parameters import Parameters, cypher_json, jsonable
 from drivine.cypher.sql.temporal import Temporal
-from drivine.cypher.sql.temporal_sql import TemporalSql
-from drivine.cypher.sql.temporals import FIELD_NAMES, NoNumber, Temporals, canonical
-from drivine.cypher.sql.value import Bool, Entities, Json, Node, Path, Relationship, Value
+from drivine.cypher.sql.temporal_sql import TRUNCATION_UNITS, TemporalSql
+from drivine.cypher.sql.temporals import FIELD_NAMES, NoNumber, Overrides, Temporals, canonical
+from drivine.cypher.sql.value import (
+    Bool,
+    Entities,
+    Json,
+    Known,
+    Node,
+    Path,
+    Relationship,
+    Value,
+    capital_noun_of,
+    known_of,
+    noun_of,
+)
+from drivine.cypher.sql.variable_kinds import check_variable_kinds
 from drivine.drivine_error import DrivineError
 from drivine.model import stamps
 
@@ -481,6 +497,9 @@ class SqlCypherCompiler(ABC):
     def compile_query(self, query: Query, parameters: Mapping[str, Any]) -> CompiledCypher:
         """The statement, read already, with its parameters' values, as SQL: a query, or a procedure where it
         writes."""
+        # A variable used as two kinds, or made where it is bound already, is refused for that, before what is not
+        # compiled yet.
+        check_variable_kinds(query)
         if query.unions:
             return self._with_functions(self._union(query, parameters))
         if not any(writes(it) for it in query.clauses):
@@ -1753,6 +1772,7 @@ class SqlCypherCompiler(ABC):
             items = {it.items if isinstance(it, Json) else None for it in all_}
             item_items = {it.item_items if isinstance(it, Json) else None for it in all_}
             row_keys = {it.row_keys if isinstance(it, Json) else None for it in all_}
+            known = {it.known if isinstance(it, Json) else None for it in all_}
             scope[variable] = dataclasses.replace(
                 value,
                 row_keys=next(iter(row_keys)) if len(row_keys) == 1 else None,
@@ -1763,6 +1783,8 @@ class SqlCypherCompiler(ABC):
                 temporals=any(isinstance(it, Json) and it.temporals for it in all_),
                 text=all(_is_text(it) for it in all_),
                 texts=all(_holds_texts(it) for it in all_),
+                # Its kind is known only where each query writes it as a value of that one.
+                known=next(iter(known)) if len(known) == 1 else None,
             )
         return _Projected(sql, scope, [])
 
@@ -2416,6 +2438,7 @@ class SqlCypherCompiler(ABC):
                         flat=carried.flat if carried else False,
                         row_keys=(key,) if written else None,
                         from_list=not written,
+                        known=carried.known if carried else None,
                     ),
                 )
             elif kind in (_Kind.NODES, _Kind.RELATIONSHIPS):
@@ -2775,6 +2798,7 @@ class SqlCypherCompiler(ABC):
 
     def _set(self, item: SetItem) -> None:
         if isinstance(item, SetProperty):
+            _property_of_kind(item.value)
             table, id_, row = self._target(item.variable, "SET")
             self._evaluate(
                 VALUE, [item.value], lambda scope: self.comparable(self.json(self._expression(item.value, scope)))
@@ -3581,7 +3605,7 @@ class SqlCypherCompiler(ABC):
     def _expression(self, expression: Expression, scope: Scope) -> Value:
         """
         The value the expression gives in the scope: see `_value_of`. Marked Json.flat where it is known to hold no
-        null in a list or a map.
+        null in a list or a map, and with its Json.known kind where the statement writes it as a value of one.
         """
         outer = self._filtering
         # Only a condition joined by AND or OR is read for its truth alone: NOT, a CASE or a function reads null apart
@@ -3594,6 +3618,10 @@ class SqlCypherCompiler(ABC):
             value = self._value_of(expression, scope)
         finally:
             self._filtering = outer
+        if isinstance(value, Json) and value.known is None:
+            known = self._known_kind(expression, scope)
+            if known is not None:
+                value = dataclasses.replace(value, known=known)
         if isinstance(value, (Json, Entities)) and not value.flat and self._flat(expression, scope):
             return dataclasses.replace(value, flat=True)
         return value
@@ -3703,6 +3731,77 @@ class SqlCypherCompiler(ABC):
             texts=all(_is_text(it) for it in items),
         )
 
+    def _known_kind(self, expression: Expression, scope: Scope) -> Known | None:
+        """
+        The kind of value the expression is in the scope, where the statement writes it as one (Json.known): a literal,
+        a negated number, a list or a map written, or a variable bound to one. Read from the statement alone, compiling
+        nothing, so a check may run before its operand is compiled. None where the kind is left open, as it is for a
+        property, a parameter or a function's value: Neo4j checks those when the row is read.
+        """
+        if isinstance(expression, Literal):
+            return known_of(expression.value)
+        if isinstance(expression, Unary):
+            operand = self._known_kind(expression.operand, scope)
+            negated = expression.operator is UnaryOperator.NEGATE and operand in ("INTEGER", "FLOAT")
+            return operand if negated else None
+        if isinstance(expression, ListLiteral):
+            return "LIST"
+        if isinstance(expression, MapLiteral):
+            return "MAP"
+        if isinstance(expression, Variable):
+            value = scope.get(expression.name)
+            return value.known if isinstance(value, Json) else None
+        return None
+
+    def _index_of_kind(self, index: Index, scope: Scope) -> None:
+        """
+        Refuses `subject[index]` where the statement writes its subject as a value that is no list or map, or its index
+        as a value of a kind its subject is not indexed by (`_known_kind`): a list by an integer, a map by a text. As
+        Neo4j refuses it; where the subject's kind is left open, it is compiled as before. An index given as a parameter
+        is of its value's kind: the statement is compiled for each call, and its SQL is already made by that value, a
+        text read as a property and a number as an item, so one of the other kind would be read as neither.
+        """
+        subject = self._known_kind(index.subject, scope)
+        if subject is None:
+            return
+        if subject not in ("LIST", "MAP"):
+            raise DrivineError(
+                f"{capital_noun_of(subject)} is not a list or a map, and is indexed as one, as in Neo4j."
+            )
+        by: Known = "INTEGER" if subject == "LIST" else "TEXT"
+        kind = self._known_kind(index.index, scope)
+        if kind is None and isinstance(index.index, Parameter):
+            kind = known_of(self._known(index.index))
+        if kind is not None and kind != by:
+            raise DrivineError(
+                f"{capital_noun_of(subject)} is indexed by {noun_of(by)}, not {noun_of(kind)}, as in Neo4j."
+            )
+
+    def _in_of_kind(self, binary: Binary, scope: Scope) -> None:
+        """Refuses the binary where it is `IN` a value the statement writes as one of a kind other than a list
+        (`_known_kind`), as Neo4j refuses it."""
+        kind = self._known_kind(binary.right, scope) if binary.operator is BinaryOperator.IN else None
+        if kind is not None and kind != "LIST":
+            raise DrivineError(f"IN takes a list, not {noun_of(kind)}, as in Neo4j.")
+
+    def _require_condition(self, expression: Expression, scope: Scope, operator: str) -> None:
+        """Refuses the expression, an operand of `operator`, where its kind is known (`_known_kind`) to be other than a
+        truth value, as Neo4j refuses it."""
+        kind = self._known_kind(expression, scope)
+        if kind is not None and kind != "BOOLEAN":
+            raise DrivineError(f"{operator} takes a truth value, not {noun_of(kind)}, as in Neo4j.")
+
+    @staticmethod
+    def _require_kind(value: Value, allowed: Known, message: Callable[[str], str]) -> None:
+        """
+        Refuses the value, an argument, where the statement writes it as a value of a kind (Json.known) other than
+        `allowed`, with the message of that kind's noun, as Neo4j refuses it when it plans the statement. A value whose
+        kind the statement leaves open is compiled as before.
+        """
+        kind = value.known if isinstance(value, Json) else None
+        if kind is not None and kind != allowed:
+            raise DrivineError(message(noun_of(kind)))
+
     def _known(self, index: Expression) -> Any:
         """An index written, or bound to a parameter, is known: a text is the property of that name, a number an
         item."""
@@ -3744,6 +3843,7 @@ class SqlCypherCompiler(ABC):
         return self._parameters.json_at(subject.name, keys)
 
     def _index(self, expression: Index, scope: Scope) -> Value:
+        self._index_of_kind(expression, scope)
         index = expression.index
         listed: list[Value] = []
 
@@ -3960,6 +4060,7 @@ class SqlCypherCompiler(ABC):
                     self.property_of(map_, it),
                     temporal=was_json.temporal if was_json else None,
                     items=was_json.items if was_json else None,
+                    known=was_json.known if was_json else None,
                 )
             inner[expression.accumulator] = Json(accumulator)
             inner[expression.variable] = Json(item, temporal=_items_of(listed), temporals=_item_temporals_of(listed))
@@ -4172,6 +4273,8 @@ class SqlCypherCompiler(ABC):
                 and subject.temporal is None
                 and subject.row_keys is None
                 and expression.key not in FIELD_NAMES
+                # One of a kind known other than a map is left to _property, which refuses it.
+                and not _known_no_map(subject)
             ):
                 return Json(self.item_value(self.comparable(subject), expression.key), temporals=subject.temporals)
         return self._expression(expression, select.scope)
@@ -4184,6 +4287,10 @@ class SqlCypherCompiler(ABC):
         if isinstance(subject, Relationship):
             return Json(self.property_of(subject.props, key))
         if isinstance(subject, Json):
+            # A value the statement writes as one of a kind other than a map has none, as Neo4j says when it plans the
+            # statement.
+            if _known_no_map(subject):
+                raise DrivineError(f"{capital_noun_of(cast(Known, subject.known))} has no properties.")
             field_ = self._temporal_field(subject, key)
             if field_ is not None:
                 return field_
@@ -4450,11 +4557,14 @@ class SqlCypherCompiler(ABC):
     def _binary(self, binary: Binary, scope: Scope) -> Value:
         filter_ = self._filtered
         operator = binary.operator
+        self._in_of_kind(binary, scope)
         if operator in (BinaryOperator.EQUALS, BinaryOperator.NOT_EQUALS, BinaryOperator.IN):
             itemwise = self._itemwise(binary, scope)
             if itemwise is not None:
                 return Bool(f"(NOT {itemwise})" if operator is BinaryOperator.NOT_EQUALS else itemwise)
         if operator in (BinaryOperator.AND, BinaryOperator.OR, BinaryOperator.XOR):
+            for it in (binary.left, binary.right):
+                self._require_condition(it, scope, operator.value)
             left = self.bool(self._expression(binary.left, scope))
             right = self.bool(self._expression(binary.right, scope))
             if operator is BinaryOperator.AND:
@@ -5102,6 +5212,8 @@ class SqlCypherCompiler(ABC):
         return None
 
     def _unary(self, unary: Unary, scope: Scope) -> Value:
+        if unary.operator is UnaryOperator.NOT:
+            self._require_condition(unary.operand, scope, "NOT")
         operand = self._expression(unary.operand, scope)
         if unary.operator is UnaryOperator.NOT:
             return Bool(f"(NOT ({self.bool(operand)}))")
@@ -5192,7 +5304,14 @@ class SqlCypherCompiler(ABC):
         name = function.name.lower()
         if name == "properties":
             subject = one()
-            return self.json(subject) if isinstance(subject, (Node, Relationship)) else subject
+            if isinstance(subject, (Node, Relationship)):
+                return self.json(subject)
+            self._require_kind(
+                subject,
+                "MAP",
+                lambda kind: f"properties() takes a node, a relationship or a map, not {kind}, as in Neo4j.",
+            )
+            return subject
         if name == "labels":
             subject = one()
             if isinstance(subject, Node):
@@ -5336,6 +5455,12 @@ class SqlCypherCompiler(ABC):
         if name == "range":
             if len(arguments) not in (2, 3):
                 raise DrivineError("range() takes a start, an end and a step.")
+            for it in arguments:
+                self._require_kind(it, "INTEGER", lambda kind: f"range() takes integers, not {kind}, as in Neo4j.")
+            # A step written or given as 0 would never reach the end: a Decimal is given as the number it is.
+            step_given = jsonable(self._known(function.arguments[2])) if len(arguments) == 3 else None
+            if _is_number(step_given) and step_given == 0:
+                raise DrivineError("range() takes a step other than 0, as in Neo4j.")
             # Each argument read as a number first, as drivine4j reads them, so a statement's SQL is the same as its.
             numbers = [self.number(self.comparable(self.json(it))) for it in arguments]
             from_, to = numbers[:2]
@@ -5527,7 +5652,7 @@ class SqlCypherCompiler(ABC):
             now_kind = _temporal_of(name.split(".")[0])
             return Json(self.scalar(self.temporals.now(now_kind)), temporal=now_kind)
         if name in TEMPORAL_TRUNCATE:
-            return self._truncate(function, arguments, _temporal_of(name.split(".")[0]))
+            return self._truncate(function, arguments, _temporal_of(name.split(".")[0]), scope)
         if name in ("duration.between", "duration.inmonths", "duration.indays", "duration.inseconds"):
             return self._between(function, arguments, name)
         # A function the store has no SQL for is named before its arguments are counted.
@@ -5554,10 +5679,15 @@ class SqlCypherCompiler(ABC):
             )
         return Json(result, text=name in TEXT_FUNCTIONS)
 
-    def _truncate(self, function: Function, arguments: list[Value], to: Temporal) -> Value:
-        """`date.truncate(unit, value)` and its like: the value cut short to the unit, as a value of `to`."""
-        if len(arguments) != 2:
+    def _truncate(self, function: Function, arguments: list[Value], to: Temporal, scope: Scope) -> Value:
+        """
+        `date.truncate(unit, value)` and its like: the value cut short to the unit, as a value of `to`, and with a map
+        of fields, `date.truncate(unit, value, {day: 2})`, those fields laid over it.
+        """
+        if len(arguments) < 2:
             raise DrivineError(f"{function.name}() takes a unit and a value.")
+        if len(arguments) > 3:
+            raise DrivineError(f"{function.name}() takes a unit, a value and a map of fields.")
         written = function.arguments[0]
         if not isinstance(written, Literal) or not isinstance(written.value, str):
             unsupported("A truncation to a unit an expression gives")
@@ -5565,14 +5695,15 @@ class SqlCypherCompiler(ABC):
         given = arguments[1]
         if not isinstance(given, Json):
             raise DrivineError(f"{function.name}() takes a unit and a value.")
+        fields = (
+            self._truncation_fields(function, unit, to, function.arguments[2], scope) if len(arguments) == 3 else None
+        )
 
         def cut(text: str, from_: Temporal) -> str:
-            truncated = self.temporals.truncate(unit, text, from_, to)
+            truncated = self.temporals.truncate(unit, text, from_, to, fields)
             if truncated is None:
-                raise DrivineError(
-                    f"{function.name}() truncates to year, quarter, month, week, day, hour, minute, second or "
-                    f"millisecond, not {unit}."
-                )
+                units = ", ".join(TRUNCATION_UNITS[:-1])
+                raise DrivineError(f"{function.name}() truncates to {units} or {TRUNCATION_UNITS[-1]}, not {unit}.")
             return truncated
 
         text = self.text(self.comparable(given))
@@ -5581,6 +5712,48 @@ class SqlCypherCompiler(ABC):
         else:
             truncated = self.temporals.by_kind(text, lambda from_, t: cut(t, from_))
         return Json(self.scalar(truncated), temporal=to)
+
+    def _truncation_fields(
+        self, function: Function, unit: str, kind: Temporal, written: Expression, scope: Scope
+    ) -> Overrides:
+        """
+        The fields the map `written`, the third argument of the function, gives the value of the kind it truncates, in
+        place of its own, as Neo4j takes them. A field of no such value, a day or a month beside a day of the week, a
+        number that is not whole, or a number written past its field's range (see TRUNCATION_RANGES; a microsecond
+        beside a millisecond given or kept by a cut to the unit runs to 999), fails, where a store would carry it into
+        the next field or fail on it at its own time. A field that is null is given as its least, as a map that leaves
+        it out makes a value: the year 0, the first month, day or day of the week, and no time; a time zone that is
+        null fails. Fields the stores have no SQL for yet (nanoseconds, the fields of a week or a quarter, a time zone
+        by name) are refused. As drivine4j's #468.
+        """
+        # Null gives no fields, as Neo4j has it.
+        if written == Literal(None):
+            return Overrides({})
+        if not isinstance(written, MapLiteral):
+            unsupported("A truncation's fields that an expression gives")
+        keys = _truncation_keys(function, kind, written.entries)
+        millis = "millisecond" in keys or unit == "millisecond"
+        timezone: str | None = None
+        fields: dict[str, str] = {}
+        for key, value in written.entries:
+            if key == "timezone":
+                timezone = _truncation_zone(function, value)
+            else:
+                fields[key] = self._truncation_number(function, key, value, millis, scope)
+        return Overrides(fields, timezone)
+
+    def _truncation_number(self, function: Function, key: str, value: Expression, millis: bool, scope: Scope) -> str:
+        """
+        The SQL number of the field `key` of a truncation of the function, which the value gives: see
+        `_truncation_fields`. With `millis`, a millisecond is given or kept, beside which a microsecond runs to 999.
+        """
+        least = TRUNCATION_LEAST.get(key, 0)
+        written = _written_number(value)
+        if written is None:
+            return f"COALESCE({self.number(self.comparable(self.json(self._expression(value, scope))))}, {least})"
+        if written.value is None:
+            return f"{least}"
+        return f"{_truncation_whole(function, key, written.value, millis)}"
 
     def _between(self, function: Function, arguments: list[Value], name: str) -> Value:
         """`duration.between(a, b)` and `duration.inMonths`, `inDays` and `inSeconds`: the duration from one value to
@@ -5790,10 +5963,16 @@ class SqlCypherCompiler(ABC):
         )
 
     def bool(self, value: Value) -> str:
-        """A value as a condition: a boolean as itself, JSON's `true` and `false` as theirs, anything else as null."""
+        """
+        A value as a condition: a boolean as itself, JSON's `true` and `false` as theirs, anything else as null. One the
+        statement writes as a value of another kind (Json.known) is refused, as Neo4j refuses it when it plans the
+        statement.
+        """
         if isinstance(value, Bool):
             return value.sql
         if isinstance(value, Json):
+            if value.known is not None and value.known != "BOOLEAN":
+                raise DrivineError(f"{capital_noun_of(value.known)} is not a condition, as in Neo4j.")
             return self.bool_of(self.comparable(value))
         raise DrivineError("A node, a relationship or a path is not a condition.")
 
@@ -6029,63 +6208,6 @@ def is_seeded(expression: Expression, made: Iterable[str]) -> bool:
         and isinstance(condition.operand, Variable)
         and condition.operand.name in set(made)
     )
-
-
-def imports(call: Call, clauses: Sequence[Clause], names: Iterable[str]) -> set[str]:
-    """
-    The variables of the row, of `names`, that the query `clauses` of the call imports, as Neo4j has it: those its
-    brackets name, `CALL (a, b) { … }`, or each with `CALL (*) { … }`; with no brackets, those its leading `WITH` names
-    as they are, or each with `WITH *`; none where it has neither, `CALL () { … }` or `CALL { MATCH … }`. In a `UNION`,
-    each query's own leading `WITH`. Refuses a bracketed name not of the row, and, as Neo4j does (its 42I28), a leading
-    `WITH` that names a variable of the row, or `*`, with anything more: such a `WITH` imports, and one that names none
-    is any `WITH`, `CALL { WITH 1 AS one WHERE … }`.
-    """
-    all_ = set(names)
-    if call.imports_all:
-        return all_
-    if call.imports is not None:
-        missing = next((it for it in call.imports if it not in all_), None)
-        if missing is not None:
-            raise DrivineError(
-                f"{missing} is not defined: a variable is bound by a pattern, a WITH or an UNWIND before it is used."
-            )
-        return set(call.imports)
-    first = clauses[0] if clauses else None
-    if not isinstance(first, With):
-        return set()
-    leading = first.projection
-
-    def named(item: ProjectionItem) -> str | None:
-        return item.expression.name if isinstance(item.expression, Variable) else None
-
-    if not leading.star and not any(named(it) in all_ for it in leading.items):
-        return set()
-    if not all(named(it) == it.name for it in leading.items) or not plain_with(first):
-        raise DrivineError(
-            "The importing WITH of a CALL { … } names variables of the row alone, as in Cypher: no alias, expression, "
-            "DISTINCT, WHERE, ORDER BY, SKIP or LIMIT. Import them with CALL (a, b) { … }, and work on them in a WITH "
-            "after."
-        )
-    return all_ if leading.star else {it.name for it in leading.items if it.name in all_}
-
-
-def plain_with(clause: With) -> bool:
-    """Whether the `WITH` has no `WHERE`, `DISTINCT`, `ORDER BY`, `SKIP` or `LIMIT`: one that only names what it passes
-    on."""
-    projection = clause.projection
-    return (
-        clause.where is None
-        and not projection.distinct
-        and not projection.order_by
-        and projection.skip is None
-        and projection.limit is None
-    )
-
-
-def bracketed(call: Call) -> bool:
-    """Whether the call imports by its brackets, `CALL (a) { … }` or `CALL (*) { … }`: what it imports so it sees
-    throughout."""
-    return call.imports is not None or call.imports_all
 
 
 def _texts_in(value: Any, texts: set[str]) -> None:
@@ -6657,6 +6779,177 @@ def _item_items_of(listed: Value) -> Temporal | None:
 
 def _is_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+TRUNCATION_DATE_FIELDS = (
+    "year",
+    "month",
+    "day",
+    "dayOfWeek",
+    "week",
+    "weekYear",
+    "quarter",
+    "dayOfQuarter",
+    "ordinalDay",
+)
+"""The fields of a date a truncation's map may give, as Neo4j takes them."""
+
+TRUNCATION_TIME_FIELDS = ("hour", "minute", "second", "millisecond", "microsecond", "nanosecond")
+"""The fields of a time of day a truncation's map may give, as Neo4j takes them."""
+
+TRUNCATION_FIELDS_NOT_COMPILED = frozenset({"nanosecond", "week", "weekYear", "quarter", "dayOfQuarter", "ordinalDay"})
+"""The fields a truncation's map may give that the stores have no SQL for yet: nanoseconds, and the fields of a week or
+a quarter."""
+
+TRUNCATION_RANGES: dict[str, tuple[int, int]] = {
+    "month": (1, 12),
+    "day": (1, 31),
+    "dayOfWeek": (1, 7),
+    "hour": (0, 23),
+    "minute": (0, 59),
+    "second": (0, 59),
+    "millisecond": (0, 999),
+    "microsecond": (0, 999999),
+}
+"""The values each field a truncation's map gives may take, as Neo4j takes them, but for the year, which runs past what
+a store's text holds."""
+
+TRUNCATION_LEAST = {"month": 1, "day": 1, "dayOfWeek": 1}
+"""The least of each field a truncation's map gives that is not 0, which a field given as null is."""
+
+TRUNCATION_FIELD_NAMES = {"dayOfWeek": "a day of the week", "hour": "an hour"}
+"""A truncation's fields as a message names them, where it is not `a <field>`."""
+
+
+def _truncation_keys(function: Function, kind: Temporal, entries: Sequence[tuple[str, Expression]]) -> set[str]:
+    """
+    The keys of `entries`, a truncation's map of fields given the function, which truncates to the kind: refused where
+    Neo4j refuses one, as a field of no such value or a day or a month beside a day of the week, or where no store has
+    SQL for it yet.
+    """
+    takes = {
+        *(TRUNCATION_DATE_FIELDS if kind not in (Temporal.LOCAL_TIME, Temporal.TIME) else ()),
+        *(TRUNCATION_TIME_FIELDS if kind is not Temporal.DATE else ()),
+        *(("timezone",) if kind.zoned else ()),
+    }
+    for key, _ in entries:
+        if key not in takes:
+            raise DrivineError(f"{function.name}() takes no field {key}.")
+        if key in TRUNCATION_FIELDS_NOT_COMPILED:
+            unsupported(f"{function.name}() of a map with {key}")
+    keys = {key for key, _ in entries}
+    for it in ("day", "month"):
+        if it in keys and "dayOfWeek" in keys:
+            raise DrivineError(f"{function.name}() takes a {it} or a day of the week, not both.")
+    return keys
+
+
+def _truncation_whole(function: Function, key: str, written: Any, millis: bool) -> int:
+    """
+    The value written as the field `key` of a truncation of the function, where it is a whole number in the field's
+    range (see TRUNCATION_RANGES); with `millis`, a millisecond is given or kept, beside which a microsecond runs to
+    999.
+    """
+    if not isinstance(written, int) or isinstance(written, bool):
+        shown = f"'{written}'" if isinstance(written, str) else _shown(written)
+        raise DrivineError(f"{function.name}() takes a whole number for {key}, not {shown}.")
+    beside = key == "microsecond" and millis
+    range_ = (0, 999) if beside else TRUNCATION_RANGES.get(key)
+    if range_ is not None and not range_[0] <= written <= range_[1]:
+        name = TRUNCATION_FIELD_NAMES.get(key, f"a {key}")
+        also = " beside a millisecond" if beside else ""
+        raise DrivineError(f"{function.name}() takes {name} from {range_[0]} to {range_[1]}{also}, not {written}.")
+    return written
+
+
+def _shown(value: Any) -> str:
+    """A value written as a message shows it, as Cypher writes it: `true`, `1.5`."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
+@dataclass(frozen=True)
+class _Written:
+    """A value a statement writes: see `_written_number`."""
+
+    value: Any
+
+
+def _written_number(value: Expression) -> _Written | None:
+    """
+    The value the expression is written as, where it is a literal or a negated whole number, `-1`, which is written as
+    much as `1` is: None for any other expression, a negated float among them, as drivine4j reads it.
+    """
+    if isinstance(value, Literal):
+        return _Written(value.value)
+    negated = value.operand if isinstance(value, Unary) and value.operator is UnaryOperator.NEGATE else None
+    if isinstance(negated, Literal) and _is_number(negated.value) and not isinstance(negated.value, float):
+        return _Written(-negated.value)
+    return None
+
+
+def _truncation_zone(function: Function, value: Expression) -> str:
+    """
+    The offset a truncation's `timezone` field, the value, gives the function, as SQL text. Neo4j takes an offset
+    written as `Z` or `+01:00` alone, as Java's ZoneOffset does (up to 18 hours, and 0 is UTC's, `Z`), and a zone by
+    name, which no store's text holds yet, so it is refused as not compiled yet.
+    """
+    if value == Literal(None):
+        raise DrivineError(f"{function.name}() takes a time zone, not null.")
+    if not isinstance(value, Literal) or not isinstance(value.value, str):
+        unsupported("A truncation to a time zone an expression gives")
+    zone: str = value.value
+    offset = _offset_text(zone)
+    if offset is not None:
+        return offset
+    if not zone.startswith(("+", "-")) and _named_zone(zone):
+        unsupported(f"The time zone '{zone}'")
+    raise DrivineError(f"'{zone}' is no time zone.")
+
+
+def _offset_text(zone: str) -> str | None:
+    """The SQL text of the offset the zone writes, `Z` or `+01:00`, as Java's ZoneOffset takes it: None where it is
+    none."""
+    if zone == "Z":
+        return "'Z'"
+    offset = re.fullmatch(r"[+-]([0-9]{2}):([0-9]{2})", zone)
+    if offset is None:
+        return None
+    hours, minutes = int(offset.group(1)), int(offset.group(2))
+    if minutes >= 60 or hours > 18 or (hours == 18 and minutes > 0):
+        return None
+    return "'Z'" if hours == 0 and minutes == 0 else f"'{zone}'"
+
+
+def _named_zone(zone: str) -> bool:
+    """Whether the text names a time zone, as `Europe/Stockholm` does."""
+    try:
+        ZoneInfo(zone)
+    except (ValueError, ZoneInfoNotFoundError):
+        return False
+    return True
+
+
+def _known_no_map(value: Json) -> bool:
+    """Whether the statement writes the value as a value of a kind other than a map (Json.known), which has no
+    properties."""
+    return value.known is not None and value.known != "MAP"
+
+
+def _property_of_kind(written: Expression) -> None:
+    """
+    Refuses `written`, the value a `SET` gives a property, where it is a map written, or a list written that holds one
+    or a list: no property, as Neo4j refuses it, and as Drivine's saves do.
+    """
+    if isinstance(written, MapLiteral) or (
+        isinstance(written, ListLiteral) and any(isinstance(it, (MapLiteral, ListLiteral)) for it in written.items)
+    ):
+        what = "a map" if isinstance(written, MapLiteral) else "a list of maps or lists"
+        raise DrivineError(
+            f"A property is a number, a text, a truth value, a temporal value or a list of them, not {what}, as in "
+            "Neo4j."
+        )
 
 
 def _cut(value: float) -> int:

@@ -4,6 +4,7 @@ wrong, on each store alike: before the store is sent anything. The statements an
 tests/cypher/refusals.yaml.
 """
 
+from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
@@ -650,10 +651,6 @@ def test_a_truncations_fields_given_as_an_expression_a_negated_number_utc_or_non
             "date() of an ordinal day without a year is Cypher, and is not compiled to SQL yet.",
         ),
         (
-            "RETURN date({date: date('2024-03-15'), week: 2})",
-            "date() of a map with date is Cypher, and is not compiled to SQL yet.",
-        ),
-        (
             "RETURN datetime({year: 1984, week: 10, timezone: 'Europe/Stockholm'})",
             "The time zone 'Europe/Stockholm' is Cypher, and is not compiled to SQL yet.",
         ),
@@ -684,6 +681,80 @@ def test_a_temporal_map_of_the_calendars_fields_that_runs_on_or_that_an_expressi
         "RETURN date({year: -1, week: -1 + 2, dayOfWeek: 7}), datetime({year: 1984, week: 10, timezone: 'Z'})",
     ):
         compiler("g").compile(cypher, {"y": 2023})
+
+
+_NAMED_ZONE = "The time zone 'Europe/Stockholm' is Cypher, and is not compiled to SQL yet."
+
+
+@pytest.mark.parametrize("compiler", COMPILERS.values(), ids=COMPILERS.keys())
+@pytest.mark.parametrize(
+    ("cypher", "message"),
+    [
+        # A zone by name in the constructor of the value given, which Postgres and Oracle gave as null.
+        (
+            "WITH datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: 'Europe/Stockholm'}) AS other "
+            "RETURN time({time: other})",
+            _NAMED_ZONE,
+        ),
+        ("RETURN datetime({year: 1984, month: 10, day: 11, timezone: 'Europe/Stockholm'})", _NAMED_ZONE),
+        (
+            "RETURN datetime({datetime: datetime('2024-03-15T10:00Z'), timezone: 'UTC'})",
+            _NAMED_ZONE.replace("Europe/Stockholm", "UTC"),
+        ),
+        (
+            "MATCH (n) RETURN date({date: n})",
+            "date() takes a date, a localdatetime or a datetime for date, not a node, a relationship or a path.",
+        ),
+        (
+            "RETURN date({date: 1 = 1})",
+            "date() takes a date, a localdatetime or a datetime for date, not a truth value.",
+        ),
+        (
+            "RETURN time({time: duration('PT1H')})",
+            "time() takes a localtime, a time, a localdatetime or a datetime for time, not a duration.",
+        ),
+        (
+            "RETURN localtime({time: localtime('10:00'), microsecond: 6, nanosecond: 1000})",
+            "localtime() takes a nanosecond from 0 to 999 beside a microsecond, not 1000.",
+        ),
+        (
+            "RETURN localtime({time: localtime('10:00'), millisecond: 5, nanosecond: 1000000})",
+            "localtime() takes a nanosecond from 0 to 999999 beside a millisecond, not 1000000.",
+        ),
+        # -1 is written as much as 1; and the fields of a whole date written beside a value that gives the time are
+        # worked out as a map of them is, past Java's years refused.
+        ("RETURN date({date: date('2024-03-15'), month: -(2)})", "date() takes a month from 1 to 12, not -2."),
+        (
+            "RETURN localdatetime({year: 4294969319, week: 1, dayOfWeek: 1, time: localtime('10:00')})",
+            "localdatetime() takes no year 4294969319: Invalid value for Year (valid values -999999999 - 999999999): "
+            "4294969319",
+        ),
+    ],
+)
+def test_a_temporal_map_from_another_temporal_value_past_what_the_spec_holds_is_refused_as_neo4j_refuses_it(
+    compiler: type[SqlCypherCompiler], cypher: str, message: str
+) -> None:
+    # #317, drivine4j's #508: the spec's "Temporal map from another temporal value Neo4j does not take" holds the rest.
+    with pytest.raises(DrivineError) as refused:
+        compiler("g").compile(cypher)
+    assert str(refused.value) == message
+
+
+@pytest.mark.parametrize("compiler", COMPILERS.values(), ids=COMPILERS.keys())
+def test_a_temporal_map_from_another_temporal_value_that_runs_on_or_that_an_expression_gives_is_compiled(
+    compiler: type[SqlCypherCompiler],
+) -> None:
+    # #317, drivine4j's #508: a day of the week or of the quarter alone, beside a value that gives the date, and a
+    # number, a value or a time zone an expression or a parameter gives, are the store's to check.
+    for cypher in (
+        "RETURN date({date: date('2024-03-15'), dayOfWeek: 2}), date({date: date('2024-03-15'), dayOfQuarter: 92}), "
+        "date({date: date('2024-03-15'), ordinalDay: 366})",
+        "WITH 13 AS m RETURN date({date: date('2024-03-15'), month: m}), localtime({time: $t, hour: 3}), "
+        "datetime({datetime: $t, timezone: $z})",
+        "RETURN date({date: date('2024-03-15'), month: 2 - 4}), "
+        "localtime({time: localtime('10:00'), microsecond: 6, nanosecond: 5})",
+    ):
+        compiler("g").compile(cypher, {"t": datetime(2024, 3, 15, 10, 0), "z": "+01:00"})
 
 
 def _in_where(aggregate: str) -> str:

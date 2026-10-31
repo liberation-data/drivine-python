@@ -362,3 +362,17 @@ def test_a_leading_with_that_imports_nothing_or_follows_brackets_is_any_with(
     compiler: type[SqlCypherCompiler], cypher: str
 ) -> None:
     assert refusal(compiler, cypher) is None
+
+
+@pytest.mark.parametrize("compiler", COMPILERS.values(), ids=COMPILERS.keys())
+def test_a_compiler_compiling_again_keeps_none_of_the_names_it_made_for_the_statement_before(
+    compiler: type[SqlCypherCompiler],
+) -> None:
+    # The first makes #anew2 for its CALL's UUID; the second quotes a variable so. Kept from the first, the second's
+    # star left it out, and gave no item; its texts kept from the second, the first's names were made otherwise.
+    made = "UNWIND [1] AS i CALL { RETURN toUpper(randomUUID()) AS u } RETURN u"
+    quoted = "UNWIND [1, 2] AS `#anew2` WITH * RETURN *"
+    for first, second in [(made, quoted), (quoted, made)]:
+        again = compiler("g")
+        again.compile(first)
+        assert again.compile(second).sql == compiler("g").compile(second).sql

@@ -4730,6 +4730,16 @@ async def test_a_call_that_writes_sees_only_the_variables_it_imports_so_a_create
             [5],
         ),
         ("MATCH (a:CyWrite {id: 2}) CALL (*) { WITH 1 AS one SET a.one = one } RETURN a.one", [1]),
+        # ... after a WITH that renames it, and in a CALL in a CALL.
+        (
+            "MATCH (a:CyWrite {id: 2}) CALL (a) { WITH a AS b SET b.renamed = true SET a.also = true } "
+            "RETURN [a.renamed, a.also]",
+            [[True, True]],
+        ),
+        (
+            "MATCH (a:CyWrite {id: 2}) CALL (a) { CALL (a) { WITH 2 AS two SET a.nested = two } } RETURN a.nested",
+            [2],
+        ),
         # An aggregate over no rows still gives its row, and the WITH's WHERE reads what brackets import.
         (
             "MATCH (a:CyWrite {id: 1}) CALL (a) { MATCH (c:CyNone) WITH count(c) AS n SET a.none = n "

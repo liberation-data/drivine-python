@@ -3297,8 +3297,7 @@ class SqlCypherCompiler(ABC):
             order_by=tuple(dataclasses.replace(it, expression=shared(it.expression)) for it in projection.order_by),
         )
         # Kept apart, as _cases_first keeps its own, so no store merges it back into the query that aggregates.
-        outer = {variable: value for variable, value in select.scope.items() if variable not in select.bound}
-        return self._with(select, With(with_, None), outer, apart=True), kept
+        return self._with(select, With(with_, None), self._around(select), apart=True), kept
 
     def _binds(self, expression: Expression, select: _Select) -> bool:
         """

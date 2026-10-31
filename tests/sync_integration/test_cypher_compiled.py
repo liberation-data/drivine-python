@@ -1232,9 +1232,13 @@ def test_a_date_or_a_moment_from_calendar_fields_an_expression_gives_fails_past_
     ):
         try:
             differing.append(f"{cypher} gave {cypher_pm.query(spec(cypher))}")
-        except Exception:  # noqa: BLE001, S112
-            # Fails, as on Neo4j.
-            continue
+        except Exception as e:  # noqa: BLE001
+            # Fails as it runs, as on Neo4j: the store's failure, not a refusal, which is a DrivineError at the root.
+            cause: BaseException = e
+            while cause.__cause__ is not None:
+                cause = cause.__cause__
+            if isinstance(cause, DrivineError):
+                differing.append(f"{cypher} was refused: {cause}")
     assert differing == []
 
 

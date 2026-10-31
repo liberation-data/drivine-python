@@ -6,6 +6,7 @@ import logging
 import math
 import re
 from abc import ABC, abstractmethod
+from calendar import isleap
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
@@ -7356,7 +7357,7 @@ def _calendar_date(name: str, entries: Sequence[tuple[str, Expression]]) -> tupl
         monday = january4 - (_iso_day_of_week(january4) - 1)
         days = monday + (field("week", "a week", 53) - 1) * 7 + field("dayOfWeek", "a day of the week", 7) - 1
     elif calendar == "an ordinal day":
-        last = 366 if _leap_year(year) else 365
+        last = 366 if isleap(year) else 365
         days = _days_from_civil(year, 1, 1) + field("ordinalDay", "an ordinal day", last, f" in {year}") - 1
     else:
         first = _days_from_civil(year, (field("quarter", "a quarter", 4) - 1) * 3 + 1, 1)
@@ -7415,11 +7416,6 @@ def _calendar_numbers(name: str, entries: Sequence[tuple[str, Expression]]) -> d
 def _written_text(value: Any) -> str:
     """The value as Cypher writes it: `true` for a truth value."""
     return str(value).lower() if isinstance(value, bool) else str(value)
-
-
-def _leap_year(year: int) -> bool:
-    """Whether the year of the proleptic Gregorian calendar is a leap year."""
-    return (year % 4 == 0 and year % 100 != 0) or year % 400 == 0
 
 
 def _days_from_civil(year: int, month: int, day: int) -> int:

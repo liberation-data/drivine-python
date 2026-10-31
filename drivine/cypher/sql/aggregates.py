@@ -244,6 +244,7 @@ class _Aggregates:
 
 
 def _refuse(aggregate: Expression) -> NoReturn:
+    """Refuses the aggregate, in a WHERE that filters no groups or in a part of one that is read over each row."""
     raise DrivineError(
         f"{_named(aggregate)} aggregates, and a WHERE holds no aggregate unless its WITH aggregates, as in Neo4j: "
         "aggregate in a WITH first, and filter what it gives in that WITH's WHERE, as in WITH x, count(*) AS c WHERE "

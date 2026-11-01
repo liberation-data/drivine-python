@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from drivine.cypher.sql.temporal import Temporal
-from drivine.cypher.sql.temporal_sql import Shared, TemporalSql
+from drivine.cypher.sql.temporal_sql import Shared, TemporalSql, years_of
 
 CLOCK = "CAST(SYS_EXTRACT_UTC(SYSTIMESTAMP) AS TIMESTAMP)"
 """The clock as the query that reads it starts, in UTC."""
@@ -11,7 +11,17 @@ CLOCK = "CAST(SYS_EXTRACT_UTC(SYSTIMESTAMP) AS TIMESTAMP)"
 NOW = "cy_now"
 """The variable a block reads CLOCK into as it starts."""
 
-_FORMATS = {"year": "YYYY", "quarter": "Q", "month": "MM", "week": "IW", "day": "DD", "hour": "HH24", "minute": "MI"}
+_FORMATS = {
+    "year": "YYYY",
+    "weekYear": "IYYY",
+    "quarter": "Q",
+    "month": "MM",
+    "week": "IW",
+    "day": "DD",
+    "hour": "HH24",
+    "minute": "MI",
+}
+"""`TRUNC`'s format model of each unit: `IYYY` is the first day of the ISO week-based year."""
 
 
 class OracleTemporalSql(TemporalSql):
@@ -129,6 +139,10 @@ class OracleTemporalSql(TemporalSql):
         return self.shared([from_, to], between)
 
     def truncate(self, unit: str, timestamp: str) -> str | None:
+        """
+        `TRUNC` of a date to a format model. A millennium, a century and a decade are the year less its years into the
+        span (see `years_of`), as months before the year's first day.
+        """
         format_ = _FORMATS.get(unit)
         if format_ is not None:
             return f"CAST(TRUNC(CAST({timestamp} AS DATE), '{format_}') AS TIMESTAMP)"
@@ -136,6 +150,17 @@ class OracleTemporalSql(TemporalSql):
             return f"CAST(CAST({timestamp} AS DATE) AS TIMESTAMP)"
         if unit == "millisecond":
             return f"TO_TIMESTAMP(TO_CHAR({timestamp}, 'YYYY-MM-DD HH24:MI:SS.FF3'), 'YYYY-MM-DD HH24:MI:SS.FF3')"
+        if unit == "microsecond":
+            return timestamp
+        years = years_of(unit)
+        if years is not None:
+            return self.shared(
+                [timestamp],
+                lambda t: (
+                    f"CAST(ADD_MONTHS(TRUNC(CAST({t[0]} AS DATE), 'YYYY'), "
+                    f"-12 * MOD(EXTRACT(YEAR FROM {t[0]}), {years})) AS TIMESTAMP)"
+                ),
+            )
         return None
 
 

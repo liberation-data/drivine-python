@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from drivine.cypher.sql.temporal import Temporal
-from drivine.cypher.sql.temporal_sql import TemporalSql
+from drivine.cypher.sql.temporal_sql import TemporalSql, years_of
 
 _TRUNCATED = {"year", "quarter", "month", "week", "day", "hour", "minute", "second", "millisecond"}
 
@@ -70,4 +70,29 @@ class PostgresTemporalSql(TemporalSql):
         return f"EXTRACT(EPOCH FROM ({to} - {from_}))"
 
     def truncate(self, unit: str, timestamp: str) -> str | None:
-        return f"date_trunc('{unit}', {timestamp})" if unit in _TRUNCATED else None
+        """
+        `date_trunc`, but for the units it counts otherwise than Neo4j: its millennium starts in 2001 and its century in
+        1901, so those and the decade are the year less its years into the span (see `years_of`). The week-based year
+        is so many weeks before the timestamp's week, its ISO week less one.
+        """
+        if unit in _TRUNCATED:
+            return f"date_trunc('{unit}', {timestamp})"
+        if unit == "microsecond":
+            return f"date_trunc('microseconds', {timestamp})"
+        years = years_of(unit)
+        if years is not None:
+            return self.shared(
+                [timestamp],
+                lambda t: (
+                    f"(date_trunc('year', {t[0]}) - make_interval(years => MOD(CAST(EXTRACT(YEAR FROM {t[0]}) AS int), "
+                    f"{years})))"
+                ),
+            )
+        if unit == "weekYear":
+            return self.shared(
+                [timestamp],
+                lambda t: (
+                    f"(date_trunc('week', {t[0]}) - make_interval(weeks => CAST(EXTRACT(WEEK FROM {t[0]}) AS int) - 1))"
+                ),
+            )
+        return None

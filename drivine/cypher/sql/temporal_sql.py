@@ -9,6 +9,39 @@ Shared = Callable[[list[str], Callable[[list[str]], str]], str]
 """The compiler's `shared`: a value it is given is written once where it is read more than once."""
 
 
+TRUNCATION_UNITS = (
+    "millennium",
+    "century",
+    "decade",
+    "year",
+    "weekYear",
+    "quarter",
+    "month",
+    "week",
+    "day",
+    "hour",
+    "minute",
+    "second",
+    "millisecond",
+    "microsecond",
+)
+"""
+The units a timestamp truncates to, as Cypher names them, from the longest. The week-based year starts on the Monday of
+its first ISO week. A timestamp keeps microseconds alone, so cut to them it is the same.
+"""
+
+_YEARS_OF = {"millennium": 1000, "century": 100, "decade": 10}
+"""
+The units of many years, and how many: as Neo4j counts them, the year less its years into the span, counted toward zero
+as Java divides. So 2017's millennium starts in 2000, 1984's century in 1900, and -1234's millennium in -1000.
+"""
+
+
+def years_of(unit: str) -> int | None:
+    """How many years the unit is, where it is a unit of many: see _YEARS_OF."""
+    return _YEARS_OF.get(unit)
+
+
 class TemporalSql(ABC):
     """
     A store's SQL for temporal values, which Temporals works openCypher's out of. Its texts and timestamps are SQL: a
@@ -76,8 +109,7 @@ class TemporalSql(ABC):
 
     @abstractmethod
     def truncate(self, unit: str, timestamp: str) -> str | None:
-        """The timestamp truncated to the unit (`year`, `quarter`, `month`, `week`, `day`, `hour`, `minute`, `second`,
-        `millisecond`): None for another unit."""
+        """The timestamp truncated to the unit, one of TRUNCATION_UNITS, as Neo4j truncates: None for another unit."""
 
     def replace(self, text: str, pattern: str, replacement: str) -> str:
         """The text with every match of the pattern, a SQL text, replaced by the replacement."""

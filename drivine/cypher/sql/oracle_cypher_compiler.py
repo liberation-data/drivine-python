@@ -286,7 +286,7 @@ class OracleCypherCompiler(SqlCypherCompiler):
         return f"NVL({_kind(json)}, 'null') = 'null'"
 
     def null_if_json_null(self, json: str) -> str:
-        return self.shared1(json, lambda x: f"CASE WHEN {_kind(x)} <> 'null' THEN {x} END")
+        return self.shared1(json, self.compared_null)
 
     def open_sort_key(self, json: str) -> list[str]:
         """
@@ -297,6 +297,24 @@ class OracleCypherCompiler(SqlCypherCompiler):
         ranks = "'object', 1, 'array', 2, 'string', 3, 'boolean', 4, 'number', 5, 'double', 5, 'float', 5"
         rank = self.shared1(json, lambda x: f"DECODE({_kind(x)}, {ranks})")
         return [rank, json]
+
+    def json_null_sort_key(self, json: str) -> list[str]:
+        """JSON's null is ranked null, as SQL's is, but `JSON` orders it apart from SQL's: so the value is read as
+        `grouped_null` has it (#314)."""
+        return [self.open_sort_key(json)[0], self.grouped_null(json)]
+
+    def compared_null(self, json: str) -> str:
+        """Oracle groups by no subquery, so the value is not bound in one, as `null_if_json_null` binds a long one: it
+        is read twice."""
+        return f"CASE WHEN {_kind(json)} <> 'null' THEN {json} END"
+
+    def grouped_null(self, json: str) -> str:
+        """
+        SQL's null read as JSON's, which reads the value once, and reads no kind of it: `compared_null` reads both, and
+        kept `DISTINCT` over 300,000 maps' values 67% longer than without it, and an order by them 39% longer; this, 8%
+        and 3% (#314).
+        """
+        return f"NVL({json}, {self.literal_json(None)})"
 
     def number(self, json: str) -> str:
         return self.shared1(

@@ -83,11 +83,16 @@ class Delete:
 class Call:
     """
     `CALL { … }`: for each row, the rows its query gives, read from the variables around it, with what it returns bound
-    for the clauses after; with `optional`, a row it gives none for is kept, with nulls.
+    for the clauses after; with `optional`, a row it gives none for is kept, with nulls. `imports` are the variables its
+    brackets import, `CALL (a, b) { … }`, and with `imports_all` it imports each, `CALL (*) { … }`, as a procedure's
+    call does, `CALL db.labels() YIELD label WHERE …`, whose `WHERE` reads each variable around it; with no brackets,
+    None, its leading `WITH` imports them.
     """
 
     optional: bool
     query: Query
+    imports: tuple[str, ...] | None = None
+    imports_all: bool = False
 
 
 @dataclass(frozen=True)

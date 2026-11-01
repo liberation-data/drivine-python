@@ -70,6 +70,20 @@ people = await pm.query(spec.bind({"city": "Sydney"}))
   is named, and that walks no variable-length relationship or quantified path pattern of its own; on Postgres they may.
   What isn't compiled yet (a path returned whole, `SKIP` of an expression…) is
   refused by name before anything is sent, and what isn't Cypher with where it went wrong.
+- A value whose kind the statement fixes (a literal, a list or a map written, or a variable a `WITH` binds to one) is
+  refused where an operator or a function takes another kind, as Neo4j refuses it when it plans the statement:
+  `RETURN 123 AND true` fails with `AND takes a truth value, not an integer, as in Neo4j.`, and so do
+  `WITH 123 AS x RETURN x.num` and `RETURN 1 IN 'foo'`. A step of 0 in `range()`, written or given, a parameter given
+  as the index of a list or a map written that isn't indexed by its kind, and a map, or a list of maps or of lists,
+  written in `SET`, are refused too, though Neo4j fails on them only when a row reaches them. A value whose kind is
+  known only when the row is read, such as a property or a parameter, is compiled: where it is of the wrong kind, the
+  statement may give null where Neo4j fails. A variable used as two kinds is refused, as Neo4j refuses it:
+  `MATCH (a)-[a]->()` fails with `a is a node, and is used as a relationship: a variable is of one kind, as in Neo4j.`
+  So is one a pattern makes where it is bound already: `MATCH (a) CREATE (a)`, a path variable bound before its
+  `MATCH`, or a relationship variable bound as something else.
+- `truncate` takes each unit Neo4j does, from `millennium` to `microsecond`, and a map of fields to set on the value
+  cut short (`date.truncate('month', d, {day: 2})`), but not yet a nanosecond, a week's or a quarter's field, or a
+  named zone.
 - `CALL db.labels()` and `CALL db.relationshipTypes()` compile, alone or within a query with `YIELD`, and give each
   label and type something has now, read from the nodes and relationships; any other procedure is refused. A parameter
   may be named by a keyword (`$limit`), as in Neo4j. Functions of numbers (`exp`, `log`, `sin`, `atan2`, `round` by a

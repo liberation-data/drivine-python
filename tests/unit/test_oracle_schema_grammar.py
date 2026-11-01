@@ -1,12 +1,13 @@
 """Oracle's schema statements where the golden statements hold none of the case, the catalog's key, and its items."""
 
+import re
 from typing import Any
 
 import pytest
 
-from drivine import range_index
+from drivine import range_index, uniqueness_constraint
 from drivine.backend.oracle.oracle_graph import OracleGraph
-from drivine.backend.oracle.oracle_schema_grammar import oracle_schema_grammar
+from drivine.backend.oracle.oracle_schema_grammar import BUSY_ATTEMPTS, oracle_schema_grammar
 from drivine.backend.sql.sql_catalog import catalog_properties, catalog_record
 from drivine.connection.database_type import DatabaseType
 from drivine.drivine_error import DrivineError
@@ -35,6 +36,23 @@ def test_quotes_a_key_drivine4j_quotes_one_a_json_path_reads_as_a_value_or_that_
     assert "(JSON_VALUE(props, ''$.\"2fa\"''))" in shared_index("2fa")
     assert "(JSON_VALUE(props, ''$.\"it''''s\"''))" in shared_index("it's")
     assert "(JSON_VALUE(props, ''$.\"a\\\"b\"''))" in shared_index('a"b')
+
+
+def test_runs_an_index_over_the_node_table_again_while_another_sessions_lock_turns_it_away_up_to_a_bound():
+    # Managers making the store key's constraint together were turned away at once by each other's lock on the node
+    # table (ORA-00054), ran out of attempts, and went on without it.
+    unique = next(
+        it
+        for it in GRAMMAR.create_unique(uniqueness_constraint("DrivineStore", "key"))
+        if isinstance(it, str) and "CREATE UNIQUE INDEX" in it
+    )
+    for block in (shared_index("name"), unique):
+        assert "PRAGMA EXCEPTION_INIT(e_busy, -54);" in block
+        assert f"FOR attempt IN 1 .. {BUSY_ATTEMPTS} LOOP" in block
+        assert re.search(
+            r"WHEN e_busy THEN\s+IF attempt = \d+ THEN RAISE; END IF;\s+DBMS_SESSION\.SLEEP\(0\.1\);", block
+        )
+        assert re.search(r"EXECUTE IMMEDIATE 'CREATE[^;]*;\s+RETURN;", block)
 
 
 class _Failing:

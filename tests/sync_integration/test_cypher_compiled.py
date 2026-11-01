@@ -8,10 +8,11 @@ needs a transaction of its own. drivine4j keeps the same in its Cypher*CrossEngi
 
 import contextlib
 import dataclasses
+import json
 import math
 import re
 import time as time_module
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from datetime import UTC, date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from typing import Any
@@ -194,6 +195,24 @@ def test_a_parameter_of_a_time_a_local_or_zoned_datetime_or_a_timedelta_is_a_tem
         )
     )
     assert found == {"minute": 30, "hour": 10, "zoned": "+02:00", "later": 16, "days": 1, "hours": 12}
+
+
+def test_a_temporal_value_is_made_from_a_parameter_of_pythons_temporal_types(cypher_pm: PersistenceManager):
+    # #317: a parameter's kind is told by its Python type, so `Temporals.over` reads it as that kind alone.
+    found = cypher_pm.get_one(
+        spec(
+            "WITH date({date: $day, day: 1}) AS d, localtime({time: $z, hour: 3}) AS l, "
+            "datetime({datetime: $ldt, timezone: '+01:00'}) AS m, datetime({date: $day, time: $time}) AS t "
+            "RETURN [[d.month, d.day], [l.hour, l.minute], [m.day, m.hour, m.timezone], [t.day, t.minute, t.timezone]]",
+            {
+                "day": date(2024, 3, 15),
+                "time": time(10, 30),
+                "ldt": datetime(2024, 3, 15, 10, 0),
+                "z": datetime(2024, 3, 15, 10, 5, tzinfo=timezone(timedelta(hours=2))),
+            },
+        )
+    )
+    assert found == [[3, 1], [3, 5], [15, 10, "+01:00"], [15, 30, "Z"]]
 
 
 def test_a_zoned_parameter_keeps_its_kind_in_reduce(cypher_pm: PersistenceManager):
@@ -981,6 +1000,384 @@ def test_an_aggregate_in_a_call_reads_the_variables_the_call_imports(cypher_pm: 
         "MATCH path = (p:Person {name: 'Laurence'})-[:ACTED_IN]->() CALL (path) { UNWIND [1, 2] AS i "
         "RETURN count(path) AS n, collect(length(path)) AS ls } RETURN n, ls"
     ) == [[2, [1, 1]]]
+
+
+def test_an_aggregate_beside_a_where_a_grouping_keys_body_or_an_order_term_that_neo4j_takes_gives_neo4js_rows(
+    cypher_pm: PersistenceManager,
+):
+    # #306, #307: beside the aggregates now refused, those Neo4j takes. drivine4j's CypherQueryContract of
+    # liberation-data/drivine4j#489 and #482; the rows are Neo4j's (2026.10).
+    seeded(cypher_pm)
+
+    def query(cypher: str) -> list[Any]:
+        return cypher_pm.query(spec(cypher))
+
+    # A WHERE over what an aggregate gave, and one in a subquery's or a CALL's own query, which aggregates in its
+    # projection.
+    assert query("UNWIND [1, 2] AS i WITH count(*) AS c WHERE c > 1 RETURN c") == [2]
+    assert query(
+        "MATCH (p:Person)-[:ACTED_IN]->(m) WITH p, collect(m.title) AS ts WHERE size(ts) > 1 RETURN p.name "
+        "ORDER BY p.name"
+    ) == ["Carrie", "Keanu"]
+    assert query(
+        "MATCH (p:Person) RETURN p.name, COUNT { MATCH (p)-[:ACTED_IN]->(m) WITH count(m) AS c WHERE c > 1 RETURN c } "
+        "AS k ORDER BY p.name"
+    ) == [["Carrie", 1], ["Hugo", 0], ["Keanu", 1], ["Laurence", 0]]
+    assert query(
+        "MATCH (p:Person) WHERE EXISTS { MATCH (p)-[:ACTED_IN]->(m) WITH count(m) AS c WHERE c > 1 RETURN c } "
+        "RETURN p.name ORDER BY p.name"
+    ) == ["Carrie", "Keanu"]
+    assert query(
+        "MATCH (p:Person) CALL (p) { MATCH (p)-[:ACTED_IN]->(m) WITH count(m) AS c WHERE c > 1 RETURN c } "
+        "RETURN p.name, c ORDER BY p.name"
+    ) == [["Carrie", 2], ["Keanu", 3]]
+    # An aggregate beside its grouping keys, and a body that names only them, or a variable of its own.
+    assert query("UNWIND [1, 2] AS x RETURN x, collect(x) AS c ORDER BY x") == [[1, [1]], [2, [2]]]
+    assert query("MATCH (p:Person)-[:ACTED_IN]->(m) RETURN p.name, count(*) ORDER BY p.name") == [
+        ["Carrie", 2],
+        ["Keanu", 3],
+        ["Laurence", 1],
+    ]
+    assert query("UNWIND [1, 2] AS x RETURN x, [y IN collect(x) | y + x] AS l ORDER BY x") == [[1, [2]], [2, [4]]]
+    assert query("UNWIND [1, 2] AS x UNWIND [3] AS z RETURN x, [y IN collect(z) | y + x] AS l ORDER BY x") == [
+        [1, [4]],
+        [2, [5]],
+    ]
+    assert query("UNWIND [1, 2] AS x RETURN x, reduce(s = 0, y IN collect(x) | s + y + x) AS l ORDER BY x") == [
+        [1, 2],
+        [2, 4],
+    ]
+    assert query(
+        "MATCH (p:Person)-[:ACTED_IN]->(m) RETURN p.name, size([x IN collect(m.title) WHERE x <> p.name | x + p.name]) "
+        "ORDER BY p.name"
+    ) == [["Carrie", 2], ["Keanu", 3], ["Laurence", 1]]
+    # An order term that names an item's name, or what an item that does not aggregate is.
+    assert query("UNWIND [{a: 1}, {a: 2}] AS x RETURN x.a AS a, count(*) AS c ORDER BY x.a + count(*) DESC") == [
+        [2, 1],
+        [1, 1],
+    ]
+    assert query("UNWIND [1, 2] AS x RETURN x AS y, count(*) AS c ORDER BY x + count(*) DESC") == [[2, 1], [1, 1]]
+    assert query("UNWIND [1, 2] AS x RETURN x AS y, count(*) AS c ORDER BY y + count(*) DESC") == [[2, 1], [1, 1]]
+    assert query(
+        "UNWIND [1, 2] AS x UNWIND [3] AS z RETURN x, count(*) AS c ORDER BY [w IN collect(z) | w + x][0] DESC"
+    ) == [[2, 1], [1, 1]]
+    # A key named in another case: Neo4j names a function in any case.
+    assert query(
+        "UNWIND [{a: 'b'}, {a: 'a'}] AS x RETURN toUpper(x.a) AS u, count(*) AS c ORDER BY TOUPPER(x.a) + count(*) DESC"
+    ) == [["B", 1], ["A", 1]]
+    assert query(
+        "UNWIND [{a: 'b'}, {a: 'a'}] AS x RETURN toUpper(x.a) AS u, collect(DISTINCT x.a) AS c "
+        "ORDER BY TOUPPER(x.a) + size(collect(DISTINCT x.a)) DESC"
+    ) == [["B", ["b"]], ["A", ["a"]]]
+
+
+def test_an_aggregating_item_over_a_key_that_is_a_property_groups_by_the_property_as_neo4j_does(
+    cypher_pm: PersistenceManager,
+):
+    # #311: beside the shapes now refused, those Neo4j takes. drivine4j's CypherQueryContract of
+    # liberation-data/drivine4j#491; the rows are Neo4j's (2026.10).
+    seeded(cypher_pm)
+
+    def query(cypher: str) -> list[Any]:
+        return cypher_pm.query(spec(cypher))
+
+    roles = ["Johnny", "Morpheus", "Neo", "Trinity"]
+    # Grouped by the property, not by its variable: one row for "Neo", which two relationships have.
+    assert query("UNWIND [{a: 1}, {a: 1}, {a: 2}] AS x RETURN x.a AS a, x.a + count(*) AS b ORDER BY a") == [
+        [1, 3],
+        [2, 3],
+    ]
+    assert query("UNWIND [{a: 1}, {a: 1}, {a: 2}] AS x WITH x.a AS a, x.a + count(*) AS b RETURN a, b ORDER BY a") == [
+        [1, 3],
+        [2, 3],
+    ]
+    assert query("MATCH (:Person)-[r:ACTED_IN]->() RETURN r.role AS role, r.role + count(*) AS n ORDER BY role") == [
+        [role, n] for role, n in zip(roles, ["Johnny1", "Morpheus1", "Neo2", "Trinity2"], strict=True)
+    ]
+    assert query(
+        "MATCH (:Person)-[r:ACTED_IN]->() RETURN r.role AS role, {role: r.role, n: count(*)} AS n ORDER BY role"
+    ) == [[role, {"role": role, "n": n}] for role, n in zip(roles, [1, 1, 2, 2], strict=True)]
+    assert query(
+        "MATCH (p:Person)-[:ACTED_IN]->(m) RETURN p.name, size(reduce(s = p.name, t IN collect(m.title) | s + t)) AS r "
+        "ORDER BY p.name"
+    ) == [["Carrie", 35], ["Keanu", 49], ["Laurence", 18]]
+    assert query(
+        "MATCH (p:Person)-[:ACTED_IN]->(m) RETURN p.name, p.name IN collect(m.title) AS r ORDER BY p.name"
+    ) == [["Carrie", False], ["Keanu", False], ["Laurence", False]]
+    assert query(
+        "UNWIND [{a: {b: 1}}, {a: {b: 1}}, {a: {b: 2}}] AS x RETURN x.a AS k, x.a.b + count(*) AS c ORDER BY k.b"
+    ) == [[{"b": 1}, 3], [{"b": 2}, 3]]
+    # In a list comprehension's WHERE, the key; in its projection or a quantifier's WHERE, Neo4j groups by its variable
+    # too.
+    assert query(
+        "MATCH (:Person)-[r:ACTED_IN]->(m) RETURN r.role AS role, "
+        "size([t IN collect(m.title) WHERE t STARTS WITH r.role | t]) AS n ORDER BY role"
+    ) == [[role, n] for role, n in zip(roles, [1, 0, 0, 0], strict=True)]
+    each = ["Johnny", "Morpheus", "Neo", "Neo", "Trinity", "Trinity"]
+    assert query(
+        "MATCH (:Person)-[r:ACTED_IN]->(m) RETURN r.role AS role, [t IN collect(m.title) | r.role] AS n ORDER BY role"
+    ) == [[it, [it]] for it in each]
+    assert query(
+        "MATCH (:Person)-[r:ACTED_IN]->(m) RETURN r.role AS role, any(t IN collect(m.title) WHERE t CONTAINS r.role) "
+        "AS n ORDER BY role"
+    ) == [[it, it == "Johnny"] for it in each]
+    # Unnamed, a map projection is the item p, which an order term reads.
+    assert query("MATCH (p:Person)-[:ACTED_IN]->(m) RETURN p {.name}, count(*) AS c ORDER BY p.name") == [
+        [{"name": "Carrie"}, 2],
+        [{"name": "Keanu"}, 3],
+        [{"name": "Laurence"}, 1],
+    ]
+    assert query("MATCH (p:Person)-[:ACTED_IN]->(m) RETURN p {.name, .born}, count(*) AS c ORDER BY p.born") == [
+        [{"name": "Laurence", "born": 1961}, 1],
+        [{"name": "Keanu", "born": 1964}, 3],
+        [{"name": "Carrie", "born": 1967}, 2],
+    ]
+    assert query(
+        "MATCH (p:Person)-[:ACTED_IN]->(m) WITH p {.name}, count(*) AS c RETURN p.name, c ORDER BY p.name"
+    ) == [["Carrie", 2], ["Keanu", 3], ["Laurence", 1]]
+    # A null key is one group; two keys of one variable group by both, not by the variable (two rows have a = 1, b = 1).
+    assert query("MATCH (m:Movie) RETURN m.tagline AS t, {t: m.tagline, n: count(*)} AS n ORDER BY t") == [
+        ["Welcome to the Real World", {"t": "Welcome to the Real World", "n": 1}],
+        [None, {"t": None, "n": 2}],
+    ]
+    assert query(
+        "UNWIND [{a: 1, b: 1, c: 1}, {a: 1, b: 1, c: 2}, {a: 1, b: 2, c: 1}, {a: 2, b: 2, c: 1}] AS x "
+        "RETURN x.a AS a, x.b AS b, x.a * 10 + x.b + count(*) AS n ORDER BY a, b"
+    ) == [[1, 1, 13], [1, 2, 13], [2, 2, 23]]
+    # In a comprehension's WHERE inside another's WHERE, the key too; but not where a comprehension binds the key's
+    # variable.
+    assert query(
+        "MATCH (:Person)-[r:ACTED_IN]->(m) RETURN r.role AS role, "
+        "size([t IN collect(m.title) WHERE size([u IN [t] WHERE u CONTAINS r.role]) > 0]) AS n ORDER BY role"
+    ) == [[role, n] for role, n in zip(roles, [1, 0, 0, 0], strict=True)]
+    assert query(
+        "UNWIND [{a: 1}, {a: 2}, {a: 2}] AS x RETURN x.a AS a, size([x IN [{a: 5}] WHERE x.a > 1]) + count(*) AS n "
+        "ORDER BY a"
+    ) == [[1, 2], [2, 3]]
+    # A function named in another case is the same function.
+    assert query(
+        "MATCH (p:Person)-[:ACTED_IN]->(m) RETURN toUpper(p.name) AS u, count(*) AS c "
+        "ORDER BY TOUPPER(p.name) + count(*) DESC"
+    ) == [["LAURENCE", 1], ["KEANU", 3], ["CARRIE", 2]]
+    assert query(
+        "MATCH (p:Person)-[:ACTED_IN]->(m) RETURN TOUPPER(p.name) AS u, count(*) AS c ORDER BY toupper(p.name)"
+    ) == [["CARRIE", 2], ["KEANU", 3], ["LAURENCE", 1]]
+    assert query(
+        "UNWIND [{a: 'x'}, {a: 'x'}, {a: 'y'}] AS x RETURN toUpper(x.a), count(*) ORDER BY TOUPPER(x.a) + count(*)"
+    ) == [["X", 2], ["Y", 1]]
+
+
+def test_any_y_in_an_aggregate_where_y_is_a_key_and_an_order_term_over_one_group_by_the_property_beyond_the_spec(
+    cypher_pm: PersistenceManager,
+):
+    # #316: drivine4j's CypherQueryContract cases of liberation-data/drivine4j#507 and #522, and Drivine for
+    # TypeScript's CypherGroupingKey cases of liberation-data/drivine#506, less the statements the spec holds since
+    # v0.21.0. The rows are Neo4j's (2026.10.1). Two x share a = 1, so grouping by x gives a = 1 twice.
+    seeded(cypher_pm)
+    x = "UNWIND [{a: 1, b: 1}, {a: 1, b: 2}, {a: 2, b: 1}] AS x RETURN x.a AS a"
+    z = "UNWIND [{b: 1}, {a: null, b: 2}, {a: 1, b: 1}, {a: 1, b: 3}] AS x RETURN x.a AS a"
+    w = "UNWIND [1, 2] AS y UNWIND [{a: 1, b: 1}, {a: 1, b: 2}] AS x RETURN x.a AS a"
+    by_property = [[1, True], [2, False]]
+    by_variable = [[1, False], [1, True], [2, False]]
+    cases: list[tuple[str, list[Any]]] = [
+        # Neo4j reads any(y IN list WHERE y = e) as e IN list, and none(…) as NOT e IN list; not all(…), nor a WHERE
+        # that is more than the one comparison.
+        (f"{x}, any(y IN collect(x.b) WHERE y = x.a + 0) AS n ORDER BY a", by_property),
+        (
+            "UNWIND [{a: 1, b: 1}, {a: 1, b: 2}, {a: 2, b: 1}] AS x "
+            "WITH x.a AS a, any(y IN collect(x.b) WHERE y = x.a) AS n RETURN a, n ORDER BY a",
+            by_property,
+        ),
+        (f"{x}, any(y IN collect(x.b) WHERE y = x.a OR y = 5) AS n ORDER BY a, n", by_variable),
+        # Nor single(…), y.p = e, y IN [e1, e2], or an e that reads y; e IN [y] is y = e. With a null in the list, as
+        # e IN list.
+        (f"{x}, single(y IN collect(x.b) WHERE y = x.a) AS n ORDER BY a, n", by_variable),
+        (f"{x}, any(y IN collect(x) WHERE y.b = x.a) AS n ORDER BY a, n", by_variable),
+        (f"{x}, none(y IN collect(x.b) WHERE y IN [x.a, 5]) AS n ORDER BY a, n", [[1, False], [1, True], [2, True]]),
+        (f"{x}, any(y IN collect(x.b) WHERE y = x.a + y) AS n ORDER BY a, n", [[1, False], [1, False], [2, False]]),
+        (f"{x}, any(y IN collect(x.b) WHERE x.a IN [y]) AS n ORDER BY a, n", by_property),
+        (f"{x}, any(y IN collect(x.b) + [null] WHERE y = x.a) AS n ORDER BY a, n", [[1, True], [2, None]]),
+        (f"{x}, none(y IN collect(x.b) + [null] WHERE y = x.a + 1) AS n ORDER BY a, n", [[1, False], [2, None]]),
+        # An e that reads only a y that a comprehension, a quantifier or a reduce in it binds of its own reads no y of
+        # the quantifier's (drivine4j#519); a reduce's accumulator is its own too. One that reads the quantifier's y in
+        # a list or an initial value does.
+        (f"{x}, any(y IN collect(x.b) WHERE [y IN [x.a] | y][0] = y) AS n ORDER BY a, n", by_property),
+        (f"{x}, any(y IN collect(x.b) WHERE y = reduce(y = 0, z IN [x.a] | y + z)) AS n ORDER BY a, n", by_property),
+        (
+            f"{x}, any(y IN collect(x.b) WHERE y = CASE WHEN any(y IN [x.a] WHERE y > 0) THEN x.a END) AS n "
+            "ORDER BY a, n",
+            by_property,
+        ),
+        (
+            f"{x}, any(y IN collect(x.b) WHERE y = CASE WHEN any(y IN [y] WHERE y > 0) THEN x.a END) AS n "
+            "ORDER BY a, n",
+            by_variable,
+        ),
+        (
+            f"{x}, any(y IN collect(x.b) WHERE y = [z IN [y] | z + x.a][0]) AS n ORDER BY a, n",
+            [[1, False], [1, False], [2, False]],
+        ),
+        (
+            f"{x}, none(y IN collect(x.b) WHERE reduce(s = y, z IN [x.a] | s + z) = y) AS n ORDER BY a, n",
+            [[1, True], [1, True], [2, True]],
+        ),
+        # A key that is a map's null and one that is missing are one null, read by its name in a body too.
+        (f"{z}, any(y IN collect(x.b) WHERE y = x.a) AS n ORDER BY a, n", [[1, True], [None, None]]),
+        (
+            f"{z}, size([t IN collect(x.b) WHERE any(u IN [t] WHERE u > coalesce(x.a, 0))]) AS n ORDER BY a, n",
+            [[1, 1], [None, 2]],
+        ),
+        (f"{z}, count(*) + [y IN [1] | coalesce(x.a, 0)][0] AS n ORDER BY a, n", [[1, 3], [None, 2]]),
+        # An order term that aggregates reads the key as an item does; a reduce's step over an aggregate groups by x.
+        (
+            f"{x}, count(*) AS n ORDER BY reduce(s = 0, y IN collect(x.b) | s + x.a), a",
+            [[1, 1], [1, 1], [2, 1]],
+        ),
+        # A y of the scope is no y a comprehension binds of its own, read in its WHERE and its projection both: not
+        # grouped by (drivine4j#519). In the projection of one over an aggregate, x.a groups by x, as Neo4j does, not
+        # by y too.
+        (f"{w}, size([y IN collect(x.b) WHERE y > 0 | y + x.a]) AS n ORDER BY a", [[1, 2], [1, 2]]),
+        (f"{w}, count(*) + [y IN [1] WHERE y > 0 | y][0] AS n ORDER BY a", [[1, 5]]),
+    ]
+    assert differing(cypher_pm, cases) == []
+    # The items of a list collected are in no order Cypher promises.
+    rows = cypher_pm.query(spec(f"{w}, [y IN collect(x.b) WHERE y > 0 | y] AS n ORDER BY a"))
+    assert [[a, sorted(n)] for a, n in rows] == [[1, [1, 1, 2, 2]]]
+
+
+def test_an_aggregate_in_the_where_of_a_with_that_groups_compares_keys_as_grouping_does_and_makes_no_variable(
+    cypher_pm: PersistenceManager,
+):
+    # #313: the WHERE of a WITH that aggregates, or is DISTINCT, filters its groups, as SQL's HAVING does. drivine4j's
+    # CypherQueryContract of liberation-data/drivine4j#497, less the statements the spec holds since v0.16.0; the rows
+    # are Neo4j's (2026.10.1).
+    seeded(cypher_pm)
+
+    def query(cypher: str) -> list[Any]:
+        return cypher_pm.query(spec(cypher))
+
+    ordered: list[tuple[str, list[Any]]] = [
+        # A key's property, read through the item it is renamed to, of a map and of a node.
+        (
+            "UNWIND [{a: 1}, {a: 1}, {a: 2}] AS x WITH x AS y, count(*) AS c WHERE x.a > 1 AND count(*) = 1 "
+            "RETURN y.a, c",
+            [[2, 1]],
+        ),
+        (
+            "MATCH (p:Person)-[:ACTED_IN]->(m) WITH p AS q, count(*) AS c WHERE p.born > 1965 RETURN q.name, c "
+            "ORDER BY q.name",
+            [["Carrie", 2]],
+        ),
+        # A key and an aggregate compared as grouping compares them, a function's name in any case; count(DISTINCT i)
+        # is not count(i).
+        (
+            "UNWIND ['a', 'A', 'b'] AS x WITH toUpper(x) AS u, count(*) AS c WHERE TOUPPER(x) = 'A' RETURN u, c",
+            [["A", 2]],
+        ),
+        ("UNWIND [1, 1, 2] AS i WITH i, Sum(i) AS s WHERE SUM(i) > 1 RETURN i, s ORDER BY i", [[1, 2], [2, 2]]),
+        (
+            "UNWIND [1, 1, 2] AS i WITH i, count(i) AS c WHERE count(DISTINCT i) = 1 AND count(i) > 1 RETURN i, c",
+            [[1, 2]],
+        ),
+        # A property's name keeps its case: sum(x.A) is not sum(x.a).
+        (
+            "UNWIND [{a: 1, A: 10}, {a: 2, A: 20}] AS x WITH count(*) AS c, sum(x.a) AS s WHERE sum(x.A) > 25 "
+            "RETURN c, s",
+            [[2, 3]],
+        ),
+        # An item quoted as a made item would be named is the statement's own.
+        *(
+            (
+                f"UNWIND [1, 1, 2] AS i WITH i, count(*) AS `#having{n}` WHERE sum(i) > 1 RETURN i, `#having{n}` "
+                "ORDER BY i",
+                [[1, 2], [2, 1]],
+            )
+            for n in range(1, 7)
+        ),
+    ]
+    for cypher, rows in ordered:
+        assert (cypher, query(cypher)) == (cypher, rows)
+    unordered: list[tuple[str, list[Any]]] = [
+        ("UNWIND [1, 1, 2] AS i WITH i, count(*) AS c WHERE sum(i) > 1 WITH * RETURN *", [[1, 2], [2, 1]]),
+        (
+            "UNWIND [1, 1, 2] AS i WITH i, count(*) AS c WHERE sum(i) > 1 RETURN i UNION UNWIND [5] AS `#having2` "
+            "RETURN `#having2` AS i",
+            [1, 2, 5],
+        ),
+        ("UNWIND [1, 1, 2] AS i WITH i, count(*) AS c WHERE count(DISTINCT i) = 1 RETURN i, c", [[1, 2], [2, 1]]),
+    ]
+    for cypher, rows in unordered:
+        given = sorted(json.dumps(it) for it in query(cypher))
+        assert (cypher, given) == (cypher, sorted(json.dumps(it) for it in rows))
+
+
+def test_a_date_or_a_moment_from_calendar_fields_an_expression_gives_fails_past_their_range_as_it_runs(
+    cypher_pm: PersistenceManager,
+):
+    # #312: worked out by the store, which fails on a field past its range as Neo4j does. drivine4j's
+    # CypherTemporalContract of liberation-data/drivine4j#495, less the statements the spec holds since v0.15.0.
+    differing: list[str] = []
+    for cypher in (
+        "UNWIND [[2023, 2, 0]] AS p RETURN date({year: p[0], week: p[1], dayOfWeek: p[2]})",
+        "UNWIND [[2024, 4, 93]] AS p RETURN date({year: p[0], quarter: p[1], dayOfQuarter: p[2]})",
+        "UNWIND [[2023, 2.5]] AS p RETURN date({year: p[0], week: p[1]})",
+        # A moment's too, which Oracle reads as a JSON value's, null where it is no moment.
+        "UNWIND [[2023, 366]] AS p RETURN localdatetime({year: p[0], ordinalDay: p[1], hour: 3})",
+        "UNWIND [[2020, 54]] AS p RETURN datetime({year: p[0], week: p[1], timezone: '+01:00'})",
+        "UNWIND [[2024, 4, 93]] AS p RETURN localdatetime({year: p[0], quarter: p[1], dayOfQuarter: p[2]})",
+    ):
+        try:
+            differing.append(f"{cypher} gave {cypher_pm.query(spec(cypher))}")
+        except Exception as e:  # noqa: BLE001
+            # Fails as it runs, as on Neo4j: the store's failure, not a refusal, which is a DrivineError at the root.
+            cause: BaseException = e
+            while cause.__cause__ is not None:
+                cause = cause.__cause__
+            if isinstance(cause, DrivineError):
+                differing.append(f"{cypher} was refused: {cause}")
+    assert differing == []
+
+
+def test_a_date_or_a_moment_from_calendar_fields_an_expression_gives_is_neo4js_at_the_turn_of_a_year(
+    cypher_pm: PersistenceManager,
+):
+    # #312: the least a null gives, and a moment beside its time. Neo4j's rows (2026.10.1).
+    rows = cypher_pm.query(
+        spec(
+            "UNWIND [[2020, 53, 7, 2024, 366, 4, 92], [2019, 53, 1, 2023, 365, 1, 91], "
+            "[2015, 53, 5, 2024, 60, null, null], [2026, 1, 1, 2025, null, 2, 1]] AS p "
+            "WITH date({year: p[0], week: p[1], dayOfWeek: p[2]}) AS w, localdatetime({year: p[3], ordinalDay: p[4], "
+            "hour: 12}) AS o, datetime({year: p[0], quarter: p[5], dayOfQuarter: p[6], hour: 0, minute: 5, "
+            "timezone: '-05:00'}) AS q "
+            "RETURN [[w.year, w.month, w.day], [o.year, o.month, o.day, o.hour], [q.year, q.month, q.day, q.minute, "
+            "q.timezone]]"
+        )
+    )
+    assert rows == [
+        [[2021, 1, 3], [2024, 12, 31, 12], [2020, 12, 31, 5, "-05:00"]],
+        [[2019, 12, 30], [2023, 12, 31, 12], [2019, 4, 1, 5, "-05:00"]],
+        [[2016, 1, 1], [2024, 2, 29, 12], [2015, 1, 1, 5, "-05:00"]],
+        [[2025, 12, 29], [2025, 1, 1, 12], [2026, 4, 1, 5, "-05:00"]],
+    ]
+
+
+def test_a_moment_from_calendar_fields_an_expression_gives_beside_a_time_is_worked_out_by_the_store(
+    cypher_pm: PersistenceManager,
+):
+    # #317: a week, an ordinal day or a quarter that an expression gives can't be worked out as the statement is
+    # compiled, so `Temporals.over` gives it the store's `of_calendar`, with the time of the value given.
+    rows = cypher_pm.query(
+        spec(
+            "UNWIND [[2020, 53, 7, 2024, 60, 4]] AS p "
+            "WITH localdatetime({year: p[0], week: p[1], dayOfWeek: p[2], time: localtime('10:30')}) AS w, "
+            "datetime({year: p[3], ordinalDay: p[4], time: time('10:00+02:00')}) AS o, "
+            "datetime({year: 2024, quarter: p[5], dayOfQuarter: 92, time: localtime('01:00'), timezone: '-05:00'}) "
+            "AS q "
+            "RETURN [[w.year, w.month, w.day, w.hour, w.minute], [o.year, o.month, o.day, o.hour, o.timezone], "
+            "[q.year, q.month, q.day, q.hour, q.timezone]]"
+        )
+    )
+    assert rows == [[[2021, 1, 3, 10, 30], [2024, 2, 29, 10, "+02:00"], [2024, 12, 31, 1, "-05:00"]]]
 
 
 def test_an_optional_call_in_a_writes_subquery_counts_what_it_finds_and_the_row_it_finds_nothing_for(
@@ -4492,3 +4889,693 @@ def test_a_list_each_row_works_out_by_a_subquery_is_read_for_each_row_in_a_call_
     ]
     assert differing(cypher_pm, cases) == []
     clear(cypher_pm)
+
+
+def distinct_values(rows: list[Any]) -> int:
+    """How many distinct values the rows hold, each item of a row of several apart."""
+
+    def text(value: Any) -> str:
+        return value if isinstance(value, str) else json.dumps(value, sort_keys=True, default=str)
+
+    return len({text(it) for row in rows for it in (row if isinstance(row, list) else [row])})
+
+
+def test_random_uuid_inside_a_larger_expression_in_a_read_is_made_again_for_each_row(
+    cypher_pm: PersistenceManager,
+):
+    # drivine4j's #412 and #471 (#292 here). A term holding randomUUID() was bound in a subquery that reads nothing of
+    # the row, or a CALL's was joined so, and the store made it once for the statement: each row read the same one.
+    # Each statement gives a value for each of 100 rows, and the count of distinct values among them. Not one in an
+    # aggregate's argument, which Neo4j refuses.
+    clear(cypher_pm)
+    shapes: list[tuple[str, int]] = [
+        *(
+            (f"UNWIND range(1, 100) AS i RETURN {it}", 100)
+            for it in [
+                "left(replace(randomUUID(), '-', ''), 16)",
+                "substring(randomUUID(), 0, 16)",
+                "toUpper(randomUUID())",
+                "[x IN [1] | randomUUID()][0]",
+                "CASE WHEN i > 0 THEN randomUUID() END",
+                "CASE WHEN true THEN toUpper(randomUUID()) END",
+                "{u: randomUUID()}.u",
+                "{u: randomUUID()}",
+                "coalesce(null, randomUUID()) + toString(i % 2)",
+            ]
+        ),
+        ("UNWIND range(1, 100) AS i RETURN [randomUUID(), randomUUID()]", 200),
+        ("UNWIND range(1, 100) AS i RETURN [x IN range(1, 3) | toUpper(randomUUID())]", 300),
+        ("UNWIND range(1, 100) AS i RETURN reduce(s = '', x IN [1, 2] | s + randomUUID())", 100),
+        ("UNWIND range(1, 100) AS i UNWIND [toUpper(randomUUID())] AS u RETURN u", 100),
+        ("UNWIND range(1, 100) AS i RETURN toUpper(randomUUID()) AS u ORDER BY u", 100),
+        ("UNWIND range(1, 100) AS i CALL { RETURN randomUUID() AS u } RETURN u", 100),
+        ("UNWIND range(1, 100) AS i CALL { RETURN toUpper(randomUUID()) + '-' AS u } RETURN u", 100),
+        # However the CALL imports, it reads the UUID made for its row, which it never names (#294).
+        ("UNWIND range(1, 100) AS i CALL () { RETURN toUpper(randomUUID()) AS u } RETURN u", 100),
+        ("UNWIND range(1, 100) AS i CALL (i) { RETURN toString(i) + randomUUID() AS u } RETURN u", 100),
+        ("UNWIND range(1, 100) AS i CALL { WITH i RETURN toString(i) + randomUUID() AS u } RETURN u", 100),
+        (
+            "UNWIND range(1, 100) AS i CALL { WITH i WITH i AS j RETURN toString(j) + randomUUID() AS u } RETURN u",
+            100,
+        ),
+        ("UNWIND range(1, 100) AS i CALL { RETURN toUpper(randomUUID()) AS u UNION RETURN 'x' AS u } RETURN u", 101),
+        # A variable quoted as the compiler names its own is the statement's: imported as named, and a UUID made still.
+        (
+            "UNWIND range(1, 100) AS `#anewi` CALL (`#anewi`) { RETURN toString(`#anewi`) + randomUUID() AS u } "
+            "RETURN u",
+            100,
+        ),
+        # ... and a CASE reading it is not taken for a randomUUID() the compiler read beside the row's own.
+        (
+            "UNWIND range(1, 100) AS i WITH i, 1 AS `#anew1` "
+            "RETURN [x IN [1] | CASE WHEN `#anew1` IS NULL THEN null ELSE randomUUID() END][0]",
+            100,
+        ),
+        # A CALL that writes makes one for each row it writes, as it did.
+        (
+            "UNWIND range(1, 100) AS i CALL (i) { CREATE (n:CyUuidCall {id: toUpper(randomUUID())}) RETURN n.id AS u } "
+            "RETURN u",
+            100,
+        ),
+        (
+            "UNWIND range(1, 100) AS i CALL () { CREATE (n:CyUuidSet) SET n.id = toUpper(randomUUID()) "
+            "RETURN n.id AS u } RETURN u",
+            100,
+        ),
+        # ... and one for each item of a list it writes.
+        (
+            "UNWIND range(1, 100) AS i CREATE (n:CyUuidList {ids: [x IN [1, 2] | toUpper(randomUUID())]}) RETURN n.ids",
+            200,
+        ),
+        # A CALL in a CALL, and an item made again in a reduce's body.
+        ("UNWIND range(1, 100) AS i CALL () { CALL () { RETURN toUpper(randomUUID()) AS u } RETURN u } RETURN u", 100),
+        ("UNWIND range(1, 100) AS i RETURN reduce(s = [], x IN [1, 2] | s + [toUpper(randomUUID())])", 200),
+        ("UNWIND range(1, 100) AS i WITH i, toUpper(randomUUID()) AS u RETURN u", 100),
+        # Two items written alike are a UUID each, as in Neo4j.
+        ("UNWIND range(1, 100) AS i RETURN toUpper(randomUUID()) AS a, toUpper(randomUUID()) AS b", 200),
+        ("UNWIND range(1, 100) AS i WITH toUpper(randomUUID()) AS a, toUpper(randomUUID()) AS b RETURN a, b", 200),
+    ]
+    failed: list[str] = []
+
+    def failing(cypher: str, wrong: Callable[[list[Any]], bool]) -> None:
+        try:
+            rows = cypher_pm.query(spec(cypher))
+            if wrong(rows):
+                failed.append(f"{cypher}: {str(rows)[:300]}")
+        except Exception as e:  # noqa: BLE001
+            failed.append(f"{cypher}: {str(e)[:300]}")
+
+    for cypher, expected in shapes:
+        failing(cypher, lambda rows, expected=expected: distinct_values(rows) != expected)
+    # A FOREACH makes one for each node it makes.
+    failing(
+        "UNWIND range(1, 50) AS i FOREACH (x IN [1, 2] | CREATE (:CyUuidEach {id: toUpper(randomUUID())}))",
+        lambda rows: False,
+    )
+    failing("MATCH (n:CyUuidEach) RETURN n.id", lambda rows: distinct_values(rows) != 100)
+    # A condition that reads one keeps about half of 1,000 rows, not all of them or none.
+    seeded(cypher_pm)
+    for cypher in [
+        "UNWIND range(1, 1000) AS i WITH i WHERE left(randomUUID(), 1) < '8' RETURN count(*)",
+        "UNWIND range(1, 1000) AS i WITH i WHERE [x IN [1] | left(randomUUID(), 1)][0] < '8' RETURN count(*)",
+        "UNWIND range(1, 1000) AS i MATCH (p:Person {name: 'Keanu'}) WHERE left(randomUUID(), 1) < '8' RETURN count(*)",
+        # An OPTIONAL MATCH's lateral query read nothing of the row, and Oracle worked it out once.
+        "UNWIND range(1, 1000) AS i OPTIONAL MATCH (p:Person {name: 'Keanu'}) WHERE randomUUID() < '8' RETURN count(p)",
+        "UNWIND range(1, 1000) AS i OPTIONAL MATCH (p:Person {name: 'Keanu'}) WHERE left(randomUUID(), 1) < '8' "
+        "RETURN count(p)",
+        "UNWIND range(1, 1000) AS i OPTIONAL MATCH (p:Person {name: 'Keanu'}) "
+        "WHERE [x IN [1] | left(randomUUID(), 1)][0] < '8' RETURN count(p)",
+        # Made for each of the 4 people a row finds, not once for the row: some of them kept, not all or none.
+        "UNWIND range(1, 1000) AS i OPTIONAL MATCH (p:Person) WHERE left(randomUUID(), 1) < '8' "
+        "WITH i, count(p) AS c WHERE c > 0 AND c < 4 RETURN count(*)",
+        # One in a CALL that imports nothing, made for each row the CALL is joined to.
+        "UNWIND range(1, 1000) AS i CALL () { OPTIONAL MATCH (p:Person {name: 'Keanu'}) "
+        "WHERE left(randomUUID(), 1) < '8' RETURN p } RETURN count(p)",
+        # Two OPTIONAL MATCHes, each a UUID of its own: one kept and not the other in about half the rows.
+        "UNWIND range(1, 1000) AS i OPTIONAL MATCH (p:Person {name: 'Keanu'}) WHERE left(randomUUID(), 1) < '8' "
+        "OPTIONAL MATCH (q:Person {name: 'Keanu'}) WHERE left(randomUUID(), 1) < '8' "
+        "WITH p, q WHERE (p IS NULL) <> (q IS NULL) RETURN count(*)",
+        # A shortest path's condition, met where its one path is found.
+        "UNWIND range(1, 1000) AS i MATCH (a:Person {name: 'Laurence'}), (b:Person {name: 'Carrie'}) "
+        "MATCH p = shortestPath((a)-[:KNOWS*]->(b)) WHERE left(randomUUID(), 1) < '8' RETURN count(p)",
+        "UNWIND range(1, 1000) AS i MATCH (a:Person {name: 'Laurence'}), (b:Person {name: 'Carrie'}) "
+        "MATCH p = allShortestPaths((a)-[:KNOWS*]->(b)) WHERE left(randomUUID(), 1) < '8' RETURN count(p)",
+        # Made again for each item: one of two kept in about half the rows, which Postgres and Oracle kept both or
+        # neither of.
+        "UNWIND range(1, 1000) AS i WITH i WHERE single(x IN range(1, 2) WHERE left(randomUUID(), 1) < '8') "
+        "RETURN count(*)",
+        "UNWIND range(1, 1000) AS i WITH i WHERE size([x IN range(1, 2) WHERE left(randomUUID(), 1) < '8' | x]) = 1 "
+        "RETURN count(*)",
+    ]:
+        failing(cypher, lambda rows: rows[0] in (0, 1000))
+    # One for each item a pattern comprehension finds, 8 of them, where Postgres refused the statement.
+    for cypher in [
+        "MATCH (p:Person) RETURN p.name, [(p)-->() | toUpper(randomUUID())]",
+        "MATCH (p:Person) RETURN p.name, [(p)-->(m) WHERE left(randomUUID(), 1) <> 'z' | left(randomUUID(), 36)]",
+    ]:
+
+        def eight(rows: list[Any]) -> bool:
+            made = [it for row in rows for it in row[1]]
+            return len(rows) != 4 or len(made) != 8 or len(set(made)) != 8
+
+        failing(cypher, eight)
+    # The UUID made first for the row is no variable of the statement's, nor is the variable a CALL's query unwinds it
+    # to: a star in the query gives j alone, before u.
+    for cypher, columns in [
+        ("UNWIND range(1, 2) AS i OPTIONAL MATCH (p:Person {name: 'Keanu'}) WHERE randomUUID() < 'z' RETURN *", 2),
+        ("UNWIND range(1, 2) AS i CALL { RETURN toUpper(randomUUID()) AS u } RETURN *", 2),
+        ("UNWIND range(1, 2) AS i CALL (*) { RETURN toUpper(randomUUID()) AS u } RETURN *", 2),
+        ("UNWIND range(1, 2) AS i WITH * WHERE left(randomUUID(), 1) < 'z' RETURN *, 1 AS one", 2),
+        ("UNWIND range(1, 2) AS i CALL { UNWIND [1] AS j RETURN *, toUpper(randomUUID()) AS u } RETURN *", 3),
+    ]:
+        failing(cypher, lambda rows, columns=columns: len(rows) != 2 or any(len(it) != columns for it in rows))
+    # A variable quoted as the compiler names its own is the statement's: it was taken for the UUID's, so read as the
+    # UUID, and left out of a star. The first name made is #anew2 here, after the UNWIND's alias.
+    for cypher, expected in [
+        ("UNWIND [1, 2] AS `#anew2` RETURN `#anew2` AS a, toUpper(randomUUID()) AS u ORDER BY a", [[1], [2]]),
+        (
+            "UNWIND [1, 2] AS i WITH i, 1 AS `#anew1`, 2 AS `#anew2`, 3 AS `#anew3`, 4 AS `#anew4`, 5 AS `#anew5`, "
+            "6 AS `#anew6` CALL { RETURN toUpper(randomUUID()) AS u } RETURN * ORDER BY i",
+            [[1, 2, 3, 4, 5, 6, 1], [1, 2, 3, 4, 5, 6, 2]],
+        ),
+        # A UNION's queries are compiled one by one: the name made in the first was a later one's variable.
+        (
+            "UNWIND [1] AS i CALL (i) { RETURN toString(i) + randomUUID() AS u } RETURN 0 AS x, u "
+            "UNION ALL WITH 2 AS `#anew2` WITH * RETURN `#anew2` AS x, 0 AS u",
+            [[0], [2]],
+        ),
+    ]:
+        failing(cypher, lambda rows, expected=expected: [it[:-1] for it in rows] != expected)
+    # An OPTIONAL MATCH that finds nothing, or keeps nothing it finds, keeps the row, with nulls.
+    for cypher in [
+        "UNWIND range(1, 3) AS i OPTIONAL MATCH (p:Person {name: 'Nobody'}) WHERE randomUUID() < 'z' RETURN i, p",
+        "UNWIND range(1, 3) AS i OPTIONAL MATCH (p:Person {name: 'Keanu'}) WHERE left(randomUUID(), 1) < '0' "
+        "RETURN i, p",
+        "UNWIND range(1, 3) AS i OPTIONAL MATCH (p:Person {name: 'Nobody'}) WHERE randomUUID() < 'z' "
+        "OPTIONAL MATCH (p)-->(m) WHERE toUpper(randomUUID()) < 'Z' RETURN i, p, m",
+    ]:
+        failing(cypher, lambda rows: len(rows) != 3 or any(v is not None for it in rows for v in it[1:]))
+    assert failed == []
+
+
+def test_random_uuid_bound_by_a_with_is_one_value_for_each_row_the_same_however_often_the_row_reads_it(
+    cypher_pm: PersistenceManager,
+):
+    # drivine4j's #412: one value for each row, not for each read of it.
+    rows = cypher_pm.query(
+        spec(
+            "UNWIND range(1, 100) AS i WITH i, randomUUID() AS u "
+            "RETURN u AS a, u AS b, toUpper(u) AS c, left(replace(u, '-', ''), 16) AS d"
+        )
+    )
+    assert len({it[0] for it in rows}) == 100
+    for a, b, upper, short in rows:
+        assert [b, upper, short] == [a, a.upper(), a.replace("-", "")[:16]]
+    made = cypher_pm.query(
+        spec("UNWIND range(1, 100) AS i WITH i, toUpper(randomUUID()) AS u RETURN u AS a, toLower(u) AS b, u + '' AS c")
+    )
+    assert len({it[0] for it in made}) == 100
+    for a, lower, plus in made:
+        assert [lower, plus] == [a.lower(), a]
+
+
+def test_a_call_sees_only_the_variables_it_imports_and_a_name_it_does_not_import_is_a_new_variable_in_it(
+    cypher_pm: PersistenceManager,
+):
+    # drivine4j's own test of liberation-data/drivine4j#410, ported for #294. A CALL saw every variable of its row, so
+    # an inner MATCH that reused a name it did not import joined to the row's variable, and gave no rows, or was
+    # refused where it bound a relationship of a node's name. The rows are Neo4j's (2026.10).
+    seeded(cypher_pm)
+    titles = ["Johnny Mnemonic", "The Matrix", "The Matrix Reloaded"]
+    people = [["Carrie", 3], ["Hugo", 3], ["Keanu", 3], ["Laurence", 3]]
+    cases: list[tuple[str, list[Any]]] = [
+        # A CALL with no brackets and no leading WITH imports nothing.
+        (
+            "MATCH (p:Person) CALL { MATCH (p:Movie) RETURN p.title AS t } "
+            "RETURN count(*) AS n, count(DISTINCT t) AS d",
+            [[12, 3]],
+        ),
+        ("MATCH (p:Person) CALL { MATCH (p:Movie) RETURN count(p) AS n } RETURN p.name, n ORDER BY p.name", people),
+        # CALL () imports nothing.
+        (
+            "MATCH (p:Person {name: 'Keanu'}) CALL () { MATCH (p:Movie) RETURN p.title AS t } RETURN p.name, t "
+            "ORDER BY t",
+            [["Keanu", it] for it in titles],
+        ),
+        # CALL (a) imports a alone, and a leading WITH a alone: b in it is new.
+        (
+            "MATCH (a:Person {name: 'Keanu'}), (b:Person {name: 'Carrie'}) "
+            "CALL (a) { MATCH (a)-[:ACTED_IN]->(b) RETURN b.title AS t } RETURN b.name, t ORDER BY t",
+            [["Carrie", it] for it in titles],
+        ),
+        (
+            "MATCH (a:Person {name: 'Keanu'}), (b:Person {name: 'Carrie'}) "
+            "CALL { WITH a MATCH (a)-[:ACTED_IN]->(b) RETURN b.title AS t } RETURN b.name, t ORDER BY t",
+            [["Carrie", it] for it in titles],
+        ),
+        # A node's name, not imported, is a relationship's in the CALL.
+        (
+            "MATCH (a:Person {name: 'Keanu'}) CALL { MATCH ()-[a:KNOWS]->() RETURN count(a) AS n } RETURN a.name, n",
+            [["Keanu", 2]],
+        ),
+        (
+            "MATCH (a:Person {name: 'Laurence'}) CALL () { MATCH ()-[a:KNOWS]->(b) RETURN b.name AS k } "
+            "RETURN a.name, k ORDER BY k",
+            [["Laurence", "Carrie"], ["Laurence", "Keanu"]],
+        ),
+        (
+            "MATCH (a:Person {name: 'Keanu'}), (b:Movie {title: 'The Matrix'}) "
+            "CALL (a) { MATCH (a)-[b]->() RETURN count(b) AS n } RETURN b.title, n",
+            [["The Matrix", 4]],
+        ),
+        # What a leading WITH imports is gone after a WITH that does not pass it on.
+        (
+            "MATCH (a:Person {name: 'Keanu'}) CALL { WITH a WITH 1 AS one MATCH (a:Movie) RETURN count(a) AS n } "
+            "RETURN n",
+            [3],
+        ),
+        # What brackets import is seen throughout the CALL, after a WITH that does not pass it on too, as Neo4j has it.
+        (
+            "MATCH (a:Person {name: 'Keanu'}), (b:Person {name: 'Carrie'}) "
+            "CALL (a, b) { WITH 1 AS one RETURN b.name AS n } RETURN n",
+            ["Carrie"],
+        ),
+        (
+            "MATCH (a:Person {name: 'Keanu'}) CALL (a) { MATCH (a)-[:ACTED_IN]->(m) WITH m "
+            "MATCH (a)-[:ACTED_IN]->(m) RETURN count(m) AS n } RETURN n",
+            [3],
+        ),
+        (
+            "MATCH (a:Person) CALL (a) { UNWIND [1, 2] AS i WITH i RETURN a.name AS n, sum(i) AS s } "
+            "RETURN n, s ORDER BY n",
+            people,
+        ),
+        # CALL (*), and a leading WITH *, import every variable.
+        (
+            "MATCH (a:Person {name: 'Keanu'}) CALL (*) { MATCH (a)-[:ACTED_IN]->(m) RETURN count(m) AS n } RETURN n",
+            [3],
+        ),
+        (
+            "MATCH (a:Person {name: 'Keanu'}) CALL (*) { MATCH (a)-[:ACTED_IN]->(m) WITH m "
+            "MATCH (a)-[:ACTED_IN]->(m) RETURN count(m) AS n } RETURN n",
+            [3],
+        ),
+        (
+            "MATCH (a:Person {name: 'Keanu'}) CALL { WITH * MATCH (a)-[:ACTED_IN]->(m) RETURN count(m) AS n } RETURN n",
+            [3],
+        ),
+        # In a UNION, each query imports what its own leading WITH names.
+        (
+            "MATCH (a:Person {name: 'Keanu'}) CALL { WITH a MATCH (a)-[:ACTED_IN]->(m) RETURN count(m) AS n "
+            "UNION ALL MATCH (a:Movie) RETURN count(a) AS n } RETURN a.name, n",
+            [["Keanu", 3], ["Keanu", 3]],
+        ),
+    ]
+    assert differing(cypher_pm, cases) == []
+
+
+def test_a_call_that_writes_sees_only_the_variables_it_imports_so_a_create_of_a_name_it_does_not_import_makes_one(
+    cypher_pm: PersistenceManager,
+):
+    # drivine4j's own test of liberation-data/drivine4j#410, ported for #294: a CREATE of a name the CALL does not
+    # import joined the row's node, so no node was made. The rows are Neo4j's (2026.10).
+    clear(cypher_pm)
+    cypher_pm.query(spec("CREATE (:CyWrite {id: 1}), (:CyWrite {id: 2})"))
+    cases: list[tuple[str, list[Any]]] = [
+        (
+            "MATCH (a:CyWrite) CALL () { CREATE (a:CyWrite {made: true}) RETURN a.made AS m } RETURN a.id, m "
+            "ORDER BY a.id",
+            [[1, True], [2, True]],
+        ),
+        (
+            "MATCH (a:CyWrite {id: 1}) CALL { CREATE (a:CyWrite {made: false}) RETURN 1 AS x } RETURN [a.id, x]",
+            [[1, 1]],
+        ),
+        ("MATCH (n:CyWrite) RETURN [count(n.id), count(n.made)]", [[2, 3]]),
+        # CALL (a) imports a alone: b in it is new, and the row's b is as it was after it.
+        (
+            "MATCH (a:CyWrite {id: 1}), (b:CyWrite {id: 2}) CALL (a) { CREATE (a)-[:R]->(b:CyWrite {id: 3}) } RETURN 1",
+            [1],
+        ),
+        ("MATCH (a:CyWrite)-[:R]->(b) RETURN [a.id, b.id]", [[1, 3]]),
+        (
+            "MATCH (a:CyWrite {id: 1}), (b:CyWrite {id: 2}) "
+            "CALL (a) { CREATE (b:CyWrite {id: 4}) RETURN b.id AS made } RETURN [b.id, made]",
+            [[2, 4]],
+        ),
+        # What brackets import is seen after a leading WITH that does not pass it on, as Neo4j has it.
+        (
+            "MATCH (a:CyWrite {id: 1}), (b:CyWrite {id: 2}) CALL (a, b) { WITH a SET b.seen = true } RETURN b.seen",
+            [True],
+        ),
+        # ... and after any WITH: a CREATE of it joins the row's node, and a SET writes it.
+        ("MATCH (a:CyWrite {id: 1}) CALL (a) { WITH 1 AS one CREATE (a)-[:S]->(:CyWrite {id: 5}) } RETURN 1", [1]),
+        ("MATCH (a:CyWrite)-[:S]->(b) RETURN [a.id, b.id]", [[1, 5]]),
+        (
+            "MATCH (a:CyWrite {id: 1}) CALL (a) { MATCH (c:CyWrite {id: 5}) WITH c SET a.next = c.id "
+            "RETURN a.next AS n } RETURN n",
+            [5],
+        ),
+        ("MATCH (a:CyWrite {id: 2}) CALL (*) { WITH 1 AS one SET a.one = one } RETURN a.one", [1]),
+        # ... after a WITH that renames it, and in a CALL in a CALL.
+        (
+            "MATCH (a:CyWrite {id: 2}) CALL (a) { WITH a AS b SET b.renamed = true SET a.also = true } "
+            "RETURN [a.renamed, a.also]",
+            [[True, True]],
+        ),
+        (
+            "MATCH (a:CyWrite {id: 2}) CALL (a) { CALL (a) { WITH 2 AS two SET a.nested = two } } RETURN a.nested",
+            [2],
+        ),
+        # An aggregate over no rows still gives its row, and the WITH's WHERE reads what brackets import.
+        (
+            "MATCH (a:CyWrite {id: 1}) CALL (a) { MATCH (c:CyNone) WITH count(c) AS n SET a.none = n "
+            "RETURN a.none AS v } RETURN v",
+            [0],
+        ),
+        (
+            "MATCH (a:CyWrite {id: 1}) CALL (a) { MATCH (c:CyWrite) WITH c WHERE c.id = a.next SET c.prev = a.id "
+            "RETURN c.prev AS p, c.id AS i } RETURN [p, i]",
+            [[1, 5]],
+        ),
+        # Reading the imports again after a WITH that aggregates, or keeps rows distinct, gives one row for each row of
+        # the call.
+        (
+            "MATCH (a:CyWrite) WHERE a.id IN [1, 2] CALL (a) { MATCH (c:CyWrite) WITH count(*) AS n SET a.count = n "
+            "RETURN n } RETURN [a.id, n, a.count] ORDER BY a.id",
+            [[1, 8, 8], [2, 8, 8]],
+        ),
+        (
+            "MATCH (a:CyWrite) WHERE a.id IN [1, 2] CALL (a) { MATCH (c:CyWrite) WITH DISTINCT 1 AS one SET a.d = one "
+            "RETURN one } RETURN [a.id, a.d] ORDER BY a.id",
+            [[1, 1], [2, 1]],
+        ),
+    ]
+    # In turn: each reads what those before it wrote.
+    assert differing(cypher_pm, cases) == []
+
+
+def test_a_with_star_at_the_start_of_a_call_passes_on_what_the_call_imports_and_nothing_where_nothing_is_bound(
+    cypher_pm: PersistenceManager,
+):
+    # drivine4j's own test of liberation-data/drivine4j#472, ported for #304, whole, as drivine4j keeps it beside the
+    # spec's steps of v0.11.0. The star expanded to the variables the CALL's first query bound, not those it imported,
+    # so it was refused with "A projection has at least one item"; and a WITH * where nothing was bound was refused so.
+    # The rows are Neo4j's (2026.10).
+    seeded(cypher_pm)
+    cases: list[tuple[str, list[Any]]] = [
+        ("UNWIND [1, 2] AS i CALL { WITH * RETURN i AS x } RETURN x", [1, 2]),
+        ("UNWIND [1, 2] AS i CALL (*) { WITH * RETURN i AS x } RETURN x", [1, 2]),
+        ("UNWIND [1, 2] AS i CALL (i) { WITH * RETURN i AS x } RETURN x", [1, 2]),
+        ("UNWIND [1, 2] AS i CALL (i) { WITH * WITH * RETURN i * 10 AS x } RETURN x", [10, 20]),
+        ("UNWIND [1] AS i WITH i, 2 AS j CALL { WITH * RETURN i + j AS x } RETURN x", [3]),
+        ("UNWIND [1] AS i CALL { WITH * UNWIND [5] AS k WITH * RETURN i + k AS x } RETURN x", [6]),
+        (
+            "MATCH (p:Person) CALL { WITH * RETURN p.name AS n } RETURN n ORDER BY n",
+            ["Carrie", "Hugo", "Keanu", "Laurence"],
+        ),
+        (
+            "UNWIND [1, 2] AS i CALL { WITH * RETURN i AS x UNION WITH * RETURN i * 10 AS x } RETURN x ORDER BY x",
+            [1, 2, 10, 20],
+        ),
+        ("UNWIND [1] AS i CALL { WITH * CALL { WITH * RETURN i AS y } RETURN y AS x } RETURN x", [1]),
+        (
+            "UNWIND [1, 2] AS i OPTIONAL CALL { WITH * WITH * WHERE i > 1 RETURN i AS x } RETURN i, x",
+            [[1, None], [2, 2]],
+        ),
+        # A star gives none of what brackets import, which the CALL sees throughout anyway.
+        ("UNWIND [1, 2] AS i CALL (i) { WITH 1 AS one WITH * RETURN * } RETURN *", [[1, 1], [2, 1]]),
+        ("UNWIND [1, 2] AS i CALL (i) { WITH *, 2 AS y RETURN * } RETURN *", [[1, 2], [2, 2]]),
+        # Where nothing is bound, a WITH * passes on nothing.
+        ("CALL { WITH * RETURN 1 AS x } RETURN x", [1]),
+        ("CALL (*) { WITH * RETURN 1 AS x } RETURN x", [1]),
+        ("UNWIND [1] AS i CALL () { WITH * RETURN 1 AS x } RETURN i, x", [[1, 1]]),
+        ("UNWIND [1, 2] AS i CALL () { WITH * WITH * RETURN 3 AS x } RETURN i, x", [[1, 3], [2, 3]]),
+        ("WITH * RETURN 1 AS x", [1]),
+        # Its WHERE is met still, on the rows it reads.
+        ("WITH * WHERE false RETURN 1 AS x", []),
+        ("WITH * WHERE true RETURN 1 AS x", [1]),
+        ("RETURN 1 AS x UNION ALL WITH * WHERE false RETURN 2 AS x", [1]),
+        ("UNWIND [1, 2] AS i CALL () { WITH * WHERE false RETURN 1 AS x } RETURN i, x", []),
+        ("UNWIND [1, 2] AS i CALL (i) { WITH * WHERE i > 1 RETURN i AS x } RETURN x", [2]),
+        # A randomUUID() in its WHERE is made for each row it reads, and once for each call of it.
+        ("WITH * WHERE randomUUID() = randomUUID() RETURN 1 AS x", []),
+        (
+            "UNWIND range(1, 40) AS i CALL () { WITH * WHERE randomUUID() < '8' RETURN 1 AS x } "
+            "RETURN count(*) > 0 AND count(*) < 40 AS mixed",
+            [True],
+        ),
+        # A CALL without brackets that imports only the UUID the compiler made for it passes on nothing.
+        ("CALL { WITH * RETURN toUpper(randomUUID()) AS u } RETURN size(u) AS n", [36]),
+        # Made for each row, beside a randomUUID(): not the compiler's own variables (drivine4j#412), which no star
+        # shows.
+        (
+            "UNWIND [1, 2] AS i CALL { WITH * RETURN toString(i) + randomUUID() AS u } RETURN count(DISTINCT u) AS n",
+            [2],
+        ),
+        (
+            "UNWIND [1, 2] AS i CALL () { WITH * RETURN toUpper(randomUUID()) AS u } RETURN count(DISTINCT u) AS n",
+            [2],
+        ),
+    ]
+    assert differing(cypher_pm, cases) == []
+    for cypher in [
+        "UNWIND [1] AS i CALL () { WITH * RETURN i AS x } RETURN x",
+        # A RETURN * of the CALL returns what it imports, which the row holds already.
+        "UNWIND [1, 2] AS i CALL { WITH * RETURN * } RETURN i",
+    ]:
+        with pytest.raises(Exception):  # noqa: B017, PT011
+            cypher_pm.query(spec(cypher))
+    # With DISTINCT, an order, SKIP or LIMIT it is refused, not left out: Neo4j gives [], [], [] and [1, 2].
+    if cypher_pm.type is not DatabaseType.NEO4J:
+        for cypher in [
+            "WITH * LIMIT 0 RETURN 1 AS x",
+            "WITH * SKIP 1 RETURN 1 AS x",
+            "UNWIND [1, 2] AS i CALL (i) { WITH * LIMIT 0 RETURN i AS x } RETURN x",
+            "UNWIND [1, 2] AS i CALL (i) { WITH DISTINCT * RETURN i AS x } RETURN x",
+        ]:
+            with pytest.raises(DrivineError, match="A projection has at least one item."):
+                cypher_pm.query(spec(cypher))
+    uuids = cypher_pm.query(spec("UNWIND [1, 2] AS i CALL { WITH * RETURN toUpper(randomUUID()) AS u } RETURN *"))
+    assert [it[0] for it in uuids] == [1, 2]
+    assert all(len(it) == 2 and len(it[1]) == 36 for it in uuids)
+    renamed = cypher_pm.query(
+        spec("UNWIND [1, 2] AS i CALL { WITH * WITH i AS j, toUpper(randomUUID()) AS u RETURN * } RETURN *")
+    )
+    assert [it[:2] for it in renamed] == [[1, 1], [2, 2]]
+    assert all(len(it) == 3 and len(it[2]) == 36 for it in renamed)
+    bracketed = cypher_pm.query(
+        spec("UNWIND [1, 2] AS i CALL (i) { WITH * RETURN i AS x, toUpper(randomUUID()) AS u } RETURN *")
+    )
+    assert [[it[0], it[2]] for it in bracketed] == [[1, 1], [2, 2]]
+    assert len({it[1] for it in bracketed}) == 2
+
+
+def test_a_pattern_comprehension_whose_body_reads_none_of_its_patterns_variables_gives_an_item_for_each_match(
+    cypher_pm: PersistenceManager,
+):
+    # drivine4j's own test of liberation-data/drivine4j#467, ported for #305. Its aggregate read only the row's
+    # columns, so it was the row query's, which Postgres refused ("must appear in the GROUP BY clause").
+    seeded(cypher_pm)
+    sizes = [["Carrie", 2], ["Hugo", 0], ["Keanu", 4], ["Laurence", 2]]
+    assert cypher_pm.query(spec("MATCH (p:Person) RETURN p.name, [(p)-->() | p.name] ORDER BY p.name")) == [
+        ["Carrie", ["Carrie", "Carrie"]],
+        ["Hugo", []],
+        ["Keanu", ["Keanu", "Keanu", "Keanu", "Keanu"]],
+        ["Laurence", ["Laurence", "Laurence"]],
+    ]
+    same_sizes = [
+        "MATCH (p:Person) RETURN p.name, size([(p)-->(m) | p]) ORDER BY p.name",
+        "MATCH (p:Person) WITH p, 7 AS k RETURN p.name, size([(p)-->() | k]) ORDER BY p.name",
+        "MATCH (p:Person) RETURN p.name, size([(p)-->(m) | COUNT { (p)-->() }]) ORDER BY p.name",
+        "MATCH (p:Person) CALL (p) { RETURN [(p)-->() | p.name] AS names } RETURN p.name, size(names) ORDER BY p.name",
+        "MATCH (p:Person) CALL { WITH p RETURN [(p)-->(m) | p.name] AS names } RETURN p.name, size(names) "
+        "ORDER BY p.name",
+        "OPTIONAL MATCH (p:Person) RETURN p.name, size([(p)-->() | p.name]) ORDER BY p.name",
+        # Its WHERE may read only the row too.
+        "MATCH (p:Person) RETURN p.name, size([(p)-->(m) WHERE p.born > 0 OR p.born IS NULL | p.name]) ORDER BY p.name",
+        # A name of the pattern's that the body binds again for its own, and reads only so, is not the pattern's.
+        "MATCH (p:Person) RETURN p.name, size([(p)-->(m) | [m IN [p.name] | m]]) ORDER BY p.name",
+        # Read in the comprehension's WHERE and its projection both (drivine4j#519).
+        "MATCH (p:Person) RETURN p.name, size([(p)-->(m) | [m IN [p.name] WHERE m <> '' | m]]) ORDER BY p.name",
+        "MATCH (p:Person) RETURN p.name, size([(p)-->(m) | reduce(m = '', x IN [1] | m + p.name)]) ORDER BY p.name",
+        "MATCH (p:Person) RETURN p.name, size([(p)-->(m) | any(m IN [p.name] WHERE m = 'Keanu')]) ORDER BY p.name",
+        "MATCH (p:Person) RETURN p.name, size([(p)-[r]->() | p {.name, n: [r IN [1] | r]}]) ORDER BY p.name",
+        "MATCH (p:Person) RETURN p.name, size([(p)-->(m) | [(p)-->() | [m IN [p.name] | m]]]) ORDER BY p.name",
+        # Its path variable is its own, where the row holds that name too.
+        "MATCH (p:Person) WITH p, 1 AS q RETURN p.name, size([q = (p)-->() | length(q)]) ORDER BY p.name",
+    ]
+    assert differing(cypher_pm, [(it, sizes) for it in same_sizes]) == []
+    # One that reads no row, a parameter, is gathered as it was.
+    parameter = "MATCH (p:Person) RETURN p.name, size([(p)-->() | $x]) ORDER BY p.name"
+    assert cypher_pm.query(spec(parameter, {"x": 5})) == sizes
+    cases: list[tuple[str, list[Any]]] = [
+        # Read by a relationship of the row, in another comprehension's body, or in a WHERE.
+        (
+            "MATCH (p:Person)-[r:KNOWS]->(q) RETURN p.name, [(q)-->() | type(r)] ORDER BY p.name",
+            [["Keanu", ["KNOWS", "KNOWS"]], ["Laurence", ["KNOWS", "KNOWS", "KNOWS", "KNOWS"]]],
+        ),
+        (
+            "MATCH (p:Person)-[r:KNOWS]->(q) RETURN p.name, size([(q)-->() | r]) ORDER BY p.name",
+            [["Keanu", 2], ["Laurence", 4]],
+        ),
+        (
+            "MATCH (p:Person) UNWIND [(p)-->(m) | [(m)-->() | p.name]] AS l WITH p, l WHERE size(l) > 0 "
+            "RETURN p.name, size(l) ORDER BY p.name",
+            [["Keanu", 2], ["Laurence", 4]],
+        ),
+        (
+            "MATCH (p:Person) WHERE size([(p)-->() | p.name]) > 1 RETURN p.name ORDER BY p.name",
+            ["Carrie", "Keanu", "Laurence"],
+        ),
+        # A UUID made for each match, as it was.
+        (
+            "MATCH (p:Person) UNWIND [(p)-->(m) | p.name + randomUUID()] AS u RETURN count(u), count(DISTINCT u)",
+            [[8, 8]],
+        ),
+    ]
+    assert differing(cypher_pm, cases) == []
+    # In a write, which Postgres refused.
+    cypher_pm.query(spec("MATCH (p:Person) SET p.knows = size([(p)-->() | p.name])"))
+    assert cypher_pm.query(spec("MATCH (p:Person) RETURN p.name, p.knows ORDER BY p.name")) == sizes
+
+
+def unordered(rows: list[Any]) -> list[str]:
+    """Rows as a multiset, a null row included, to compare those of a statement that gives no order."""
+    return sorted(json.dumps(it) for it in rows)
+
+
+def test_a_null_in_a_map_or_a_list_and_a_missing_key_are_one_null_beyond_the_spec(cypher_pm: PersistenceManager):
+    # #314: drivine4j's CypherQueryContract cases of liberation-data/drivine4j#500 that the spec does not hold, and
+    # Drivine for TypeScript's own beside them (liberation-data/drivine#501). The rows are Neo4j's (2026.10).
+    seeded(cypher_pm)
+    cases: list[tuple[str, dict[str, Any], list[Any]]] = [
+        # A UNION in a CALL, and a part beside a CALL's UNION ALL, which leaves the part's rows compared.
+        (
+            "CALL { UNWIND [{a: null}] AS x RETURN x.a AS v UNION UNWIND [{b: 1}] AS x RETURN x.a AS v } "
+            "RETURN v, count(*) AS c",
+            {},
+            [[None, 1]],
+        ),
+        ("CALL { RETURN null AS v UNION RETURN {}.a AS v } RETURN v, count(*) AS c", {}, [[None, 1]]),
+        (
+            "UNWIND [{a: null}] AS x CALL { RETURN 1 AS z UNION ALL RETURN 2 AS z } RETURN x.a AS v "
+            "UNION UNWIND [{b: 1}] AS x RETURN x.a AS v",
+            {},
+            [None],
+        ),
+        # An order ties a value kept distinct, which on Oracle may be JSON's null still.
+        (
+            "UNWIND [{a: null, i: 1}, {b: 1, i: 2}, {a: 0, i: 3}] AS x WITH DISTINCT x.a AS a, x.i AS i "
+            "RETURN i ORDER BY a, i DESC",
+            {},
+            [3, 2, 1],
+        ),
+        # A value kept distinct, on Oracle JSON's null, is still the same null as a property a node has not.
+        (
+            "UNWIND [{a: null}] AS x WITH DISTINCT x.a AS a RETURN a AS v "
+            "UNION MATCH (p:Person {name: 'Hugo'}) RETURN p.nickname AS v",
+            {},
+            [None],
+        ),
+        (
+            "UNWIND [{a: null}, {b: 1}] AS x WITH DISTINCT x.a AS a MATCH (p:Person) "
+            "RETURN CASE WHEN p.born IS NULL THEN p.nickname ELSE a END AS v, count(*) AS c",
+            {},
+            [[None, 4]],
+        ),
+        # Grouped by a value of an unwound list that holds a null, and sorted by it.
+        ("UNWIND [null, 1, null] AS v RETURN v, count(*) AS c ORDER BY v", {}, [[1, 1], [None, 2]]),
+        # A grouped or kept null comes back as null, not as JSON's null or its text.
+        (
+            "UNWIND [{a: null}, {b: 1}] AS x WITH x.a AS a, count(*) AS c RETURN {a: a, c: c} AS m",
+            {},
+            [{"a": None, "c": 2}],
+        ),
+        ("UNWIND [{a: null}, {a: null}] AS x WITH DISTINCT x.a AS a RETURN [a, a IS NULL] AS l", {}, [[None, True]]),
+        # A CALL's UNION ALL whose later part's value may be JSON's null, in a part of an outer UNION.
+        ("CALL { RETURN {}.a AS v UNION ALL RETURN [null][0] AS v } RETURN v UNION RETURN {}.a AS v", {}, [None]),
+        # A subquery's UNION compares its queries' rows with the two nulls as one.
+        ("UNWIND [{a: null}] AS x RETURN COUNT { RETURN x.a AS v UNION RETURN {}.a AS v } AS n", {}, [1]),
+        # head(), last(), a parameter's entry by its key, and a parameter that is null.
+        ("UNWIND [[null], []] AS l RETURN head(l) AS h, last(l) AS t, count(*) AS c", {}, [[None, None, 2]]),
+        ("RETURN $p['a'] AS a UNION RETURN $q.a AS a", {"p": {"a": None}, "q": {}}, [None]),
+        (
+            "UNWIND [{b: 1}, {b: 2}] AS x RETURN CASE WHEN x.b = 1 THEN $p ELSE x.a END AS v, count(*) AS c",
+            {"p": None},
+            [[None, 2]],
+        ),
+    ]
+    for cypher, parameters, rows in cases:
+        assert (cypher, cypher_pm.query(spec(cypher, parameters))) == (cypher, rows)
+
+
+def test_a_writes_rows_group_a_maps_null_and_a_missing_key_as_one_null_beyond_the_spec(
+    cypher_pm: PersistenceManager,
+):
+    # #314: drivine4j's CypherWriteContract case of liberation-data/drivine4j#500 that the spec does not hold.
+    clear(cypher_pm)
+    assert cypher_pm.query(
+        spec("UNWIND [{a: 1}, {a: 1}] AS r CREATE (:CyWrite {b: 9}) RETURN r.a AS a, count(*) AS c")
+    ) == [[1, 2]]
+
+
+def test_a_calls_union_all_whose_later_part_gives_a_lists_null_keeps_it_one_null_with_a_missing_key(
+    cypher_pm: PersistenceManager,
+):
+    # #321, drivine4j's of liberation-data/drivine4j#512: the column may be JSON's null where any part's value may be,
+    # not only the first's. The rows are Neo4j's (2026.10), in any order where the statement gives none.
+    assert cypher_pm.query(spec("CALL { RETURN {}.a AS v UNION ALL RETURN [null][0] AS v } RETURN DISTINCT v")) == [
+        None
+    ]
+    assert unordered(
+        cypher_pm.query(
+            spec(
+                "CALL { RETURN 1 AS v UNION ALL RETURN [null][0] AS v UNION ALL RETURN {}.a AS v } "
+                "RETURN v, count(*) AS c"
+            )
+        )
+    ) == unordered([[1, 1], [None, 2]])
+    # In a part of an outer UNION, which compares rows by it.
+    assert unordered(
+        cypher_pm.query(
+            spec(
+                "CALL { RETURN {}.a AS v UNION ALL RETURN 1 AS v UNION ALL RETURN [null][0] AS v } RETURN v "
+                "UNION RETURN 2 AS v"
+            )
+        )
+    ) == unordered([None, 1, 2])
+
+
+def test_a_calls_union_all_whose_first_part_gives_a_list_and_a_later_one_a_number_or_a_map_sorts_each_by_its_kind(
+    cypher_pm: PersistenceManager,
+):
+    # #321, drivine4j's of liberation-data/drivine4j#512: the column is a list only where every part's value is, so a
+    # number or a map a later part gives sorts by its kind, not as a list would. The rows are Neo4j's (2026.10).
+    # Postgres takes jsonb's order of kinds, a number before a list (liberation-data/drivine4j#307), and refuses a
+    # written list's json beside a number's jsonb in one UNION ALL.
+    if cypher_pm.type is DatabaseType.POSTGRES:
+        return
+    ordered: list[tuple[str, list[Any]]] = [
+        ("CALL { RETURN [10] AS v UNION ALL RETURN 10 AS v } RETURN v ORDER BY v", [[10], 10]),
+        ("CALL { RETURN [1, 2] AS v UNION ALL RETURN 10 AS v } RETURN v ORDER BY v", [[1, 2], 10]),
+        ("CALL { RETURN [10] AS v UNION ALL RETURN {a: 1} AS v } RETURN v ORDER BY v", [{"a": 1}, [10]]),
+        (
+            "CALL { RETURN [10] AS v UNION ALL RETURN 10 AS v UNION ALL RETURN [9] AS v UNION ALL RETURN [2] AS v } "
+            "RETURN v ORDER BY v",
+            [[2], [9], [10], 10],
+        ),
+        # A later part's list of numbers unwinds to numbers, which sort after the first part's list.
+        ("CALL { RETURN [[1]] AS v UNION ALL RETURN [1] AS v } UNWIND v AS x RETURN x AS r ORDER BY r", [[1], 1]),
+    ]
+    for cypher, rows in ordered:
+        assert (cypher, cypher_pm.query(spec(cypher))) == (cypher, rows)
+    # A later part's number compares as a number, and a later part's null in a list makes `=` and IN null, not false.
+    # These give no order.
+    unordered_: list[tuple[str, list[Any]]] = [
+        ("CALL { RETURN [1] AS v UNION ALL RETURN 1 AS v } RETURN v < 2 AS r", [None, True]),
+        ("CALL { RETURN [1] AS v UNION ALL RETURN [null] AS v } RETURN v = [1] AS r", [True, None]),
+        ("CALL { RETURN [1] AS v UNION ALL RETURN [null] AS v } RETURN v IN [[1], 1] AS r", [True, None]),
+    ]
+    for cypher, rows in unordered_:
+        assert (cypher, unordered(cypher_pm.query(spec(cypher)))) == (cypher, unordered(rows))

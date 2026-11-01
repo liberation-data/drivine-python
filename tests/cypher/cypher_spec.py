@@ -6,6 +6,7 @@ drivine-cypher-spec. drivine4j's CypherSpec, ported.
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -117,10 +118,15 @@ def load(file: str) -> CypherSpec:
 
 
 def expanded(value: Any) -> Any:
-    """The value with each `{$repeat: text, times: n}` in it written out: the text repeated n times."""
+    """
+    The value with each `{$repeat: text, times: n}` in it written out, the text repeated n times, and each `{$float:
+    "NaN"}`, `{$float: "Infinity"}` and `{$float: "-Infinity"}` the float it names.
+    """
     if isinstance(value, Mapping):
         if set(value) == {"$repeat", "times"}:  # pyright: ignore[reportUnknownArgumentType]
             return str(value["$repeat"]) * int(value["times"])
+        if set(value) == {"$float"}:  # pyright: ignore[reportUnknownArgumentType]
+            return float(str(value["$float"]))
         return {key: expanded(it) for key, it in value.items()}  # pyright: ignore[reportUnknownVariableType]
     if isinstance(value, list):
         return [expanded(it) for it in value]  # pyright: ignore[reportUnknownVariableType]
@@ -137,7 +143,8 @@ def canonical(value: Any, step: Step, sort: bool | None = None) -> Any:
     if isinstance(value, int):
         return ("int", value)
     if isinstance(value, float):
-        return ("float", value)
+        # NaN in the rows is the same as NaN there, though it is equal to nothing.
+        return ("float", "NaN") if math.isnan(value) else ("float", value)
     if isinstance(value, Mapping):
         entries = {str(key): canonical(it, step) for key, it in value.items()}  # pyright: ignore[reportUnknownVariableType]
         return ("ordered", tuple(entries.items())) if step.key_order else entries
@@ -187,9 +194,14 @@ def _steps(first: int, last: int) -> tuple[int, ...]:
 
 HELD: dict[str, dict[str, list[Hold]]] = {
     "queries.yaml": {
-        # v0.18.0, liberation-data/drivine-cypher-spec#43: a key read in a body nested in a list comprehension's WHERE,
-        # in an order term's body, and any(y IN … WHERE y = e).
-        "Implicit grouping key": [Hold(316, ("sql",), (29, 30, 31, 33, 34, 35, 37, 38, 39, 40, 42, 43, 44))],
+        # v0.21.0, liberation-data/drivine-cypher-spec#31: a NaN or infinite parameter is bound as a text
+        # (drivine4j#295), and Oracle compares NaN equal to NaN (drivine4j#409, also #327); drivine4j#452 fixes both.
+        "NaN and the infinities as parameters": [Hold(164, ("sql",))],
+        "NaN worked out": [Hold(164, ("oracle",), (2, 3))],
+    },
+    "writes.yaml": {
+        # v0.21.0, liberation-data/drivine-cypher-spec#31: as above, written.
+        "NaN and the infinities written": [Hold(164, ("sql",))],
     },
 }
 """

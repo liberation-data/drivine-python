@@ -1173,6 +1173,84 @@ async def test_an_aggregating_item_over_a_key_that_is_a_property_groups_by_the_p
     ) == [["X", 2], ["Y", 1]]
 
 
+async def test_any_y_in_an_aggregate_where_y_is_a_key_and_an_order_term_over_one_group_by_the_property_beyond_the_spec(
+    cypher_pm: PersistenceManager,
+):
+    # #316: drivine4j's CypherQueryContract cases of liberation-data/drivine4j#507 and #522, and Drivine for
+    # TypeScript's CypherGroupingKey cases of liberation-data/drivine#506, less the statements the spec holds since
+    # v0.21.0. The rows are Neo4j's (2026.10.1). Two x share a = 1, so grouping by x gives a = 1 twice.
+    await seeded(cypher_pm)
+    x = "UNWIND [{a: 1, b: 1}, {a: 1, b: 2}, {a: 2, b: 1}] AS x RETURN x.a AS a"
+    z = "UNWIND [{b: 1}, {a: null, b: 2}, {a: 1, b: 1}, {a: 1, b: 3}] AS x RETURN x.a AS a"
+    w = "UNWIND [1, 2] AS y UNWIND [{a: 1, b: 1}, {a: 1, b: 2}] AS x RETURN x.a AS a"
+    by_property = [[1, True], [2, False]]
+    by_variable = [[1, False], [1, True], [2, False]]
+    cases: list[tuple[str, list[Any]]] = [
+        # Neo4j reads any(y IN list WHERE y = e) as e IN list, and none(…) as NOT e IN list; not all(…), nor a WHERE
+        # that is more than the one comparison.
+        (f"{x}, any(y IN collect(x.b) WHERE y = x.a + 0) AS n ORDER BY a", by_property),
+        (
+            "UNWIND [{a: 1, b: 1}, {a: 1, b: 2}, {a: 2, b: 1}] AS x "
+            "WITH x.a AS a, any(y IN collect(x.b) WHERE y = x.a) AS n RETURN a, n ORDER BY a",
+            by_property,
+        ),
+        (f"{x}, any(y IN collect(x.b) WHERE y = x.a OR y = 5) AS n ORDER BY a, n", by_variable),
+        # Nor single(…), y.p = e, y IN [e1, e2], or an e that reads y; e IN [y] is y = e. With a null in the list, as
+        # e IN list.
+        (f"{x}, single(y IN collect(x.b) WHERE y = x.a) AS n ORDER BY a, n", by_variable),
+        (f"{x}, any(y IN collect(x) WHERE y.b = x.a) AS n ORDER BY a, n", by_variable),
+        (f"{x}, none(y IN collect(x.b) WHERE y IN [x.a, 5]) AS n ORDER BY a, n", [[1, False], [1, True], [2, True]]),
+        (f"{x}, any(y IN collect(x.b) WHERE y = x.a + y) AS n ORDER BY a, n", [[1, False], [1, False], [2, False]]),
+        (f"{x}, any(y IN collect(x.b) WHERE x.a IN [y]) AS n ORDER BY a, n", by_property),
+        (f"{x}, any(y IN collect(x.b) + [null] WHERE y = x.a) AS n ORDER BY a, n", [[1, True], [2, None]]),
+        (f"{x}, none(y IN collect(x.b) + [null] WHERE y = x.a + 1) AS n ORDER BY a, n", [[1, False], [2, None]]),
+        # An e that reads only a y that a comprehension, a quantifier or a reduce in it binds of its own reads no y of
+        # the quantifier's (drivine4j#519); a reduce's accumulator is its own too. One that reads the quantifier's y in
+        # a list or an initial value does.
+        (f"{x}, any(y IN collect(x.b) WHERE [y IN [x.a] | y][0] = y) AS n ORDER BY a, n", by_property),
+        (f"{x}, any(y IN collect(x.b) WHERE y = reduce(y = 0, z IN [x.a] | y + z)) AS n ORDER BY a, n", by_property),
+        (
+            f"{x}, any(y IN collect(x.b) WHERE y = CASE WHEN any(y IN [x.a] WHERE y > 0) THEN x.a END) AS n "
+            "ORDER BY a, n",
+            by_property,
+        ),
+        (
+            f"{x}, any(y IN collect(x.b) WHERE y = CASE WHEN any(y IN [y] WHERE y > 0) THEN x.a END) AS n "
+            "ORDER BY a, n",
+            by_variable,
+        ),
+        (
+            f"{x}, any(y IN collect(x.b) WHERE y = [z IN [y] | z + x.a][0]) AS n ORDER BY a, n",
+            [[1, False], [1, False], [2, False]],
+        ),
+        (
+            f"{x}, none(y IN collect(x.b) WHERE reduce(s = y, z IN [x.a] | s + z) = y) AS n ORDER BY a, n",
+            [[1, True], [1, True], [2, True]],
+        ),
+        # A key that is a map's null and one that is missing are one null, read by its name in a body too.
+        (f"{z}, any(y IN collect(x.b) WHERE y = x.a) AS n ORDER BY a, n", [[1, True], [None, None]]),
+        (
+            f"{z}, size([t IN collect(x.b) WHERE any(u IN [t] WHERE u > coalesce(x.a, 0))]) AS n ORDER BY a, n",
+            [[1, 1], [None, 2]],
+        ),
+        (f"{z}, count(*) + [y IN [1] | coalesce(x.a, 0)][0] AS n ORDER BY a, n", [[1, 3], [None, 2]]),
+        # An order term that aggregates reads the key as an item does; a reduce's step over an aggregate groups by x.
+        (
+            f"{x}, count(*) AS n ORDER BY reduce(s = 0, y IN collect(x.b) | s + x.a), a",
+            [[1, 1], [1, 1], [2, 1]],
+        ),
+        # A y of the scope is no y a comprehension binds of its own, read in its WHERE and its projection both: not
+        # grouped by (drivine4j#519). In the projection of one over an aggregate, x.a groups by x, as Neo4j does, not
+        # by y too.
+        (f"{w}, size([y IN collect(x.b) WHERE y > 0 | y + x.a]) AS n ORDER BY a", [[1, 2], [1, 2]]),
+        (f"{w}, count(*) + [y IN [1] WHERE y > 0 | y][0] AS n ORDER BY a", [[1, 5]]),
+    ]
+    assert await differing(cypher_pm, cases) == []
+    # The items of a list collected are in no order Cypher promises.
+    rows = await cypher_pm.query(spec(f"{w}, [y IN collect(x.b) WHERE y > 0 | y] AS n ORDER BY a"))
+    assert [[a, sorted(n)] for a, n in rows] == [[1, [1, 1, 2, 2]]]
+
+
 async def test_an_aggregate_in_the_where_of_a_with_that_groups_compares_keys_as_grouping_does_and_makes_no_variable(
     cypher_pm: PersistenceManager,
 ):
@@ -5206,6 +5284,8 @@ async def test_a_pattern_comprehension_whose_body_reads_none_of_its_patterns_var
         "MATCH (p:Person) RETURN p.name, size([(p)-->(m) WHERE p.born > 0 OR p.born IS NULL | p.name]) ORDER BY p.name",
         # A name of the pattern's that the body binds again for its own, and reads only so, is not the pattern's.
         "MATCH (p:Person) RETURN p.name, size([(p)-->(m) | [m IN [p.name] | m]]) ORDER BY p.name",
+        # Read in the comprehension's WHERE and its projection both (drivine4j#519).
+        "MATCH (p:Person) RETURN p.name, size([(p)-->(m) | [m IN [p.name] WHERE m <> '' | m]]) ORDER BY p.name",
         "MATCH (p:Person) RETURN p.name, size([(p)-->(m) | reduce(m = '', x IN [1] | m + p.name)]) ORDER BY p.name",
         "MATCH (p:Person) RETURN p.name, size([(p)-->(m) | any(m IN [p.name] WHERE m = 'Keanu')]) ORDER BY p.name",
         "MATCH (p:Person) RETURN p.name, size([(p)-[r]->() | p {.name, n: [r IN [1] | r]}]) ORDER BY p.name",

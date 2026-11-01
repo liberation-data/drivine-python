@@ -195,9 +195,9 @@ def _steps(first: int, last: int) -> tuple[int, ...]:
 HELD: dict[str, dict[str, list[Hold]]] = {
     "queries.yaml": {
         # v0.21.0, liberation-data/drivine-cypher-spec#31: a NaN or infinite parameter is bound as a text
-        # (drivine4j#295), and Oracle compares NaN equal to NaN (drivine4j#409).
+        # (drivine4j#295), and Oracle compares NaN equal to NaN (drivine4j#409, also #327); drivine4j#452 fixes both.
         "NaN and the infinities as parameters": [Hold(164, ("sql",))],
-        "NaN worked out": [Hold(327, ("oracle",), (2, 3))],
+        "NaN worked out": [Hold(164, ("oracle",), (2, 3))],
     },
     "writes.yaml": {
         # v0.21.0, liberation-data/drivine-cypher-spec#31: as above, written.

@@ -115,6 +115,9 @@ Scope = Mapping[str, Value]
 Body = Callable[[list[str]], str]
 """SQL written over values, each as `shared` names it."""
 
+Reading = Callable[[Expression], Expression | None]
+"""What a part of an expression is read as, if it is read as something else: see `_aggregates_first`."""
+
 # ----- The variables of a procedure -----
 
 PARAMS = "cy_params"
@@ -3683,31 +3686,131 @@ class SqlCypherCompiler(ABC):
                 )
             return None
 
-        # A list comprehension's WHERE reads a key by its name too, where it binds no variable the key reads. In its
-        # projection, a quantifier's WHERE or a reduce's step, Neo4j groups by each variable the key reads as well, so
-        # the body is kept as it is, and those variables beside: `[t IN collect(m.title) | r.role]` beside `r.role`
-        # gives a row for each `r`.
-        def rekeyed(term: Expression, bound: AbstractSet[str] = frozenset()) -> Expression:
+        # The term with each key in it read as `key` reads it, in a comprehension's, a quantifier's or a reduce's body
+        # too, where the body binds no variable the key reads.
+        def reading_keys(term: Expression, bound: AbstractSet[str], key: Reading) -> Expression:
             def replacement(part: Expression) -> Expression | None:
-                if (not bound or _grouping_key(part) in key_names) and not any(
-                    it in bound for it in variables_in(part)
-                ):
-                    found = kept(part)
-                    if found is not None:
-                        return found
-                if isinstance(part, ListComprehension) and part.where is not None:
+                if not any(it in bound for it in variables_in(part)):
+                    read = key(part)
+                    if read is not None:
+                        return read
+
+                def in_body(body: Expression, *names: str) -> Expression:
+                    return reading_keys(body, {*bound, *names}, key)
+
+                if isinstance(part, ListComprehension):
                     return dataclasses.replace(
-                        part, list=rekeyed(part.list, bound), where=rekeyed(part.where, {*bound, part.variable})
+                        part,
+                        list=reading_keys(part.list, bound, key),
+                        where=in_body(part.where, part.variable) if part.where is not None else None,
+                        projection=in_body(part.projection, part.variable) if part.projection is not None else None,
+                    )
+                if isinstance(part, Quantifier):
+                    return dataclasses.replace(
+                        part,
+                        list=reading_keys(part.list, bound, key),
+                        where=in_body(part.where, part.variable) if part.where is not None else None,
+                    )
+                if isinstance(part, Reduce):
+                    return dataclasses.replace(
+                        part,
+                        initial=reading_keys(part.initial, bound, key),
+                        list=reading_keys(part.list, bound, key),
+                        expression=in_body(part.expression, part.accumulator, part.variable),
                     )
                 return None
 
             return replaced(term, replacement)
 
-        rekeyed_items = [dataclasses.replace(it, expression=rekeyed(it.expression)) for it in items]
+        # Neo4j reads `any(y IN list WHERE y = e)` as `e IN list`, and `none(…)` as `NOT e IN list`, where `e` reads no
+        # `y`; `y IN [e]` and `e IN [y]` are `y = e` to it. Not `all(…)` or `single(…)`, a WHERE that is more than the
+        # one comparison (`AND`, `OR`), `y.p = e`, or `y IN [e1, e2]`: those group by each variable `e` reads.
+        def read_as_in(part: Quantifier) -> bool:
+            where = part.where
+            if not isinstance(where, Binary) or part.kind not in (QuantifierKind.ANY, QuantifierKind.NONE):
+                return False
+            own = Variable(part.variable)
+
+            def compared_to(left: Expression, right: Expression) -> Expression | None:
+                return right if left == own else left if right == own else None
+
+            compared: Expression | None = None
+            if where.operator is BinaryOperator.EQUALS:
+                compared = compared_to(where.left, where.right)
+            elif (
+                where.operator is BinaryOperator.IN
+                and isinstance(where.right, ListLiteral)
+                and len(where.right.items) == 1
+            ):
+                compared = compared_to(where.left, where.right.items[0])
+            # A `y` that a comprehension, a quantifier or a reduce in `e` binds of its own is not the quantifier's.
+            return compared is not None and part.variable not in variables_read_in(compared)
+
+        # As Neo4j reads a key in an item that aggregates: by its name in a part that holds no aggregate, and in a list
+        # comprehension's WHERE, all through. In the projection of a comprehension over an aggregate, or the WHERE of a
+        # quantifier or the step of a reduce over one, Neo4j groups by each variable the key reads as well, so the body
+        # is kept as it is, and those variables beside: `[t IN collect(m.title) | r.role]` beside `r.role` gives a row
+        # for each `r`, where `[t IN collect(m.title) WHERE t STARTS WITH r.role]` and `count(*) + [y IN [1] |
+        # r.role][0]` give one for each role, and so does `any(t IN collect(m.title) WHERE t = r.role)`, which Neo4j
+        # reads as `r.role IN collect(m.title)`. `read` reads a key or an aggregate, and `key` a key in a body.
+        def rekeyed(term: Expression, read: Reading, key: Reading) -> Expression:
+            def replacement(part: Expression) -> Expression | None:
+                given = read(part)
+                if given is not None:
+                    return given
+                if not contains(part, is_aggregate):
+                    return reading_keys(part, frozenset(), key)
+                if isinstance(part, ListComprehension) and part.where is not None:
+                    return dataclasses.replace(
+                        part,
+                        list=rekeyed(part.list, read, key),
+                        where=reading_keys(part.where, {part.variable}, key),
+                    )
+                if isinstance(part, Quantifier) and part.where is not None and read_as_in(part):
+                    return dataclasses.replace(
+                        part,
+                        list=rekeyed(part.list, read, key),
+                        where=reading_keys(part.where, {part.variable}, key),
+                    )
+                return None
+
+            return replaced(term, replacement)
+
+        def key_of(part: Expression) -> Expression | None:
+            name = key_names.get(_grouping_key(part)) if key_names else None
+            return Variable(name) if name is not None else None
+
+        rekeyed_items = [dataclasses.replace(it, expression=rekeyed(it.expression, kept, key_of)) for it in items]
+
+        # An order term, or a part of one, that is an item is read by the item's name, as over a DISTINCT projection it
+        # can only be; a variable an item is named after is that item, not the variable of that name before it. In a
+        # body, as an item reads it.
+        item_names = {_grouping_key(it.expression): it.name for it in items}
+
+        def as_item(term: Expression) -> Expression | None:
+            if isinstance(term, Variable) and term.name in by_name:
+                return term
+            item = item_names.get(_grouping_key(term))
+            return Variable(item) if item is not None else None
+
+        def sorted_by(term: Expression) -> Expression | None:
+            item = as_item(term)
+            return item if item is not None else kept(term)
+
+        def sorted_by_key(term: Expression) -> Expression | None:
+            item = as_item(term)
+            return item if item is not None else key_of(term)
+
+        rekeyed_order = [
+            dataclasses.replace(sort, expression=rekeyed(sort.expression, sorted_by, sorted_by_key))
+            for sort in projection.order_by
+        ]
 
         # A variable a comprehension's, a quantifier's or a reduce's body names outside its own is kept, but where it is
         # read only in a key that `rekeyed` reads by its name; so is a pattern's or a subquery's. A subquery may name
-        # any variable: each the projection groups by is kept.
+        # any variable: each the projection groups by is kept. A comprehension's own name is left out each time it is
+        # read, in its WHERE and its projection both, so a variable of the scope of that name is not grouped by
+        # (drivine4j#519).
         def named(expression: Expression) -> list[str]:
             if is_aggregate(expression):
                 return []
@@ -3732,7 +3835,9 @@ class SqlCypherCompiler(ABC):
                 own = keyed
             return _ordered(variables_outside_aggregates(expression), own, *(named(it) for it in children(expression)))
 
-        # An order term that aggregates may name a key too, by the variable the projection groups by.
+        # An order term that aggregates may name a key too, by the variable the projection groups by; or, as an item
+        # does, the variable of a key that is a property, in a body that groups by it.
+        keyed_in_order = _ordered(keyed, *(variables_in(it) for it in properties))
         scope = select.scope
         beside = [
             it
@@ -3743,8 +3848,8 @@ class SqlCypherCompiler(ABC):
                     if contains(item.expression, is_aggregate)
                 ),
                 *(
-                    [name for name in named(sort.expression) if name in keyed]
-                    for sort in projection.order_by
+                    [name for name in named(rekeyed_sort.expression) if name in keyed_in_order]
+                    for sort, rekeyed_sort in zip(projection.order_by, rekeyed_order, strict=True)
                     if contains(sort.expression, is_aggregate)
                 ),
             )
@@ -3771,25 +3876,7 @@ class SqlCypherCompiler(ABC):
             limit=None,
         )
 
-        # An order term, or a part of one, that is an item is read by the item's name, as over a DISTINCT projection it
-        # can only be; a variable an item is named after is that item, not the variable of that name before it.
-        item_names = {_grouping_key(it.expression): it.name for it in items}
-
-        def sorted_by(term: Expression) -> Expression | None:
-            if isinstance(term, Variable) and term.name in by_name:
-                return term
-            item = item_names.get(_grouping_key(term))
-            return Variable(item) if item is not None else kept(term)
-
-        keeping = dataclasses.replace(
-            projection,
-            star=False,
-            items=tuple(rekeyed_items),
-            order_by=tuple(
-                dataclasses.replace(sort, expression=replaced(sort.expression, sorted_by))
-                for sort in projection.order_by
-            ),
-        )
+        keeping = dataclasses.replace(projection, star=False, items=tuple(rekeyed_items), order_by=tuple(rekeyed_order))
         return self._with(select, With(grouped, None)), keeping
 
     def _held_first(

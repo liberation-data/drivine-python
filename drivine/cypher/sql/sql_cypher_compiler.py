@@ -650,10 +650,14 @@ class SqlCypherCompiler(ABC):
         )
         # Every query's names, before any is compiled: a name made in one is no variable of a later one's.
         self._give(query)
-        rows = "\nUNION ALL\n".join(
-            f"SELECT {i + 1} AS part, {self.row_number} AS n, q.result "
-            f"FROM (\n{indent(self._query(Query(clauses)))}\n) q"
-            for i, clauses in enumerate(parts)
+        # Its rows are compared, as a UNION without ALL compares them: see `_comparing_parts`.
+        rows = self._comparing_parts(
+            not query.unions[0].all,
+            lambda: "\nUNION ALL\n".join(
+                f"SELECT {i + 1} AS part, {self.row_number} AS n, q.result "
+                f"FROM (\n{indent(self._query(Query(clauses)))}\n) q"
+                for i, clauses in enumerate(parts)
+            ),
         )
         if query.unions[0].all:
             sql = f"SELECT u.result FROM (\n{indent(rows)}\n) u\nORDER BY u.part, u.n"
@@ -1004,6 +1008,30 @@ class SqlCypherCompiler(ABC):
         `sort_key` alone.
         """
         return [self.sort_key(json)]
+
+    def json_null_sort_key(self, json: str) -> list[str]:
+        """
+        `open_sort_key` of a value that may be JSON's null (Json.json_null): JSON's null ties with SQL's, as Cypher has
+        one null, so a term after it decides their order (#314). Where a store's `open_sort_key` does not tie them
+        already, it says so.
+        """
+        return self.open_sort_key(json)
+
+    def compared_null(self, json: str) -> str:
+        """
+        The JSON value `json`, JSON's null read as SQL's, where rows are given by it to a `UNION` that compares them,
+        and by default where they are grouped or kept distinct (`grouped_null`): as `null_if_json_null`, but where a
+        store binds a long value in a subquery there, which no store groups by, written out where it is read.
+        """
+        return self.null_if_json_null(json)
+
+    def grouped_null(self, json: str) -> str:
+        """
+        The JSON value `json` as rows are grouped or kept distinct by it, JSON's null and SQL's one: as
+        `compared_null`, but where a store makes them one more cheaply in a value that each row reads alike, as SQL's
+        null read as JSON's, it says so (#314).
+        """
+        return self.compared_null(json)
 
     def list_sort_key(self, json: str) -> str:
         """What an order sorts the JSON by where the statement makes it a list (Json.list): as `sort_key`, where the
@@ -1390,6 +1418,12 @@ class SqlCypherCompiler(ABC):
         The order of the rows the projection being compiled reads, which `collect` gathers them in, as Cypher gathers
         them: a group's rows are not read in the order of the query they come from.
         """
+        self._distinct_parts = False
+        """
+        Whether the query compiled is a part of a `UNION` without ALL, whose rows are compared as a whole: there a value
+        that may be JSON's null (Json.json_null) is given as SQL's, as Cypher has one null (#314). Set only for the work
+        `_comparing_parts` does, so an exception leaves it as it was.
+        """
         self._stepping = False
         """Whether a quantified path pattern's conditions are being compiled: what they hold is in its walk's step."""
         self._filtering = False
@@ -1690,14 +1724,18 @@ class SqlCypherCompiler(ABC):
             if query.unions:
                 # Each query's rows as one value each, as a statement's are; without ALL, each once.
                 distinct = not query.unions[0].all
-                parts: list[str] = []
-                for clauses in [query.clauses, *(it.clauses for it in query.unions)]:
+
+                def part(clauses: Sequence[Clause]) -> str:
                     select = _Select(scope)
                     for clause in clauses[:-1]:
                         select = self._read(select, clause, scope)
                     sql = self._project(select, _returned(clauses).projection, final=True).sql
                     result = self.comparable(Json("q.result", ordered=True)) if distinct else "q.result"
-                    parts.append(f"SELECT {result} AS result FROM (\n{indent(sql)}\n) q")
+                    return f"SELECT {result} AS result FROM (\n{indent(sql)}\n) q"
+
+                parts = self._comparing_parts(
+                    distinct, lambda: [part(it) for it in [query.clauses, *(u.clauses for u in query.unions)]]
+                )
                 return ("\nUNION\n" if distinct else "\nUNION ALL\n").join(parts)
             select = _Select(scope)
             for clause in query.clauses:
@@ -1840,6 +1878,16 @@ class SqlCypherCompiler(ABC):
         imports = {variable: _columns_of(value, name, column, self._identities) for variable, value, column in named}
         return f"({self.bound_select(', '.join(columns))}) {name}", imports
 
+    def _comparing_parts(self, distinct: bool, work: Callable[[], T]) -> T:
+        """The work, its parts of a `UNION` compared as a whole where `distinct` (`_distinct_parts`), as it was
+        after."""
+        was = self._distinct_parts
+        self._distinct_parts = distinct
+        try:
+            return work()
+        finally:
+            self._distinct_parts = was
+
     def _called_union(self, select: _Select, call: Call) -> _Projected:
         """A `UNION` in a `CALL { … }`: each query's rows, the same items of the same kinds, matched by name as Cypher
         matches them."""
@@ -1854,7 +1902,9 @@ class SqlCypherCompiler(ABC):
         if any({item.name for item in it.projection.items} != set(names) for it in returns):
             raise DrivineError("Each query of a UNION returns the same names, as in Cypher.")
         distinct = not query.unions[0].all
-        projected = [self._called_part(select, call, it, names, distinct) for it in parts]
+        projected = self._comparing_parts(
+            distinct, lambda: [self._called_part(select, call, it, names, distinct) for it in parts]
+        )
         kinds = {tuple(type(value) for value in it.scope.values()) for it in projected}
         if len(kinds) > 1:
             unsupported("A UNION in CALL { … } whose queries return values of different kinds")
@@ -1869,7 +1919,9 @@ class SqlCypherCompiler(ABC):
             was = self._identities
             self._identities = False
             try:
-                projected = [self._called_part(select, call, it, names, distinct) for it in parts]
+                projected = self._comparing_parts(
+                    distinct, lambda: [self._called_part(select, call, it, names, distinct) for it in parts]
+                )
             finally:
                 self._identities = was
         sql = ("\nUNION\n" if distinct else "\nUNION ALL\n").join(
@@ -1878,7 +1930,10 @@ class SqlCypherCompiler(ABC):
         # A value is of a temporal kind where each query makes it of that one, and a text, or a list of texts, where
         # each makes it one. It is at keys of a write's row (`row_keys`) only where each query takes it from those: a
         # property of it is read from the row there, which would read the first query's value for every query's rows.
-        # It is read from an unwound item (`from_list`) only where each query reads it from one.
+        # It is read from an unwound item (`from_list`) only where each query reads it from one. It may be JSON's null
+        # (`json_null`) where any query's may be, so that what reads it after compares that null and SQL's as one
+        # (#321). It is a list (`list`) only where each query makes it one, so that an order sorts the others' numbers
+        # and maps by their kinds, not as lists; and it holds no null (`flat`) only where each query's holds none.
         scope: dict[str, Value] = {}
         for variable, value in projected[0].scope.items():
             if not isinstance(value, Json):
@@ -1902,6 +1957,10 @@ class SqlCypherCompiler(ABC):
                 texts=all(_holds_texts(it) for it in all_),
                 # Its kind is known only where each query writes it as a value of that one.
                 known=next(iter(known)) if len(known) == 1 else None,
+                json_null=any(_may_be_json_null(it) for it in all_),
+                list=all(_is_list(it) for it in all_),
+                item_lists=all(_holds_lists(it) for it in all_),
+                flat=all(isinstance(it, Json) and it.flat for it in all_),
             )
         return _Projected(sql, scope, [])
 
@@ -1929,7 +1988,8 @@ class SqlCypherCompiler(ABC):
 
         items = self.shared1(self.comparable(self.json(listed)), items_of)
         select.source(self._elements_of(listed, items, name))
-        # An item of a list of texts, or of a text, is a text; an item of a list that holds no null holds none.
+        # An item of a list of texts, or of a text, is a text; an item of a list that holds no null holds none, nor is
+        # JSON's null.
         select.bind(
             unwind.variable,
             Json(
@@ -1941,6 +2001,7 @@ class SqlCypherCompiler(ABC):
                 text=_holds_texts(listed) or _is_text(listed),
                 flat=self._is_flat(listed),
                 from_list=True,
+                json_null=not self._is_flat(listed),
             ),
         )
         select.order.append((f"{name}.item_no", False))
@@ -3090,13 +3151,11 @@ class SqlCypherCompiler(ABC):
             for item in items
         ]
         aggregating = any(contains(it.expression, is_aggregate) for it in items)
-        # Where rows are compared (DISTINCT, GROUP BY), JSON is compared as what compares.
+        # Where rows are compared (DISTINCT, GROUP BY), each item is compared as `_row_compared` has it.
         compared = projection.distinct or aggregating
-        columns: list[tuple[str, Value]] = []
-        for i, (_, value) in enumerate(compiled):
-            if compared and isinstance(value, Json) and value.ordered:
-                value = dataclasses.replace(value, sql=self.comparable(value), ordered=False)
-            columns.append((f"c{i + 1}", value))
+        columns: list[tuple[str, Value]] = [
+            (f"c{i + 1}", self._row_compared(value) if compared else value) for i, (_, value) in enumerate(compiled)
+        ]
         select_list = [it for column, value in columns for it in _columns(value, column, self._identities)]
         # An order is written over the items' names, and where nothing is grouped or kept distinct, the variables too.
         name = self._alias("p")
@@ -3134,7 +3193,15 @@ class SqlCypherCompiler(ABC):
                 after[column] = self._sortable(self._expression(sort.expression, item_columns))
                 sorts_anew = True
             elif item >= 0:
-                carried(column, lambda item=item: compiled[item][1], sort.expression)
+                # One that may be JSON's null, where rows are compared, as its column is grouped by: see
+                # `_row_compared`.
+                carried(
+                    column,
+                    lambda item=item: (
+                        columns[item][1] if compared and _may_be_json_null(compiled[item][1]) else compiled[item][1]
+                    ),
+                    sort.expression,
+                )
             elif compared and not contains(sort.expression, _aggregates):
                 after[column] = self._sortable(self._expression(sort.expression, item_columns))
             elif over_items is not None:
@@ -3203,7 +3270,13 @@ class SqlCypherCompiler(ABC):
         order = [(named, descending) for column, descending in sorts for named, _ in sorted_by(column)]
         if final:
             values = [self.json(_columns_of(value, name, column, self._identities)) for column, value in columns]
-            result = values[0].sql if len(values) == 1 else self.json_array([it.sql for it in values])
+            # A value that may be JSON's null is given as SQL's where a UNION compares rows by it; in a row of several,
+            # a list's item, SQL's null is JSON's (#314).
+            if len(values) == 1:
+                one = values[0]
+                result = self.compared_null(one.sql) if self._distinct_parts and one.json_null else one.sql
+            else:
+                result = self.json_array([it.sql for it in values])
             outer_columns = f"{self.returned(result)} AS result"
         else:
             outer = [
@@ -3232,6 +3305,24 @@ class SqlCypherCompiler(ABC):
             for item, (column, value) in zip(items, columns, strict=True)
         }
         return _Projected("\n".join(outer_lines), scope_out, order)
+
+    def _row_compared(self, value: Value) -> Value:
+        """
+        The value as rows are compared by it, where they are grouped or kept distinct: JSON as what compares, and JSON's
+        null, which a value read out of a map or a list may be (Json.json_null), and SQL's as one, as Cypher has one
+        null (#314). It may still be JSON's null, as Oracle's `grouped_null` gives it, so it is still read as one that
+        may be. In a part of a `UNION` that compares rows (`_distinct_parts`) it is SQL's, as another part's value that
+        is never JSON's null gives it.
+        """
+        if not isinstance(value, Json):
+            return value
+        if value.json_null:
+            it = self.comparable(value)
+            sql = self.compared_null(it) if self._distinct_parts else self.grouped_null(it)
+            return dataclasses.replace(value, sql=sql, ordered=False)
+        if value.ordered:
+            return dataclasses.replace(value, sql=self.comparable(value), ordered=False)
+        return value
 
     def _anew_first(
         self, select: _Select, projection: Projection, items: list[ProjectionItem]
@@ -3719,7 +3810,10 @@ class SqlCypherCompiler(ABC):
             if not contains(item.expression, is_aggregate)
             and (
                 contains(item.expression, lambda it: isinstance(it, Parameter))
-                or any("SELECT" in key.upper() for key in _group_keys(self._expression(item.expression, select.scope)))
+                or any(
+                    "SELECT" in key.upper()
+                    for key in _group_keys(self._row_compared(self._expression(item.expression, select.scope)))
+                )
             )
         ]
         if not held:
@@ -3808,7 +3902,12 @@ class SqlCypherCompiler(ABC):
 
     def _value_of(self, expression: Expression, scope: Scope) -> Value:
         if isinstance(expression, Literal):
-            return Json(self.literal_json(expression.value), text=isinstance(expression.value, str))
+            # A null written is JSON's null, as a map's is: see Json.json_null.
+            return Json(
+                self.literal_json(expression.value),
+                text=isinstance(expression.value, str),
+                json_null=expression.value is None,
+            )
         if isinstance(expression, Parameter):
             if self._given_parameters is not None and expression.name in self._given_parameters:
                 return self._given_parameters[expression.name]
@@ -3826,7 +3925,7 @@ class SqlCypherCompiler(ABC):
         if isinstance(expression, Property):
             in_parameter = self._in_parameter(expression)
             if in_parameter is not None:
-                return Json(in_parameter)
+                return Json(in_parameter, json_null=True)
             return self._property(self._expression(expression.subject, scope), expression.key)
         if isinstance(expression, HasLabels):
             subject = self._expression(expression.subject, scope)
@@ -4040,7 +4139,7 @@ class SqlCypherCompiler(ABC):
         if isinstance(known, str):
             in_parameter = self._in_parameter(expression)
             if in_parameter is not None:
-                return Json(in_parameter)
+                return Json(in_parameter, json_null=True)
             return self._property(self._expression(expression.subject, scope), known)
         # An item of a list of nodes or relationships is the node or the relationship, so it is compared by its id; of
         # one collect gathers in this query, its properties, for a store reads no aggregate from a subquery. A pattern
@@ -4059,6 +4158,7 @@ class SqlCypherCompiler(ABC):
                 list=_holds_lists(subject_value()),
                 text=_holds_texts(subject_value()),
                 temporals=_item_temporals_of(subject_value()),
+                json_null=not self._is_flat(subject_value()),
             )
 
         def item(list_: str) -> str:
@@ -4080,6 +4180,7 @@ class SqlCypherCompiler(ABC):
             list=_holds_lists(subject_value()),
             text=_holds_texts(subject_value()),
             temporals=_item_temporals_of(subject_value()),
+            json_null=not self._is_flat(subject_value()),
         )
 
     def _entity_at(self, entities: Entities, at: str) -> Value:
@@ -4258,6 +4359,8 @@ class SqlCypherCompiler(ABC):
             self.reduce(self._alias("f"), initial, list_, step, context, context_step),
             # It may hold what its start, its list or a value of the row its step reads holds (#347).
             temporals=_has_temporals(start) or _has_temporals(listed) or any(_has_temporals(scope[it]) for it in read),
+            # Its step may give JSON's null, as a null written or read from a map does.
+            json_null=True,
         )
 
     def _pattern_comprehension(self, expression: PatternComprehension, scope: Scope) -> Value:
@@ -4467,7 +4570,11 @@ class SqlCypherCompiler(ABC):
                 # One of a kind known other than a map is left to _property, which refuses it.
                 and not _known_no_map(subject)
             ):
-                return Json(self.item_value(self.comparable(subject), expression.key), temporals=subject.temporals)
+                return Json(
+                    self.item_value(self.comparable(subject), expression.key),
+                    temporals=subject.temporals,
+                    json_null=not subject.flat,
+                )
         return self._expression(expression, select.scope)
 
     def _property(self, subject: Value, key: str) -> Value:
@@ -4487,12 +4594,13 @@ class SqlCypherCompiler(ABC):
                 return field_
             if subject.row_keys is not None:
                 keys = (*subject.row_keys, key)
-                return Json(self.row_value(keys), row_keys=keys)
+                return Json(self.row_value(keys), row_keys=keys, json_null=not subject.flat)
             taken = self.property_of(self.comparable(subject), key)
             return Json(
                 taken,
                 identity=self._identity_taken(subject, taken, True, lambda it: self.property_of(it, key)),
                 temporals=subject.temporals,
+                json_null=not subject.flat,
             )
         if isinstance(subject, Bool):
             raise DrivineError("A truth value has no properties.")
@@ -5607,6 +5715,7 @@ class SqlCypherCompiler(ABC):
             item_lists=all(_holds_lists(result) for _, result in results),
             text=all(_is_text(result) for _, result in results),
             texts=all(_holds_texts(result) for _, result in results),
+            json_null=any(_may_be_json_null(result) for _, result in results),
         )
 
     def _function(self, function: Function, scope: Scope) -> Value:
@@ -5993,6 +6102,7 @@ class SqlCypherCompiler(ABC):
                 list=_holds_lists(one()),
                 text=_holds_texts(one()),
                 temporals=_item_temporals_of(one()),
+                json_null=not self._is_flat(one()),
             )
         return Json(result, text=name in TEXT_FUNCTIONS)
 
@@ -6325,6 +6435,9 @@ class SqlCypherCompiler(ABC):
             return self.comparable(self.json(value)), lambda it: [self.list_sort_key(it)]
         if not isinstance(value, Json) or temporal is not None or _is_text(value):
             return self.comparable(self.json(value)), lambda it: [self.sort_key(it)]
+        # One that may be JSON's null ties it with SQL's, so the next term decides between them (#314).
+        if _may_be_json_null(value):
+            return self.comparable(self.json(value)), self.json_null_sort_key
         return self.comparable(self.json(value)), self.open_sort_key
 
 
@@ -7203,6 +7316,11 @@ def _is_text(value: Value) -> bool:
 def _holds_texts(value: Value) -> bool:
     """Whether the statement makes the value a list whose every item is a text, or null: see Json.texts."""
     return isinstance(value, Json) and value.texts
+
+
+def _may_be_json_null(value: Value) -> bool:
+    """Whether the value may be JSON's null: see Json.json_null."""
+    return isinstance(value, Json) and value.json_null
 
 
 def utf8_bytes(given: Any) -> int | None:

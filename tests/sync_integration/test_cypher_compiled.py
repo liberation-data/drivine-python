@@ -5218,3 +5218,144 @@ def test_a_pattern_comprehension_whose_body_reads_none_of_its_patterns_variables
     # In a write, which Postgres refused.
     cypher_pm.query(spec("MATCH (p:Person) SET p.knows = size([(p)-->() | p.name])"))
     assert cypher_pm.query(spec("MATCH (p:Person) RETURN p.name, p.knows ORDER BY p.name")) == sizes
+
+
+def unordered(rows: list[Any]) -> list[str]:
+    """Rows as a multiset, a null row included, to compare those of a statement that gives no order."""
+    return sorted(json.dumps(it) for it in rows)
+
+
+def test_a_null_in_a_map_or_a_list_and_a_missing_key_are_one_null_beyond_the_spec(cypher_pm: PersistenceManager):
+    # #314: drivine4j's CypherQueryContract cases of liberation-data/drivine4j#500 that the spec does not hold, and
+    # Drivine for TypeScript's own beside them (liberation-data/drivine#501). The rows are Neo4j's (2026.10).
+    seeded(cypher_pm)
+    cases: list[tuple[str, dict[str, Any], list[Any]]] = [
+        # A UNION in a CALL, and a part beside a CALL's UNION ALL, which leaves the part's rows compared.
+        (
+            "CALL { UNWIND [{a: null}] AS x RETURN x.a AS v UNION UNWIND [{b: 1}] AS x RETURN x.a AS v } "
+            "RETURN v, count(*) AS c",
+            {},
+            [[None, 1]],
+        ),
+        ("CALL { RETURN null AS v UNION RETURN {}.a AS v } RETURN v, count(*) AS c", {}, [[None, 1]]),
+        (
+            "UNWIND [{a: null}] AS x CALL { RETURN 1 AS z UNION ALL RETURN 2 AS z } RETURN x.a AS v "
+            "UNION UNWIND [{b: 1}] AS x RETURN x.a AS v",
+            {},
+            [None],
+        ),
+        # An order ties a value kept distinct, which on Oracle may be JSON's null still.
+        (
+            "UNWIND [{a: null, i: 1}, {b: 1, i: 2}, {a: 0, i: 3}] AS x WITH DISTINCT x.a AS a, x.i AS i "
+            "RETURN i ORDER BY a, i DESC",
+            {},
+            [3, 2, 1],
+        ),
+        # A value kept distinct, on Oracle JSON's null, is still the same null as a property a node has not.
+        (
+            "UNWIND [{a: null}] AS x WITH DISTINCT x.a AS a RETURN a AS v "
+            "UNION MATCH (p:Person {name: 'Hugo'}) RETURN p.nickname AS v",
+            {},
+            [None],
+        ),
+        (
+            "UNWIND [{a: null}, {b: 1}] AS x WITH DISTINCT x.a AS a MATCH (p:Person) "
+            "RETURN CASE WHEN p.born IS NULL THEN p.nickname ELSE a END AS v, count(*) AS c",
+            {},
+            [[None, 4]],
+        ),
+        # Grouped by a value of an unwound list that holds a null, and sorted by it.
+        ("UNWIND [null, 1, null] AS v RETURN v, count(*) AS c ORDER BY v", {}, [[1, 1], [None, 2]]),
+        # A grouped or kept null comes back as null, not as JSON's null or its text.
+        (
+            "UNWIND [{a: null}, {b: 1}] AS x WITH x.a AS a, count(*) AS c RETURN {a: a, c: c} AS m",
+            {},
+            [{"a": None, "c": 2}],
+        ),
+        ("UNWIND [{a: null}, {a: null}] AS x WITH DISTINCT x.a AS a RETURN [a, a IS NULL] AS l", {}, [[None, True]]),
+        # A CALL's UNION ALL whose later part's value may be JSON's null, in a part of an outer UNION.
+        ("CALL { RETURN {}.a AS v UNION ALL RETURN [null][0] AS v } RETURN v UNION RETURN {}.a AS v", {}, [None]),
+        # A subquery's UNION compares its queries' rows with the two nulls as one.
+        ("UNWIND [{a: null}] AS x RETURN COUNT { RETURN x.a AS v UNION RETURN {}.a AS v } AS n", {}, [1]),
+        # head(), last(), a parameter's entry by its key, and a parameter that is null.
+        ("UNWIND [[null], []] AS l RETURN head(l) AS h, last(l) AS t, count(*) AS c", {}, [[None, None, 2]]),
+        ("RETURN $p['a'] AS a UNION RETURN $q.a AS a", {"p": {"a": None}, "q": {}}, [None]),
+        (
+            "UNWIND [{b: 1}, {b: 2}] AS x RETURN CASE WHEN x.b = 1 THEN $p ELSE x.a END AS v, count(*) AS c",
+            {"p": None},
+            [[None, 2]],
+        ),
+    ]
+    for cypher, parameters, rows in cases:
+        assert (cypher, cypher_pm.query(spec(cypher, parameters))) == (cypher, rows)
+
+
+def test_a_writes_rows_group_a_maps_null_and_a_missing_key_as_one_null_beyond_the_spec(
+    cypher_pm: PersistenceManager,
+):
+    # #314: drivine4j's CypherWriteContract case of liberation-data/drivine4j#500 that the spec does not hold.
+    clear(cypher_pm)
+    assert cypher_pm.query(
+        spec("UNWIND [{a: 1}, {a: 1}] AS r CREATE (:CyWrite {b: 9}) RETURN r.a AS a, count(*) AS c")
+    ) == [[1, 2]]
+
+
+def test_a_calls_union_all_whose_later_part_gives_a_lists_null_keeps_it_one_null_with_a_missing_key(
+    cypher_pm: PersistenceManager,
+):
+    # #321, drivine4j's of liberation-data/drivine4j#512: the column may be JSON's null where any part's value may be,
+    # not only the first's. The rows are Neo4j's (2026.10), in any order where the statement gives none.
+    assert cypher_pm.query(spec("CALL { RETURN {}.a AS v UNION ALL RETURN [null][0] AS v } RETURN DISTINCT v")) == [
+        None
+    ]
+    assert unordered(
+        cypher_pm.query(
+            spec(
+                "CALL { RETURN 1 AS v UNION ALL RETURN [null][0] AS v UNION ALL RETURN {}.a AS v } "
+                "RETURN v, count(*) AS c"
+            )
+        )
+    ) == unordered([[1, 1], [None, 2]])
+    # In a part of an outer UNION, which compares rows by it.
+    assert unordered(
+        cypher_pm.query(
+            spec(
+                "CALL { RETURN {}.a AS v UNION ALL RETURN 1 AS v UNION ALL RETURN [null][0] AS v } RETURN v "
+                "UNION RETURN 2 AS v"
+            )
+        )
+    ) == unordered([None, 1, 2])
+
+
+def test_a_calls_union_all_whose_first_part_gives_a_list_and_a_later_one_a_number_or_a_map_sorts_each_by_its_kind(
+    cypher_pm: PersistenceManager,
+):
+    # #321, drivine4j's of liberation-data/drivine4j#512: the column is a list only where every part's value is, so a
+    # number or a map a later part gives sorts by its kind, not as a list would. The rows are Neo4j's (2026.10).
+    # Postgres takes jsonb's order of kinds, a number before a list (liberation-data/drivine4j#307), and refuses a
+    # written list's json beside a number's jsonb in one UNION ALL.
+    if cypher_pm.type is DatabaseType.POSTGRES:
+        return
+    ordered: list[tuple[str, list[Any]]] = [
+        ("CALL { RETURN [10] AS v UNION ALL RETURN 10 AS v } RETURN v ORDER BY v", [[10], 10]),
+        ("CALL { RETURN [1, 2] AS v UNION ALL RETURN 10 AS v } RETURN v ORDER BY v", [[1, 2], 10]),
+        ("CALL { RETURN [10] AS v UNION ALL RETURN {a: 1} AS v } RETURN v ORDER BY v", [{"a": 1}, [10]]),
+        (
+            "CALL { RETURN [10] AS v UNION ALL RETURN 10 AS v UNION ALL RETURN [9] AS v UNION ALL RETURN [2] AS v } "
+            "RETURN v ORDER BY v",
+            [[2], [9], [10], 10],
+        ),
+        # A later part's list of numbers unwinds to numbers, which sort after the first part's list.
+        ("CALL { RETURN [[1]] AS v UNION ALL RETURN [1] AS v } UNWIND v AS x RETURN x AS r ORDER BY r", [[1], 1]),
+    ]
+    for cypher, rows in ordered:
+        assert (cypher, cypher_pm.query(spec(cypher))) == (cypher, rows)
+    # A later part's number compares as a number, and a later part's null in a list makes `=` and IN null, not false.
+    # These give no order.
+    unordered_: list[tuple[str, list[Any]]] = [
+        ("CALL { RETURN [1] AS v UNION ALL RETURN 1 AS v } RETURN v < 2 AS r", [None, True]),
+        ("CALL { RETURN [1] AS v UNION ALL RETURN [null] AS v } RETURN v = [1] AS r", [True, None]),
+        ("CALL { RETURN [1] AS v UNION ALL RETURN [null] AS v } RETURN v IN [[1], 1] AS r", [True, None]),
+    ]
+    for cypher, rows in unordered_:
+        assert (cypher, unordered(cypher_pm.query(spec(cypher)))) == (cypher, unordered(rows))

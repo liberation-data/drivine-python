@@ -121,6 +121,13 @@ class ConstraintManager:
             return await self.ensure(spec, sample_size)
         return await self._await_built(spec, sample_size)
 
+    async def in_force(self, spec: UniquenessConstraintSpec) -> bool:
+        """
+        Whether the constraint is there and built, so that the engine enforces it, as one another process made. One
+        still being built is waited on; one whose build failed (FalkorDB) is not in force, and is left as it is.
+        """
+        return await self._await_build(spec, until_listed=False) == "BUILT"
+
     async def drop(self, spec: UniquenessConstraintSpec) -> None:
         """Drops the constraint, or one whose build FalkorDB listed as FAILED, which `list` leaves out."""
         if await self._exists(spec) or await self._failed(spec):

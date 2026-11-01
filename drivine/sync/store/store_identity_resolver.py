@@ -2,7 +2,9 @@
 # change that, and run the script again.
 from __future__ import annotations
 
+import contextlib
 import logging
+import random
 import re
 import uuid
 from datetime import UTC, datetime
@@ -12,9 +14,11 @@ from drivine.drivine_error import DrivineError
 from drivine.schema.schema_specs import uniqueness_constraint
 from drivine.store.store_identity import StoreIdentity
 from drivine.sync import concurrency
-from drivine.sync.manager.contention import any_cause, contended_pause
+from drivine.sync.manager.contention import any_cause, contended_pause, ddl_deadlocked
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from drivine.backend.graph_backend import GraphBackend
     from drivine.schema.ensure_result import EnsureResult
     from drivine.schema.uniqueness_constraint_spec import UniquenessConstraintSpec
@@ -31,11 +35,25 @@ _ATTEMPTS = 3
 _MERGE_ATTEMPTS = 5
 _MERGE_BACKOFF_SECONDS = 0.05
 _ENSURE_ATTEMPTS = 3
+_LOOKS_FOR_THE_WINNER = 8
+"""How many times the winner's key constraint is looked for once this manager's making failed: _winners_in_force."""
+_LOOK_PAUSE_SECONDS = 0.05
+"""The least pause before the second look for the winner's constraint; each later one is as much longer."""
 _VIOLATED_THE_KEY = re.compile(r"unique constraint|already exists", re.IGNORECASE)
 _WRITE_CONFLICT = re.compile(r"conflict|another write", re.IGNORECASE)
 _MADE_MEANWHILE = re.compile(r"already (exists|indexed)|ORA-00955\b", re.IGNORECASE)
 _UNIQUE_VIOLATION = "23505"
 _ORACLE_UNIQUE_VIOLATION = "ORA-00001"
+
+
+def _look_pause(look: int) -> float:
+    """
+    The pause before look `look` (from 1) for the winner's constraint: as many _LOOK_PAUSE_SECONDS as looks so far,
+    and up to as much again at random, so that losers looking together don't ask together. 2.8 s at most over all the
+    looks.
+    """
+    base = look * _LOOK_PAUSE_SECONDS
+    return base + random.random() * base
 
 
 def _sqlstate(failure: BaseException) -> str | None:
@@ -100,11 +118,20 @@ class StoreIdentityResolver:
     """
 
     def __init__(
-        self, persistence_manager: PersistenceManager, backend: GraphBackend, constraints: ConstraintManager | None
+        self,
+        persistence_manager: PersistenceManager,
+        backend: GraphBackend,
+        constraints: ConstraintManager | None,
+        sleep: Callable[[float], None] = concurrency.sleep,
     ) -> None:
+        """
+        `sleep` waits out the pauses between looks for the winner's constraint (see `_winners_in_force`); a test gives
+        one that doesn't wait, as `when_not_contended`'s are given.
+        """
         self.persistence_manager = persistence_manager
         self.backend = backend
         self.constraints = constraints
+        self._sleep = sleep
 
     def resolve(self) -> StoreIdentity:
         guarded = self._ensure_unique_key()
@@ -138,14 +165,37 @@ class StoreIdentityResolver:
         (FalkorDB), or the index's name taken in the catalog (Postgres's `pg_class`, 23505). The constraint is then
         ensured again, which finds the other's. Going on without it would let a stamp be refused by the other's
         constraint, or two stamps be written before it is in force (#298, as drivine4j#473).
+
+        A manager whose making still fails, as one that lost each round of Neo4j's label lock to the others does, looks
+        for the winner's constraint before it goes on best-effort, as drivine4j does (see `_winners_in_force`). Turned
+        away for contention and finding none, it ensures the constraint once more, by then with fewer making it at once.
+
+        That narrows the window for two stamps without closing it: a manager whose last ensure is turned away too writes
+        its stamp unguarded, and so may another, while no constraint is in force yet. No store offers a lock to make the
+        constraint under, and ensuring or looking for longer would only move the window. A stamp written unguarded is
+        still written again when a constraint made meanwhile refuses it (see `_assign_if_absent`), and of two stamps
+        each manager reads the oldest (see `resolve`).
         """
         if self.constraints is None:
             return False
         try:
-            result = self._ensured_again_when_made_meanwhile(self.constraints)
+            return self._in_force_after(self._ensured_again_when_made_meanwhile(self.constraints))
         except Exception as error:
-            logger.warning("Could not ensure the DrivineStore key constraint: %s. Identity is best-effort.", error)
-            return False
+            failure = error
+        # A deadlock on a SQL store's DDL as well as the engine's own contention, as drivine4j's resolver takes it.
+        contended = self.backend.contended(failure) or ddl_deadlocked(failure)
+        if self._winners_in_force(self.constraints, contended):
+            return True
+        if contended:
+            try:
+                return self._in_force_after(self._ensured_again_when_made_meanwhile(self.constraints))
+            except Exception as again:
+                failure = again
+        logger.warning("Could not ensure the DrivineStore key constraint: %s. Identity is best-effort.", failure)
+        return False
+
+    def _in_force_after(self, result: EnsureResult[UniquenessConstraintSpec]) -> bool:
+        """Whether the key's constraint is in force after `result`; warns, and answers False, when it can't be."""
         if result.status == "VIOLATION":
             logger.warning(
                 "%s already holds duplicate DrivineStore stamps, so their uniqueness can't be enforced. Identity is "
@@ -178,6 +228,26 @@ class StoreIdentityResolver:
                     raise
                 concurrency.sleep(contended_pause(attempt - 1))
                 attempt += 1
+
+    def _winners_in_force(self, constraints: ConstraintManager, contended: bool) -> bool:
+        """
+        Whether another manager's key constraint is in force, looked for after this one's making failed. Of managers
+        making it at once on Neo4j, each round of the label's lock goes to one and turns the rest away as deadlocked;
+        with many at once, the rounds can go on past the schema executor's attempts (as in drivine CI run 41260212023).
+        A loser turned away each time finds the winner's here, and, looking rather than making it again, leaves the lock
+        to the others, so that one of them wins sooner. The winner may still be making it, so after `contended` making
+        it is looked for up to _LOOKS_FOR_THE_WINNER times, with longer pauses between (see `_look_pause`), as drivine4j
+        does. After a failure of another kind (no permission, an index in the way, refused as made meanwhile each time)
+        it is looked for once: no winner is still making it, and the warning shouldn't wait. A look that fails finds
+        nothing.
+        """
+        for look in range(_LOOKS_FOR_THE_WINNER if contended else 1):
+            if look:
+                self._sleep(_look_pause(look))
+            with contextlib.suppress(Exception):
+                if constraints.in_force(_KEY_CONSTRAINT):
+                    return True
+        return False
 
     def _assign_if_absent(self, guarded: bool) -> None:
         """

@@ -5,6 +5,7 @@ the constraint is run again as it would be.
 """
 
 import logging
+from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any, Literal
 
@@ -14,6 +15,7 @@ from neo4j.exceptions import Neo4jError
 from drivine.backend.backends import backend_for
 from drivine.connection.database_type import DatabaseType
 from drivine.drivine_error import DrivineError
+from drivine.manager.contention import CONTENDED_ATTEMPTS
 from drivine.query.query_specification import QuerySpecification
 from drivine.schema.constraint_manager import ConstraintManager
 from drivine.schema.schema_executor import SchemaExecutor
@@ -61,7 +63,9 @@ class Store:
     """
     A Neo4j store whose stamp MERGE fails with the next of `merge_failures`, if any. The first `create_failures`
     CREATE CONSTRAINTs deadlock, or, given `made_meanwhile`, are refused with it, another session having made the
-    constraint, unless `found_after` is False: then nothing made it, and the refusal is for something else.
+    constraint, unless `found_after` is False: then nothing made it, and the refusal is for something else. Given
+    `listed_by`, another manager's constraint is listed from the first SHOW CONSTRAINTS for which it answers True, told
+    how many CREATEs and SHOWs there have been.
     """
 
     def __init__(
@@ -70,14 +74,19 @@ class Store:
         merge_failures: list[BaseException],
         made_meanwhile: BaseException | None = None,
         found_after: bool = True,
+        listed_by: Callable[[int, int], bool] | None = None,
     ) -> None:
         self.create_failures = create_failures
         self.merge_failures = merge_failures
         self.made_meanwhile = made_meanwhile
         self.found_after = found_after
+        self.listed_by = listed_by
         self.created = False
         self.creates = 0
+        self.shows = 0
         self.merges = 0
+        self.pauses: list[float] = []
+        """The pauses the resolver took between looks for the winner's constraint, given a sleep that doesn't wait."""
 
     def query(self, spec: QuerySpecification[Any]) -> list[Any]:
         assert spec.statement is not None
@@ -88,6 +97,9 @@ class Store:
                 self.created = self.made_meanwhile is not None and self.found_after
                 raise self.made_meanwhile or bolt(DEADLOCK, "Deadlock wait cycle.")
             self.created = True
+        if statement.startswith("SHOW CONSTRAINTS"):
+            self.shows += 1
+            self.created = self.created or (self.listed_by is not None and self.listed_by(self.creates, self.shows))
         if statement.startswith("SHOW CONSTRAINTS") and self.created:
             return [{"name": "DrivineStore_key", "labels": ["DrivineStore"], "properties": ["key"]}]
         return []
@@ -179,10 +191,16 @@ async def resolve(store: Store, api: Api, schema_management: bool = True) -> str
     backend = backend_for(DatabaseType.NEO4J)
     if api == "async":
         constraints = ConstraintManager(SchemaExecutor(AsyncProvider(store)), NEO4J_SCHEMA)  # pyright: ignore[reportArgumentType]
-        resolver = StoreIdentityResolver(AsyncPm(store), backend, constraints if schema_management else None)  # pyright: ignore[reportArgumentType]
+
+        async def pause(seconds: float) -> None:
+            store.pauses.append(seconds)
+
+        resolver = StoreIdentityResolver(AsyncPm(store), backend, constraints if schema_management else None, pause)  # pyright: ignore[reportArgumentType]
         return (await resolver.resolve()).id
     sync_constraints = SyncConstraintManager(SyncSchemaExecutor(SyncProvider(store)), NEO4J_SCHEMA)  # pyright: ignore[reportArgumentType]
-    sync_resolver = SyncStoreIdentityResolver(SyncPm(store), backend, sync_constraints if schema_management else None)  # pyright: ignore[reportArgumentType]
+    sync_resolver = SyncStoreIdentityResolver(
+        SyncPm(store), backend, sync_constraints if schema_management else None, store.pauses.append
+    )  # pyright: ignore[reportArgumentType]
     return sync_resolver.resolve().id
 
 
@@ -247,7 +265,7 @@ async def test_the_constraint_is_ensured_again_when_postgres_refused_its_index_f
 @pytest.mark.parametrize("api", APIS)
 async def test_a_unique_violation_in_a_users_table_is_not_taken_for_one_made_meanwhile(api: Api, caplog):
     violation = PostgresUniqueViolation("orders_pkey")
-    store = Store(1, [], made_meanwhile=DrivineError.with_root_cause(violation))
+    store = Store(1, [], made_meanwhile=DrivineError.with_root_cause(violation), found_after=False)
 
     assert await resolve(store, api) == "store-8"
     assert store.creates == 1
@@ -267,10 +285,99 @@ async def test_identity_is_best_effort_once_its_making_is_refused_as_made_meanwh
 
 @pytest.mark.parametrize("api", APIS)
 async def test_a_constraint_refusal_of_another_kind_is_not_ensured_again(api: Api, caplog):
-    store = Store(EVERY_TIME, [], made_meanwhile=bolt("Neo.ClientError.Security.Forbidden", "Schema operation denied"))
+    store = Store(
+        EVERY_TIME,
+        [],
+        made_meanwhile=bolt("Neo.ClientError.Security.Forbidden", "Schema operation denied"),
+        found_after=False,
+    )
 
     assert await resolve(store, api) == "store-8"
     assert store.creates == 1 and len(best_effort(caplog)) == 1
+
+
+@pytest.mark.parametrize("api", APIS)
+async def test_the_winners_constraint_is_found_when_its_own_making_deadlocked_as_often_as_the_executor_runs_one(
+    api: Api, caplog
+):
+    # drivine CI run 41260212023's 16 managers: this one lost every round of the label's lock, while another made it.
+    store = Store(EVERY_TIME, [Exception(CONFLICT)], listed_by=lambda made, _: made >= CONTENDED_ATTEMPTS)
+
+    assert await resolve(store, api) == "store-8"
+    assert store.creates == CONTENDED_ATTEMPTS
+    # Under the constraint found, a conflict is a lost race, and the stamp is written again.
+    assert store.merges == 2
+    assert best_effort(caplog) == []
+
+
+@pytest.mark.parametrize("api", APIS)
+async def test_the_winners_constraint_is_looked_for_again_after_a_pause_while_the_winner_is_still_making_it(
+    api: Api, caplog
+):
+    # The ensure's first look, then the first two looks after the deadlocks, find nothing.
+    store = Store(EVERY_TIME, [], listed_by=lambda made, shows: made >= CONTENDED_ATTEMPTS and shows > 3)
+
+    assert await resolve(store, api) == "store-8"
+    assert store.creates == CONTENDED_ATTEMPTS and best_effort(caplog) == []
+
+
+@pytest.mark.parametrize("api", APIS)
+async def test_the_winners_constraint_is_looked_for_only_so_long_after_the_deadlocks_and_then_warned_of(
+    api: Api, caplog
+):
+    store = Store(EVERY_TIME, [], listed_by=lambda _, __: False)
+
+    assert await resolve(store, api) == "store-8"
+    # The ensure's own look, the resolver's eight (_LOOKS_FOR_THE_WINNER) after it gave up, then the last ensure's.
+    assert store.shows == 1 + 8 + 1
+    # Before each look but the first, as many 50 ms as looks so far, and by chance up to as much again.
+    assert len(store.pauses) == 7
+    assert all(n * 0.05 <= pause < n * 0.1 for n, pause in enumerate(store.pauses, start=1)), store.pauses
+    assert len(best_effort(caplog)) == 1
+
+
+@pytest.mark.parametrize("api", APIS)
+async def test_the_constraint_is_ensured_once_more_when_the_looks_for_the_winners_find_none(api: Api, caplog):
+    # The other managers have stopped making it, or given up: the last ensure makes it, so no stamp goes unguarded.
+    store = Store(CONTENDED_ATTEMPTS, [Exception(CONFLICT)])
+
+    assert await resolve(store, api) == "store-8"
+    assert store.creates == CONTENDED_ATTEMPTS + 1 and len(store.pauses) == 7
+    # Under the constraint made, a conflict is a lost race, and the stamp is written again.
+    assert store.merges == 2
+    assert best_effort(caplog) == []
+
+
+@pytest.mark.parametrize("api", APIS)
+async def test_the_winners_constraint_is_looked_for_again_after_an_oracle_ddl_deadlock(api: Api, caplog):
+    # ORA-04020, on an object's library cache lock, is contention as drivine4j's resolver takes it, so it is looked for
+    # again rather than once. The ensure's own look and the first after the deadlocks find nothing.
+    deadlock = OracleFailure("ORA-04020: deadlock detected while trying to lock object DRIVINE.DRIVINE_NODE")
+    store = Store(
+        EVERY_TIME,
+        [],
+        made_meanwhile=deadlock,
+        found_after=False,
+        listed_by=lambda made, shows: made >= CONTENDED_ATTEMPTS and shows > 2,
+    )
+
+    assert await resolve(store, api) == "store-8"
+    assert store.creates == CONTENDED_ATTEMPTS and best_effort(caplog) == []
+
+
+@pytest.mark.parametrize("api", APIS)
+async def test_the_winners_constraint_is_looked_for_once_without_a_pause_after_a_refusal_that_is_not_contention(
+    api: Api, caplog
+):
+    # No permission to make it: no winner is still making it, so the warning doesn't wait out the looks.
+    forbidden = bolt("Neo.ClientError.Security.Forbidden", "Schema operation denied")
+    store = Store(EVERY_TIME, [], made_meanwhile=forbidden, found_after=False, listed_by=lambda _, __: False)
+
+    assert await resolve(store, api) == "store-8"
+    # The ensure's own look, then the resolver's one.
+    assert store.creates == 1 and store.shows == 1 + 1
+    assert store.pauses == []
+    assert len(best_effort(caplog)) == 1
 
 
 @pytest.mark.parametrize("api", APIS)

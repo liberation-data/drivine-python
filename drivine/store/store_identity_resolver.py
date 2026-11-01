@@ -10,11 +10,13 @@ from typing import TYPE_CHECKING
 
 from drivine import concurrency
 from drivine.drivine_error import DrivineError
-from drivine.manager.contention import any_cause, contended_pause
+from drivine.manager.contention import any_cause, contended_pause, ddl_deadlocked
 from drivine.schema.schema_specs import uniqueness_constraint
 from drivine.store.store_identity import StoreIdentity
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from drivine.backend.graph_backend import GraphBackend
     from drivine.manager.persistence_manager import PersistenceManager
     from drivine.schema.constraint_manager import ConstraintManager
@@ -114,11 +116,20 @@ class StoreIdentityResolver:
     """
 
     def __init__(
-        self, persistence_manager: PersistenceManager, backend: GraphBackend, constraints: ConstraintManager | None
+        self,
+        persistence_manager: PersistenceManager,
+        backend: GraphBackend,
+        constraints: ConstraintManager | None,
+        sleep: Callable[[float], Awaitable[None]] = concurrency.sleep,
     ) -> None:
+        """
+        `sleep` waits out the pauses between looks for the winner's constraint (see `_winners_in_force`); a test gives
+        one that doesn't wait, as `when_not_contended`'s are given.
+        """
         self.persistence_manager = persistence_manager
         self.backend = backend
         self.constraints = constraints
+        self._sleep = sleep
 
     async def resolve(self) -> StoreIdentity:
         guarded = await self._ensure_unique_key()
@@ -154,17 +165,35 @@ class StoreIdentityResolver:
         constraint, or two stamps be written before it is in force (#298, as drivine4j#473).
 
         A manager whose making still fails, as one that lost each round of Neo4j's label lock to the others does, looks
-        for the winner's constraint before it goes on best-effort, as drivine4j does (see `_winners_in_force`).
+        for the winner's constraint before it goes on best-effort, as drivine4j does (see `_winners_in_force`). Turned
+        away for contention and finding none, it ensures the constraint once more, by then with fewer making it at once.
+
+        That narrows the window for two stamps without closing it: a manager whose last ensure is turned away too writes
+        its stamp unguarded, and so may another, while no constraint is in force yet. No store offers a lock to make the
+        constraint under, and ensuring or looking for longer would only move the window. A stamp written unguarded is
+        still written again when a constraint made meanwhile refuses it (see `_assign_if_absent`), and of two stamps
+        each manager reads the oldest (see `resolve`).
         """
         if self.constraints is None:
             return False
         try:
-            result = await self._ensured_again_when_made_meanwhile(self.constraints)
+            return self._in_force_after(await self._ensured_again_when_made_meanwhile(self.constraints))
         except Exception as error:
-            if await self._winners_in_force(self.constraints):
-                return True
-            logger.warning("Could not ensure the DrivineStore key constraint: %s. Identity is best-effort.", error)
-            return False
+            failure = error
+        # A deadlock on a SQL store's DDL as well as the engine's own contention, as drivine4j's resolver takes it.
+        contended = self.backend.contended(failure) or ddl_deadlocked(failure)
+        if await self._winners_in_force(self.constraints, contended):
+            return True
+        if contended:
+            try:
+                return self._in_force_after(await self._ensured_again_when_made_meanwhile(self.constraints))
+            except Exception as again:
+                failure = again
+        logger.warning("Could not ensure the DrivineStore key constraint: %s. Identity is best-effort.", failure)
+        return False
+
+    def _in_force_after(self, result: EnsureResult[UniquenessConstraintSpec]) -> bool:
+        """Whether the key's constraint is in force after `result`; warns, and answers False, when it can't be."""
         if result.status == "VIOLATION":
             logger.warning(
                 "%s already holds duplicate DrivineStore stamps, so their uniqueness can't be enforced. Identity is "
@@ -198,19 +227,21 @@ class StoreIdentityResolver:
                 await concurrency.sleep(contended_pause(attempt - 1))
                 attempt += 1
 
-    async def _winners_in_force(self, constraints: ConstraintManager) -> bool:
+    async def _winners_in_force(self, constraints: ConstraintManager, contended: bool) -> bool:
         """
         Whether another manager's key constraint is in force, looked for after this one's making failed. Of managers
         making it at once on Neo4j, each round of the label's lock goes to one and turns the rest away as deadlocked;
         with many at once, the rounds can go on past the schema executor's attempts (as in drivine CI run 41260212023).
         A loser turned away each time finds the winner's here, and, looking rather than making it again, leaves the lock
-        to the others, so that one of them wins sooner. The winner may still be making it, so it is looked for up to
-        _LOOKS_FOR_THE_WINNER times, with longer pauses between (see `_look_pause`). drivine4j looks once. A look that
-        fails finds nothing.
+        to the others, so that one of them wins sooner. The winner may still be making it, so after `contended` making
+        it is looked for up to _LOOKS_FOR_THE_WINNER times, with longer pauses between (see `_look_pause`), as drivine4j
+        does. After a failure of another kind (no permission, an index in the way, refused as made meanwhile each time)
+        it is looked for once: no winner is still making it, and the warning shouldn't wait. A look that fails finds
+        nothing.
         """
-        for look in range(_LOOKS_FOR_THE_WINNER):
+        for look in range(_LOOKS_FOR_THE_WINNER if contended else 1):
             if look:
-                await concurrency.sleep(_look_pause(look))
+                await self._sleep(_look_pause(look))
             with contextlib.suppress(Exception):
                 if await constraints.in_force(_KEY_CONSTRAINT):
                     return True

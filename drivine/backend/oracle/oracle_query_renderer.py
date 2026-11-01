@@ -128,7 +128,8 @@ class OracleQueryRenderer(SqlQueryRenderer):
         """
         The comparison of the root's property `name` with text as the expression of a range index or a uniqueness
         constraint of one of the root's labels that begins with the property, the first label with one: None where
-        there is none, or where the comparison isn't `eq`, `gt`, `gte`, `lt` or `lte` with text of at most 4,000 bytes.
+        there is none, or where the comparison isn't `eq`, `gt`, `gte`, `lt`, `lte` or an equality with a lowercased
+        copy (see lower_copies), with text of at most 4,000 bytes.
 
         It is written beside the JSON test, which still decides: the expression is the property as text, so it holds of
         every node the test holds of, and of a number written as the same text too. It is null for a node without the
@@ -136,7 +137,8 @@ class OracleQueryRenderer(SqlQueryRenderer):
         """
         if not isinstance(test, CompareTest) or json_packed or name == stamps.PROPERTY:
             return None
-        operator = _SQL_OPERATORS.get(test.operator)
+        lowered = test.operator == "EQ_LOWERED"
+        operator = "=" if lowered else _SQL_OPERATORS.get(test.operator)
         value = storable(stored(test.value))
         if operator is None or not isinstance(value, str) or len(value.encode()) > 4000:
             return None
@@ -148,7 +150,9 @@ class OracleQueryRenderer(SqlQueryRenderer):
             return None
         if label not in self.tested:
             self.tested.append(label)
-        return f"{labelled_value(self.root, label, name)} {operator} {self._bind(value)}"
+        # A lowercased copy is compared with the value as Oracle lowercases it, as the test beside it does.
+        bound = f"LOWER({self._bind(value)})" if lowered else self._bind(value)
+        return f"{labelled_value(self.root, label, name)} {operator} {bound}"
 
     def _compare(self, test: Test, column: str, name: str, json_packed: bool, path: tuple[str, ...]) -> str:
         """A test of the property `name` of the JSON column `column`."""
@@ -195,6 +199,11 @@ class OracleQueryRenderer(SqlQueryRenderer):
             return self._matches(text, str(value))
         if operator == "CONTAINS_IGNORE_CASE":
             return f"INSTR(LOWER({text}), {self._bind(str(value).lower())}) > 0"
+        # A lowercased copy, compared with the value as Oracle lowercases it: see lower_copies.
+        if operator == "EQ_LOWERED":
+            return f"{text} = LOWER({self._bind(str(value))})"
+        if operator == "CONTAINS_LOWERED":
+            return f"INSTR({text}, LOWER({self._bind(str(value))})) > 0"
         return f"LOWER({text}) = {self._bind(str(value).lower())}"
 
     def _matches(self, text: str, pattern: str) -> str:

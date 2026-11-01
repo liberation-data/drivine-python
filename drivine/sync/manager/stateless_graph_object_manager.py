@@ -25,6 +25,8 @@ from drivine.drivine_error import DrivineError
 from drivine.dsl.collection_sorts import sort_collections
 from drivine.dsl.condition import Where
 from drivine.dsl.index_advice_policy import IndexAdvicePolicy
+from drivine.dsl.lower_copy_lookups import lowered, lowered_where
+from drivine.dsl.model_scope import scope_of
 from drivine.dsl.order_term import OrderTerm
 from drivine.dsl.query import Query
 from drivine.dsl.rendered_query import RenderedQuery
@@ -56,6 +58,7 @@ from drivine.sync.manager.group_operations import GroupOperations
 from drivine.sync.manager.persistence_manager import PersistenceManager
 from drivine.sync.schema.constraint_manager import ConstraintManager
 from drivine.sync.schema.index_manager import IndexManager
+from drivine.sync.schema.lower_copy_catalog import LowerCopyCatalog
 from drivine.sync.schema.schema_executor import SchemaExecutor
 from drivine.sync.store.store_identity_resolver import StoreIdentityResolver
 from drivine.sync.transaction.transaction import current_transaction
@@ -94,9 +97,11 @@ class StatelessGraphObjectManager:
         self.mapper = GraphObjectMapper(self.registry)
         self._warned_non_atomic = False
         self._identity: StoreIdentity | None = None
+        self._lower_copy_catalog: LowerCopyCatalog | None = None
+        """See `_lower_copies`."""
         self.edges = EdgeOperations(self.registry, self._run_one, self._query, self.mapper, self.backend)
         """Relationships on their own, between stored nodes: see EdgeOperations."""
-        self.groups = GroupOperations(self.registry, self._query, self.mapper, self.backend)
+        self.groups = GroupOperations(self.registry, self._query, self.mapper, self.backend, self._group_lookups)
         """Grouped reads: see GroupOperations."""
         self.index_advice = IndexAdvicePolicy.WARN
         """What an ordered query with no range index to seek into does: see IndexAdvicePolicy."""
@@ -110,12 +115,16 @@ class StatelessGraphObjectManager:
         """
         Range, vector and full-text indexes of this manager's database: made idempotently, outside any transaction.
         """
-        return IndexManager(self._schema_executor(), self._schema_grammar(), self.index_advisor.refresh)
+        return IndexManager(
+            self._schema_executor(), self._schema_grammar(), self.index_advisor.refresh, self._lower_copies()
+        )
 
     @property
     def constraints(self) -> ConstraintManager:
         """Uniqueness constraints of this manager's database: made idempotently, outside any transaction."""
-        return ConstraintManager(self._schema_executor(), self._schema_grammar(), self.index_advisor.refresh)
+        return ConstraintManager(
+            self._schema_executor(), self._schema_grammar(), self.index_advisor.refresh, self._lower_copies()
+        )
 
     def store_identity(self) -> StoreIdentity:
         """
@@ -165,6 +174,7 @@ class StatelessGraphObjectManager:
         `depth` overrides a recursive relationship's max_depth for this load, by field name.
         """
         target = self.registry.model_of(type_)
+        where = self._lookups(where, target)
         query = Query(None, order_by, limit, skip, seek, depth)
         rendered = self._rendered(target, where, bindings, query, self._filter_indexes(where))
         if rendered.ordered:
@@ -214,6 +224,7 @@ class StatelessGraphObjectManager:
     ) -> int:
         """How many objects of the class a load with the same filter would find."""
         target = self.registry.model_of(type_)
+        where = self._lookups(where, target)
         rendered = self._rendered(target, where, bindings, Query(), self._filter_indexes(where))
         if isinstance(target, GraphViewModel):
             statement = self.backend.count_views(target, rendered.where, None, rendered.labels_tested)
@@ -509,6 +520,7 @@ class StatelessGraphObjectManager:
         a filter, every one. Returns the number deleted.
         """
         target = self.registry.model_of(type_)
+        where = self._lookups(where, target)
         rendered = self._rendered(target, where, bindings, Query(), self._filter_indexes(where))
         statement = self.backend.delete_all(target, rendered.where, rendered.labels_tested)
         return self.persistence_manager.get_one(statement.spec(rendered.bindings))
@@ -581,7 +593,7 @@ class StatelessGraphObjectManager:
         """
         target = self.registry.model_of(type_)
         root = root_of(target)
-        predicate, values_bound = self._condition(target, where, bindings)
+        predicate, values_bound = self._condition(target, self._lookups(where, target), bindings)
         named = [*(set or {}), *clear]
         self._assert_patchable(root, named)
         values: dict[str, Any] = {}
@@ -679,6 +691,39 @@ class StatelessGraphObjectManager:
         where = self.backend.written(where) if where else where
         predicate = f"({where}) AND {rendered.where}" if rendered.where else where
         return dataclasses.replace(rendered, where=predicate, bindings={**(bindings or {}), **rendered.bindings})
+
+    def _lower_copies(self) -> LowerCopyCatalog | None:
+        """
+        The record of which lowercased copies every node of a label has, which an index or constraint that ignores case
+        fills in, read and kept for this manager: none for a store with no schema connection.
+        """
+        if self._lower_copy_catalog is None:
+            try:
+                executor = self._schema_executor()
+                grammar = self._schema_grammar()
+            except DrivineError:
+                return None
+            self._lower_copy_catalog = LowerCopyCatalog(executor.run, grammar.lower_copies, self.store_identity)
+        return self._lower_copy_catalog
+
+    def _lookups(self, where: str | Where | None, target_: TargetModel) -> str | Where | None:
+        """
+        The filter, its case-insensitive comparisons of the root's `CaseInsensitive` properties made comparisons with
+        their lowercased copies, where every node is known to have them (see lower_copy_lookups); a filter written as
+        Cypher or SQL as it is.
+        """
+        if where is None or isinstance(where, str):
+            return where
+        return lowered_where(where, target_, self._filled_copies(root_of(target_)))
+
+    def _group_lookups(self, model: FragmentModel, where: Where) -> Where:
+        """A grouped read's condition, over the lowercased copies where it can be: see `_lookups`."""
+        return lowered(where, scope_of(model), self._filled_copies(model))
+
+    def _filled_copies(self, root: FragmentModel) -> set[str]:
+        """The `CaseInsensitive` properties of the fragment whose copy every node of a label of it is known to have."""
+        catalog = self._lower_copies() if root.lower_copied else None
+        return catalog.filled(root.labels, root.lower_copied) if catalog is not None else set()
 
     def _filter_indexes(self, where: str | Where | None) -> list[SchemaItem]:
         """

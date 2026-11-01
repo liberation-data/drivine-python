@@ -52,7 +52,14 @@ class PostgresWrites:
         def planned(bound: Mapping[str, Any]) -> tuple[WritePlan, str | None]:
             plan = WritePlan()
             values: dict[str, Any] = {**(bound.get("set") or {}), **(bound.get("vectors") or {})}
-            plan.patch(plan.shape(model.labels, key), stored_key(bound["id"]), "0", present(values), absent(values))
+            plan.patch(
+                plan.shape(model.labels, key),
+                stored_key(bound["id"]),
+                "0",
+                present(values),
+                absent(values),
+                model.lower_copied,
+            )
             return plan, self._meeting(where, bound) if where else None
 
         def reshaped(rows: list[str], bound: Mapping[str, Any]) -> list[Any]:
@@ -76,7 +83,7 @@ class PostgresWrites:
             shape = plan.shape(model.labels, key)
             for i, row in enumerate(bound["rows"]):
                 values: dict[str, Any] = {**(row.get("props") or {}), **(row.get("vectors") or {})}
-                plan.patch(shape, stored_key(row["id"]), str(i), present(values), absent(values))
+                plan.patch(shape, stored_key(row["id"]), str(i), present(values), absent(values), model.lower_copied)
             return plan, None
 
         def reshaped(rows: list[str], bound: Mapping[str, Any]) -> list[Any]:
@@ -110,7 +117,7 @@ class PostgresWrites:
                     id_,
                     stored_key(id_),
                     list(dict.fromkeys(group.model.labels)),
-                    _writes(props),
+                    _writes(props, group.model.lower_copied),
                     index,
                 )
 
@@ -172,9 +179,12 @@ class PostgresWrites:
         return f"SELECT COUNT(*) FROM {self.graph.nodes} n WHERE n.nid = $1 AND ({written})"
 
 
-def _writes(props: Mapping[str, Any]) -> NodeWrites:
-    """A node step's writes of the properties: those that are not null written, and those that are removed."""
-    return NodeWrites(set=present(props), unset=absent(props))
+def _writes(props: Mapping[str, Any], lower: Sequence[str] = ()) -> NodeWrites:
+    """
+    A node step's writes of the properties: those that are not null written, and those that are removed, and the
+    properties whose lowercased copies it keeps.
+    """
+    return NodeWrites(set=present(props), unset=absent(props), lower=list(lower))
 
 
 def _literal(value: Any) -> str:

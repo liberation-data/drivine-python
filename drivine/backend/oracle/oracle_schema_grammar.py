@@ -14,7 +14,9 @@ from drivine.backend.oracle.oracle_graph import (
 )
 from drivine.backend.oracle.oracle_side_table import OracleSideTable
 from drivine.backend.sql.sql_catalog import CATALOG_KINDS, CatalogKind, catalog_properties, catalog_record
+from drivine.model import lower_copies
 from drivine.schema.full_text_index_spec import FullTextIndexSpec
+from drivine.schema.lower_copy_statements import LOWER_COPY_KIND, LowerCopyStatements, Recording, catalog_entries
 from drivine.schema.range_index_spec import RangeIndexSpec
 from drivine.schema.schema_grammar import SchemaGrammar, portable_pins, sampled_node_id
 from drivine.schema.schema_item import SchemaItem
@@ -138,6 +140,58 @@ def oracle_schema_grammar(graph: OracleGraph) -> SchemaGrammar:
         unsupported_vector_tuning=portable_pins,
         conflicts=grammar.conflicts,
         labelled_indexes=True,
+        lower_copies=_lower_copies(graph),
+    )
+
+
+def _lower_copies(graph: OracleGraph) -> LowerCopyStatements:
+    """
+    The lowercased copies on Oracle, as drivine4j's `OracleLowerCopies` writes them: a property of the node's JSON,
+    filled in by an update of the label's nodes that Oracle lowercases with `LOWER`, and removed where the property has
+    no value, which an empty text is on Oracle; recorded as a row of the graph's catalog, of kind `LOWER_COPY`. The
+    number of nodes written is handed back as a row, from a block of its own.
+    """
+
+    def fill(label: str, property: str, batch: int) -> str:
+        path = f"'$.{drivine4j_step(lower_copies.of(property))}'"
+        value = f"JSON_VALUE(n.props, '$.{drivine4j_step(property)}')"
+        copy = f"JSON_VALUE(n.props, {path})"
+        return f"""DECLARE
+    v_written NUMBER;
+    v_result  SYS_REFCURSOR;
+BEGIN
+    UPDATE {graph.nodes} n
+    SET n.props = JSON_TRANSFORM(n.props, SET {path} = LOWER({value}) REMOVE ON NULL)
+    WHERE {has_labels("n", [label])}
+      AND DECODE({copy}, LOWER({value}), 1, 0) = 0
+      AND ROWNUM <= {batch};
+    v_written := SQL%ROWCOUNT;
+    OPEN v_result FOR SELECT v_written AS "written" FROM dual;
+    DBMS_SQL.RETURN_RESULT(v_result);
+END;"""
+
+    def record(label: str, property: str) -> Recording:
+        """Of two processes recording it at once, the second is refused on the catalog's key: taken as recorded."""
+        return Recording(
+            f"""BEGIN
+    MERGE INTO {graph.catalog} c
+    USING (SELECT {sql_text(LOWER_COPY_KIND)} AS kind, {sql_text(label)} AS label, {
+                sql_text(catalog_properties([property]))
+            } AS properties FROM dual) k
+    ON (c.kind = k.kind AND c.label = k.label AND c.properties = k.properties)
+    WHEN NOT MATCHED THEN INSERT (kind, label, properties, name, object_name, details)
+        VALUES (k.kind, k.label, k.properties, NULL, NULL, '{{}}');
+EXCEPTION
+    WHEN DUP_VAL_ON_INDEX THEN NULL;
+END;"""
+        )
+
+    return LowerCopyStatements(
+        read=f'SELECT label AS "label", properties AS "properties" FROM {graph.catalog} WHERE kind = '
+        f"{sql_text(LOWER_COPY_KIND)}",
+        fill=fill,
+        record=record,
+        entries=catalog_entries,
     )
 
 

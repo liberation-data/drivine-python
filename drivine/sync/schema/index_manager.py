@@ -13,8 +13,9 @@ from drivine.schema.full_text_index_spec import FullTextIndexSpec
 from drivine.schema.range_index_spec import RangeIndexSpec
 from drivine.schema.schema_grammar import SchemaGrammar
 from drivine.schema.schema_item import SchemaItem
-from drivine.schema.schema_specs import IndexSpec, item_name
+from drivine.schema.schema_specs import IndexSpec, item_name, made_as
 from drivine.schema.vector_index_spec import VectorIndexSpec
+from drivine.sync.schema.lower_copy_catalog import LowerCopyCatalog, fill_in_lower_copies
 from drivine.sync.schema.schema_executor import SchemaExecutor
 
 S = TypeVar("S", bound=RangeIndexSpec | VectorIndexSpec | FullTextIndexSpec)
@@ -29,12 +30,21 @@ class IndexManager:
     """
 
     def __init__(
-        self, executor: SchemaExecutor, grammar: SchemaGrammar, changed: Callable[[], None] = lambda: None
+        self,
+        executor: SchemaExecutor,
+        grammar: SchemaGrammar,
+        changed: Callable[[], None] = lambda: None,
+        copies: LowerCopyCatalog | None = None,
     ) -> None:
-        """`changed` is told once this has made or dropped an index: the object manager's index list is then stale."""
+        """
+        `changed` is told once this has made or dropped an index: the object manager's index list is then stale.
+        `copies` fills in the lowercased copies an index that ignores case is made over; without it, such an index is
+        refused.
+        """
         self.executor = executor
         self.grammar = grammar
         self.changed = changed
+        self.copies = copies
 
     def list(self, kind: Literal["RANGE", "VECTOR", "FULLTEXT"] = "RANGE") -> list[SchemaItem]:
         """The indexes of a kind the engine holds."""
@@ -46,8 +56,21 @@ class IndexManager:
         return listing.read(self.executor.run(listing.statement))
 
     def ensure(self, spec: S) -> EnsureResult[S]:
-        self._warn_unsupported(spec)
-        found = self._find(spec)
+        """
+        Makes the index unless the engine holds one over its label and properties. An index that ignores case (see
+        RangeIndexSpec) is made over the lowercased copies, and first fills them in on the nodes of its label that have
+        none, recording that they all have them, whatever the result. Where the index isn't there yet, the copies are
+        filled in again even where recorded, as by `recreate`: those a field kept before it lost `CaseInsensitive` went
+        out of step meanwhile.
+        """
+        made = made_as(spec)
+        self._warn_unsupported(made)
+        found = self._find(made)
+        fill_in_lower_copies(self.copies, spec, found is None)
+        return dataclasses.replace(self._ensure_made(made, found), spec=spec)
+
+    def _ensure_made(self, spec: S, found: SchemaItem | None) -> EnsureResult[S]:
+        """`ensure`, of the index as it is made, which the engine holds as `found`."""
         if found is not None and found.incomplete:
             self._create(spec)
             self.changed()
@@ -68,13 +91,19 @@ class IndexManager:
         return EnsureResult("CREATED", spec)
 
     def recreate(self, spec: S) -> EnsureResult[S]:
-        """Drops the index over the label and properties, whatever its shape, and makes it as the spec says."""
+        """
+        Drops the index over the label and properties, whatever its shape, and makes it as the spec says. An index that
+        ignores case fills the lowercased copies in again on every node of its label, recorded or not, where a write
+        that bypassed Drivine left one out of step.
+        """
+        fill_in_lower_copies(self.copies, spec, True)
         self.drop(spec)
-        self._create(spec)
+        self._create(made_as(spec))
         self.changed()
         return EnsureResult("RECREATED", spec)
 
-    def drop(self, spec: IndexSpec) -> None:
+    def drop(self, declared: IndexSpec) -> None:
+        spec = made_as(declared)
         found = self._find(spec)
         if found is None:
             return

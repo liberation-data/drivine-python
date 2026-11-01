@@ -6,7 +6,7 @@ from drivine.backend.cypher_stamps import LOCK, OFFERED, STAMP, changes, restamp
 from drivine.backend.graph_statement import GraphStatement
 from drivine.backend.vector_writes import vector_clauses
 from drivine.drivine_error import DrivineError
-from drivine.model import stamps
+from drivine.model import lower_copies, stamps
 from drivine.model.fragment_model import FragmentModel
 
 
@@ -63,10 +63,17 @@ class PatchStatements:
         kept = f"{carry}, " if carry else ""
         changed = " OR ".join([changes("n", props), *vector_clauses(model, grammar, "n", vectors)[1]])
         sets = " ".join(vector_clauses(model, grammar, "x", vectors)[0])
+        # The lowercased copies of a node the patch changed, from what it then holds, in a clause of their own: see
+        # lower_copies.
+        copies = [
+            f"FOREACH (x IN CASE WHEN changed THEN [n] ELSE [] END | {it})"
+            for it in lower_copies.clauses("x", model.lower_copied)
+        ]
         return [
             f"WITH {kept}f, n, CASE WHEN n IS NULL THEN false ELSE {changed} END AS changed",
             f"FOREACH (x IN CASE WHEN changed THEN [n] ELSE [] END | "
             f"SET {restamp('x', 'true')} SET x += {props} {sets})",
+            *copies,
             f"FOREACH (x IN CASE WHEN f IS NOT NULL AND {stamps.two_tokens_of('f')} IS NULL THEN [f] ELSE [] END | "
             f"SET x.{STAMP} = {OFFERED})",
         ]

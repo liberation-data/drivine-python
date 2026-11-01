@@ -1958,8 +1958,8 @@ class SqlCypherCompiler(ABC):
                 # Its kind is known only where each query writes it as a value of that one.
                 known=next(iter(known)) if len(known) == 1 else None,
                 json_null=any(_may_be_json_null(it) for it in all_),
-                list=all(isinstance(it, Json) and it.list for it in all_),
-                item_lists=all(isinstance(it, Json) and it.item_lists for it in all_),
+                list=all(_is_list(it) for it in all_),
+                item_lists=all(_holds_lists(it) for it in all_),
                 flat=all(isinstance(it, Json) and it.flat for it in all_),
             )
         return _Projected(sql, scope, [])

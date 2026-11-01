@@ -275,7 +275,7 @@ class OracleCypherCompiler(SqlCypherCompiler):
         return f"NVL({_kind(json)}, 'null') = 'null'"
 
     def null_if_json_null(self, json: str) -> str:
-        return self.shared1(json, lambda x: f"CASE WHEN {_kind(x)} <> 'null' THEN {x} END")
+        return self.shared1(json, self.compared_null)
 
     def open_sort_key(self, json: str) -> list[str]:
         """

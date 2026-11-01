@@ -187,18 +187,9 @@ def _steps(first: int, last: int) -> tuple[int, ...]:
 
 HELD: dict[str, dict[str, list[Hold]]] = {
     "queries.yaml": {
-        # v0.17.0, liberation-data/drivine-cypher-spec#42: JSON's null and a missing key group, de-duplicate and sort
-        # apart.
-        "A null in a map and a missing key are one null": [
-            Hold(314, ("postgres",), (*_steps(1, 23), 25, 26)),
-            Hold(314, ("oracle",), (*_steps(1, 27), 29)),
-        ],
         # v0.18.0, liberation-data/drivine-cypher-spec#43: a key read in a body nested in a list comprehension's WHERE,
         # in an order term's body, and any(y IN … WHERE y = e).
         "Implicit grouping key": [Hold(316, ("sql",), (29, 30, 31, 33, 34, 35, 37, 38, 39, 40, 42, 43, 44))],
-    },
-    "writes.yaml": {
-        "A null in a written row and a missing key are one null": [Hold(314, ("sql",), (1, 2))],
     },
 }
 """

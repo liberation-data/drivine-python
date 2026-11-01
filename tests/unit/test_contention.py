@@ -10,10 +10,13 @@ from neo4j.exceptions import Neo4jError, ServiceUnavailable, SessionExpired
 
 from drivine.backend.cypher_backend import CypherBackend
 from drivine.backend.cypher_grammar import FALKORDB_GRAMMAR, MEMGRAPH_GRAMMAR, NEO4J_GRAMMAR
+from drivine.backend.oracle.oracle_graph import OracleGraph
+from drivine.backend.oracle.oracle_schema_grammar import oracle_schema_grammar
 from drivine.connection.database_type import DatabaseType
 from drivine.drivine_error import DrivineError
 from drivine.manager.contention import CONTENDED_ATTEMPTS, ddl_contended, ddl_deadlocked, when_not_contended
 from drivine.schema.schema_executor import SchemaExecutor
+from drivine.schema.schema_specs import uniqueness_constraint
 
 
 def bolt(code: str) -> Neo4jError:
@@ -188,6 +191,52 @@ async def test_a_schema_statement_postgres_turned_away_for_a_deadlock_is_run_aga
         with pytest.raises(DrivineError) as raised:
             await run
         assert getattr(raised.value.root_cause, "sqlstate", None) == sqlstate
+    assert ran == runs
+
+
+@pytest.mark.parametrize(
+    ("message", "runs"),
+    [
+        ("ORA-00054: resource busy and acquire with NOWAIT specified or timeout expired", 1),
+        ("ORA-04020: deadlock detected while trying to lock object JVM_NODE", 2),
+    ],
+)
+async def test_an_oracle_indexs_block_that_waited_out_a_busy_lock_itself_is_not_run_again_for_it_but_is_for_a_deadlock(
+    message: str, runs: int
+):
+    # An Oracle index's block has waited thirty seconds on the busy lock before it gives up: run again, as other DDL
+    # is, it would wait as long again each time, three minutes in all.
+    block = next(
+        it
+        for it in oracle_schema_grammar(OracleGraph("jvm")).create_unique(uniqueness_constraint("DrivineStore", "key"))
+        if isinstance(it, str) and "CREATE UNIQUE INDEX" in it
+    )
+    ran = 0
+
+    class Connection:
+        async def query(self, _spec: object) -> list[object]:
+            nonlocal ran
+            ran += 1
+            if ran == 1:
+                raise oracledb.DatabaseError(message)
+            return []
+
+        async def release(self, _error: BaseException | None = None) -> None:
+            return None
+
+    class Provider:
+        name = "oracle"
+        type = DatabaseType.ORACLE
+
+        async def connect(self) -> Connection:
+            return Connection()
+
+    run = SchemaExecutor(Provider()).run(block)  # pyright: ignore[reportArgumentType]
+    if runs == 2:
+        assert await run == []
+    else:
+        with pytest.raises(DrivineError, match="ORA-00054"):
+            await run
     assert ran == runs
 
 

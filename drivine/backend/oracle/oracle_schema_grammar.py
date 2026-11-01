@@ -58,6 +58,18 @@ How many times `_made` runs an index's statement that another session's lock on 
 a tenth of a second apart, before it raises: as drivine4j's `OracleGraph.BUSY_ATTEMPTS`.
 """
 
+_WAITS_OUT_BUSY = "PRAGMA EXCEPTION_INIT(e_busy, -54);"
+"""What declares the busy lock `_made` waits out: a block that holds it has waited before it fails for that lock."""
+
+
+def waits_out_busy_lock(statement: str) -> bool:
+    """
+    Whether `statement` waited out another session's busy lock (ORA-00054) itself before it failed for it, as a block of
+    `_made` does for thirty seconds: the schema executor doesn't run it again for that lock, or each run would wait as
+    long again.
+    """
+    return _WAITS_OUT_BUSY in statement
+
 
 def _made(ddl: str) -> str:
     """
@@ -71,7 +83,7 @@ def _made(ddl: str) -> str:
     e_exists EXCEPTION;
     PRAGMA EXCEPTION_INIT(e_exists, -955);
     e_busy EXCEPTION;
-    PRAGMA EXCEPTION_INIT(e_busy, -54);
+    {_WAITS_OUT_BUSY}
 BEGIN
     FOR attempt IN 1 .. {BUSY_ATTEMPTS} LOOP
         BEGIN

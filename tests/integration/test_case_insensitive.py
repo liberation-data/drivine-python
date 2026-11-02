@@ -3,6 +3,7 @@ CaseInsensitive on every store: the lowercased copy each write keeps, the items 
 that read it once it is. drivine4j's CaseInsensitiveCrossEngineTest.
 """
 
+import asyncio
 import uuid
 from typing import Annotated, Any
 
@@ -107,8 +108,9 @@ class TestTheCopy:
 
     async def test_is_no_change_to_the_stamp(self, gom, pm, label):
         account = fragment(label)
-        await create(pm, label, {"uuid": "a1", "email": "Ada@X.com"})
         first = await gom.save(account(uuid="a1", email="Ada@X.com"))
+        # Out of step, as a write that bypassed Drivine leaves it: a save of the same values only puts it back.
+        await set_copy(pm, label, "a1", "stale")
         again = await gom.save(account(uuid="a1", email="Ada@X.com"))
         assert (await stored(pm, label))["a1"][COPY] == "ada@x.com"
         assert first.stamp.split(":")[0] == again.stamp.split(":")[0]
@@ -134,6 +136,17 @@ class TestTheCopy:
         changed = [account(uuid="a1", email="Di@X.com"), account(uuid="a2", email="Ed@X.com")]
         await gom.patch_all(changed, only=["email"])
         assert {k: v[COPY] for k, v in (await stored(pm, label)).items()} == {"a1": "di@x.com", "a2": "ed@x.com"}
+
+    async def test_a_patch_writes_it_only_on_a_node_it_changed(self, gom, pm, label):
+        account = fragment(label)
+        saved = await gom.save(account(uuid="a1", email="Ann@X.com"))
+        # Out of step, as a write that bypassed Drivine leaves it: a patch that changes nothing leaves it so.
+        await set_copy(pm, label, "a1", "stale")
+        assert not (await gom.patch(account, "a1", set={"email": "Ann@X.com"})).changed
+        assert (await stored(pm, label))["a1"][COPY] == "stale"
+        assert (await gom.load(account, "a1")).stamp == saved.stamp
+        assert (await gom.patch(account, "a1", set={"email": "Anne@X.com"})).changed
+        assert (await stored(pm, label))["a1"][COPY] == "anne@x.com"
 
     async def test_a_views_save_keeps_it_on_the_root_and_related_nodes(self, gom, pm, label):
         account = fragment(label)
@@ -168,7 +181,8 @@ class TestLookups:
         assert await gom.load_all(account, q.email.eq_ignore_case("")) == []
         # The patch changed the node, so it wrote the copy again from the property.
         assert (await stored(pm, label))["a2"][COPY] == "bo@x.com"
-        assert await gom.delete_all(account, q.email.eq_ignore_case("BO@x.COM")) == 1
+        await set_copy(pm, label, "a2", "decoy")
+        assert await gom.delete_all(account, q.email.eq_ignore_case("Decoy")) == 1
         assert (await gom.indexes.ensure(range_index(label, "email", ignore_case=True))).status == "ALREADY_MATCHING"
 
     async def test_another_manager_reads_the_record(self, gom, pm, label):
@@ -179,6 +193,16 @@ class TestLookups:
         other = StatelessGraphObjectManager(pm)
         assert [it.uuid for it in await other.load_all(account, refs(account).email.eq_ignore_case("Decoy"))] == ["a1"]
 
+    @pytest.mark.async_only
+    async def test_managers_recording_at_once_each_keep_theirs_and_record_each_once(self, pm, label):
+        properties = ["p1", "p2", "p3", "p4"]
+        # Each property twice: two record the same copy at once, and others different ones beside them.
+        await asyncio.gather(
+            *(StatelessGraphObjectManager(pm)._lower_copies().fill_in(label, [it], True) for it in properties * 2)
+        )
+        recorded = await StatelessGraphObjectManager(pm)._lower_copies()._stored()
+        assert {it for it in recorded if it[0] == label} == {(label, it) for it in properties}
+
     async def test_a_recreated_index_fills_the_copies_in_again(self, gom, pm, label):
         account = fragment(label)
         spec = range_index(label, "email", ignore_case=True)
@@ -186,6 +210,25 @@ class TestLookups:
         await gom.indexes.ensure(spec)
         await set_copy(pm, label, "a1", "stale")
         assert (await gom.indexes.recreate(spec)).status == "RECREATED"
+        assert (await stored(pm, label))["a1"][COPY] == "ada@x.com"
+
+    async def test_an_item_made_anew_fills_the_copies_in_again_though_they_are_recorded(self, gom, pm, label):
+        account = fragment(label)
+        index = range_index(label, "email", ignore_case=True)
+        await gom.save(account(uuid="a1", email="Ada@X.com"))
+        await gom.indexes.ensure(index)
+        await gom.indexes.drop(index)
+        # Out of step while the index was gone, as a write made while the field was not CaseInsensitive leaves it.
+        await set_copy(pm, label, "a1", "stale")
+        assert (await gom.indexes.ensure(index)).status == "CREATED"
+        assert (await stored(pm, label))["a1"][COPY] == "ada@x.com"
+        if pm.type is DatabaseType.FALKORDB:
+            return
+        # The index aside, which Neo4j would take for one in the constraint's way.
+        await gom.indexes.drop(index)
+        await set_copy(pm, label, "a1", "stale")
+        constraint = uniqueness_constraint(label, "email", ignore_case=True)
+        assert (await gom.constraints.ensure(constraint)).status == "CREATED"
         assert (await stored(pm, label))["a1"][COPY] == "ada@x.com"
 
 

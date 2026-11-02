@@ -13,12 +13,15 @@ from drivine import (
     CaseInsensitive,
     DrivineError,
     GraphProperty,
+    GraphView,
     JsonPacked,
     ModelRegistry,
     NodeFragment,
     NodeId,
     PropertyBag,
     RangeIndex,
+    Relationship,
+    Root,
     SchemaCatalog,
     Transient,
     Unique,
@@ -44,6 +47,7 @@ from drivine.dsl.path_condition import PathCondition
 from drivine.dsl.query import Query
 from drivine.dsl.ref import STORED
 from drivine.manager.save_options import SaveOptions
+from drivine.mapper.graph_object_mapper import GraphObjectMapper
 from drivine.schema.constraint_manager import ConstraintManager
 from drivine.schema.index_manager import IndexManager
 from drivine.schema.lower_copy_catalog import LowerCopyCatalog
@@ -100,12 +104,28 @@ class TestTheCopy:
         with pytest.raises(DrivineError, match=refused):
             ModelRegistry().fragment(fragment)
 
+    def test_is_not_held_by_a_flat_bag_on_a_load(self):
+        class Bagged(NodeFragment, labels=["Bagged"]):
+            uuid: Annotated[str, NodeId()]
+            email: Annotated[str | None, CaseInsensitive()] = None
+            extra: Annotated[dict[str, Any], PropertyBag(flat=True)] = {}
+
+        registry = ModelRegistry()
+        model = registry.fragment(Bagged)
+        props = {"uuid": "b1", "email": "Ada@X.com", "__drivine.lower.email": "ada@x.com", "note": "x"}
+        loaded = GraphObjectMapper(registry).fragment(model, {"props": props, "labels": model.labels})
+        assert loaded.email == "Ada@X.com"
+        assert loaded.extra == {"note": "x"}
+
     def test_follows_a_renamed_field(self):
         class Renamed(NodeFragment, labels=["Renamed"]):
             uuid: Annotated[str, NodeId()]
             mail: Annotated[str, CaseInsensitive(), GraphProperty("e_mail")]
 
         assert ModelRegistry().fragment(Renamed).lower_copied == ["e_mail"]
+        # A lookup on the field reads the copy of the property it is stored as.
+        where = lowered_where(refs(Renamed).mail.eq_ignore_case("A"), ModelRegistry().fragment(Renamed), {"e_mail"})
+        assert where == PathCondition((f"{STORED}__drivine.lower.e_mail",), CompareTest("EQ_LOWERED", "A"))
 
 
 class TestWrites:
@@ -132,6 +152,30 @@ class TestWrites:
         )
         assert self.copies in statement.text
         assert "SET t1.`__drivine.lower.display_name` = toLower(t1.display_name)" in statement.text
+
+    def test_a_subclass_s_own_fields_on_a_related_node_on_every_store(self):
+        # Classes of the test's own: a subclass of a shared model would be read as one of its models elsewhere.
+        class Person(NodeFragment, labels=["CiPerson"]):
+            uuid: Annotated[str, NodeId()]
+            email: Annotated[str | None, CaseInsensitive()] = None
+
+        class Vip(Person, labels=["CiVip"]):
+            nickname: Annotated[str | None, CaseInsensitive()] = None
+
+        class People(GraphView):
+            person: Annotated[Person, Root()]
+            friends: Annotated[list[Person], Relationship("KNOWS")] = []
+
+        registry = ModelRegistry()
+        saved = People(person=Person(uuid="a1"), friends=[Vip(uuid="a2", nickname="Bobby")])
+        view = registry.view(People)
+        assert registry.fragment(Vip).lower_copied == ["email", "nickname"]
+        text = CypherBackend(NEO4J_GRAMMAR).save(view, saved, None, False, registry).text
+        assert "t1.`__drivine.lower.nickname` = toLower(t1.nickname)" in text
+        oracle = OracleBackend(OracleGraph()).save(view, saved, None, False, registry)
+        assert '["email","nickname"]' in oracle.bindings.values()
+        postgres = PostgresBackend(PostgresGraph()).save(view, saved, None, False, registry)
+        assert '"lower":["email","nickname"]' in postgres.spec({}).parameters["_plan"]
 
     def test_a_batch(self):
         statement = CypherBackend(NEO4J_GRAMMAR).fragment_batch(

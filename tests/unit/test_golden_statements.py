@@ -96,12 +96,6 @@ from tests.models import (
 
 GOLDEN = json.loads((Path(__file__).parent.parent / "golden" / "statements.json").read_text())
 
-CASE_INSENSITIVE = "Account.save" in GOLDEN["NEO4J"]
-"""
-Whether the goldens hold the statements of CaseInsensitive's copies, which TypeScript's port of drivine4j#149 adds:
-until they are synced from a Drivine that has them, those cases are left out here, and test_case_insensitive pins them.
-"""
-
 
 CYPHER_WHERE = "n.name = $name"
 SQL_WHERE = "JSON_VALUE(n.props, '$.name') = $name"
@@ -174,7 +168,7 @@ def indexed_reads(backend: OracleBackend) -> dict[str, str]:
         "query.Dog.indexed": backend.load_all_fragments(dog, dogs.where, None, dogs.labels_tested).text,
         "query.Dog.indexed.deleteAll": backend.delete_all(dog, dogs.where, dogs.labels_tested).text,
         "query.Dog.notIndexed": backend.load_all_fragments(dog, names.where, None, names.labels_tested).text,
-        **(lowered_indexed_read(backend, registry) if CASE_INSENSITIVE else {}),
+        **lowered_indexed_read(backend, registry),
     }
 
 
@@ -425,34 +419,33 @@ def queries(registry: ModelRegistry, backend: GraphBackend) -> dict[str, GraphSt
         ),
         "query.Person.count": backend.count_fragments(registry.fragment(Person), count_where),
     }
-    if CASE_INSENSITIVE:
-        # Once every node has the copies of email and display_name: a lookup on either, of the root alone, reads the
-        # copy, the value lowercased by the store; one on name, or of an empty value, lowercases the property.
-        account, friends = refs(Account), refs(AccountFriends)
-        cases["query.Account.lowered"] = load(
-            registry.fragment(Account),
-            Query(
-                where=lowered_where(
-                    [
-                        account.email.eq_ignore_case("Ada@X.com"),
-                        any_of(account.display_name.contains_ignore_case("AD"), account.name.eq_ignore_case("Ada")),
-                        not_(account.email.eq_ignore_case("")),
-                    ],
-                    registry.fragment(Account),
-                    {"email", "display_name"},
-                )
-            ),
-        )
-        cases["query.AccountFriends.lowered"] = load(
-            registry.view(AccountFriends),
-            Query(
-                where=lowered_where(
-                    [friends.account.email.eq_ignore_case("Ada@X.com"), friends.friends.email.eq_ignore_case("Bo")],
-                    registry.view(AccountFriends),
-                    {"email"},
-                )
-            ),
-        )
+    # Once every node has the copies of email and display_name: a lookup on either, of the root alone, reads the
+    # copy, the value lowercased by the store; one on name, or of an empty value, lowercases the property.
+    account, friends = refs(Account), refs(AccountFriends)
+    cases["query.Account.lowered"] = load(
+        registry.fragment(Account),
+        Query(
+            where=lowered_where(
+                [
+                    account.email.eq_ignore_case("Ada@X.com"),
+                    any_of(account.display_name.contains_ignore_case("AD"), account.name.eq_ignore_case("Ada")),
+                    not_(account.email.eq_ignore_case("")),
+                ],
+                registry.fragment(Account),
+                {"email", "display_name"},
+            )
+        ),
+    )
+    cases["query.AccountFriends.lowered"] = load(
+        registry.view(AccountFriends),
+        Query(
+            where=lowered_where(
+                [friends.account.email.eq_ignore_case("Ada@X.com"), friends.friends.email.eq_ignore_case("Bo")],
+                registry.view(AccountFriends),
+                {"email"},
+            )
+        ),
+    )
     return cases
 
 
@@ -552,25 +545,24 @@ def saves(registry: ModelRegistry, backend: GraphBackend, where: str, orphans: b
             MatchedNode(fragment(Person), "p1"), "OWNS", Direction.OUTGOING, fragment(Dog)
         ),
     }
-    if CASE_INSENSITIVE:
-        cases.update(
-            {
-                "Account.save": save(
-                    fragment(Account), Account(uuid="a1", email="Ada@X.com", display_name="Ada L", name="Ada")
+    cases.update(
+        {
+            "Account.save": save(
+                fragment(Account), Account(uuid="a1", email="Ada@X.com", display_name="Ada L", name="Ada")
+            ),
+            "AccountFriends.save": save(
+                view(AccountFriends),
+                AccountFriends(
+                    account=Account(uuid="a1", email="Ada@X.com"), friends=[Account(uuid="a2", email="Bo@X.com")]
                 ),
-                "AccountFriends.save": save(
-                    view(AccountFriends),
-                    AccountFriends(
-                        account=Account(uuid="a1", email="Ada@X.com"), friends=[Account(uuid="a2", email="Bo@X.com")]
-                    ),
-                ),
-                "saveAll.accounts": backend.fragment_batch(
-                    [FragmentGroup(fragment(Account), [Account(uuid="a1", email="Ada@X.com")])], SaveOptions()
-                ),
-                "Account.patch": backend.patch_one(fragment(Account)),
-                "Account.patchAll": backend.patch_many(fragment(Account)),
-            }
-        )
+            ),
+            "saveAll.accounts": backend.fragment_batch(
+                [FragmentGroup(fragment(Account), [Account(uuid="a1", email="Ada@X.com")])], SaveOptions()
+            ),
+            "Account.patch": backend.patch_one(fragment(Account)),
+            "Account.patchAll": backend.patch_many(fragment(Account)),
+        }
+    )
     if orphans:
         cases["PersonCareer.delete.orphans"] = backend.delete(view(PersonCareer), None, CascadeType.DELETE_ORPHAN)
         cases["LocationHierarchy.delete.orphans"] = backend.delete(
@@ -612,18 +604,17 @@ def schema(grammar: SchemaGrammar) -> dict[str, str]:
         )
 
     ignoring_case: dict[str, str] = {}
-    if CASE_INSENSITIVE:
-        # Made over the lowercased copies, under their own names; FalkorDB can make no constraint over a copy.
-        ignoring_case["schema.createRange.ignoreCase"] = shown(
-            grammar.create_range(made_as(range_index("Account", "email", ignore_case=True)))
+    # Made over the lowercased copies, under their own names; FalkorDB can make no constraint over a copy.
+    ignoring_case["schema.createRange.ignoreCase"] = shown(
+        grammar.create_range(made_as(range_index("Account", "email", ignore_case=True)))
+    )
+    if grammar is not FALKORDB_SCHEMA:
+        ignoring_case["schema.createUnique.ignoreCase"] = shown(
+            grammar.create_unique(made_as(uniqueness_constraint("Account", "email", ignore_case=True)))
         )
-        if grammar is not FALKORDB_SCHEMA:
-            ignoring_case["schema.createUnique.ignoreCase"] = shown(
-                grammar.create_unique(made_as(uniqueness_constraint("Account", "email", ignore_case=True)))
-            )
-        ignoring_case["schema.lowerCopies.fill"] = grammar.lower_copies.fill("Account", "email", 10000)
-        ignoring_case["schema.lowerCopies.record"] = grammar.lower_copies.record("Account", "email").statement
-        ignoring_case["schema.lowerCopies.read"] = grammar.lower_copies.read
+    ignoring_case["schema.lowerCopies.fill"] = grammar.lower_copies.fill("Account", "email", 10000)
+    ignoring_case["schema.lowerCopies.record"] = grammar.lower_copies.record("Account", "email").statement
+    ignoring_case["schema.lowerCopies.read"] = grammar.lower_copies.read
     return {
         **ignoring_case,
         "schema.listRanges": grammar.list_ranges.statement,

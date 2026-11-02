@@ -109,8 +109,9 @@ class TestTheCopy:
 
     def test_is_no_change_to_the_stamp(self, gom, pm, label):
         account = fragment(label)
-        create(pm, label, {"uuid": "a1", "email": "Ada@X.com"})
         first = gom.save(account(uuid="a1", email="Ada@X.com"))
+        # Out of step, as a write that bypassed Drivine leaves it: a save of the same values only puts it back.
+        set_copy(pm, label, "a1", "stale")
         again = gom.save(account(uuid="a1", email="Ada@X.com"))
         assert (stored(pm, label))["a1"][COPY] == "ada@x.com"
         assert first.stamp.split(":")[0] == again.stamp.split(":")[0]
@@ -136,6 +137,17 @@ class TestTheCopy:
         changed = [account(uuid="a1", email="Di@X.com"), account(uuid="a2", email="Ed@X.com")]
         gom.patch_all(changed, only=["email"])
         assert {k: v[COPY] for k, v in (stored(pm, label)).items()} == {"a1": "di@x.com", "a2": "ed@x.com"}
+
+    def test_a_patch_writes_it_only_on_a_node_it_changed(self, gom, pm, label):
+        account = fragment(label)
+        saved = gom.save(account(uuid="a1", email="Ann@X.com"))
+        # Out of step, as a write that bypassed Drivine leaves it: a patch that changes nothing leaves it so.
+        set_copy(pm, label, "a1", "stale")
+        assert not (gom.patch(account, "a1", set={"email": "Ann@X.com"})).changed
+        assert (stored(pm, label))["a1"][COPY] == "stale"
+        assert (gom.load(account, "a1")).stamp == saved.stamp
+        assert (gom.patch(account, "a1", set={"email": "Anne@X.com"})).changed
+        assert (stored(pm, label))["a1"][COPY] == "anne@x.com"
 
     def test_a_views_save_keeps_it_on_the_root_and_related_nodes(self, gom, pm, label):
         account = fragment(label)
@@ -170,7 +182,8 @@ class TestLookups:
         assert gom.load_all(account, q.email.eq_ignore_case("")) == []
         # The patch changed the node, so it wrote the copy again from the property.
         assert (stored(pm, label))["a2"][COPY] == "bo@x.com"
-        assert gom.delete_all(account, q.email.eq_ignore_case("BO@x.COM")) == 1
+        set_copy(pm, label, "a2", "decoy")
+        assert gom.delete_all(account, q.email.eq_ignore_case("Decoy")) == 1
         assert (gom.indexes.ensure(range_index(label, "email", ignore_case=True))).status == "ALREADY_MATCHING"
 
     def test_another_manager_reads_the_record(self, gom, pm, label):
@@ -188,6 +201,25 @@ class TestLookups:
         gom.indexes.ensure(spec)
         set_copy(pm, label, "a1", "stale")
         assert (gom.indexes.recreate(spec)).status == "RECREATED"
+        assert (stored(pm, label))["a1"][COPY] == "ada@x.com"
+
+    def test_an_item_made_anew_fills_the_copies_in_again_though_they_are_recorded(self, gom, pm, label):
+        account = fragment(label)
+        index = range_index(label, "email", ignore_case=True)
+        gom.save(account(uuid="a1", email="Ada@X.com"))
+        gom.indexes.ensure(index)
+        gom.indexes.drop(index)
+        # Out of step while the index was gone, as a write made while the field was not CaseInsensitive leaves it.
+        set_copy(pm, label, "a1", "stale")
+        assert (gom.indexes.ensure(index)).status == "CREATED"
+        assert (stored(pm, label))["a1"][COPY] == "ada@x.com"
+        if pm.type is DatabaseType.FALKORDB:
+            return
+        # The index aside, which Neo4j would take for one in the constraint's way.
+        gom.indexes.drop(index)
+        set_copy(pm, label, "a1", "stale")
+        constraint = uniqueness_constraint(label, "email", ignore_case=True)
+        assert (gom.constraints.ensure(constraint)).status == "CREATED"
         assert (stored(pm, label))["a1"][COPY] == "ada@x.com"
 
 

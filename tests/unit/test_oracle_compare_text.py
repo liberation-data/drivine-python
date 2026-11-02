@@ -116,11 +116,13 @@ def test_a_stored_text_is_compared_as_a_text_with_a_given_one_the_items_of_a_lis
     assert f"THEN {clobs(property_('n1', True), empty_clob, '=')}" in empty, empty
     assert "ELSE FALSE END" not in empty, empty
     # Items each read as a VARCHAR2, written or given, are compared as JSON with the property, where it is read as one
-    # too or is no text, which is tested once, not for each item; a longer text is in none of them.
+    # too or is no text, which is tested once, not for each item; a longer text is in none of them. A list written out
+    # that holds a null has its constants tested so too, as one list (#227), as drivine4j's.
     for cypher in [
         "MATCH (n:Doc) WHERE n.t IN $xs RETURN n",
         "MATCH (n:Doc) RETURN n.t IN $xs",
         "MATCH (n:Doc) RETURN n.t IN ['a', 5, $x]",
+        "MATCH (n:Doc) RETURN n.t IN ['a', 5, null, $x]",
     ]:
         listed = sql(cypher, {"xs": ["a", "b"], "x": "abc"})
         assert ITEM.search(listed) is not None and "DBMS_LOB" not in listed, f"{cypher}: {listed}"
@@ -140,14 +142,13 @@ def test_a_stored_text_is_compared_as_a_text_with_a_given_one_the_items_of_a_lis
     assert ") THEN TRUE ELSE NULL END" in sql("MATCH (n:Doc) RETURN [n.t, null] IN $xs", {"xs": ["a", None]})
     passed_on = sql("MATCH (n:Doc) WITH n.t AS t RETURN t IN $xs", {"xs": ["a", None]})
     assert re.search(r"JSON_SERIALIZE\(w\d+\.c1", passed_on) is None, passed_on
-    # A list written out that holds a null is compared item by item, each item as equality compares it: the written
-    # ones, the null among them, as a given text or number is; beside the null, which is no list or map, a list or a
-    # map is not equal either.
+    # Its other items are compared one by one, as equality compares each: a given text or number as one; and its nulls
+    # are one null term.
     itemwise = sql("MATCH (n:Doc) RETURN n.t IN ['a', 5, null, $x]")
-    assert itemwise.count("NVL(JSON_VALUE(n1.props, '$.t.type()'), 'null') <> 'string' THEN") == 3, itemwise
-    scalar = "NVL(JSON_VALUE(n1.props, '$.t.type()'), 'null') NOT IN ('string', 'array', 'object') THEN"
-    assert itemwise.count(scalar) == 1, itemwise
-    assert "DBMS_LOB" not in itemwise, itemwise
+    one_by_one = "CASE WHEN JSON_VALUE(n1.props, '$.t') IS NOT NULL OR NVL(JSON_VALUE(n1.props, '$.t.type()'), 'null') "
+    given = f"{one_by_one}<> 'string' THEN JSON_QUERY(n1.props, '$.t' RETURNING JSON) = JSON($_cy_x)"
+    assert given in itemwise, itemwise
+    assert itemwise.count(f"{one_by_one}<> 'string' THEN") == 1 and " OR NULL)" in itemwise, itemwise
     # An empty item, or one past 4,000 bytes, isn't, and both sides are compared as texts.
     for xs in [["a", ""], ["a", "€" * 1_334]]:
         listed = sql("MATCH (n:Doc) WHERE n.t IN $xs RETURN n", {"xs": xs})
@@ -253,11 +254,12 @@ def test_the_items_of_a_list_that_holds_a_list_or_a_map_written_or_given_are_com
 
 
 def test_two_values_the_statement_writes_are_compared_as_json_and_beside_one_only_the_other_side_is_tested():
-    # Each item of a list written out that holds a null and values of several kinds is compared with the value alone:
-    # in a few hundred characters each, as before, where Oracle ran out of memory reading more.
+    # The constants of a list written out that holds a null and values of several kinds are tested at once, as one list,
+    # and its null is one null term (#227): compared one by one, Oracle ran out of memory reading a long one.
     literals = sql("RETURN [7 IN [0, 's1', null, 3.5, true, [5, 'n'], {k: 6}], 'a' = 'a', [1] = [1, null]]")
     assert "DBMS_LOB" not in literals and "<> 'string'" not in literals, literals
-    assert "JSON('7') = JSON_SCALAR(TO_BINARY_DOUBLE('3.5'))" in literals, literals
+    assert literals.count("EXISTS (SELECT 1 FROM JSON_TABLE(JSON_ARRAY(JSON('0'), JSON('\"s1\"')") == 1, literals
+    assert "WHERE CASE WHEN" in literals and " THEN i1.item = JSON('7') ELSE FALSE END) OR NULL)" in literals, literals
 
     # Beside a written value that is no text or a short text, the other side alone is tested, and beside one of one kind
     # a list or a map is not equal (drivine4j#476); beside an empty text, which Oracle reads as null, or one past 4,000

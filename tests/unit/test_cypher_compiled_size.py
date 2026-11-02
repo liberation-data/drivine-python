@@ -474,6 +474,26 @@ def test_a_sign_nested_under_an_aggregate_compiles_to_about_the_statement_a_ceil
 
 
 @COMPILERS
+def test_a_value_tested_with_in_against_a_long_list_literal_of_several_kinds_with_a_null_compiles_to_about_the_list(
+    compiler: type[SqlCypherCompiler],
+) -> None:
+    # #227: each item was compared with the value on its own, the value written out at each, so -1 IN 1,001 such items
+    # compiled to 1.6 MB on Oracle, and ran out of PGA. Its constants are now tested at once, as one list, and its nulls
+    # are one null. drivine4j's of liberation-data/drivine4j#360.
+    def item(i: int) -> str:
+        return [f"{i}", f"'s{i}'", "null", f"{i}.5", "true", f"[{i}, 'n']", f"{{k: {i}}}"][i % 7]
+
+    items = "[" + ", ".join(item(i) for i in range(1001)) + "]"
+    reference = len(compiler("g").compile(f"RETURN {items}").sql)
+    for value in ["-1", "0", "999999", "null", "[5, 'n']", "{k: 6}", "3.0", "true", "$p"]:
+        size = len(compiler("g").compile(f"RETURN {value} IN {items}", {"p": -1}).sql)
+        assert size < reference * 1.2, f"{value} IN the list: {size} characters, the list alone {reference}"
+    for statement in [f"MATCH (n) WHERE n.v IN {items} RETURN n", f"UNWIND [-1, [5, null]] AS x RETURN x IN {items}"]:
+        size = len(compiler("g").compile(statement).sql)
+        assert size < reference * 1.2, f"{statement[:40]}: {size} characters, the list alone {reference}"
+
+
+@COMPILERS
 @pytest.mark.parametrize("kind", ["any", "all", "none", "single"])
 def test_quantifiers_nested_twice_as_deep_over_lists_that_may_be_null_compile_to_about_twice_the_statement(
     compiler: type[SqlCypherCompiler], kind: str

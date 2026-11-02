@@ -8,6 +8,7 @@ from pydantic.fields import FieldInfo
 
 from drivine.annotation.aggregate import Aggregate
 from drivine.annotation.aggregate_function import AggregateFunction
+from drivine.annotation.case_insensitive import CaseInsensitive
 from drivine.annotation.empty_when_absent import EmptyWhenAbsent
 from drivine.annotation.full_text_index import FullTextIndex
 from drivine.annotation.graph_path import GraphPath
@@ -53,6 +54,7 @@ MARKERS: tuple[type, ...] = (
     Root,
     NodeId,
     NodeStamp,
+    CaseInsensitive,
     Relationship,
     GraphProperty,
     Transient,
@@ -224,7 +226,10 @@ class ModelRegistry:
             )
         fields = self._fields(type_)
         self._assert_only(
-            type_, fields, (NodeId, NodeStamp, PropertyBag, NodeLabels, VectorIndex, *_MAPPING), "a NodeFragment"
+            type_,
+            fields,
+            (NodeId, NodeStamp, PropertyBag, NodeLabels, VectorIndex, CaseInsensitive, *_MAPPING),
+            "a NodeFragment",
         )
         ids = [name for name, (_, marks) in fields.items() if NodeId in marks]
         if len(ids) > 1:
@@ -264,6 +269,7 @@ class ModelRegistry:
             },
             full_text_indexes=[it.properties for it in schema if it.kind == "FULLTEXT"],
             schema=schema,
+            lower_copied=self._lower_copied(type_, fields, mapping),
         )
         # A catalog's vector index over a field without VectorIndex is refused here as well as when the catalog is
         # applied, since either may come first.
@@ -502,7 +508,14 @@ class ModelRegistry:
         for field, (_, marks) in fields.items():
             for marker, kind in kinds.items():
                 if marker in marks:
-                    declarations.append(SchemaDeclaration(kind, (stored_name(field),), field))  # pyright: ignore[reportArgumentType]
+                    declarations.append(
+                        SchemaDeclaration(
+                            kind,  # pyright: ignore[reportArgumentType]
+                            (stored_name(field),),
+                            field,
+                            ignore_case=bool(getattr(marks[marker], "ignore_case", False)),
+                        )
+                    )
             vector = marks.get(VectorIndex)
             if isinstance(vector, VectorIndex):
                 declarations.append(
@@ -529,8 +542,41 @@ class ModelRegistry:
                     raise DrivineError(
                         f"On a class, a {type(item).__name__} names its fields: {type(item).__name__}([...])."
                     )
-                declarations.append(SchemaDeclaration(kind, tuple(stored_name(f) for f in item.properties)))  # pyright: ignore[reportArgumentType]
+                declarations.append(
+                    SchemaDeclaration(
+                        kind,  # pyright: ignore[reportArgumentType]
+                        tuple(stored_name(f) for f in item.properties),
+                        ignore_case=bool(getattr(item, "ignore_case", False)),
+                    )
+                )
         return declarations
+
+    @staticmethod
+    def _lower_copied(
+        type_: type, fields: dict[str, tuple[FieldInfo, dict[type, Any]]], mapping: FieldMapping
+    ) -> list[str]:
+        """
+        The stored names of the `CaseInsensitive` fields, in the order of their fields' names, as drivine4j orders
+        them. A `CaseInsensitive` field holds text stored as a property of its own: not the stamp, a property bag, the
+        node's labels, a field that isn't stored, or one stored as packed JSON.
+        """
+        marked = sorted(field for field, (_, marks) in fields.items() if CaseInsensitive in marks)
+        for field in marked:
+            info, marks = fields[field]
+            other = next(
+                (it.__name__ for it in (NodeStamp, PropertyBag, NodeLabels, Transient, JsonPacked) if it in marks),
+                None,
+            )
+            shape = FieldShape.of(info.annotation)
+            item: Any = shape.item
+            text = shape.collection is None and isinstance(item, type) and issubclass(item, str)
+            if other or not text:
+                raise DrivineError(
+                    f"CaseInsensitive {type_.__name__}.{field} is "
+                    f"{f'a {other} field' if other else f'not text, but {item!r}'}. It must hold text stored as "
+                    f"a property of its own: not a NodeStamp, PropertyBag, NodeLabels, Transient or JsonPacked field."
+                )
+        return [mapping.graph_properties[it] for it in marked]
 
     def _node_labels(
         self, type_: type, fields: dict[str, tuple[FieldInfo, dict[type, Any]]], own: list[str]

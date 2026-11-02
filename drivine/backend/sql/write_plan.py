@@ -91,6 +91,7 @@ class WritePlan:
                 "add": _non_empty(writes.add),
                 "drop": _non_empty(writes.drop),
                 "owned": _owned(owned) if owned else None,
+                "lower": _non_empty(writes.lower),
                 "i": index,
                 "root": True if root else None,
                 "carried": root.carried if root else None,
@@ -173,10 +174,19 @@ class WritePlan:
         """
         self._add("cut", {"from": from_, "to": to, "type": type, "dir": code(direction)})
 
-    def patch(self, shape: int, stored_id: str, index: str, set: Mapping[str, Any], unset: Sequence[str]) -> None:
+    def patch(
+        self,
+        shape: int,
+        stored_id: str,
+        index: str,
+        set: Mapping[str, Any],
+        unset: Sequence[str],
+        lower: Sequence[str] = (),
+    ) -> None:
         """
         The step that writes `set` to the node of `shape` whose stored id is `stored_id`, and removes `unset` from it,
         if the node is there. It makes no node. The node is returned under `index`, with whether the step changed it.
+        It writes the lowercased copy of each of `lower` on a node it changed, as a `node` step does.
         """
         self._add(
             "patch",
@@ -187,6 +197,7 @@ class WritePlan:
                 "fresh": stamps.fresh(),
                 "set": _non_empty(dict(set)),
                 "unset": _non_empty(list(unset)),
+                "lower": _non_empty(list(lower)),
             },
         )
 

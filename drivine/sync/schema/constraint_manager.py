@@ -2,6 +2,7 @@
 # change that, and run the script again.
 from __future__ import annotations
 
+import dataclasses
 import logging
 from collections.abc import Callable
 from typing import Any, Literal
@@ -11,10 +12,11 @@ from drivine.schema.ensure_result import EnsureResult
 from drivine.schema.schema_grammar import SchemaGrammar
 from drivine.schema.schema_item import SchemaItem
 from drivine.schema.schema_listing import SchemaListing
-from drivine.schema.schema_specs import range_index
+from drivine.schema.schema_specs import lowercased, made_as, range_index
 from drivine.schema.uniqueness_constraint_spec import UniquenessConstraintSpec
 from drivine.sync import concurrency
 from drivine.sync.schema.index_manager import IndexManager
+from drivine.sync.schema.lower_copy_catalog import LowerCopyCatalog, fill_in_lower_copies
 from drivine.sync.schema.schema_executor import SchemaExecutor
 
 logger = logging.getLogger("drivine.schema")
@@ -32,12 +34,21 @@ class ConstraintManager:
     """
 
     def __init__(
-        self, executor: SchemaExecutor, grammar: SchemaGrammar, changed: Callable[[], None] = lambda: None
+        self,
+        executor: SchemaExecutor,
+        grammar: SchemaGrammar,
+        changed: Callable[[], None] = lambda: None,
+        copies: LowerCopyCatalog | None = None,
     ) -> None:
-        """`changed` is told once this has made or dropped a constraint, as the object manager's list is then stale."""
+        """
+        `changed` is told once this has made or dropped a constraint, as the object manager's list is then stale.
+        `copies` fills in the lowercased copies a constraint that ignores case is made over; without it, such a
+        constraint is refused.
+        """
         self.executor = executor
         self.grammar = grammar
         self.changed = changed
+        self.copies = copies
 
     def list(self) -> list[SchemaItem]:
         return self.grammar.list_uniques.read(self.executor.run(self.grammar.list_uniques.statement))
@@ -61,7 +72,24 @@ class ConstraintManager:
         index is dropped and the constraint made, its own index taking the plain one's place. The data is read first,
         however `sample_size` is set: a key held more than once keeps the index and is a VIOLATION, with an empty sample
         when `sample_size` is 0, and data that can't be read keeps the index and raises the engine's refusal.
+
+        A constraint that ignores case (see UniquenessConstraintSpec) is made over the lowercased copies, and first
+        fills them in, as IndexManager's `ensure` does: again, recorded or not, where the constraint isn't there yet.
+        FalkorDB can't make one, and refuses it before that.
         """
+        made = made_as(spec)
+        self.grammar.require_constrainable(made)
+        if lowercased(spec):
+            # A node saved before there were copies is held to the constraint too. One made anew fills them in again,
+            # recorded or not: they may have gone out of step while it was gone.
+            fill_in_lower_copies(self.copies, spec, not self._exists(made))
+        result = self._ensure_made(made, sample_size, replace_blocking_index)
+        return dataclasses.replace(result, spec=spec)
+
+    def _ensure_made(
+        self, spec: UniquenessConstraintSpec, sample_size: int, replace_blocking_index: bool
+    ) -> EnsureResult[UniquenessConstraintSpec]:
+        """`ensure`, of the constraint as it is made."""
         # One still being built, by another process or an earlier run, may yet fail: its build is waited on, as for one
         # made here. One dropped meanwhile is made again below.
         found = self._await_build(spec, until_listed=False)
@@ -118,7 +146,7 @@ class ConstraintManager:
                 spec.label,
                 ", ".join(spec.properties),
             )
-            return self.ensure(spec, sample_size)
+            return self._ensure_made(spec, sample_size, False)
         return self._await_built(spec, sample_size)
 
     def in_force(self, spec: UniquenessConstraintSpec) -> bool:
@@ -126,10 +154,11 @@ class ConstraintManager:
         Whether the constraint is there and built, so that the engine enforces it, as one another process made. One
         still being built is waited on; one whose build failed (FalkorDB) is not in force, and is left as it is.
         """
-        return self._await_build(spec, until_listed=False) == "BUILT"
+        return self._await_build(made_as(spec), until_listed=False) == "BUILT"
 
-    def drop(self, spec: UniquenessConstraintSpec) -> None:
+    def drop(self, declared: UniquenessConstraintSpec) -> None:
         """Drops the constraint, or one whose build FalkorDB listed as FAILED, which `list` leaves out."""
+        spec = made_as(declared)
         if self._exists(spec) or self._failed(spec):
             self._drop_unique(spec)
             self.changed()

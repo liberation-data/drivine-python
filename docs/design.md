@@ -307,8 +307,10 @@ The markers are the TypeScript decorators, renamed where Python has its own conv
 - `Relationship(type, direction=..., max_depth=...)`.
 - `GraphPath([hop(...)])`, `Count(type)`, `Aggregate(...)`.
 - `GraphProperty(name)`, `NodeLabels(...)`, `PropertyBag(...)`, `JsonPacked()`.
-- `ReadOnly()`, `Transient()`, `SortedBy(...)`, `EmptyWhenAbsent()`.
-- Schema markers: `RangeIndex`, `Unique`, `VectorIndex`, `FullTextIndex`, on the field or as class arguments.
+- `ReadOnly()`, `Transient()`, `SortedBy(...)`, `EmptyWhenAbsent()`, `CaseInsensitive()`.
+- Schema markers: `RangeIndex`, `Unique`, `VectorIndex`, `FullTextIndex`, on the field or as class arguments;
+  `RangeIndex(ignore_case=True)` and `Unique(ignore_case=True)` are over the lowercased copy a `CaseInsensitive()`
+  field keeps.
 
 `@Default` isn't needed: a Pydantic default applies when the property is absent. A stored null loading as the default
 is a validator, which the base class provides as `Annotated[str, NullAsDefault()] = "active"`.

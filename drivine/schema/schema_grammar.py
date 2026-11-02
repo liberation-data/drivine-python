@@ -11,6 +11,7 @@ from drivine.backend.cypher import label_expression, quote_name
 from drivine.connection.database_type import DatabaseType
 from drivine.drivine_error import DrivineError
 from drivine.schema.full_text_index_spec import FullTextIndexSpec
+from drivine.schema.lower_copy_statements import CYPHER_LOWER_COPIES, LowerCopyStatements
 from drivine.schema.native_operation import NativeOperation
 from drivine.schema.range_index_spec import RangeIndexSpec
 from drivine.schema.schema_item import SchemaItem
@@ -77,6 +78,17 @@ class SchemaGrammar:
     """
     drop_named_range: Callable[[str], list[str]] = field(default=lambda name: [])
     """Drops the range index the engine names so: one in the way of a constraint, whatever made it."""
+
+    lower_copies: LowerCopyStatements = CYPHER_LOWER_COPIES
+    """
+    The statements that fill in the lowercased copies of a property and record that every node of a label has them
+    (see LowerCopyStatements): Cypher, on the store's node, unless the engine speaks otherwise.
+    """
+    require_constrainable: Callable[[UniquenessConstraintSpec], None] = field(default=lambda spec: None)
+    """
+    Raises for a uniqueness constraint the engine can't make, the spec being as it is made (see `made_as`), before
+    anything is filled in or made for it.
+    """
 
     conflicts: Callable[[UniquenessConstraintSpec, int], str] = field(
         default=lambda spec, limit: _conflicts(spec, limit, "id")
@@ -387,8 +399,28 @@ _FALKORDB_UNIQUES = (
     "entitytype = 'NODE' RETURN {label: label, properties: properties, status: status}"
 )
 
+_FALKORDB_CONSTRAINABLE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+"""A name `GRAPH.CONSTRAINT` takes, as FalkorDB checks it."""
+
+
+def _falkordb_constrainable(spec: UniquenessConstraintSpec) -> None:
+    """
+    `GRAPH.CONSTRAINT` takes a label and properties as plain names, and has no way to quote one: a property whose name
+    holds a dot, as a lowercased copy's does, can be indexed and not constrained (FalkorDB/FalkorDB#551).
+    """
+    refused = [it for it in spec.properties if not _FALKORDB_CONSTRAINABLE.fullmatch(it)]
+    if refused:
+        raise DrivineError(
+            f"FalkorDB cannot make the uniqueness constraint {item_name(spec)} on {spec.label}"
+            f"({', '.join(spec.properties)}): GRAPH.CONSTRAINT takes only a plain name for a property, and "
+            f"{', '.join(repr(it) for it in refused)} is not one. A uniqueness constraint that ignores case is over "
+            "the lowercased copy, named so. See https://github.com/FalkorDB/FalkorDB/issues/551"
+        )
+
+
 FALKORDB_SCHEMA = SchemaGrammar(
     engine="FalkorDB",
+    require_constrainable=_falkordb_constrainable,
     ranges_per_property=True,
     unique_needs_range=True,
     # One item per property with a range index: a composite spec matches when all of its are present.

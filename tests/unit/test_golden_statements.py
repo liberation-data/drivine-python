@@ -57,6 +57,7 @@ from drivine.backend.postgres.postgres_graph import PostgresGraph
 from drivine.backend.postgres.postgres_save_statement import PostgresSaveStatement
 from drivine.backend.postgres.postgres_write_statement import PostgresWriteStatement
 from drivine.connection.database_type import DatabaseType
+from drivine.dsl.lower_copy_lookups import lowered_where
 from drivine.dsl.query import Query
 from drivine.manager.group_query import GroupQuery
 from drivine.model.graph_view_model import GraphViewModel
@@ -68,7 +69,10 @@ from drivine.schema.schema_grammar import (
     schema_grammar_for,
 )
 from drivine.schema.schema_item import SchemaItem
+from drivine.schema.schema_specs import made_as
 from tests.models import (
+    Account,
+    AccountFriends,
     ActorStats,
     ActorWithDirectors,
     ActorWithLatestMovie,
@@ -164,6 +168,20 @@ def indexed_reads(backend: OracleBackend) -> dict[str, str]:
         "query.Dog.indexed": backend.load_all_fragments(dog, dogs.where, None, dogs.labels_tested).text,
         "query.Dog.indexed.deleteAll": backend.delete_all(dog, dogs.where, dogs.labels_tested).text,
         "query.Dog.notIndexed": backend.load_all_fragments(dog, names.where, None, names.labels_tested).text,
+        **lowered_indexed_read(backend, registry),
+    }
+
+
+def lowered_indexed_read(backend: OracleBackend, registry: ModelRegistry) -> dict[str, str]:
+    """Oracle's lookup of a lowercased copy through the labelled index over it."""
+    account = registry.fragment(Account)
+    indexed = [SchemaItem("Account", ("__drivine.lower.email",))]
+    where = lowered_where(refs(Account).email.eq_ignore_case("Ada@X.com"), account, {"email"})
+    query = backend.render_query(Query(where=where), account, lambda it: registry.fragment(it).labels, indexed)
+    return {
+        "query.Account.lowered.indexed": backend.load_all_fragments(
+            account, query.where, None, query.labels_tested
+        ).text
     }
 
 
@@ -182,6 +200,10 @@ def postgres_statements() -> dict[str, str]:
         "Person.patch.where": {"id": "p1", "set": {"name": "Ada"}, "vectors": {}, "name": "O'Brien"},
         "Person.patchAll": {
             "rows": [{"id": "p1", "props": {"name": "Ada"}, "vectors": {}}, {"id": 2, "props": {"bio": None}}]
+        },
+        "Account.patch": {"id": "a1", "set": {"email": "Ada@X.com"}, "vectors": {}},
+        "Account.patchAll": {
+            "rows": [{"id": "a1", "props": {"email": "Ada@X.com", "display_name": None}, "vectors": {}}]
         },
     }
     plans: dict[str, str] = {}
@@ -322,7 +344,7 @@ def queries(registry: ModelRegistry, backend: GraphBackend) -> dict[str, GraphSt
 
     m, c, a, p = refs(Movie), refs(PersonCareer), refs(Animal), refs(Customer)
     count_where, _ = backend.render_where(refs(Person).name.eq_ignore_case("ada"), registry.fragment(Person), labels)
-    return {
+    cases = {
         "query.Movie.where": load(
             registry.fragment(Movie),
             Query(
@@ -397,6 +419,34 @@ def queries(registry: ModelRegistry, backend: GraphBackend) -> dict[str, GraphSt
         ),
         "query.Person.count": backend.count_fragments(registry.fragment(Person), count_where),
     }
+    # Once every node has the copies of email and display_name: a lookup on either, of the root alone, reads the
+    # copy, the value lowercased by the store; one on name, or of an empty value, lowercases the property.
+    account, friends = refs(Account), refs(AccountFriends)
+    cases["query.Account.lowered"] = load(
+        registry.fragment(Account),
+        Query(
+            where=lowered_where(
+                [
+                    account.email.eq_ignore_case("Ada@X.com"),
+                    any_of(account.display_name.contains_ignore_case("AD"), account.name.eq_ignore_case("Ada")),
+                    not_(account.email.eq_ignore_case("")),
+                ],
+                registry.fragment(Account),
+                {"email", "display_name"},
+            )
+        ),
+    )
+    cases["query.AccountFriends.lowered"] = load(
+        registry.view(AccountFriends),
+        Query(
+            where=lowered_where(
+                [friends.account.email.eq_ignore_case("Ada@X.com"), friends.friends.email.eq_ignore_case("Bo")],
+                registry.view(AccountFriends),
+                {"email"},
+            )
+        ),
+    )
+    return cases
 
 
 STAMP = "aaaaaaaaaaaaaaaa:bbbbbbbbbbbbbbbb"
@@ -495,6 +545,24 @@ def saves(registry: ModelRegistry, backend: GraphBackend, where: str, orphans: b
             MatchedNode(fragment(Person), "p1"), "OWNS", Direction.OUTGOING, fragment(Dog)
         ),
     }
+    cases.update(
+        {
+            "Account.save": save(
+                fragment(Account), Account(uuid="a1", email="Ada@X.com", display_name="Ada L", name="Ada")
+            ),
+            "AccountFriends.save": save(
+                view(AccountFriends),
+                AccountFriends(
+                    account=Account(uuid="a1", email="Ada@X.com"), friends=[Account(uuid="a2", email="Bo@X.com")]
+                ),
+            ),
+            "saveAll.accounts": backend.fragment_batch(
+                [FragmentGroup(fragment(Account), [Account(uuid="a1", email="Ada@X.com")])], SaveOptions()
+            ),
+            "Account.patch": backend.patch_one(fragment(Account)),
+            "Account.patchAll": backend.patch_many(fragment(Account)),
+        }
+    )
     if orphans:
         cases["PersonCareer.delete.orphans"] = backend.delete(view(PersonCareer), None, CascadeType.DELETE_ORPHAN)
         cases["LocationHierarchy.delete.orphans"] = backend.delete(
@@ -535,7 +603,20 @@ def schema(grammar: SchemaGrammar) -> dict[str, str]:
             for it in statements
         )
 
+    ignoring_case: dict[str, str] = {}
+    # Made over the lowercased copies, under their own names; FalkorDB can make no constraint over a copy.
+    ignoring_case["schema.createRange.ignoreCase"] = shown(
+        grammar.create_range(made_as(range_index("Account", "email", ignore_case=True)))
+    )
+    if grammar is not FALKORDB_SCHEMA:
+        ignoring_case["schema.createUnique.ignoreCase"] = shown(
+            grammar.create_unique(made_as(uniqueness_constraint("Account", "email", ignore_case=True)))
+        )
+    ignoring_case["schema.lowerCopies.fill"] = grammar.lower_copies.fill("Account", "email", 10000)
+    ignoring_case["schema.lowerCopies.record"] = grammar.lower_copies.record("Account", "email").statement
+    ignoring_case["schema.lowerCopies.read"] = grammar.lower_copies.read
     return {
+        **ignoring_case,
         "schema.listRanges": grammar.list_ranges.statement,
         "schema.listUniques": grammar.list_uniques.statement,
         "schema.listVectors": grammar.list_vectors.statement,

@@ -11,7 +11,7 @@ from drivine.backend.save_statement_builder import id_of, object_props
 from drivine.backend.vector_writes import split_vectors, vector_clauses
 from drivine.drivine_error import DrivineError
 from drivine.manager.save_options import SaveOptions
-from drivine.model import stamps
+from drivine.model import lower_copies, stamps
 from drivine.model.fragment_model import FragmentModel
 
 
@@ -41,10 +41,12 @@ class FragmentBatchStatement:
             id_ = quote_name(_id_property(group.model))
             vector_sets, vector_changes = vector_clauses(group.model, grammar, "n", "row.vectors")
             changed = " OR ".join([changes("n", "row.props"), *vector_changes])
+            # The lowercased copies after the properties, from what the node then holds: see lower_copies.
+            writes = [*vector_sets, *lower_copies.clauses("n", group.model.lower_copied)]
             parts.append(
                 f"FOREACH (row IN $rows{i} | MERGE (n{label_expression(group.model.labels)} {{{id_}: row.id}}) "
                 f"SET n.{LOCK} = true REMOVE n.{LOCK} SET {restamp('n', changed)} SET n += row.props "
-                f"{' '.join(vector_sets)})"
+                f"{' '.join(writes)})"
             )
         for i, group in enumerate(groups):
             parts.extend(FragmentBatchStatement._read(group.model, i, "after", carried))

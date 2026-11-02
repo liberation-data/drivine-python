@@ -16,7 +16,7 @@ from drivine.schema import vector_annotation_check
 from drivine.schema.ensure_result import EnsureResult
 from drivine.schema.recorded_inventory import RecordedInventory, inventory_entries, read_inventory
 from drivine.schema.schema_catalog import DEFAULT_SCOPE, SchemaCatalog
-from drivine.schema.schema_specs import SchemaSpec, item_name, uniqueness_constraint
+from drivine.schema.schema_specs import SchemaSpec, item_name, made_as, uniqueness_constraint
 from drivine.schema.uniqueness_constraint_spec import UniquenessConstraintSpec
 from drivine.schema.vector_index_spec import VectorIndexSpec
 from drivine.sync import concurrency
@@ -40,14 +40,18 @@ MARKER_LABEL = "_DrivineSchema"
 
 
 def _key_of(spec: SchemaSpec) -> str:
-    return f"{spec.kind}:{spec.label}:{','.join(sorted(spec.properties))}"
+    """What makes two declarations the same item: kind, label and the properties it is made over (see `made_as`)."""
+    return f"{spec.kind}:{spec.label}:{','.join(sorted(made_as(spec).properties))}"
 
 
-def inventory_key(spec: SchemaSpec) -> str:
+def inventory_key(declared: SchemaSpec) -> str:
     """
     An item's identity in an owner's inventory, drivine4j's `inventoryKey`: kind, label, properties and name, so a
-    renamed item shows as an orphan rather than coexisting unattributed.
+    renamed item shows as an orphan rather than coexisting unattributed. Of the item as it is made (see `made_as`): one
+    that ignores case names the lowercased copies and its own name,
+    `RANGE_INDEX:Account:__drivine.lower.email:Account_email_ci_range`.
     """
+    spec = made_as(declared)
     return f"{CATALOG_KINDS[spec.kind]}:{spec.label}:{','.join(spec.properties)}:{item_name(spec)}"
 
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from drivine.backend.postgres.postgres_graph import PostgresGraph
@@ -54,6 +54,8 @@ class _NodeWrite:
     """A merge patch: a null removes the property."""
     record: tuple[str, bool] | None = None
     """For an open NodeLabels field: the property recording the labels it wrote, and whether it is replaced."""
+    lower: list[str] = field(default_factory=lambda: [])
+    """The properties whose lowercased copies the write keeps: the `CaseInsensitive` fields' of the node's class."""
 
 
 class PostgresSaveBuilder:
@@ -209,6 +211,7 @@ class PostgresSaveBuilder:
             add=write.add,
             drop=write.remove,
             owned=OwnedLabels(write.record[0], write.record[1], write.model.labels) if write.record else None,
+            lower=write.lower,
         )
         return self._plan.node(
             self._plan.shape(write.model.labels, key),
@@ -262,6 +265,7 @@ class PostgresSaveBuilder:
             [] if model is found else [it for it in model.labels if it not in found.labels],
             [],
             props,
+            lower=list(model.lower_copied),
         )
         if labels_clear is not None and model.node_labels:
             labels_field = model.node_labels

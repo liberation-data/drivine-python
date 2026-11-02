@@ -19,6 +19,10 @@ async with AppDrivine() as drivine:      # makes what is missing on the way in; 
     ...
 ```
 
+`RangeIndex(ignore_case=True)` and `Unique(ignore_case=True)` on a `CaseInsensitive` field are made over the lowercased
+copy a save keeps of it, so they serve `eq_ignore_case` and refuse two values that differ only in case. Ensuring one
+fills the copies in first. See [Lookups that ignore case](06-fragments-and-views.md#lookups-that-ignore-case).
+
 Entering the assembly calls `start()`, which you may call yourself instead: `await drivine.start()`, from your
 application assembly, say. It registers the databases whether or not there are catalogs, as drivine4j does, so a
 missing `DATABASE_TYPE` raises `DrivineError` there rather than on first use. Without the assembly, enforce it yourself:

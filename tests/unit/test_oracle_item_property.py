@@ -1,8 +1,9 @@
 """
 On Oracle, a property that is an item of a `RETURN` or a `WITH` is read through its text, as extended JSON: Oracle
 crashed the session where a statement took a text past 32 KB from the properties as JSON for each of two rows (#144).
-So is a text a write takes from the row it is writing, to work out what it writes (#176), and an unwound item's value a
-`RETURN` or a `WITH` gives (#186). Elsewhere a property is read as it was. drivine4j's OracleItemPropertyTest, ported.
+So is a text a write takes from the row it is writing, to work out what it writes (#176), an unwound item's value a
+`RETURN` or a `WITH` gives (#186), and a property that is an argument of `coalesce()` (liberation-data/drivine4j#459).
+Elsewhere a property is read as it was. drivine4j's OracleItemPropertyTest, ported.
 """
 
 import re
@@ -377,3 +378,38 @@ def test_an_item_of_a_list_read_by_its_place_is_read_through_the_lists_text_wher
     items = "MATCH (n:Doc) RETURN [split(n.a, 'x')[0], head(n.tags), last(n.tags)]"
     postgres = PostgresCypherCompiler("g").compile(items).sql
     assert "-> 0)" in postgres and "-> -1)" in postgres and "CLOB" not in postgres, postgres
+
+
+def test_a_property_coalesce_reads_is_read_through_its_text_its_kind_by_its_own_path_and_anything_else_as_it_was():
+    # Taken out as JSON, a text past 32 KB closed the session over two rows or more (liberation-data/drivine4j#459).
+    parameters = {"p": {"q": None}}
+    cypher = "MATCH (n:Doc)-[r:R]->() RETURN [coalesce($p.q, n.a), coalesce(r.a, 'z')]"
+    sql = OracleCypherCompiler("g").compile(cypher, parameters).sql
+    # A text of at most 4,000 bytes as a VARCHAR2, a longer one through its text, anything else as JSON, as it was.
+    assert (
+        "CASE JSON_VALUE(n1.props, '$.a.type()') WHEN 'string' THEN "
+        f"COALESCE(JSON_SCALAR(JSON_VALUE(n1.props, '$.a')), {LONG}) "
+        "WHEN 'null' THEN NULL ELSE JSON_QUERY(n1.props, '$.a' RETURNING JSON) END"
+    ) in sql, sql
+    # The relationship's too: read by its own path for its kind, its VARCHAR2 and, in the ELSE, its JSON, and kept
+    # whole for its text.
+    relationships = [it for it in re.findall(r"CASE JSON_VALUE\((\w+)\.props, '\$\.a\.type\(\)'\)", sql) if it != "n1"]
+    assert len(relationships) == 1, sql
+    (relationship,) = relationships
+    assert sql.count(f"{relationship}.props, '$.a") == 3, sql
+    assert LONG.replace("n1.props", f"{relationship}.props") in sql, sql
+    assert f"ELSE JSON_QUERY({relationship}.props, '$.a' RETURNING JSON) END" in sql, sql
+    # The parameter's key, and a property of a map, are read as they were (the query's own KEEP '$' aside).
+    assert "<> 'null' THEN JSON_QUERY(" in sql, sql
+    of_map = oracle("WITH {a: 'x'} AS m RETURN coalesce(m.a, 'z')")
+    assert "KEEP '$.a'" not in of_map, of_map
+    # Elsewhere a property coalesce() reads is read as it was.
+    postgres = PostgresCypherCompiler("g").compile("MATCH (n:Doc) RETURN coalesce($p.q, n.a)", parameters).sql
+    assert "(n1.props -> 'a')" in postgres and "KEEP" not in postgres, postgres
+
+
+def test_a_nodes_stamp_coalesce_reads_is_read_from_its_column():
+    # The stamp is a column of the node's row, not a property in its JSON, so it is not read as coalesce()'s other
+    # properties are (liberation-data/drivine4j#459).
+    sql = oracle("MATCH (n:Doc) RETURN coalesce(n.`__drivine.stamp`, 0)")
+    assert "JSON_SCALAR(n1.stamp)" in sql and "KEEP '$." not in sql and "__drivine.stamp" not in sql, sql

@@ -1735,6 +1735,80 @@ def test_a_text_past_32_kb_that_is_an_item_of_a_list_read_by_its_place_on_two_ro
     assert typed(rows) == typed([[1, "a", 2.0, [3], {"k": 4}, None, "y", 1, None]]), rows
 
 
+def test_a_text_past_32_kb_that_coalesce_gives_from_a_property_on_two_rows_is_read_whole(
+    cypher_pm: PersistenceManager,
+):
+    # On Oracle an argument of coalesce() that is a property was taken out as JSON, JSON_QUERY(props, '$.a' RETURNING
+    # JSON): a text past 32 KB so closed the session over two rows or more (ORA-03113), as #144's did, on the first run
+    # of the statement or a later one, and in a write. A node of another label holds the same values, and is not read.
+    # drivine4j's CypherQueryContract of liberation-data/drivine4j#459.
+    clear(cypher_pm)
+    bio = "a" * 40_000 + "x"
+    props = "{name: 'x', bio: $bio, e: '', f: 1.0, n: 5, l: ['a'], m: $m, m2: $m2}"
+    cypher_pm.query(
+        spec(
+            f"CREATE (a:CyCo {props})-[:CY_CO {{bio: $bio}}]->(b:CyCo {props})-[:CY_CO {{bio: $bio}}]->(a), "
+            f"(:CyCoOther {props})-[:CY_CO {{bio: $bio}}]->(b)",
+            # Of two bytes a letter: m is 4,000 bytes, a VARCHAR2's most, and m2 one letter past it.
+            {"bio": bio, "m": "\u00e9" * 2000, "m2": "\u00e9" * 2001},
+        )
+    )
+    all_ = "MATCH (n:CyCo)"
+
+    def each(value: Any) -> list[Any]:
+        return [value, value]
+
+    statements: list[tuple[str, list[Any]]] = [
+        # The issue's, and the shapes that closed the session with it.
+        (f"{all_} RETURN size(toLower(trim(coalesce($p.q, n.bio))))", each(40_001)),
+        (f"{all_} RETURN size(trim(coalesce($p.q, n.bio)))", each(40_001)),
+        (f"{all_} RETURN size(coalesce($p.q, n.bio))", each(40_001)),
+        (f"{all_} RETURN size(coalesce(n.bio, 'z'))", each(40_001)),
+        (f"{all_} RETURN coalesce($p.q, n.bio)", each(bio)),
+        (f"{all_} RETURN toLower(coalesce($p.q, n.bio))", each(bio)),
+        (f"{all_} RETURN size(toLower(coalesce($p.q, n.bio)) + 'z')", each(40_002)),
+        (f"{all_} RETURN coalesce(n.bio, 'z') ENDS WITH 'x'", each(True)),
+        (f"{all_} RETURN size(toUpper(coalesce(n.nope, $p.q, n.bio)))", each(40_001)),
+        (f"{all_} WITH coalesce($p.q, n.bio) AS b RETURN size(toLower(b))", each(40_001)),
+        (f"{all_} RETURN [size(coalesce($p.q, n.bio)), coalesce(n.nope, n.name)]", each([40_001, "x"])),
+        # Of a relationship, and beside a variable-length walk.
+        ("MATCH (:CyCo)-[r:CY_CO]->(:CyCo) RETURN size(toLower(trim(coalesce($p.q, r.bio))))", each(40_001)),
+        ("MATCH (n:CyCo)-[:CY_CO*1..2]->(o:CyCo) RETURN size(coalesce($p.q, o.bio))", [40_001] * 4),
+        ("MATCH (n:CyCo)-[:CY_CO*1..2]->(o:CyCo) RETURN size(toLower(coalesce($p.q, n.bio)))", [40_001] * 4),
+        # In a WHERE, and of two nodes' tables side by side: the CASE on the property's kind keeps each label test.
+        (f"{all_} WHERE coalesce($p.q, n.bio) ENDS WITH 'x' RETURN size(coalesce(n.bio, 'z'))", each(40_001)),
+        ("MATCH (n:CyCo), (o:CyCo) RETURN size(coalesce($p.q, n.bio)) + size(coalesce($p.q, o.bio))", [80_002] * 4),
+        # Of a node in a list, as a comprehension reads it, of an optional match that found none, and as a grouping
+        # key.
+        (f"{all_} WITH collect(n) AS ns RETURN [x IN ns | size(coalesce($p.q, x.bio))]", [[40_001, 40_001]]),
+        (f"{all_} OPTIONAL MATCH (n)-[:CY_NONE]->(o) RETURN coalesce(o.bio, n.name)", each("x")),
+        (f"{all_} RETURN coalesce($p.q, n.name) AS k, count(*) AS c", [["x", 2]]),
+        # A text of multibyte letters, at a VARCHAR2's most and past it.
+        (
+            f"{all_} RETURN [size(coalesce($p.q, n.m)), size(coalesce($p.q, n.m2)), coalesce($p.q, n.m) = n.m, "
+            "coalesce($p.q, n.m2) = n.m2]",
+            each([2_000, 2_001, True, True]),
+        ),
+        # In a write.
+        (f"{all_} SET n.copy = coalesce($p.q, n.bio) RETURN size(n.copy)", each(40_001)),
+    ]
+    parameters = {"p": {"q": None}}
+    with one_session(cypher_pm):
+        # Oracle closed the session on the first run, or from the second on.
+        for run in range(1, 4):
+            for cypher, expected in statements:
+                rows = asked_again(cypher_pm, cypher, parameters)
+                assert typed(rows) == typed(expected), f"{cypher}, run {run}"
+        # A property of every other kind, and one that isn't there, is read as it was.
+        kinds = (
+            f"{all_} RETURN [coalesce(n.e, 'z'), coalesce($p.q, n.f), coalesce(n.n, 0), coalesce(n.l, []), "
+            "coalesce(n.nope, 'z'), coalesce(n.nope, $p.q)]"
+        )
+        rows = asked_again(cypher_pm, kinds, parameters)
+        assert typed(rows) == typed(each(["", 1.0, 5, ["a"], "z", None])), rows
+    clear(cypher_pm)
+
+
 def test_a_text_past_32_kb_compares_equal_unequal_in_a_list_and_in_order_stored_given_and_beside_a_long_value(
     cypher_pm: PersistenceManager,
 ):

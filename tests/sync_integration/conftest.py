@@ -113,6 +113,8 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
         fails = item.get_closest_marker("fails_on_sql_stores")
         if fails and engine in SQL_STORES:
             item.add_marker(pytest.mark.xfail(reason=fails.args[0], strict=True))
-        if item.get_closest_marker("needs_sqlite_3_53") and engine == "sqlite" and SQLITE_BEFORE_3_53:
+        # A test over `cypher_pm` runs on the store it names, which the markers above leave as they are.
+        store = callspec.params.get("cypher_pm", engine) if callspec is not None else None
+        if item.get_closest_marker("needs_full_floats") and store == "sqlite" and SQLITE_BEFORE_3_53:
             reason = "SQLite before 3.53 rounds a float to 15 significant digits, and groups by no outer column (#376)."
             item.add_marker(pytest.mark.xfail(reason=reason, strict=True))

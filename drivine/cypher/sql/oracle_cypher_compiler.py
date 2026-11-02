@@ -13,6 +13,7 @@ from drivine.cypher.ast.query import Query
 from drivine.cypher.sql.compiled_cypher import CompiledCypher
 from drivine.cypher.sql.oracle_temporal_sql import CLOCK, NOW, OracleTemporalSql
 from drivine.cypher.sql.parameters import OBJECT, cypher_json, json_text, jsonable
+from drivine.cypher.sql.procedure_step import ProcedureStep
 from drivine.cypher.sql.sql_cypher_compiler import (
     CALLER,
     COUNT,
@@ -1388,7 +1389,7 @@ class OracleCypherCompiler(SqlCypherCompiler):
             return f"SELECT /*+ {hinted.group(1)} {_NO_JSON_TABLE_TRANSFORM} */{query[hinted.end() :]}"
         return re.sub(r"^SELECT ", f"SELECT /*+ {_NO_JSON_TABLE_TRANSFORM} */ ", query, count=1)
 
-    def lateral(self, query: str, name: str, optional: bool) -> str:
+    def lateral(self, query: str, name: str, optional: bool, columns: Sequence[tuple[str, bool]]) -> str:
         """
         An optional join is on `1 = 1`, not `ON TRUE`: in a scalar subquery, as a `COUNT { … }` is, Oracle refuses a
         join on `TRUE` followed by a `WHERE … AND …` (ORA-00907), and crashes the session on one without (ORA-07445 in
@@ -1396,7 +1397,7 @@ class OracleCypherCompiler(SqlCypherCompiler):
         """
         if optional:
             return f"LEFT JOIN LATERAL (\n{indent(query)}\n) {name} ON 1 = 1"
-        return super().lateral(query, name, optional=False)
+        return super().lateral(query, name, False, columns)
 
     def matches(self, text: str, pattern: str) -> str:
         """
@@ -1580,7 +1581,7 @@ class OracleCypherCompiler(SqlCypherCompiler):
             ),
         )
 
-    def procedure(self, body: list[str], parameters: dict[str, Any]) -> CompiledCypher:
+    def procedure(self, program: Sequence[ProcedureStep], parameters: dict[str, Any]) -> CompiledCypher:
         """An anonymous block, which returns its rows as an implicit result."""
         declared = [
             "DECLARE",
@@ -1601,7 +1602,9 @@ class OracleCypherCompiler(SqlCypherCompiler):
             declared += [f"    {SAVED}{depth} JSON;", f"    {GATHERED}{depth} JSON;", f"    {CALLER}{depth} JSON;"]
         # The clock is read once, by a query: see OracleTemporalSql.now.
         clock = f"SELECT {CLOCK} INTO {NOW} FROM DUAL;"
-        return CompiledCypher("\n".join([*declared, "BEGIN", indent("\n".join([clock, *body])), "END;"]), parameters)
+        return CompiledCypher(
+            "\n".join([*declared, "BEGIN", indent("\n".join([clock, *self.statements(program)])), "END;"]), parameters
+        )
 
     def return_rows(self, query: str) -> list[str]:
         return [f"OPEN {CURSOR} FOR\n{indent(query)};", f"DBMS_SQL.RETURN_RESULT({CURSOR});"]

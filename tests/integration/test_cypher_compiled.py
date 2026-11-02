@@ -3102,7 +3102,7 @@ async def test_a_quotient_of_floats_is_written_without_the_zeros_its_scale_leave
     ) == [[2.0, 3.5, 2.5, "2.0", "2.5", "3.5"]]
 
 
-@pytest.mark.needs_sqlite_3_53
+@pytest.mark.needs_exact_float_reads
 async def test_to_string_of_a_double_past_oracles_number_range_writes_its_shortest_digits(
     cypher_pm: PersistenceManager,
 ):

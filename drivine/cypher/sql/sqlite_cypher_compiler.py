@@ -167,8 +167,11 @@ class SqliteCypherCompiler(SqlCypherCompiler):
         return f"({json} -> {_path(key)})"
 
     def element(self, json: str, index: str) -> str:
-        """Counted from the end where negative, as SQLite's `->` counts an index."""
-        return f"({json} -> CAST({index} ->> '$' AS INTEGER))"
+        """
+        Counted from the end where negative, as the path `$[#-N]` reads it: `-> -N` is refused before SQLite 3.47. The
+        index is read once, and a null one gives a null path, which reads null.
+        """
+        return f"({json} -> ('$[' || replace(CAST({index} ->> '$' AS INTEGER), '-', '#-') || ']'))"
 
     def keyed(self, json: str, key: str) -> str | None:
         return f"({json} -> ('$.' || json_quote({key} ->> '$')))"
@@ -205,7 +208,7 @@ class SqliteCypherCompiler(SqlCypherCompiler):
         return f"({alias}.key + 1)"
 
     def item_at(self, json: str, index: int) -> str:
-        return self.element(json, self.literal_json(index))
+        return f"({json} -> '$[{index if index >= 0 else f'#{index}'}]')"
 
     def list_size(self, json: str) -> str:
         size = self.function("size", json)
@@ -409,7 +412,7 @@ class SqliteCypherCompiler(SqlCypherCompiler):
             "tointeger": lambda: self.shared1(json, to_integer),
             "tofloat": lambda: self.shared1(json, to_float),
             "head": lambda: f"({json} -> 0)",
-            "last": lambda: f"({json} -> -1)",
+            "last": lambda: self.item_at(json, -1),
             "abs": lambda: self.scalar(f"abs({self.number(json)})"),
         }
         function = functions.get(name)

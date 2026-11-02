@@ -139,14 +139,14 @@ class Temporals:
 
         def formatted(values: list[str]) -> str:
             t = values[0]
-            clock = f"to_char({t}, 'HH24:MI:SS') || {self._fraction(t)}"
+            clock = f"{self.sql.to_char}({t}, 'HH24:MI:SS') || {self._fraction(t)}"
             zone = offset if offset is not None else "'Z'"
             if kind is Temporal.DATE:
-                return f"to_char({t}, 'YYYY-MM-DD')"
+                return f"{self.sql.to_char}({t}, 'YYYY-MM-DD')"
             if kind is Temporal.LOCAL_DATE_TIME:
-                text = f"to_char({t}, 'YYYY-MM-DD\"T\"') || {clock}"
+                text = f"{self.sql.to_char}({t}, 'YYYY-MM-DD\"T\"') || {clock}"
             elif kind is Temporal.DATE_TIME:
-                text = f"to_char({t}, 'YYYY-MM-DD\"T\"') || {clock} || {zone}"
+                text = f"{self.sql.to_char}({t}, 'YYYY-MM-DD\"T\"') || {clock} || {zone}"
             elif kind is Temporal.LOCAL_TIME:
                 text = clock
             elif kind is Temporal.TIME:
@@ -204,17 +204,17 @@ class Temporals:
         """
 
         def field(name: str, default: str, digits: int) -> str:
-            return f"to_char({fields.get(name, default)}, 'FM{'0' * digits}')"
+            return f"{self.sql.to_char}({fields.get(name, default)}, 'FM{'0' * digits}')"
 
         micros = (
-            f"TRUNC({fields.get('millisecond', '0')} * 1000 + {fields.get('microsecond', '0')} + "
+            f"{self.sql.trunc}({fields.get('millisecond', '0')} * 1000 + {fields.get('microsecond', '0')} + "
             f"{fields.get('nanosecond', '0')} / 1000)"
         )
         day = f"{field('year', '1970', 4)} || '-' || {field('month', '1', 2)} || '-' || {field('day', '1', 2)}"
         clock = (
             f"{field('hour', '0', 2)} || ':' || {field('minute', '0', 2)} || ':' || {field('second', '0', 2)} "
             "|| '.' || "
-            f"to_char({micros}, 'FM000000')"
+            f"{self.sql.to_char}({micros}, 'FM000000')"
         )
         zone = timezone if timezone is not None else "'Z'"
         if kind is Temporal.DATE:
@@ -247,10 +247,10 @@ class Temporals:
             return f"COALESCE({fields[name]}, {least})" if name in fields else str(least)
 
         def january(y: str, day: int) -> str:
-            return self.sql.local(f"to_char({y}, 'FM0000') || '-01-0{day}'", Temporal.DATE)
+            return self.sql.local(f"{self.sql.to_char}({y}, 'FM0000') || '-01-0{day}'", Temporal.DATE)
 
         def whole(*values: str) -> str:
-            return " AND ".join(f"{it} = TRUNC({it})" for it in values)
+            return " AND ".join(f"{it} = {self.sql.trunc}({it})" for it in values)
 
         year = given("year", 0)
         if "week" in fields:
@@ -277,7 +277,7 @@ class Temporals:
                     time,
                     timezone,
                     kind,
-                    lambda day: f"{whole(y, n)} AND {n} >= 1 AND EXTRACT(YEAR FROM {day}) = {y}",
+                    lambda day: f"{whole(y, n)} AND {n} >= 1 AND {self.sql.extract('YEAR', day)} = {y}",
                 )
 
             return self.shared([year, given("ordinalDay", 1)], ordinal)
@@ -302,9 +302,9 @@ class Temporals:
         def dated(d: list[str]) -> str:
             day = d[0]
             fields = {
-                "year": f"EXTRACT(YEAR FROM {day})",
-                "month": f"EXTRACT(MONTH FROM {day})",
-                "day": f"CASE WHEN NOT ({valid(day)}) THEN 0 ELSE EXTRACT(DAY FROM {day}) END",
+                "year": self.sql.extract("YEAR", day),
+                "month": self.sql.extract("MONTH", day),
+                "day": f"CASE WHEN NOT ({valid(day)}) THEN 0 ELSE {self.sql.extract('DAY', day)} END",
             }
             return self._dated(fields, time, timezone, kind)
 
@@ -323,13 +323,12 @@ class Temporals:
             lambda c: self.of({**time, **self._date_of(c[0])}, timezone, kind),
         )
 
-    @staticmethod
-    def _date_of(timestamp: str) -> dict[str, str]:
+    def _date_of(self, timestamp: str) -> dict[str, str]:
         """The year, the month and the day of the month of the timestamp, as `of` takes them."""
         return {
-            "year": f"EXTRACT(YEAR FROM {timestamp})",
-            "month": f"EXTRACT(MONTH FROM {timestamp})",
-            "day": f"EXTRACT(DAY FROM {timestamp})",
+            "year": self.sql.extract("YEAR", timestamp),
+            "month": self.sql.extract("MONTH", timestamp),
+            "day": self.sql.extract("DAY", timestamp),
         }
 
     # ----- Values made from another -----
@@ -442,10 +441,12 @@ class Temporals:
         """`over`'s fields of the time of the wall clock `clock` (None where none is given), laid over by `fields`."""
         time: dict[str, str] = {}
         for name, part in (("hour", "HOUR"), ("minute", "MINUTE")):
-            value = fields.get(name, f"EXTRACT({part} FROM {clock})" if clock is not None else None)
+            value = fields.get(name, self.sql.extract(part, clock) if clock is not None else None)
             if value is not None:
                 time[name] = value
-        second = fields.get("second", f"TRUNC(EXTRACT(SECOND FROM {clock}))" if clock is not None else None)
+        second = fields.get(
+            "second", f"{self.sql.trunc}({self.sql.extract('SECOND', clock)})" if clock is not None else None
+        )
         if second is not None:
             time["second"] = second
         if any(it in fields for it in _FRACTION):
@@ -490,7 +491,7 @@ class Temporals:
         """`over`'s value of the date `day`, moved by a `quarter` or a `dayOfWeek` among `fields` where one is."""
 
         def whole(value: str, last: int) -> str:
-            return f"{value} = TRUNC({value}) AND {value} BETWEEN 1 AND {last}"
+            return f"{value} = {self.sql.trunc}({value}) AND {value} BETWEEN 1 AND {last}"
 
         if "quarter" in fields:
 
@@ -525,16 +526,20 @@ class Temporals:
         for a name the kind has no field of. A zoned value's fields are those of its wall clock.
         """
         if kind is Temporal.DURATION:
-            if _duration_field(self._parts("NULL"), name) is None:
+            if _duration_field(self.sql, self._parts("NULL"), name) is None:
                 return None
-            return Field(self.shared([text], lambda t: _duration_field(self._parts(t[0]), name) or ""), text=False)
+            return Field(
+                self.shared([text], lambda t: _duration_field(self.sql, self._parts(t[0]), name) or ""), text=False
+            )
         if kind.zoned and name in ("timezone", "offset", "offsetMinutes", "offsetSeconds"):
             return self._zone_field(text, name)
-        epoch = "TIMESTAMP '1970-01-01 00:00:00'"
+        epoch = self.sql.epoch
         if name == "epochSeconds":
-            return Field(f"TRUNC({self.sql.seconds_between(epoch, self.sql.utc(text, kind))})", text=False)
+            return Field(f"{self.sql.trunc}({self.sql.seconds_between(epoch, self.sql.utc(text, kind))})", text=False)
         if name == "epochMillis":
-            return Field(f"TRUNC({self.sql.seconds_between(epoch, self.sql.utc(text, kind))} * 1000)", text=False)
+            return Field(
+                f"{self.sql.trunc}({self.sql.seconds_between(epoch, self.sql.utc(text, kind))} * 1000)", text=False
+            )
         if name not in INSTANT_FIELDS:
             return None
 
@@ -542,40 +547,40 @@ class Temporals:
 
     def _clock_field(self, t: str, name: str) -> str:
         """A field of the wall clock `t`, a timestamp, by Cypher's name for it."""
-        second = f"EXTRACT(SECOND FROM {t})"
+        second = self.sql.extract("SECOND", t)
         if name == "year":
-            return f"EXTRACT(YEAR FROM {t})"
+            return self.sql.extract("YEAR", t)
         if name == "quarter":
-            return f"TRUNC((EXTRACT(MONTH FROM {t}) + 2) / 3)"
+            return f"{self.sql.trunc}(({self.sql.extract('MONTH', t)} + 2) / 3)"
         if name == "month":
-            return f"EXTRACT(MONTH FROM {t})"
+            return self.sql.extract("MONTH", t)
         if name == "week":
-            return self.sql.number(f"to_char({t}, 'IW')")
+            return self.sql.number(f"{self.sql.to_char}({t}, 'IW')")
         if name == "weekYear":
-            return self.sql.number(f"to_char({t}, 'IYYY')")
+            return self.sql.number(f"{self.sql.to_char}({t}, 'IYYY')")
         if name == "day":
-            return f"EXTRACT(DAY FROM {t})"
+            return self.sql.extract("DAY", t)
         if name == "ordinalDay":
-            return self.sql.number(f"to_char({t}, 'DDD')")
+            return self.sql.number(f"{self.sql.to_char}({t}, 'DDD')")
         if name == "dayOfQuarter":
             quarter = self.sql.truncate("quarter", t)
             assert quarter is not None
-            day = self.sql.number(f"to_char({t}, 'DDD')")
-            first = self.sql.number(f"to_char({quarter}, 'DDD')")
+            day = self.sql.number(f"{self.sql.to_char}({t}, 'DDD')")
+            first = self.sql.number(f"{self.sql.to_char}({quarter}, 'DDD')")
             return f"({day} - {first} + 1)"
         if name in ("dayOfWeek", "weekDay"):
             return self.sql.day_of_week(t)
         if name == "hour":
-            return f"EXTRACT(HOUR FROM {t})"
+            return self.sql.extract("HOUR", t)
         if name == "minute":
-            return f"EXTRACT(MINUTE FROM {t})"
+            return self.sql.extract("MINUTE", t)
         if name == "second":
-            return f"TRUNC({second})"
+            return f"{self.sql.trunc}({second})"
         if name == "millisecond":
-            return f"(TRUNC({second} * 1000) - TRUNC({second}) * 1000)"
+            return f"({self.sql.trunc}({second} * 1000) - {self.sql.trunc}({second}) * 1000)"
         if name == "microsecond":
-            return f"(TRUNC({second} * 1000000) - TRUNC({second}) * 1000000)"
-        return f"((TRUNC({second} * 1000000) - TRUNC({second}) * 1000000) * 1000)"
+            return f"({self.sql.trunc}({second} * 1000000) - {self.sql.trunc}({second}) * 1000000)"
+        return f"(({self.sql.trunc}({second} * 1000000) - {self.sql.trunc}({second}) * 1000000) * 1000)"
 
     def _zone_field(self, text: str, name: str) -> Field:
         def zone(values: list[str]) -> str:
@@ -640,7 +645,8 @@ class Temporals:
             seconds = parts.seconds
         else:
             seconds = self.shared(
-                [parts.seconds], lambda sec: f"CASE WHEN {date_} THEN TRUNC({sec[0]} / 86400) * 86400 ELSE {sec[0]} END"
+                [parts.seconds],
+                lambda sec: f"CASE WHEN {date_} THEN {self.sql.trunc}({sec[0]} / 86400) * 86400 ELSE {sec[0]} END",
             )
         return self.sql.add_time(
             self.sql.add_months(timestamp, f"{s}({parts.months})"), f"{s}({parts.days})", f"{s}({seconds})"
@@ -775,8 +781,9 @@ class Temporals:
             Parts(
                 f"({f('years')} * 12 + {f('quarters')} * 3 + {f('months')})",
                 f"({f('weeks')} * 7 + {f('days')})",
-                f"({f('hours')} * 3600 + {f('minutes')} * 60 + {f('seconds')} + {f('milliseconds')} / 1000 + "
-                f"{f('microseconds')} / 1000000 + {f('nanoseconds')} / 1000000000)",
+                f"({f('hours')} * 3600 + {f('minutes')} * 60 + {f('seconds')} + "
+                f"{self.sql.quotient(f('milliseconds'), '1000')} + {self.sql.quotient(f('microseconds'), '1000000')} + "
+                f"{self.sql.quotient(f('nanoseconds'), '1000000000')})",
             )
         )
 
@@ -789,20 +796,20 @@ class Temporals:
 
         def spread(values: list[str]) -> str:
             m0, d0, s0 = values
-            m = f"TRUNC({m0})"
-            d = f"TRUNC({d0} + ({m0} - TRUNC({m0})) * 30.436875)"
-            s = f"({s0} + ({d0} + ({m0} - TRUNC({m0})) * 30.436875 - {d}) * 86400)"
+            m = f"{self.sql.trunc}({m0})"
+            d = f"{self.sql.trunc}({d0} + ({m0} - {self.sql.trunc}({m0})) * 30.436875)"
+            s = f"({s0} + ({d0} + ({m0} - {self.sql.trunc}({m0})) * 30.436875 - {d}) * 86400)"
             return self.shared([m, d, s], written)
 
         def written(values: list[str]) -> str:
             months, days, seconds = values
-            years = f"TRUNC({months} / 12)"
-            hours = f"TRUNC({seconds} / 3600)"
-            minutes = f"(TRUNC({seconds} / 60) - {hours} * 60)"
-            secs = f"({seconds} - TRUNC({seconds} / 60) * 60)"
+            years = f"{self.sql.trunc}({months} / 12)"
+            hours = f"{self.sql.trunc}({seconds} / 3600)"
+            minutes = f"({self.sql.trunc}({seconds} / 60) - {hours} * 60)"
+            secs = f"({seconds} - {self.sql.trunc}({seconds} / 60) * 60)"
 
             def unit(value: str, letter: str) -> str:
-                return f"CASE WHEN {value} <> 0 THEN {_number(value)} || '{letter}' ELSE '' END"
+                return f"CASE WHEN {value} <> 0 THEN {_number(self.sql, value)} || '{letter}' ELSE '' END"
 
             return (
                 f"CASE WHEN {months} = 0 AND {days} = 0 AND {seconds} = 0 THEN 'PT0S' WHEN {seconds} IS NOT NULL THEN "
@@ -866,7 +873,7 @@ class Temporals:
             if unit == "months":
                 return self._text(Parts(months, "0", "0"))
             if unit == "days":
-                return self._text(Parts("0", f"TRUNC({self.sql.seconds_between(a, b)} / 86400)", "0"))
+                return self._text(Parts("0", f"{self.sql.trunc}({self.sql.seconds_between(a, b)} / 86400)", "0"))
             if unit == "seconds":
                 return self._text(Parts("0", "0", self.sql.seconds_between(a, b)))
             return self.shared(
@@ -874,7 +881,11 @@ class Temporals:
                 lambda m: self.shared(
                     [self.sql.seconds_between(self.sql.add_months(a, m[0]), b)],
                     lambda rest: self._text(
-                        Parts(m[0], f"TRUNC({rest[0]} / 86400)", f"({rest[0]} - TRUNC({rest[0]} / 86400) * 86400)")
+                        Parts(
+                            m[0],
+                            f"{self.sql.trunc}({rest[0]} / 86400)",
+                            f"({rest[0]} - {self.sql.trunc}({rest[0]} / 86400) * 86400)",
+                        )
                     ),
                 ),
             )
@@ -882,38 +893,38 @@ class Temporals:
         return self.shared([from_, to], between)
 
 
-def _duration_field(parts: Parts, name: str) -> str | None:
+def _duration_field(sql: TemporalSql, parts: Parts, name: str) -> str | None:
     """A field of a duration of the parts, by Cypher's name for it: None for a name a duration has no field of."""
     m, d, s = parts.months, parts.days, parts.seconds
     fields = {
-        "years": f"TRUNC({m} / 12)",
-        "quarters": f"TRUNC({m} / 3)",
+        "years": f"{sql.trunc}({m} / 12)",
+        "quarters": f"{sql.trunc}({m} / 3)",
         "months": m,
-        "weeks": f"TRUNC({d} / 7)",
+        "weeks": f"{sql.trunc}({d} / 7)",
         "days": d,
-        "hours": f"TRUNC({s} / 3600)",
-        "minutes": f"TRUNC({s} / 60)",
-        "seconds": f"TRUNC({s})",
-        "milliseconds": f"TRUNC({s} * 1000)",
-        "microseconds": f"TRUNC({s} * 1000000)",
-        "nanoseconds": f"TRUNC({s} * 1000000000)",
-        "quartersOfYear": f"(TRUNC({m} / 3) - TRUNC({m} / 12) * 4)",
-        "monthsOfQuarter": f"({m} - TRUNC({m} / 3) * 3)",
-        "monthsOfYear": f"({m} - TRUNC({m} / 12) * 12)",
-        "daysOfWeek": f"({d} - TRUNC({d} / 7) * 7)",
-        "minutesOfHour": f"(TRUNC({s} / 60) - TRUNC({s} / 3600) * 60)",
-        "secondsOfMinute": f"(TRUNC({s}) - TRUNC({s} / 60) * 60)",
-        "millisecondsOfSecond": f"(TRUNC({s} * 1000) - TRUNC({s}) * 1000)",
-        "microsecondsOfSecond": f"(TRUNC({s} * 1000000) - TRUNC({s}) * 1000000)",
-        "nanosecondsOfSecond": f"(TRUNC({s} * 1000000000) - TRUNC({s}) * 1000000000)",
+        "hours": f"{sql.trunc}({s} / 3600)",
+        "minutes": f"{sql.trunc}({s} / 60)",
+        "seconds": f"{sql.trunc}({s})",
+        "milliseconds": f"{sql.trunc}({s} * 1000)",
+        "microseconds": f"{sql.trunc}({s} * 1000000)",
+        "nanoseconds": f"{sql.trunc}({s} * 1000000000)",
+        "quartersOfYear": f"({sql.trunc}({m} / 3) - {sql.trunc}({m} / 12) * 4)",
+        "monthsOfQuarter": f"({m} - {sql.trunc}({m} / 3) * 3)",
+        "monthsOfYear": f"({m} - {sql.trunc}({m} / 12) * 12)",
+        "daysOfWeek": f"({d} - {sql.trunc}({d} / 7) * 7)",
+        "minutesOfHour": f"({sql.trunc}({s} / 60) - {sql.trunc}({s} / 3600) * 60)",
+        "secondsOfMinute": f"({sql.trunc}({s}) - {sql.trunc}({s} / 60) * 60)",
+        "millisecondsOfSecond": f"({sql.trunc}({s} * 1000) - {sql.trunc}({s}) * 1000)",
+        "microsecondsOfSecond": f"({sql.trunc}({s} * 1000000) - {sql.trunc}({s}) * 1000000)",
+        "nanosecondsOfSecond": f"({sql.trunc}({s} * 1000000000) - {sql.trunc}({s}) * 1000000000)",
     }
     return fields.get(name)
 
 
-def _number(value: str) -> str:
+def _number(sql: TemporalSql, value: str) -> str:
     """A number as Neo4j writes one in a duration: no zeros after the point, nor the point where there is no
     fraction."""
-    return f"RTRIM(to_char({value}, 'FM9999999999990.999999999'), '.')"
+    return f"RTRIM({sql.to_char}({value}, 'FM9999999999990.999999999'), '.')"
 
 
 def canonical(text: str, kind: Temporal) -> str | None:

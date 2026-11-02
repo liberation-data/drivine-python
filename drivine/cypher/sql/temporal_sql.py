@@ -111,6 +111,25 @@ class TemporalSql(ABC):
     def truncate(self, unit: str, timestamp: str) -> str | None:
         """The timestamp truncated to the unit, one of TRUNCATION_UNITS, as Neo4j truncates: None for another unit."""
 
+    to_char = "to_char"
+    """The name of the function that writes a timestamp or a number as text in a pattern (`'YYYY-MM-DD'`,
+    `'FM0000'`), as Postgres's and Oracle's `to_char` does."""
+
+    trunc = "TRUNC"
+    """The name of the function that cuts a number's fraction off, as `TRUNC` does."""
+
+    epoch = "TIMESTAMP '1970-01-01 00:00:00'"
+    """The timestamp of the epoch, 1970-01-01 at midnight."""
+
+    def quotient(self, dividend: str, divisor: str) -> str:
+        """The dividend divided by the divisor, numbers each, with its fraction kept where both are whole numbers."""
+        return f"{dividend} / {divisor}"
+
+    def extract(self, field: str, timestamp: str) -> str:
+        """The field (`YEAR`, `MONTH`, `DAY`, `HOUR`, `MINUTE`, `SECOND` with its fraction) of the timestamp, a
+        number."""
+        return f"EXTRACT({field} FROM {timestamp})"
+
     def replace(self, text: str, pattern: str, replacement: str) -> str:
         """The text with every match of the pattern, a SQL text, replaced by the replacement."""
         return f"REGEXP_REPLACE({text}, {pattern}, {replacement})"

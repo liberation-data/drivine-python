@@ -4505,8 +4505,8 @@ def test_a_list_literal_of_more_than_100_items_keeps_its_items_returned_tested_w
     for n in (100, 101, 250, 1001):
         # An Oracle session spends 180 MB of its PGA on a statement of a list of 1001, 815 MB on one that reads it three
         # times, and keeps 50 to 217 MB after (#241). Late in the suite, beside its other sessions, that passes Oracle
-        # Free's limit (ORA-04036), so Oracle isn't asked a list of 1001; drivine4j asks it all but the comparisons
-        # below (liberation-data/drivine4j#360, here #227).
+        # Free's limit (ORA-04036), so Oracle isn't asked a list of 1001; drivine4j asks it all but the comparison
+        # of the list with itself below (liberation-data/drivine4j#404).
         if n > 250 and cypher_pm.type is DatabaseType.ORACLE:
             continue
         items = [_long_item(i) for i in range(n)]
@@ -4525,12 +4525,66 @@ def test_a_list_literal_of_more_than_100_items_keeps_its_items_returned_tested_w
         numbers = "[" + ", ".join("null" if i % 7 == 2 else f"{i}" for i in range(n)) + "]"
         found = f"RETURN [{last_whole} IN {numbers}, 999999 IN {numbers}]"
         assert cypher_pm.query(spec(found)) == [[True, None]], f"{n} items"
-        # A list of several kinds is compared item by item, in a few hundred characters of SQL each: Oracle runs out of
-        # memory reading the comparisons of 1001 even alone (#227). (Not -1, which compiles to ten times the statement.)
-        found = f"RETURN [{last_whole} IN {listed}, 999999 IN {listed}]"
-        assert cypher_pm.query(spec(found)) == [[True, None]], f"{n} items"
+        # A list of several kinds: its constants are tested at once, as one list, and its nulls make a value not found
+        # null (#227). One a statement: on Oracle, each copy of a long literal takes its own PGA to build.
+        for value, found in ((f"{last_whole}", True), ("999999", None), ("-1", None)):
+            assert cypher_pm.query(spec(f"RETURN {value} IN {listed}")) == [found], f"{value} IN {n} items"
         # Compared with itself item by item, each pair equal but the nulls, which are null beside each other.
         assert cypher_pm.query(spec(f"RETURN {listed} = {listed}")) == [None], f"{n} items"
+
+
+def test_a_value_of_each_kind_tested_with_in_against_a_long_list_literal_of_several_kinds_a_null_among_them(
+    cypher_pm: PersistenceManager,
+):
+    # Not in the spec yet (#227): on Oracle, -1 IN 1,001 such items compiled to 2 MB, and ran out of PGA. drivine4j's
+    # CypherQueryCrossEngineTest of liberation-data/drivine4j#360.
+    for n in (10, 101, 1001):
+        # Oracle isn't asked a list of 1001, as above (#241).
+        if n > 250 and cypher_pm.type is DatabaseType.ORACLE:
+            continue
+        items = [_long_item(i) for i in range(n)]
+        listed = "[" + ", ".join(it[0] for it in items) + "]"
+        no_nulls = "[" + ", ".join(it[0] for it in items if it[1] is not None) + "]"
+        last_whole = max(i for i in range(n) if i % 7 == 0)
+        # Not found beside a null is null; found, a nested list, a map, a float equal to a whole number and a truth
+        # value are true. One a statement: on Oracle, each copy of a long literal takes its own PGA to build.
+        tested: list[tuple[str, bool | None]] = [
+            (f"-1 IN {listed}", None),
+            (f"{last_whole} IN {listed}", True),
+            (f"null IN {listed}", None),
+            (f"[5, 'n'] IN {listed}", True),
+            (f"{{k: 6}} IN {listed}", True),
+            (f"7.0 IN {listed}", True),
+            (f"true IN {listed}", True),
+            (f"'s1' IN {listed}", True),
+            (f"-1 IN {no_nulls}", False),
+            (f"'s1' IN {no_nulls}", True),
+        ]
+        for statement, expected in tested:
+            label = f"{statement.split(' IN ')[0]} IN {n} items"
+            assert cypher_pm.query(spec(f"RETURN {statement}")) == [expected], label
+        unwound = f"UNWIND [-1, 0, null] AS x RETURN x IN {listed}"
+        assert cypher_pm.query(spec(unwound)) == [None, True, None], f"{n} items"
+        kept = f"UNWIND [-1, 0, 7, null, 's1'] AS x WITH x WHERE x IN {listed} RETURN x"
+        assert cypher_pm.query(spec(kept)) == [0, 7, "s1"], f"{n} items"
+        missing = f"UNWIND [-1, 0, 7, null, 's1'] AS x WITH x WHERE NOT x IN {no_nulls} RETURN x"
+        assert cypher_pm.query(spec(missing)) == [-1], f"{n} items"
+        none_missing = f"UNWIND [-1, 0, 7, null, 's1'] AS x WITH x WHERE NOT x IN {listed} RETURN x"
+        assert cypher_pm.query(spec(none_missing)) == [], f"{n} items"
+    # A truth value is no number, a float is equal to a whole number, and an item that holds a null makes its comparison
+    # null where nothing else differs.
+    kinds = (
+        "RETURN [true IN [1, 's', null], true IN [1, 's'], 3.0 IN [3, 's', null], [5, null] IN [[5, null], 1, 2], "
+        "[5, 'n'] IN [[5, null], 1, 2], [5, 'n'] IN [[6, null], 1, 2], {k: 6} IN [{k: null}, 1, 2], 1 IN [1, 2, null], "
+        "1 IN [true, 1.5, 's']]"
+    )
+    assert cypher_pm.query(spec(kinds)) == [[None, False, True, None, None, False, None, True, False]]
+    # A value that holds a null, against constants that hold none: null where an item is equal but for the null.
+    held = (
+        "UNWIND [[5, null], [6, 'n'], null] AS v "
+        "RETURN [v IN [[5, 1], [6, 'n'], 3], v IN [[7, 1], [6, 'n'], 3, null], v IN [[7, 1], 3]]"
+    )
+    assert cypher_pm.query(spec(held)) == [[None, None, False], [True, True, False], [None, None, None]]
 
 
 def test_a_long_list_or_map_literal_without_a_null_equals_the_same_value_given_as_a_parameter_or_collected(

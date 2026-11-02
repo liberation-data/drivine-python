@@ -5505,15 +5505,45 @@ class SqlCypherCompiler(ABC):
         if binary.operator is BinaryOperator.IN:
             if not isinstance(right, ListLiteral) or not right.items:
                 return None
-            # The item compiled once, and compared with each of the list's.
+            # The item compiled once, and compared with each of the list's. A null the list writes makes its
+            # comparison null whatever the value, so the nulls are one null term. A value that compares as JSON is
+            # tested at once, as `_membership` tests it against a list, against the items that are constants holding no
+            # null, where there are two or more: written one by one, a long list of mixed kinds compiled to megabytes on
+            # Oracle (#227). A value that may hold a null is tested against the texts, numbers and truth values apart,
+            # as one that holds none, which none of them is equal to but for a null; and against the lists and maps as
+            # membership tests such a value, item by item where it holds a null.
             item = self._expression(left, scope)
+            nulls = [it for it in right.items if isinstance(it, Literal) and it.value is None]
+            items = [it for it in right.items if not (isinstance(it, Literal) and it.value is None)]
+            constants: list[Expression] = []
+            others = items
+            if isinstance(item, Json) and _plain_json(item) and sum(1 for it in items if _constant(it)) > 1:
+                constants = [it for it in items if _constant(it)]
+                others = [it for it in items if not _constant(it)]
+            if self._is_flat(item):
+                scalars, containers = constants, []
+            else:
+                scalars = [it for it in constants if not isinstance(it, (ListLiteral, MapLiteral))]
+                containers = [it for it in constants if isinstance(it, (ListLiteral, MapLiteral))]
+            terms: list[str] = []
+            for written, flat in ((scalars, True), (containers, False)):
+                if written:
+                    within = ListLiteral(tuple(written))
+                    value = dataclasses.replace(cast(Json, item), flat=True) if flat else item
+                    in_ = Binary(BinaryOperator.IN, left, within)
+                    terms.append(self._membership(in_, value, self._expression(within, scope), scope, False))
             stored = self._stored(left, scope)
-            compared: list[str] = []
-            for listed in right.items:
+            for listed in others:
                 equals = Binary(BinaryOperator.EQUALS, left, listed)
                 a, b = self._compared(item, self._expression(listed, scope), equals)
-                compared.append(self._equality(a, b, listed, self._plain(left, listed, a, b, scope), stored))
-            return _grouped(compared, "OR")
+                terms.append(self._equality(a, b, listed, self._plain(left, listed, a, b, scope), stored))
+            # A null beside other terms takes its kind from them; alone, it is given one, as Postgres can't make a bare
+            # NULL JSON.
+            if not nulls:
+                return _grouped(terms, "OR")
+            if not terms:
+                return "(CASE WHEN 1 = 0 THEN FALSE END)"
+            return _grouped([*terms, "NULL"], "OR")
         if isinstance(left, ListLiteral) and isinstance(right, ListLiteral):
             if len(left.items) != len(right.items):
                 return "FALSE"
@@ -7573,6 +7603,39 @@ def _holds_temporals(listed: Value) -> bool:
         or _item_items_of(listed) is not None
         or (isinstance(listed, Json) and listed.temporals)
     )
+
+
+def _plain_json(value: Json) -> bool:
+    """
+    Whether the value compares as its JSON, as `SqlCypherCompiler._membership` compares a value with a list's items: no
+    node, relationship or value that holds one, which compares by identity, and no temporal value, which compares by
+    its kind. One that may hold a null `_membership` compares as `_equality` does, null where an item is equal but for
+    the null.
+    """
+    return value.identity is None and not _holds_temporals(value) and value.temporal is None
+
+
+def _constant(expression: Expression) -> bool:
+    """
+    Whether the expression is a constant that holds no null: a number, a text or a truth value the statement writes, a
+    negated number, or a list or a map of such. As JSON, it is equal to a value that holds no null where Cypher finds
+    them equal.
+    """
+    if isinstance(expression, Literal):
+        return expression.value is not None
+    if isinstance(expression, Unary):
+        operand = expression.operand
+        return (
+            expression.operator is UnaryOperator.NEGATE
+            and isinstance(operand, Literal)
+            and isinstance(operand.value, (int, float))
+            and not isinstance(operand.value, bool)
+        )
+    if isinstance(expression, ListLiteral):
+        return all(_constant(it) for it in expression.items)
+    if isinstance(expression, MapLiteral):
+        return all(_constant(value) for _, value in expression.entries)
+    return False
 
 
 def _has_temporals(value: Value) -> bool:

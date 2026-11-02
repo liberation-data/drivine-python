@@ -86,6 +86,11 @@ class SqliteCypherCompiler(SqlCypherCompiler):
         """A float the statement writes as Java writes a double, `1.0E9`, as drivine4j's JSON writes it."""
         return literal(_java_json(jsonable(value)))
 
+    def parameter_text(self, value: Any) -> str:
+        """NaN and the infinities as the texts drivine4j binds them as, `"NaN"`, `"Infinity"`, `"-Infinity"`: JSON holds
+        no such number."""
+        return _parameter_json(jsonable(value))
+
     def parameter_json(self, marker: str, text: str | None) -> str:
         return marker
 
@@ -697,6 +702,22 @@ def _java_json(value: Any) -> str:
         )
     if isinstance(value, list):
         return "[" + ",".join(_java_json(it) for it in cast(list[Any], value)) + "]"
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _parameter_json(value: Any) -> str:
+    """A value of JSON's own kinds as compact JSON text, as a parameter is bound: see `parameter_text`."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return json.dumps(java_text(value))
+    if isinstance(value, dict):
+        entries = cast(dict[str, Any], value)
+        return (
+            "{"
+            + ",".join(f"{json.dumps(key, ensure_ascii=False)}:{_parameter_json(it)}" for key, it in entries.items())
+            + "}"
+        )
+    if isinstance(value, list):
+        return "[" + ",".join(_parameter_json(it) for it in cast(list[Any], value)) + "]"
     return json.dumps(value, ensure_ascii=False)
 
 

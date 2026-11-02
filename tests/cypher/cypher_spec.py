@@ -208,11 +208,8 @@ HELD: dict[str, dict[str, list[Hold]]] = {
     "queries.yaml": {
         # v0.21.0, liberation-data/drivine-cypher-spec#31: a NaN or infinite parameter is bound as a text
         # (drivine4j#295), and Oracle compares NaN equal to NaN (drivine4j#409, also #327); drivine4j#452 fixes both.
-        # On SQLite step 6 gives null, as Neo4j does, as drivine4j and Drivine for TypeScript hold the rest there.
-        "NaN and the infinities as parameters": [
-            Hold(164, ("postgres", "oracle")),
-            Hold(164, ("sqlite",), (1, 2, 3, 4, 5, 7, 8, 9, 10, 12, 13, 14, 15, 16, 17, 18, 19)),
-        ],
+        # drivine4j holds the case on SQLite too, for drivine4j#295.
+        "NaN and the infinities as parameters": [Hold(164, ("sql",))],
         "NaN worked out": [Hold(164, ("oracle",), (2, 3))],
         # SQLite before 3.53 writes a float to 15 significant digits, and refuses a subquery in json_each that groups
         # by a column of its row (#376).

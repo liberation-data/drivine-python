@@ -35,7 +35,7 @@ from drivine.sync import (
     transaction,
 )
 from tests.cypher.cypher_spec import load
-from tests.sync_integration.conftest import ORACLE, POSTGRES, SQL_STORES
+from tests.sync_integration.conftest import ORACLE, POSTGRES, SQL_STORES, SQLITE
 
 UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
 """A random version 4 UUID, in lower case, as Neo4j's `randomUUID()` gives one."""
@@ -348,7 +348,9 @@ def test_a_cypher_statement_takes_named_parameters_on_a_sql_store(cypher_pm: Per
         cypher_pm.query(positional)
 
 
-@pytest.mark.parametrize("store", [it for it in SQL_STORES if {"postgres": POSTGRES, "oracle": ORACLE}.get(it)])
+@pytest.mark.parametrize(
+    "store", [it for it in SQL_STORES if {"postgres": POSTGRES, "oracle": ORACLE, "sqlite": SQLITE}.get(it)]
+)
 def test_a_write_in_a_transaction_rolled_back_leaves_nothing_and_runs_again_after(
     store: str, factory: PersistenceManagerFactory
 ):
@@ -363,7 +365,9 @@ def test_a_write_in_a_transaction_rolled_back_leaves_nothing_and_runs_again_afte
     assert pm.query(spec("MATCH (n:CyWrite) RETURN count(n)")) == [1]
 
 
-@pytest.mark.parametrize("store", [it for it in SQL_STORES if {"postgres": POSTGRES, "oracle": ORACLE}.get(it)])
+@pytest.mark.parametrize(
+    "store", [it for it in SQL_STORES if {"postgres": POSTGRES, "oracle": ORACLE, "sqlite": SQLITE}.get(it)]
+)
 def test_a_cypher_statement_is_compiled_against_the_tables_of_the_graph_its_datasource_names(
     store: str, registry: DatabaseRegistry, factory: PersistenceManagerFactory
 ):
@@ -2749,6 +2753,7 @@ def test_aggregates_of_temporal_arithmetic_give_what_they_give_of_it_worked_out_
     ) == [[2, 1], [1, 2]]
 
 
+@pytest.mark.needs_sqlite_3_53
 def test_an_aggregate_of_floats_gives_a_float_whole_or_not_and_a_sum_of_integers_an_integer(
     cypher_pm: PersistenceManager,
 ):
@@ -2845,7 +2850,7 @@ def hub(
     if pm.type is DatabaseType.NEO4J:
         apart, nodes, edges = pm, None, None
     else:
-        store = "postgres" if pm.type is DatabaseType.POSTGRES else "oracle"
+        store = {DatabaseType.POSTGRES: "postgres", DatabaseType.ORACLE: "oracle"}.get(pm.type, "sqlite")
         name = f"{store}_{HUB_GRAPH}"
         if registry.registered(name) is None:
             properties = dataclasses.replace(ConnectionProperties.from_env(store), default_graph_path=HUB_GRAPH)
@@ -2975,6 +2980,7 @@ def test_a_quotient_of_floats_is_written_without_the_zeros_its_scale_leaves(cyph
     ) == [[2.0, 3.5, 2.5, "2.0", "2.5", "3.5"]]
 
 
+@pytest.mark.needs_sqlite_3_53
 def test_to_string_of_a_double_past_oracles_number_range_writes_its_shortest_digits(
     cypher_pm: PersistenceManager,
 ):
@@ -2989,6 +2995,7 @@ def test_to_string_of_a_double_past_oracles_number_range_writes_its_shortest_dig
     assert cypher_pm.query(spec("RETURN toString(5e-324)")) == ["4.9E-324"]
 
 
+@pytest.mark.needs_sqlite_3_53
 def test_round_reads_a_precision_from_data_or_a_whole_float_as_a_whole_number_toward_zero_and_a_null_as_null(
     cypher_pm: PersistenceManager,
 ):
@@ -3111,6 +3118,7 @@ def test_round_reads_a_precision_from_data_or_a_whole_float_as_a_whole_number_to
         ) == [[2.225073858507201e-308, 2.2250738585072014e-308, 5e-324, 1e-323]]
 
 
+@pytest.mark.needs_sqlite_3_53
 def test_round_to_0_places_rounds_half_toward_positive_infinity_as_round_of_one_argument_does(
     cypher_pm: PersistenceManager,
 ):
@@ -5284,6 +5292,7 @@ def test_random_uuid_bound_by_a_with_is_one_value_for_each_row_the_same_however_
         assert [lower, plus] == [a.lower(), a]
 
 
+@pytest.mark.needs_sqlite_3_53
 def test_a_call_sees_only_the_variables_it_imports_and_a_name_it_does_not_import_is_a_new_variable_in_it(
     cypher_pm: PersistenceManager,
 ):

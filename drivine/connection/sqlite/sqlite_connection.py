@@ -8,7 +8,7 @@ from typing import Any, TypeVar
 
 from drivine import concurrency
 from drivine.backend.sql.sql_graph import DEFAULT_GRAPH
-from drivine.backend.sqlite.sqlite_graph import JSON_ROWS
+from drivine.backend.sqlite.sqlite_graph import CYPHER, JSON_ROWS
 from drivine.connection.connection import Connection
 from drivine.connection.postgres.postgres_result_mapper import PostgresResultMapper
 from drivine.connection.sqlite.sqlite_cursor import SqliteCursor
@@ -56,7 +56,8 @@ class SqliteConnection(Connection):
         finalized = spec.finalized_copy("SQL")
         statement, parameters, compiled = _compiled(finalized, self.graph)
         start = time.perf_counter()
-        rows = await concurrency.blocking(self.session.query, statement, parameters, on=self.session.thread)
+        run = self.session.query_writing if compiled and _writes(statement) else self.session.query
+        rows = await concurrency.blocking(run, statement, parameters, on=self.session.thread)
         log_statement(self.session_id, finalized, start)
         if compiled:
             # A compiled statement's row is its one column, as a graph engine's record of one column is its value.
@@ -66,7 +67,8 @@ class SqliteConnection(Connection):
     async def open_cursor(self, spec: CursorSpecification[T]) -> SqliteCursor[T]:
         finalized = spec.finalized_copy("SQL")
         statement, parameters, compiled = _compiled(finalized, self.graph)
-        cursor = await concurrency.blocking(self.session.execute, statement, parameters, on=self.session.thread)
+        execute = self.session.execute_writing if compiled and _writes(statement) else self.session.execute
+        cursor = await concurrency.blocking(execute, statement, parameters, on=self.session.thread)
         opened = SqliteCursor(finalized, self.session, statement, cursor, self.result_mapper, compiled)
         self._cursors.append(opened)
         return opened
@@ -117,6 +119,11 @@ def _compiled(spec: QuerySpecification[Any], graph: str) -> tuple[str, Any, bool
         *([f"OFFSET {spec._skip}"] if spec._skip else []),
     ]
     return " ".join([statement.text, *paged]), spec.parameters, cypher is not None
+
+
+def _writes(statement: str) -> bool:
+    """Whether the compiled statement writes: a procedure `drivine_cypher` carries out."""
+    return f"{CYPHER}(" in statement
 
 
 _warned: list[bool] = []

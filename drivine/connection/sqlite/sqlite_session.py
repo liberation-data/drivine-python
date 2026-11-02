@@ -10,14 +10,14 @@ import logging
 import re
 import sqlite3
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime
 from datetime import time as clock_time
 from decimal import Decimal
 from enum import Enum
 from types import ModuleType
-from typing import Any, NoReturn, cast
+from typing import Any, NoReturn, TypeVar, cast
 from uuid import UUID
 
 from drivine.backend.sql.sql_json import storable, to_json
@@ -27,6 +27,8 @@ from drivine.backend.sqlite.sqlite_graph import JSON_ROWS, SqliteGraph
 from drivine.drivine_error import DrivineError
 
 logger = logging.getLogger("drivine.connection")
+
+T = TypeVar("T")
 
 MINIMUM_VERSION = (3, 45, 0)
 """The oldest SQLite Drivine's statements run on: drivine4j's, for its JSON functions and aggregate order."""
@@ -140,6 +142,31 @@ class SqliteSession:
             self._raise_told(error)
         finally:
             cursor.close()
+
+    def query_writing(self, statement: str, parameters: Mapping[str, Any] | Sequence[Any]) -> list[dict[str, Any]]:
+        """`query` of a statement that writes, in a transaction of its own where none is open: see `writing`."""
+        return self.writing(lambda: self.query(statement, parameters))
+
+    def execute_writing(self, statement: str, parameters: Mapping[str, Any] | Sequence[Any]) -> sqlite3.Cursor:
+        """`execute` of a statement that writes, in a transaction of its own where none is open: see `writing`."""
+        return self.writing(lambda: self.execute(statement, parameters))
+
+    def writing(self, run: Callable[[], T]) -> T:
+        """
+        What `run` gives, in a transaction of its own where none is open, which takes the write lock as it begins: a
+        statement that reads, then writes within it, as compiled Cypher's `drivine_cypher` does, would otherwise be
+        turned away at once where another connection wrote after it began to read, without waiting for the lock.
+        """
+        if self.in_transaction:
+            return run()
+        self.begin()
+        try:
+            done = run()
+            self.commit()
+        except BaseException:
+            self.rollback()
+            raise
+        return done
 
     def execute(self, statement: str, parameters: Mapping[str, Any] | Sequence[Any]) -> sqlite3.Cursor:
         """

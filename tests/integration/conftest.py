@@ -4,6 +4,7 @@ from collections.abc import AsyncIterator
 import pytest
 
 from drivine import DatabaseRegistry, DatabaseType, PersistenceManager, PersistenceManagerFactory, QuerySpecification
+from drivine.connection.sqlite.sqlite_session import FULL_FLOATS_VERSION, sqlite_module
 from tests.integration.sql_cypher_fixtures import for_store
 
 ORACLE = os.environ.get("ORACLE_DATABASE_TYPE") == "ORACLE"
@@ -30,6 +31,9 @@ tests' own environment configures them, and Oracle when set.
 
 SQL_STORES = ("postgres", "oracle", "sqlite")
 """The stores that keep a graph in SQL tables."""
+
+SQLITE_BEFORE_3_53 = sqlite_module().sqlite_version_info < FULL_FLOATS_VERSION
+"""Whether the SQLite the tests run on is older than 3.53, which compiled Cypher needs all of (#376)."""
 
 
 @pytest.fixture(scope="session")
@@ -101,3 +105,6 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
         fails = item.get_closest_marker("fails_on_sql_stores")
         if fails and engine in SQL_STORES:
             item.add_marker(pytest.mark.xfail(reason=fails.args[0], strict=True))
+        if item.get_closest_marker("needs_sqlite_3_53") and engine == "sqlite" and SQLITE_BEFORE_3_53:
+            reason = "SQLite before 3.53 rounds a float to 15 significant digits, and groups by no outer column (#376)."
+            item.add_marker(pytest.mark.xfail(reason=reason, strict=True))

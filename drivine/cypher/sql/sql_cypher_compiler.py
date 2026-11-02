@@ -784,6 +784,14 @@ class SqlCypherCompiler(ABC):
         """
         return self.property_of(props, key)
 
+    def coalesced_property(self, props: str, key: str) -> str:
+        """
+        The property `key` of the node or relationship whose properties are `props`, where it is an argument of
+        `coalesce()`: as `property_of` reads it, null where it is JSON's null, but on a store that must read such an
+        argument apart.
+        """
+        return self.null_if_json_null(self.property_of(props, key))
+
     def row_value(self, keys: Sequence[str]) -> str:
         """
         The value at `keys`, each of a map in the one before, in the row a write is making (ROW), where a statement of
@@ -5883,6 +5891,20 @@ class SqlCypherCompiler(ABC):
             json_null=any(_may_be_json_null(result) for _, result in results),
         )
 
+    def _coalesced(self, argument: Expression, value: Value, scope: Scope) -> str:
+        """
+        An argument of `coalesce()`, `value` as compiled from `argument`, null where it is JSON's null: a property of a
+        node or a relationship a variable names as `coalesced_property` reads it, which on Oracle reads a long text
+        through its text (liberation-data/drivine4j#459).
+        """
+        if isinstance(argument, Property) and isinstance(argument.subject, Variable):
+            subject = scope.get(argument.subject.name)
+            if isinstance(subject, Node) and argument.key != stamps.PROPERTY:
+                return self.coalesced_property(subject.props, argument.key)
+            if isinstance(subject, Relationship):
+                return self.coalesced_property(subject.props, argument.key)
+        return self.null_if_json_null(self.comparable(self.json(value)))
+
     def _function(self, function: Function, scope: Scope) -> Value:
         arguments = [self._expression(it, scope) for it in function.arguments]
 
@@ -5936,8 +5958,8 @@ class SqlCypherCompiler(ABC):
                 return self._relationship_list(subject.eids)
             raise DrivineError("relationships() takes a path.")
         if name == "coalesce":
-            coalesced = ", ".join(self.null_if_json_null(self.comparable(self.json(it))) for it in arguments)
             written = list(zip(function.arguments, arguments, strict=True))
+            coalesced = ", ".join(self._coalesced(argument, value, scope) for argument, value in written)
             return Json(
                 f"COALESCE({coalesced})",
                 temporal=_kind_of(written),

@@ -137,6 +137,11 @@ people = await pm.query(spec.bind({"city": "Sydney"}))
   1.4 to 2.5 times a plain read as drivine4j measured it, and the list is written out whole for it. Any other item is
   read as before, and so is an unwound item. A list made of a long property (`[n.bio, 'y']`) still takes the property
   out as JSON, as above.
+- So are reads of an argument of `coalesce()` that is a property of a node or a relationship
+  ([#295](https://github.com/liberation-data/drivine-python/issues/295)), wherever the `coalesce()` is
+  (`coalesce($p.q, n.bio)`, `size(trim(coalesce(n.bio, '')))`, `SET n.a = coalesce(n.bio, '')`): a text of at most
+  4,000 bytes is read as a `VARCHAR2`, at no cost drivine4j measured (20,000 rows take 72 ms either way), and a longer
+  one through its text. Any other value is read as before, and so is a value of a map (`coalesce(m.a, 'z')`).
 - On Oracle two texts are compared (`=`, `<>`, `<`, `>=`, `IN` …) as `VARCHAR2`s, and as CLOBs with
   `DBMS_LOB.COMPARE` where either is past 4,000 bytes
   ([#291](https://github.com/liberation-data/drivine-python/issues/291)).

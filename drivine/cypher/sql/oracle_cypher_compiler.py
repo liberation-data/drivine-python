@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import json as json_
 import math
 import re
 from collections.abc import Callable, Mapping, Sequence
@@ -35,6 +36,7 @@ from drivine.cypher.sql.sql_cypher_compiler import (
     Walk,
     Walked,
     indent,
+    is_given_number,
     literal,
     utf8_bytes,
 )
@@ -146,7 +148,8 @@ class OracleCypherCompiler(SqlCypherCompiler):
     Oracle keeps a number as a number, so a stored `2.0` reads as `2`; a floating-point number the statement writes, or
     a parameter's that is a whole number, is a `BINARY_DOUBLE`, and stays one. A text Oracle reads out of JSON is a
     `VARCHAR2` of at most 4,000 bytes, and one longer is read as a CLOB where it is measured, cut, changed, searched
-    or reversed (see `texts`). An empty text is null, as Oracle's empty text is.
+    or reversed (see `texts`), or compared (see `json_equals` and `ordered`). An empty text is null, as Oracle's empty
+    text is.
     `reduce` is a function the query declares, and does not run in a statement that writes, in the step of a `reduce`,
     or where its step reads a path.
 
@@ -182,6 +185,14 @@ class OracleCypherCompiler(SqlCypherCompiler):
         self._long = False
         """Whether the texts `texts` gives its body are CLOBs: see `scalar`, `starts_with`, `ends_with`,
         `contains_text`, `split`, `replace_text` and `reversed_text`, which read them otherwise."""
+        self._reads_compared = False
+        """
+        Whether a comparison reads a property by its own path (see `shared_compared`): the statement is then not
+        rewritten by Oracle's JSON table transformation (see `planned`), which read the reads of one node's properties
+        together, and lost them where a quantifier's subquery, bound as a comparison's side, read them: `all(x IN [1]
+        WHERE p.born > 1962) = true` was null for each person (the spec's "Quantifiers of null"), and right with the
+        hint, or with the property taken out as JSON first.
+        """
 
     def compile_query(self, query: Query, parameters: Mapping[str, Any]) -> CompiledCypher:
         """As SqlCypherCompiler's, saying whether the statement calls the store's function: see `nulls_equal`."""
@@ -432,6 +443,115 @@ class OracleCypherCompiler(SqlCypherCompiler):
         """The JSON as text, where it is a string: a CLOB where `clob`, else as `text` reads it; a property by its own
         path (see `_direct`)."""
         return _direct(self._long_text(json) if clob else self.text(json), json)
+
+    @property
+    def _as_json(self) -> bool:
+        """
+        Whether two values are compared as JSON, as `json_equals` and `ordered` compared them before #291: in a
+        statement that writes and in the step of a `reduce()`, which run as PL/SQL. There a CLOB read from an unwound
+        row's JSON closed the session (ORA-03113), where the JSON was refused (ORA-40180) and the session stayed open:
+        `UNWIND $items AS t MERGE (n {a: t.a})` with a text past 32 KB (liberation-data/drivine4j#389). So a text past
+        32 KB is refused there, as before.
+        """
+        return self.procedural or self._folding
+
+    def shared_compared(self, a: str, b: str, body: Body) -> str:
+        """
+        The sides of a comparison, an `IN` among them, bound as a sum's are (see `shared_sum`), and each property read
+        by its own path where it is not bound (see `_direct`): `json_equals` and `ordered` read a text as a `VARCHAR2`
+        or a CLOB, and not as JSON, which Oracle refuses to compare past about 32 KB (ORA-40180, #291). Taken out as
+        JSON and compared, a stored text past 32 KB, on two rows or more, closed the session on the first run or a later
+        one (ORA-03113), as #144's did.
+
+        Not in a statement that writes, nor in the step of a `reduce()`, where two values are compared as JSON, as
+        before (see `_as_json`).
+        """
+        if self._as_json:
+            return self.shared([a, b], body)
+        if _property_read(a) is not None or _property_read(b) is not None:
+            self._reads_compared = True
+
+        def direct(sides: list[str]) -> str:
+            sql = body(sides)
+            for side in sides:
+                sql = _direct(sql, side)
+            return sql
+
+        return self.shared_sum(a, b, direct)
+
+    def json_equals(self, x: str, y: str) -> str:
+        """
+        As JSON, but where either is a text past 4,000 bytes, or empty, which a `VARCHAR2` doesn't hold: then two texts
+        as `_text_order` compares them, and a text is equal to no value of another kind, and is compared with SQL's
+        null, a property that isn't there, as null. `=` of JSON refuses a value past about 32 KB, a text among them,
+        whatever the other is (ORA-40180, #291): `n.bio = 'abc'` failed where one node's bio was so long. Each is read
+        as a `VARCHAR2` first, and its kind only where that is null. A list or a map that holds a long text is compared
+        as JSON, and refused. Each side is read more than once, so a long one is bound, as `shared_compared` binds it.
+        """
+        if self._as_json or (_written(x) and _written(y)):
+            return f"{x} = {y}"
+        # Beside a value the statement writes, as beside one it is given, the other alone is tested: a list literal of
+        # a few hundred items, compared item by item, so stays as large as before, where Oracle ran out of memory.
+        if _written(x) or _written(y):
+            other, value = (x, y) if _written(y) else (y, x)
+            # Beside a value of one kind, a list or a map is not equal, and isn't compared as JSON (drivine4j#476).
+            containers = _written_scalar(value) is False
+            return self.shared_compared(other, value, lambda it: _one_sided(it[0], it[1], containers))
+
+        def equal(sides: list[str]) -> str:
+            a, b = sides
+            return (
+                f"CASE WHEN {_short(a)} IS NOT NULL AND {_short(b)} IS NOT NULL THEN {a} = {b} "
+                f"WHEN {_kind(a)} = 'string' AND {_kind(b)} = 'string' THEN {_clob_order(a, '=', b)} "
+                f"WHEN {_kind(a)} IS NULL OR {_kind(b)} IS NULL THEN NULL "
+                f"WHEN {_kind(a)} = 'string' OR {_kind(b)} = 'string' THEN FALSE ELSE {a} = {b} END"
+            )
+
+        return self.shared_compared(x, y, equal)
+
+    def given_equals(self, x: str, y: str, given: Any) -> str:
+        """
+        `json_equals`, but where `given` is a number, a truth value, or a text of 1 to 4,000 bytes, which is read as a
+        `VARCHAR2`: then only the other side is tested, and where it is a text that isn't, it is longer or empty, and
+        not equal. A property read from the store is not null as JSON, and so needs no test of its own.
+        """
+        if self._as_json:
+            return f"{x} = {y}"
+        if not _read_short(given):
+            return self.json_equals(x, y)
+        if _written(x):
+            return f"{x} = {y}"
+        return self.shared_compared(x, y, lambda it: _one_sided(it[0], it[1]))
+
+    def given_items_test(self, value: str, items: Sequence[Any]) -> str | None:
+        """
+        Where each of the items is null or read as a `VARCHAR2` (see `given_equals`), whether the value is read as one
+        too, or is no text: then each item is compared with it as JSON, a plain equality, as before, and where it is a
+        text that isn't, it is longer than any of them or empty, and in none. Tested once for the value, not once for
+        each item, as Drivine for TypeScript measured: over 20,000 rows an `IN` of three items took 9 ms so, against
+        15 ms with the test in each item's comparison, as drivine4j writes it, and 7.5 ms before.
+        """
+        if self._as_json or not all(it is None or _read_short(it) for it in items):
+            return None
+        return f"({_short_or_no_text(value)})"
+
+    @property
+    def given_items_decided(self) -> bool:
+        """
+        Not in a statement that writes, nor in the step of a `reduce()`, which compare as before (see `_as_json`): a
+        stored text past 32 KB, taken out as JSON to read its nulls, closed the session (liberation-data/drivine4j#475).
+        """
+        return not self._as_json
+
+    def ordered(self, x: str, operator: str, y: str) -> str:
+        """
+        Two texts, as `_text_order` orders them; any other two of one kind as JSON. JSON ordered a text past 32 KB,
+        read from the store on two rows or more, and closed the session on the first run or a later one (ORA-03113,
+        #291). Its sides are bound, and a property read by its own path, by `shared_compared`.
+        """
+        if self._as_json:
+            return f"{x} {operator} {y}"
+        return f"CASE WHEN {_kind(x)} = 'string' THEN {_text_order(x, operator, y)} ELSE {x} {operator} {y} END"
 
     def bool_of(self, json: str) -> str:
         return self.shared1(
@@ -1222,9 +1342,10 @@ class OracleCypherCompiler(SqlCypherCompiler):
         liberation-data/drivine4j#415): `MATCH (a:N1), (b:N2) RETURN a.n + b.n` gave a row for each two nodes, and so
         did `a.n - a.m`, `toUpper(a.s), size(a.s)` and `a.l + b.l`. Seen on Oracle 23.26.3 (gvenzl/oracle-free 23). The
         hint is the statement's, whichever query of it holds it, so the outermost one holds it. A query of one table
-        reads as it did: none lost a test.
+        reads as it did, none lost a test, but where a comparison reads a property by its own path (see
+        `_reads_compared`).
         """
-        if len(self._graph_table.findall(query)) < 2:
+        if len(self._graph_table.findall(query)) < 2 and not self._reads_compared:
             return query
         hinted = _HINTED.match(query)
         if hinted:
@@ -1692,6 +1813,99 @@ def _searched(t: str, x: str) -> str:
 def _kind(json: str) -> str:
     """The kind of the JSON as Oracle names it, a floating-point number by its own name."""
     return f"JSON_VALUE({json}, '$.type()')"
+
+
+def _short(json: str) -> str:
+    """The JSON as a `VARCHAR2`, where it is a text of at most 4,000 bytes, a number or a truth value; else null."""
+    return f"JSON_VALUE({json}, '$')"
+
+
+def _clob_order(x: str, operator: str, y: str) -> str:
+    """
+    Whether the JSON texts `x` and `y` stand as `operator` says, as CLOBs: see `_text_order`. Each is a CLOB by
+    `TO_CLOB` too: `JSON_VALUE(JSON('null'), '$' RETURNING CLOB)`, of a null a list writes, is a null of no type to
+    `DBMS_LOB.COMPARE`, which then matched more than one of its declarations (PLS-307).
+    """
+    cx, cy = (f"TO_CLOB(JSON_VALUE({it}, '$' RETURNING CLOB))" for it in (x, y))
+    return f"NVL(DBMS_LOB.COMPARE({cx}, {cy}), SIGN(NVL(LENGTH({cx}), 0) - NVL(LENGTH({cy}), 0))) {operator} 0"
+
+
+def _text_order(x: str, operator: str, y: str) -> str:
+    """
+    Whether the JSON texts `x` and `y` stand as `operator` says, `=`, `<`, `>=`…: as `VARCHAR2`s where both are read
+    so, which compare by their bytes, so by their code points; else as CLOBs, by `DBMS_LOB.COMPARE`, which compares the
+    whole of each, a shorter one that starts the other first. An empty text, null as a CLOB, comes before any other. A
+    CLOB is compared by its UTF-16 units, so between two texts, either past 4,000 bytes, that first differ where one has
+    a character past U+FFFF and the other one from U+E000 to U+FFFF, the order is the other way round from Cypher's.
+    """
+    return (
+        f"CASE WHEN {_short(x)} IS NOT NULL AND {_short(y)} IS NOT NULL THEN {_short(x)} {operator} {_short(y)} "
+        f"ELSE {_clob_order(x, operator, y)} END"
+    )
+
+
+def _one_sided(a: str, b: str, containers: bool = True) -> str:
+    """
+    Whether the JSON value `a` is equal to `b`, which is no text or a text read as a `VARCHAR2`: as JSON where `a` is
+    read as one too, or is no text, and else not, as `a` is then a longer text or an empty one; null where `a` is SQL's
+    null. Where not `containers`, `b` being a value of one kind, a list or a map is not equal either, and isn't compared
+    as JSON, which refuses one that holds a text past 32 KB (ORA-40180).
+    """
+    return f"CASE WHEN {_short_or_no_text(a, containers)} THEN {a} = {b} ELSE FALSE END"
+
+
+def _short_or_no_text(json: str, containers: bool = True) -> str:
+    """
+    Whether the JSON value is read as a `VARCHAR2`, a text of 1 to _SHORT_TEXT bytes, or is no text; SQL's null is no
+    text. Where not `containers`, a list or a map doesn't pass either.
+    """
+    kinds = "<> 'string'" if containers else "NOT IN ('string', 'array', 'object')"
+    return f"{_short(json)} IS NOT NULL OR NVL({_kind(json)}, 'null') {kinds}"
+
+
+def _read_short(given: Any) -> bool:
+    """Whether the value the statement gives is a number, a truth value or a text of 1 to _SHORT_TEXT bytes, which
+    `JSON_VALUE` reads as a `VARCHAR2`."""
+    if isinstance(given, str):
+        return 0 < cast(int, utf8_bytes(given)) <= _SHORT_TEXT
+    return isinstance(given, bool) or is_given_number(given)
+
+
+_WRITTEN_LITERAL = re.compile(r"JSON\('((?:[^']|'')*)'\)", re.DOTALL)
+"""A value the statement writes as `literal_json` writes it, `JSON('5')`, and its JSON's text, its quotes doubled."""
+
+_WRITTEN_FLOAT = re.compile(r"JSON_SCALAR\(TO_BINARY_DOUBLE\('[^']*'\)\)")
+"""A float the statement writes, as `literal_json` writes it."""
+
+
+def _written(json: str) -> bool:
+    """
+    Whether the JSON is a value the statement writes that is no text, or a text of 1 to _SHORT_TEXT bytes, which
+    `JSON_VALUE` reads as a `VARCHAR2`: a literal, `JSON('5')`, a float, or a list or a map it makes. Beside it the
+    other side alone is tested (see `OracleCypherCompiler.json_equals`), as beside a value the statement is given.
+    """
+    return _written_scalar(json) is not None
+
+
+def _written_scalar(json: str) -> bool | None:
+    """Whether the JSON, where it is `_written`, is a value of one kind (True) or a list or a map (False); None where it
+    isn't written."""
+    literal_ = _WRITTEN_LITERAL.fullmatch(json)
+    if literal_ is not None:
+        value = json_.loads(literal_[1].replace("''", "'"))
+        if isinstance(value, (list, dict)):
+            return False
+        return True if not isinstance(value, str) or _read_short(value) else None
+    # A float literal; and a list or a map, which its constructor makes whatever it holds, so never SQL's null.
+    if _WRITTEN_FLOAT.fullmatch(json) is not None:
+        return True
+    return False if json.startswith(("JSON_ARRAY(", "JSON_OBJECT(")) and _enclosed(json) else None
+
+
+def _enclosed(sql: str) -> bool:
+    """Whether the SQL is one call whose parentheses, opened by its first, close only at its end."""
+    open_ = sql.find("(")
+    return open_ > 0 and sql.endswith(")") and _balanced(sql[open_ + 1 : -1])
 
 
 def _quoted(text: str) -> str:

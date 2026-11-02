@@ -1735,6 +1735,203 @@ def test_a_text_past_32_kb_that_is_an_item_of_a_list_read_by_its_place_on_two_ro
     assert typed(rows) == typed([[1, "a", 2.0, [3], {"k": 4}, None, "y", 1, None]]), rows
 
 
+def test_a_text_past_32_kb_compares_equal_unequal_in_a_list_and_in_order_stored_given_and_beside_a_long_value(
+    cypher_pm: PersistenceManager,
+):
+    # On Oracle two values were compared as JSON: = and IN with a text past 32 KB on either side were refused
+    # (ORA-40180, #291), and <, >, <= and >= of one read from the store on two rows or more closed the session on the
+    # first run or a later one (ORA-03113). A node of another label holds the same text, and is not read. drivine4j's
+    # CypherQueryContract of liberation-data/drivine4j#389, with Drivine for TypeScript's statements of its port.
+    clear(cypher_pm)
+    long = "a" * 40_000 + "x"
+    # Equal, equal again, differing in the last character either way, short, null, and a number.
+    values: list[str | int | None] = [long, long, long[:-1] + "y", long[:-1] + "w", "abc", None, 5]
+    # And a short text of each, to compare the long ones with through a long value.
+    shorts: list[str | None] = ["abc", "zzz", "a", None, "abc", "b", "q"]
+    # One node at a time: on Oracle, UNWIND of a list of texts past 32 KB into CREATE closes the session.
+    for i, (t, s) in enumerate(zip(values, shorts, strict=True)):
+        cypher_pm.query(spec("CREATE (:CyCompare {i: $i, t: $t, s: $s})", {"i": i, "t": t, "s": s}))
+    cypher_pm.query(spec("CREATE (:CyCompareOther {i: 0, t: $t})", {"t": long}))
+
+    def compared(a: str | int | None, operator: str, b: str | int | None) -> bool | None:
+        # As Cypher compares two values: null beside null, a text and a number are not equal and are not ordered.
+        if a is None or b is None:
+            return None
+        if type(a) is not type(b):
+            return False if operator == "=" else True if operator == "<>" else None
+        order = (a > b) - (a < b)  # pyright: ignore[reportOperatorIssue]
+        return {"=": order == 0, "<>": order != 0, "<": order < 0, ">": order > 0, "<=": order <= 0, ">=": order >= 0}[
+            operator
+        ]
+
+    # An empty text, which Oracle reads as null, as a VARCHAR2 and as a CLOB, comes before any other.
+    given: dict[str, str | int | None] = {
+        "same": long,
+        "last": long[:-1] + "y",
+        "short": "abc",
+        "empty": "",
+        "none": None,
+        "number": 5,
+    }
+    listed: list[str | int | None] = [long, "abc", 5]
+    # A value too long to write as SQL, so bound beside the property: the issue's own form, of a node's short text, and
+    # of a long text a parameter gives.
+    bound = "toLower(trim(coalesce($p.q, m.s)))"
+    bound_long = "toLower(trim(coalesce($p.q, $same)))"
+    pairs = [(i, j) for i in range(len(values)) for j in range(len(values))]
+
+    def count(of: list[bool | None]) -> list[int]:
+        return [sum(1 for it in of if it is True)]
+
+    # Texts of an unwound parameter's items, two of them long, compared in a read.
+    rows = [long, long[:-1] + "y", "abc"]
+    parameters: dict[str, Any] = {
+        **given,
+        "p": {"q": None},
+        "list": listed,
+        "shortList": ["abc", 5, None],
+        "prefix": long[:32_768],
+        "rows": [{"a": it} for it in rows],
+    }
+    statements: list[tuple[str, list[Any]]] = []
+    for operator in ["=", "<>", "<", ">", "<=", ">="]:
+        stored = [compared(values[i], operator, values[j]) for i, j in pairs]
+        beside = [compared(values[i], operator, shorts[j]) for i, j in pairs]
+        unwound = [compared(it, operator, row) for row in rows for it in values]
+        statements += [
+            (f"MATCH (n:CyCompare), (m:CyCompare) RETURN n.t {operator} m.t ORDER BY n.i, m.i", stored),
+            (f"MATCH (n:CyCompare), (m:CyCompare) WHERE n.t {operator} m.t RETURN count(*)", count(stored)),
+            (f"MATCH (n:CyCompare), (m:CyCompare) RETURN n.t {operator} {bound} ORDER BY n.i, m.i", beside),
+            (f"MATCH (n:CyCompare), (m:CyCompare) WHERE n.t {operator} {bound} RETURN count(*)", count(beside)),
+            (
+                f"MATCH (n:CyCompare) RETURN n.t {operator} {bound_long} ORDER BY n.i",
+                [compared(it, operator, long) for it in values],
+            ),
+            (f"UNWIND $rows AS r MATCH (n:CyCompare) WHERE n.t {operator} r.a RETURN count(*)", count(unwound)),
+        ]
+        for name, value in given.items():
+            each = [compared(it, operator, value) for it in values]
+            statements += [
+                (f"MATCH (n:CyCompare) RETURN n.t {operator} ${name} ORDER BY n.i", each),
+                # A value a WITH passes on, which may be JSON's null, rather than a property read from the store.
+                (f"MATCH (n:CyCompare) WITH n.i AS i, n.t AS t RETURN t {operator} ${name} ORDER BY i", each),
+            ]
+            statements += [
+                (f"WITH ${name} AS a, ${other} AS b RETURN a {operator} b", [compared(value, operator, other_value)])
+                for other, other_value in given.items()
+            ]
+
+    def in_(value: str | int | None, items: list[str | int | None]) -> bool | None:
+        return None if value is None else value in items
+
+    # IN, of a list the statement writes, of one a parameter gives, and of a bound value's.
+    in_lists = [None if values[j] is None else in_(values[i], [values[j]]) for i, j in pairs]
+    in_bound = [None if shorts[j] is None else in_(values[i], [shorts[j]]) for i, j in pairs]
+    in_given = [in_(it, listed) for it in values]
+    in_short = [in_(it, ["abc", 5]) for it in values]
+    # A given list that holds a null makes each miss null.
+    in_short_list = [True if it is True else None for it in in_short]
+    statements += [
+        ("MATCH (n:CyCompare), (m:CyCompare) RETURN n.t IN [m.t] ORDER BY n.i, m.i", in_lists),
+        ("MATCH (n:CyCompare), (m:CyCompare) WHERE n.t IN [m.t] RETURN count(*)", count(in_lists)),
+        (f"MATCH (n:CyCompare), (m:CyCompare) RETURN n.t IN [{bound}] ORDER BY n.i, m.i", in_bound),
+        (f"MATCH (n:CyCompare), (m:CyCompare) WHERE n.t IN [{bound}] RETURN count(*)", count(in_bound)),
+        (
+            f"MATCH (n:CyCompare) RETURN n.t IN [{bound_long}, 'x'] ORDER BY n.i",
+            [in_(it, [long]) for it in values],
+        ),
+        ("MATCH (n:CyCompare) RETURN n.t IN $list ORDER BY n.i", in_given),
+        ("MATCH (n:CyCompare) WHERE n.t IN $list RETURN count(*)", count(in_given)),
+        # Of short items only, written or given, which on Oracle test only the property: null where it is a longer
+        # text, so not in.
+        ("MATCH (n:CyCompare) RETURN n.t IN ['abc', 5] ORDER BY n.i", in_short),
+        ("MATCH (n:CyCompare) WHERE n.t IN ['abc', 5] RETURN count(*)", count(in_short)),
+        ("MATCH (n:CyCompare) RETURN n.t IN $shortList ORDER BY n.i", in_short_list),
+        ("MATCH (n:CyCompare) WHERE n.t IN $shortList RETURN count(*)", count(in_short)),
+        # The same of a value a WITH passes on, and of a long one bound beside the list, which on Oracle is tested
+        # beside the EXISTS that compares it with each item as JSON, and must not be so compared. (The bound value is a
+        # parameter's: one made so of a stored text past 32 KB closes the session on main too, #295.)
+        ("MATCH (n:CyCompare) WITH n.i AS i, n.t AS t RETURN t IN $shortList ORDER BY i", in_short_list),
+        ("MATCH (n:CyCompare) WITH n.t AS t WHERE t IN $shortList RETURN count(*)", count(in_short)),
+        (
+            f"MATCH (n:CyCompare) RETURN [{bound_long} IN ['abc', 5], toLower(trim(coalesce($p.q, $short))) IN "
+            "['abc', 5]] ORDER BY n.i",
+            [[False, True] for _ in values],
+        ),
+        (f"MATCH (n:CyCompare) WHERE {bound_long} IN ['abc', 5] RETURN count(*)", [0]),
+        # A long text the statement makes, beside no property and no long value.
+        ("WITH $same AS t, $prefix AS x RETURN substring(t, 0, 32768) = x", [True]),
+        (
+            "WITH $same AS t RETURN [substring(t, 0, 40001) = t, substring(t, 0, 40000) = t, "
+            "substring(t, 0, 40000) < t]",
+            [[True, False, True]],
+        ),
+    ]
+    with one_session(cypher_pm):
+        # Oracle closed the session on the first run or a later one.
+        for run in range(1, 4):
+            for cypher, expected in statements:
+                assert asked_again(cypher_pm, cypher, parameters) == expected, f"{cypher}, run {run}"
+    clear(cypher_pm)
+
+
+def test_a_text_past_32_kb_is_in_no_list_of_short_items_null_where_one_is_null_on_several_rows(
+    cypher_pm: PersistenceManager,
+):
+    # On Oracle, n.t IN $l with a null and an empty item or one past 4,000 bytes in $l closed the session (ORA-03113):
+    # where no item was equal, the property was taken out as JSON over two rows to tell null from false. drivine4j's
+    # CypherQueryContract of liberation-data/drivine4j#475.
+    clear(cypher_pm)
+    long = "a" * 40_000
+    for i in range(2):
+        cypher_pm.query(spec("CREATE (:CyInNull {i: $i, t: $t})", {"i": i, "t": f"{long}{i}"}))
+    # Short items, and an empty one and one past 4,000 bytes, which are compared with the text as texts.
+    lists: list[tuple[list[Any], bool | None]] = [
+        (["abc", 5, None], None),
+        (["abc", None], None),
+        ([None], None),
+        (["abc", 5], False),
+        (["", None], None),
+        (["x" * 5_000, None], None),
+        (["", "abc"], False),
+    ]
+    parameters = {f"l{i}": items for i, (items, _) in enumerate(lists)}
+    with one_session(cypher_pm):
+        for run in range(1, 4):
+            for i, (items, found) in enumerate(lists):
+                returned = f"MATCH (n:CyInNull) RETURN n.t IN $l{i} ORDER BY n.i"
+                filtered = f"MATCH (n:CyInNull) WHERE n.t IN $l{i} RETURN count(*)"
+                assert asked_again(cypher_pm, returned, parameters) == [found, found], f"{items}, run {run}"
+                assert asked_again(cypher_pm, filtered, parameters) == [0], f"{items} in a WHERE, run {run}"
+            # And written out, which is compared item by item.
+            written = "MATCH (n:CyInNull) RETURN n.t IN ['abc', 5, null] ORDER BY n.i"
+            assert asked_again(cypher_pm, written, parameters) == [None, None], f"written, run {run}"
+    clear(cypher_pm)
+
+
+def test_a_text_of_4_000_bytes_compares_as_a_short_one_and_one_past_4_000_bytes_but_not_characters_as_a_long_one(
+    cypher_pm: PersistenceManager,
+):
+    # On Oracle a text is compared as a VARCHAR2 up to 4,000 bytes, and as a CLOB past them (#291): counted in bytes, so
+    # '€', three bytes, makes a text of 1,335 characters past them.
+    clear(cypher_pm)
+    at = "€" * 1_333 + "a"
+    past = at + "b"
+    for i, t in enumerate([at, past]):
+        cypher_pm.query(spec("CREATE (:CyBytes {i: $i, t: $t})", {"i": i, "t": t}))
+    parameters = {"at": at, "past": past, "l": [past, None]}
+    compared = (
+        "MATCH (n:CyBytes) RETURN [n.t = $at, n.t = $past, n.t IN [$at, 'x'], n.t IN $l, n.t < $past] ORDER BY n.i"
+    )
+    assert cypher_pm.query(spec(compared, parameters)) == [
+        [True, False, True, None, True],
+        [False, True, False, True, False],
+    ]
+    filtered = "MATCH (n:CyBytes) WHERE n.t IN [$at, 'x'] RETURN n.i"
+    assert cypher_pm.query(spec(filtered, parameters)) == [0]
+    clear(cypher_pm)
+
+
 def test_collect_distinct_beside_keys_other_aggregates_an_order_a_page_and_a_variable_outside_its_aggregates(
     cypher_pm: PersistenceManager,
 ):

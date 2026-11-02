@@ -136,3 +136,29 @@ JSON(JSON_QUERY(JSON_SERIALIZE(list RETURNING CLOB), '$[0]' RETURNING CLOB))
 Drivine reads an item so where it is a text, and an item of any other type with the plain `JSON_QUERY` (see
 `OracleCypherCompiler._list_item`). An unwound item, which `JSON_TABLE` takes out, ran clean as it was. A list made of a
 long property, `JSON_ARRAY(JSON_QUERY(props, '$.a' RETURNING JSON), 'y')`, crashes in its making, and isn't worked around.
+
+## Two texts, compared
+
+The same crash comes from a text past 32 KB compared as JSON (liberation-data/drivine4j#389, #291 here): `<`, `>`, `<=`
+or `>=` of a property read with `JSON_QUERY(props, '$.a' RETURNING JSON)`, over two or more rows, closed the session
+from the first run of the statement or a later one. `=` of such JSON is refused instead (ORA-40180), and the session
+stays open. Read by the property's own path, `JSON_VALUE(props, '$.a' RETURNING CLOB)`, and compared with
+`DBMS_LOB.COMPARE`, it ran clean in a fresh container, three runs:
+
+```sql
+DBMS_LOB.COMPARE(JSON_VALUE(n1.props, '$.a' RETURNING CLOB), JSON_VALUE(n2.props, '$.a' RETURNING CLOB))
+```
+
+Drivine compares two texts so where either is past 4,000 bytes, and as `VARCHAR2`s where neither is (see
+`OracleCypherCompiler.json_equals` and `OracleCypherCompiler.ordered`). A list or a map that holds a long text is still
+compared as JSON, and refused. So is a text in a statement that writes, or in the step of a `reduce()`, which run as
+PL/SQL: there a CLOB read from an unwound row's JSON, `UNWIND $items AS t MERGE (n {a: t.a})`, closed the session,
+where the JSON is refused (ORA-40180).
+
+The same crash comes from `n.t IN $l` where `$l` holds a null beside an empty text or one past 4,000 bytes
+(liberation-data/drivine4j#475): where no item was equal, the property was read for the nulls it holds, written out with
+`JSON_SERIALIZE(JSON_QUERY(props, '$.a' RETURNING JSON) …)`, and compared with each item again by the graph's
+`nulls_equal` function, so a text past 32 KB was taken out as JSON over two rows. Items the statement writes or is
+given, none a list or a map, are equal to no value that holds a null, and a comparison with one is null only where the
+item is null, so Drivine decides between null and false when it compiles the statement and doesn't read the property
+again (see `SqlCypherCompiler.given_items_decided`).

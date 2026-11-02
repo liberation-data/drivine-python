@@ -27,8 +27,8 @@ class ConnectionProperties:
     """For engines without multi-statement transactions. Defaults to WARN. See `TransactionMode`."""
     default_graph_path: str | None = None
     """
-    On Oracle and Postgres, the graph to work on: it names the graph's tables (on Oracle, its property graph too).
-    Defaults to `drivine`. drivine4j's `default-graph-path`.
+    On Oracle, Postgres and SQLite, the graph to work on: it names the graph's tables (on Oracle, its property graph
+    too). Defaults to `drivine`. drivine4j's `default-graph-path`.
     """
 
     @classmethod
@@ -60,14 +60,15 @@ class ConnectionProperties:
         host = text("DATABASE_HOST")
         if not database_type:
             raise DrivineError(f"{prefix}DATABASE_TYPE for named connection is required.")
-        if not host:
-            raise DrivineError(f"{prefix}DATABASE_HOST for named connection is required.")
         try:
             kind = DatabaseType(database_type.upper())
         except ValueError:
             raise DrivineError(
                 f"{prefix}DATABASE_TYPE must be one of: {', '.join(DatabaseType)}, not {database_type!r}."
             ) from None
+        # A SQLite file has no host: DATABASE_NAME is its path.
+        if not host and kind is not DatabaseType.SQLITE:
+            raise DrivineError(f"{prefix}DATABASE_HOST for named connection is required.")
         mode = text("DATABASE_TRANSACTION_MODE")
         try:
             transaction_mode = TransactionMode(mode.upper()) if mode else None
@@ -76,12 +77,12 @@ class ConnectionProperties:
                 f"{prefix}DATABASE_TRANSACTION_MODE must be one of: {', '.join(TransactionMode)}."
             ) from None
         database_name = text("DATABASE_NAME")
-        if kind in (DatabaseType.POSTGRES, DatabaseType.ORACLE) and not database_name:
+        if kind in (DatabaseType.POSTGRES, DatabaseType.ORACLE, DatabaseType.SQLITE) and not database_name:
             raise DrivineError(f"{prefix}DATABASE_NAME for named connection is required.")
 
         return cls(
             database_type=kind,
-            host=host,
+            host=host or "",
             port=number("DATABASE_PORT"),
             user_name=text("DATABASE_USER"),
             password=text("DATABASE_PASSWORD"),

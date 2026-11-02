@@ -1,6 +1,9 @@
 # Written by scripts/unasync.py from tests/integration/stores.py:
 # change that, and run the script again.
-"""What a test asks of a store in the store's own language: Cypher on the graph engines, SQL on Postgres and Oracle."""
+"""
+What a test asks of a store in the store's own language: Cypher on the graph engines, SQL on Postgres, Oracle and
+SQLite.
+"""
 
 import json
 from typing import Any
@@ -16,12 +19,23 @@ def is_postgres(pm: PersistenceManager) -> bool:
     return pm.type is DatabaseType.POSTGRES
 
 
+def is_sqlite(pm: PersistenceManager) -> bool:
+    return pm.type is DatabaseType.SQLITE
+
+
+def _sqlite_text(prop: str, alias: str = "n") -> str:
+    """The property of the node row as text on SQLite, as Drivine reads it."""
+    return f"({alias}.props ->> '$.\"{prop}\"')"
+
+
 def equals(pm: PersistenceManager, prop: str, parameter: str) -> str:
     """A raw `where` that the node's property equals the parameter: `n.<prop> = $<parameter>` in Cypher."""
     if is_oracle(pm):
         return f"JSON_VALUE(n.props, '$.{prop}') = ${parameter}"
     if is_postgres(pm):
         return f"(n.props ->> '{prop}') = ${parameter}"
+    if is_sqlite(pm):
+        return f"{_sqlite_text(prop)} = ${parameter}"
     return f"n.{prop} = ${parameter}"
 
 
@@ -31,6 +45,8 @@ def below(pm: PersistenceManager, prop: str, value: int) -> str:
         return f"JSON_VALUE(n.props, '$.{prop}' RETURNING NUMBER) < {value}"
     if is_postgres(pm):
         return f"CAST(n.props ->> '{prop}' AS numeric) < {value}"
+    if is_sqlite(pm):
+        return f"{_sqlite_text(prop)} < {value}"
     return f"n.{prop} < {value}"
 
 
@@ -40,6 +56,8 @@ def above(pm: PersistenceManager, prop: str, value: int) -> str:
         return f"JSON_VALUE(n.props, '$.{prop}' RETURNING NUMBER) > {value}"
     if is_postgres(pm):
         return f"CAST(n.props ->> '{prop}' AS numeric) > {value}"
+    if is_sqlite(pm):
+        return f"{_sqlite_text(prop)} > {value}"
     return f"n.{prop} > {value}"
 
 
@@ -58,6 +76,11 @@ def nodes(pm: PersistenceManager, label: str) -> list[dict[str, Any]]:
             QuerySpecification[Any](f"SELECT n.props FROM drivine_node n WHERE n.labels @> '[\"{label}\"]'")
         )
         rows = [it["props"] for it in found]
+    elif is_sqlite(pm):
+        found = pm.query(
+            QuerySpecification[Any](f"SELECT n.props FROM drivine_node n WHERE instr(n.labels, '\"{label}\"') > 0")
+        )
+        rows = [json.loads(it["props"]) for it in found]
     else:
         rows = pm.query(QuerySpecification[Any](f"MATCH (n:{label}) RETURN properties(n)"))
     return sorted(rows, key=lambda it: (str(it.get("uuid")), str(it.get("id"))))
@@ -79,6 +102,13 @@ def labels(pm: PersistenceManager, uuid: str) -> list[str]:
             )
         )
         found = row["labels"]
+    elif is_sqlite(pm):
+        row = pm.get_one(
+            QuerySpecification[Any](
+                f"SELECT n.labels FROM drivine_node n WHERE {_sqlite_text('uuid')} = CAST($uuid AS TEXT)"
+            ).bind({"uuid": uuid})
+        )
+        found = json.loads(row["labels"])
     else:
         found = pm.get_one(QuerySpecification[Any]("MATCH (n {uuid: $uuid}) RETURN labels(n)").bind({"uuid": uuid}))
     return sorted(found)
@@ -99,6 +129,12 @@ def create(pm: PersistenceManager, label: str, *props: dict[str, Any]) -> None:
                     "INSERT INTO drivine_node (labels, props) VALUES (CAST($labels AS jsonb), CAST($props AS jsonb))"
                 ).bind({"labels": json.dumps([label]), "props": json.dumps(it)})
             )
+        elif is_sqlite(pm):
+            pm.execute(
+                QuerySpecification[Any]("INSERT INTO drivine_node (labels, props) VALUES ($labels, $props)").bind(
+                    {"labels": json.dumps([label]), "props": json.dumps(it)}
+                )
+            )
         else:
             pm.execute(QuerySpecification[Any](f"CREATE (n:{label}) SET n = $props").bind({"props": it}))
 
@@ -117,6 +153,13 @@ def set_property(pm: PersistenceManager, label: str, prop: str, value: Any) -> N
             QuerySpecification[Any](
                 f"UPDATE drivine_node n SET props = jsonb_set(n.props, '{{{prop}}}', CAST($value AS jsonb)) "
                 f"WHERE n.labels @> '[\"{label}\"]'"
+            ).bind({"value": json.dumps(value)})
+        )
+    elif is_sqlite(pm):
+        pm.execute(
+            QuerySpecification[Any](
+                f"UPDATE drivine_node SET props = json_set(props, '$.\"{prop}\"', json($value)) "
+                f"WHERE instr(labels, '\"{label}\"') > 0"
             ).bind({"value": json.dumps(value)})
         )
     else:
@@ -142,6 +185,14 @@ def relate(pm: PersistenceManager, src: str, type: str, dst: str) -> None:
                 "AND (b.props ->> 'id') = CAST($b AS text)"
             ).bind(bindings)
         )
+    elif is_sqlite(pm):
+        pm.execute(
+            QuerySpecification[Any](
+                "INSERT INTO drivine_edge (src, dst, type, props) SELECT a.nid, b.nid, $type, '{}' "
+                f"FROM drivine_node a, drivine_node b WHERE {_sqlite_text('id', 'a')} = CAST($a AS TEXT) "
+                f"AND {_sqlite_text('id', 'b')} = CAST($b AS TEXT)"
+            ).bind(bindings)
+        )
     else:
         pm.execute(
             QuerySpecification[Any](f"MATCH (a {{id: $a}}), (b {{id: $b}}) CREATE (a)-[:{type}]->(b)").bind(bindings)
@@ -154,6 +205,9 @@ def node_ids(pm: PersistenceManager) -> list[str]:
         rows = pm.query(QuerySpecification[Any]("SELECT JSON_VALUE(n.props, '$.id') FROM drivine_node n"))
     elif is_postgres(pm):
         found = pm.query(QuerySpecification[Any]("SELECT n.props ->> 'id' AS id FROM drivine_node n"))
+        rows = [it["id"] for it in found]
+    elif is_sqlite(pm):
+        found = pm.query(QuerySpecification[Any](f"SELECT {_sqlite_text('id')} AS id FROM drivine_node n"))
         rows = [it["id"] for it in found]
     else:
         rows = pm.query(QuerySpecification[Any]("MATCH (n) RETURN n.id"))

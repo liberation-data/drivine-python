@@ -49,6 +49,7 @@ async def new_graph(store: str, factory: PersistenceManagerFactory) -> AsyncIter
         await drop_graph(factory.get(store), name)
 
 
+@pytest.mark.written_in_cypher
 async def test_cypher_through_a_persistence_manager_alone_writes_and_reads_on_a_new_graph(
     new_graph: tuple[DatabaseRegistry, str], factory: PersistenceManagerFactory, store: str
 ):
@@ -78,6 +79,7 @@ async def test_cypher_through_a_persistence_manager_alone_writes_and_reads_on_a_
 
 
 @pytest.mark.async_only
+@pytest.mark.written_in_cypher
 async def test_makes_a_new_graphs_tables_for_statements_that_ask_at_once(
     new_graph: tuple[DatabaseRegistry, str], store: str
 ):
@@ -88,6 +90,7 @@ async def test_makes_a_new_graphs_tables_for_statements_that_ask_at_once(
 
 
 @pytest.mark.async_only
+@pytest.mark.written_in_cypher
 async def test_makes_the_tables_once_when_many_pools_and_object_managers_first_use_them_together_round_after_round(
     factory: PersistenceManagerFactory, store: str
 ):

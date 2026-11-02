@@ -1,4 +1,6 @@
 import os
+import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -24,6 +26,9 @@ os.environ.setdefault("FALKORDB_DATABASE_HOST", "test-container.invalid")
 os.environ.setdefault("POSTGRES_DATABASE_TYPE", "POSTGRES")
 os.environ.setdefault("POSTGRES_DATABASE_HOST", "test-container.invalid")
 os.environ.setdefault("POSTGRES_DATABASE_NAME", "drivine")
+# SQLite needs no container: a file in a directory of this run's own.
+os.environ.setdefault("SQLITE_DATABASE_TYPE", "SQLITE")
+os.environ.setdefault("SQLITE_DATABASE_NAME", str(Path(tempfile.mkdtemp(prefix="drivine-sqlite-")) / "graph.db"))
 if os.environ.get("ORACLE_TESTS") == "true":
     os.environ.setdefault("ORACLE_DATABASE_TYPE", "ORACLE")
     os.environ.setdefault("ORACLE_DATABASE_HOST", "test-container.invalid")

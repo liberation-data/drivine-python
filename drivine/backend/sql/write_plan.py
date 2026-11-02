@@ -28,6 +28,10 @@ class WritePlan:
     """The parameter the plan is bound as."""
     MARK = "_mark"
     """The parameter that carries the stamp the steps take a new relationship token from."""
+    SHAPES = "_shapes"
+    """The parameter the shapes the plan names are bound as: a JSON array of `{labels, key}`."""
+    PATCHED_IF = "_patchedIf"
+    """The parameter that carries the query a `patch` step asks of the node it found, or null."""
 
     def __init__(self) -> None:
         self.mark = stamps.fresh()

@@ -33,6 +33,7 @@ GRAPH_TYPES = (
     DatabaseType.FALKORDB,
     DatabaseType.ORACLE,
     DatabaseType.POSTGRES,
+    DatabaseType.SQLITE,
 )
 
 MARKER_LABEL = "_DrivineSchema"

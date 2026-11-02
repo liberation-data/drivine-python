@@ -1,6 +1,6 @@
 """Which failures over Bolt, and of a SQL store's DDL, are contention, and that only those are run again."""
 
-from typing import Any
+from typing import Annotated, Any
 
 import oracledb
 import psycopg
@@ -8,6 +8,7 @@ import psycopg.errors
 import pytest
 from neo4j.exceptions import Neo4jError, ServiceUnavailable, SessionExpired
 
+from drivine import NodeFragment, NodeId, PersistenceManager, QuerySpecification, StatelessGraphObjectManager
 from drivine.backend.cypher_backend import CypherBackend
 from drivine.backend.cypher_grammar import FALKORDB_GRAMMAR, MEMGRAPH_GRAMMAR, NEO4J_GRAMMAR
 from drivine.backend.oracle.oracle_graph import OracleGraph
@@ -265,3 +266,34 @@ async def test_an_outer_run_does_not_run_again_a_drivers_own_deadlock_an_inner_r
     with pytest.raises(DrivineError):
         await when_not_contended(inner, ddl_deadlocked, no_pause)
     assert calls == CONTENDED_ATTEMPTS
+
+
+class Deleting(PersistenceManager):
+    """A Neo4j that turns the first delete away as deadlocked, and deletes on the next attempt."""
+
+    database = "default"
+    type = DatabaseType.NEO4J
+
+    def __init__(self) -> None:
+        self.attempts = 0
+
+    async def query(self, spec: QuerySpecification[Any]) -> list[Any]:
+        self.attempts += 1
+        if self.attempts == 1:
+            raise caused_by(bolt("Neo.TransientError.Transaction.DeadlockDetected"))
+        return [1]
+
+    async def open_cursor(self, spec: Any) -> Any:
+        raise NotImplementedError
+
+
+class Gizmo(NodeFragment, labels=["Gizmo"]):
+    id: Annotated[str, NodeId()]
+
+
+@pytest.mark.parametrize("delete", ["delete", "delete_all"])
+async def test_a_delete_turned_away_as_contended_is_run_again_as_a_save_is(delete: str):
+    pm = Deleting()
+    gom = StatelessGraphObjectManager(pm)
+    deleted = await (gom.delete(Gizmo, "g1") if delete == "delete" else gom.delete_all(Gizmo))
+    assert (deleted, pm.attempts) == (1, 2)

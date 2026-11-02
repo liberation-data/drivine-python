@@ -1,7 +1,7 @@
 [project]
 name = "drivine"
 version = "0.3.2"
-description = "Graph database client for Python: Neo4j, Memgraph, FalkorDB, Neptune, Oracle and Postgres."
+description = "Graph database client for Python: Neo4j, Memgraph, FalkorDB, Neptune, Oracle, Postgres and SQLite."
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
@@ -11,7 +11,7 @@ dependencies = [
     "pydantic>=2.7",
     "pi-pilgrim>=0.4.0,<0.5",
 ]
-keywords = ["graph", "database", "neo4j", "memgraph", "falkordb", "neptune", "oracle", "postgres", "cypher", "ogm"]
+keywords = ["graph", "database", "neo4j", "memgraph", "falkordb", "neptune", "oracle", "postgres", "sqlite", "cypher", "ogm"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Framework :: AsyncIO",

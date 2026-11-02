@@ -35,9 +35,12 @@ async def tables_made(pm: PersistenceManager, name: str) -> int:
         return await pm.get_one(
             QuerySpecification[Any](f"SELECT COUNT(*) FROM user_tables WHERE LOWER(table_name) IN ({tables})")
         )
-    row = await pm.get_one(
-        QuerySpecification[Any](f"SELECT COUNT(*) AS made FROM pg_tables WHERE tablename IN ({tables})")
+    catalog = (
+        f"SELECT COUNT(*) AS made FROM sqlite_master WHERE type = 'table' AND name IN ({tables})"
+        if pm.type is DatabaseType.SQLITE
+        else f"SELECT COUNT(*) AS made FROM pg_tables WHERE tablename IN ({tables})"
     )
+    row = await pm.get_one(QuerySpecification[Any](catalog))
     return row["made"]
 
 
@@ -60,6 +63,8 @@ async def drop_graph(pm: PersistenceManager, name: str) -> None:
         statements = [f"DROP PROPERTY GRAPH IF EXISTS {name}"] + [
             f"DROP TABLE IF EXISTS {name}_{it} PURGE" for it in ("edge", "node", "schema")
         ]
+    elif pm.type is DatabaseType.SQLITE:
+        statements = [f"DROP TABLE IF EXISTS {name}_{it}" for it in ("edge", "node", "schema")]
     else:
         # CASCADE: the store's functions return a row of its node table.
         statements = [f"DROP TABLE IF EXISTS {name}_edge, {name}_node, {name}_schema CASCADE"]

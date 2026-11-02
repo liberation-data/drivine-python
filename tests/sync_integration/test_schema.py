@@ -283,12 +283,12 @@ def test_store_identity_is_stable(factory, pm):
     assert one.id == two.id and one.engine == pm.type
 
 
-RACE_ROUNDS = {DatabaseType.ORACLE: 2, DatabaseType.POSTGRES: 3}
+RACE_ROUNDS = {DatabaseType.ORACLE: 2, DatabaseType.POSTGRES: 3, DatabaseType.SQLITE: 3}
 """How many rounds of managers racing to make the store key's constraint a store runs: fewer on the SQL stores."""
 
 
 def wipe_store_stamps(pm: PersistenceManager) -> None:
-    if pm.type in (DatabaseType.ORACLE, DatabaseType.POSTGRES):
+    if pm.type in (DatabaseType.ORACLE, DatabaseType.POSTGRES, DatabaseType.SQLITE):
         pm.execute(QuerySpecification("DELETE FROM drivine_node"))
     else:
         pm.execute(QuerySpecification("MATCH (s:DrivineStore) DETACH DELETE s"))

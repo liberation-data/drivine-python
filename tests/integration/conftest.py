@@ -12,14 +12,27 @@ ORACLE = os.environ.get("ORACLE_DATABASE_TYPE") == "ORACLE"
 POSTGRES = os.environ.get("POSTGRES_DATABASE_TYPE") == "POSTGRES"
 """Whether Postgres is configured, as the tests' own environment configures it."""
 
-ENGINES = ["default", "memgraph", "falkordb", *(["postgres"] if POSTGRES else []), *(["oracle"] if ORACLE else [])]
+SQLITE = os.environ.get("SQLITE_DATABASE_TYPE") == "SQLITE"
+"""Whether SQLite is configured, as the tests' own environment configures it: a file of the run's own."""
+
+ENGINES = [
+    "default",
+    "memgraph",
+    "falkordb",
+    *(["postgres"] if POSTGRES else []),
+    *(["oracle"] if ORACLE else []),
+    *(["sqlite"] if SQLITE else []),
+]
 """
-The registered names of the databases each test runs on: Neo4j, Memgraph and FalkorDB, Postgres as the tests' own
-environment configures it, and Oracle when set.
+The registered names of the databases each test runs on: Neo4j, Memgraph and FalkorDB, Postgres and SQLite as the
+tests' own environment configures them, and Oracle when set.
 """
 
-SQL_STORES = ("postgres", "oracle")
-"""The stores that keep a graph in SQL tables, and compile a Cypher statement to their SQL."""
+SQL_STORES = ("postgres", "oracle", "sqlite")
+"""The stores that keep a graph in SQL tables."""
+
+CYPHER_REFUSED = ("sqlite",)
+"""The SQL stores that compile no Cypher yet: SQLite, until liberation-data/drivine-python#93."""
 
 
 @pytest.fixture(scope="session")
@@ -32,6 +45,8 @@ async def registry() -> AsyncIterator[DatabaseRegistry]:
         registry.build_or_resolve_from_env("postgres")
     if ORACLE:
         registry.build_or_resolve_from_env("oracle")
+    if SQLITE:
+        registry.build_or_resolve_from_env("sqlite")
     yield registry
     await registry.close()
 
@@ -44,7 +59,7 @@ def factory(registry: DatabaseRegistry) -> PersistenceManagerFactory:
 @pytest.fixture(params=ENGINES)
 async def pm(request: pytest.FixtureRequest, factory: PersistenceManagerFactory) -> AsyncIterator[PersistenceManager]:
     manager = factory.get(request.param)
-    if manager.type in (DatabaseType.ORACLE, DatabaseType.POSTGRES):
+    if manager.type in (DatabaseType.ORACLE, DatabaseType.POSTGRES, DatabaseType.SQLITE):
         # A node's relationships go with it: the relationship table cascades.
         await manager.execute(QuerySpecification("DELETE FROM drivine_node"))
     else:
@@ -74,7 +89,8 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     """
     for item in items:
         callspec = getattr(item, "callspec", None)
-        engine = callspec.params.get("pm") if callspec is not None else None
+        # The store a test runs on: its `pm`, or in the suites over SQL stores alone, its `store`.
+        engine = (callspec.params.get("pm") or callspec.params.get("store")) if callspec is not None else None
         if item.get_closest_marker("rolls_back") and engine == "falkordb":
             item.add_marker(pytest.mark.skip(reason="FalkorDB commits each statement as it runs: nothing rolls back."))
         graph_engine_only = item.get_closest_marker("graph_engine_only")
@@ -83,3 +99,5 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
         fails = item.get_closest_marker("fails_on_sql_stores")
         if fails and engine in SQL_STORES:
             item.add_marker(pytest.mark.xfail(reason=fails.args[0], strict=True))
+        if item.get_closest_marker("written_in_cypher") and engine in CYPHER_REFUSED:
+            item.add_marker(pytest.mark.skip(reason="Cypher is not compiled for SQLite yet (#93)."))

@@ -9,6 +9,7 @@ from typing import Any
 from drivine.backend.cypher_grammar import FALKORDB_GRAMMAR, NEO4J_GRAMMAR
 from drivine.backend.oracle.oracle_schema_grammar import waits_out_busy_lock
 from drivine.backend.postgres.postgres_statement import value_of
+from drivine.backend.sqlite.sqlite_contention import locked
 from drivine.connection.database_type import DatabaseType
 from drivine.drivine_error import DrivineError
 from drivine.query.query_specification import QuerySpecification
@@ -18,19 +19,26 @@ from drivine.sync.manager.contention import any_cause, ddl_contended, ddl_deadlo
 
 _ORACLE_SERIAL = re.compile(r"ORA-08177\b")
 
+_RECORD_ROWS = (DatabaseType.POSTGRES, DatabaseType.SQLITE)
+"""The stores that give a row as a record of its columns."""
+
 
 def _contended(failure: BaseException, waited_out_busy: bool) -> bool:
     """
     A transient error over Bolt, FalkorDB turning a write away while another is in progress, an Oracle serialization
-    failure, or a SQL store turning DDL away because of another session's (see ddl_contended), as when managers that
-    start together each make the indexes of the store's key. A statement that `waited_out_busy`, as an Oracle index's
-    block does (see waits_out_busy_lock), is taken as turned away only for a deadlock (see ddl_deadlocked).
+    failure, SQLite's file locked by another connection (see locked), or a SQL store turning DDL away because of another
+    session's (see ddl_contended), as when managers that start together each make the indexes of the store's key. A
+    statement that `waited_out_busy`, as an Oracle index's block does (see waits_out_busy_lock), is taken as turned away
+    only for a deadlock (see ddl_deadlocked).
     """
     ddl = ddl_deadlocked(failure) if waited_out_busy else ddl_contended(failure)
     return ddl or any_cause(
         failure,
         lambda it: (
-            NEO4J_GRAMMAR.contended(it) or FALKORDB_GRAMMAR.contended(it) or bool(_ORACLE_SERIAL.search(str(it)))
+            NEO4J_GRAMMAR.contended(it)
+            or FALKORDB_GRAMMAR.contended(it)
+            or bool(_ORACLE_SERIAL.search(str(it)))
+            or locked(it)
         ),
     )
 
@@ -62,8 +70,9 @@ class SchemaExecutor:
             connection.release(error)
             raise DrivineError.with_root_cause(error) from error
         connection.release()
-        # Postgres gives a row as a record of its columns, where the graph engines give one column as its value.
-        return [value_of(it) for it in rows] if self.provider.type is DatabaseType.POSTGRES else rows
+        # Postgres and SQLite give a row as a record of its columns, where the graph engines give one column as its
+        # value.
+        return [value_of(it) for it in rows] if self.provider.type in _RECORD_ROWS else rows
 
     def _native(self, operation: NativeOperation) -> list[Any]:
         constraint = getattr(self.provider, "constraint", None)

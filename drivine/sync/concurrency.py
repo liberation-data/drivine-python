@@ -9,7 +9,10 @@ import inspect
 import threading
 import time
 from collections.abc import Callable
-from typing import Any, TypeAlias
+from concurrent.futures import Executor
+from typing import Any, TypeAlias, TypeVar
+
+R = TypeVar("R")
 
 Lock: TypeAlias = threading.Lock
 """A lock: what queues a transaction's statements on its connection."""
@@ -23,6 +26,14 @@ OTHER_API = "drivine"
 
 def sleep(seconds: float) -> None:
     time.sleep(seconds)
+
+
+def blocking(function: Callable[..., R], *arguments: Any, on: Executor | None = None) -> R:
+    """
+    Runs a call that blocks, such as one of the `sqlite3` module, where it is: the async API runs it on a thread, `on`'s
+    where it is given.
+    """
+    return function(*arguments)
 
 
 def runs_here(function: Callable[..., Any]) -> bool:

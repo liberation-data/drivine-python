@@ -4431,8 +4431,8 @@ def test_a_list_literal_of_more_than_100_items_keeps_its_items_returned_tested_w
     for n in (100, 101, 250, 1001):
         # An Oracle session spends 180 MB of its PGA on a statement of a list of 1001, 815 MB on one that reads it three
         # times, and keeps 50 to 217 MB after (#241). Late in the suite, beside its other sessions, that passes Oracle
-        # Free's limit (ORA-04036), so Oracle isn't asked a list of 1001; drivine4j asks it all but the comparisons
-        # below (liberation-data/drivine4j#360, here #227).
+        # Free's limit (ORA-04036), so Oracle isn't asked a list of 1001; drivine4j asks it all but the comparison
+        # of the list with itself below (liberation-data/drivine4j#404).
         if n > 250 and cypher_pm.type is DatabaseType.ORACLE:
             continue
         items = [_long_item(i) for i in range(n)]

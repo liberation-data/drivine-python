@@ -25,7 +25,7 @@ await pm.execute(spec)                   # no results
 ### Cypher on Postgres, Oracle and SQLite
 
 A statement written as Cypher, with `cypher_statement` or `cypher_file`, is compiled to SQL over the graph's tables on
-Postgres and Oracle, and gives the rows a graph engine gives, as drivine4j compiles it:
+Postgres, Oracle and SQLite, and gives the rows a graph engine gives, as drivine4j compiles it:
 
 ```python
 from drivine import QuerySpecification, cypher_statement
@@ -34,8 +34,10 @@ spec = QuerySpecification(cypher_statement("MATCH (p:Person {city: $city}) RETUR
 people = await pm.query(spec.bind({"city": "Sydney"}))
 ```
 
-- A read is a query. A write (`CREATE`, `MERGE`, `SET`, `REMOVE`, `DELETE`) is an anonymous PL/SQL block on Oracle, and
-  a function made for the statement in `pg_temp` on Postgres: one statement, applied whole or not at all. A block hands
+- A read is a query. A write (`CREATE`, `MERGE`, `SET`, `REMOVE`, `DELETE`) is an anonymous PL/SQL block on Oracle,
+  a function made for the statement in `pg_temp` on Postgres, and on SQLite, which has no procedural language, steps
+  that `drivine_cypher`, a function Drivine registers on each connection, carries out under a savepoint: one statement,
+  applied whole or not at all. A block hands
   its rows back whole, so on Oracle a write is run with `query`, and a cursor over one is refused. On Postgres a cursor
   over a write writes when it is opened, as on a graph engine.
 - Parameters are named, `$name`: a statement bound to a list of them is refused.

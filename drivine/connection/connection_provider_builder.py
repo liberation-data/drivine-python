@@ -17,7 +17,7 @@ logger = logging.getLogger("drivine.connection")
 _AUTO_COMMIT_ENGINES = (DatabaseType.FALKORDB,)
 """Engines without multi-statement transactions, which honour TransactionMode."""
 
-_GRAPH_STORES = (DatabaseType.ORACLE, DatabaseType.POSTGRES)
+_GRAPH_STORES = (DatabaseType.ORACLE, DatabaseType.POSTGRES, DatabaseType.SQLITE)
 """The stores that keep a graph of a name in tables of its own: `default_graph_path` names it."""
 
 
@@ -110,7 +110,7 @@ class ConnectionProviderBuilder:
             return retained
         if self._type is None:
             raise DrivineError("A database type is required.")
-        if not self._host:
+        if not self._host and self._type is not DatabaseType.SQLITE:
             raise DrivineError("host config is required")
         if self._default_graph_path and self._type not in _GRAPH_STORES:
             logger.warning("default_graph_path is ignored by %s, which names no graph", self._type)
@@ -126,6 +126,8 @@ class ConnectionProviderBuilder:
             provider = self._oracle_provider(name)
         elif self._type is DatabaseType.POSTGRES:
             provider = self._postgres_provider(name)
+        elif self._type is DatabaseType.SQLITE:
+            provider = self._sqlite_provider(name)
         else:
             raise DrivineError(f"{self._type} is not supported by drivine-python yet.")
         self.registry.register(provider)
@@ -221,3 +223,17 @@ class ConnectionProviderBuilder:
             self._idle_timeout,
             self._default_graph_path,
         )
+
+    def _sqlite_provider(self, name: str) -> ConnectionProvider:
+        """
+        `database_name` is the file's path, as drivine4j reads it; `default_graph_path` names the graph, `drivine` by
+        default. A file has no host, port, user or password.
+        """
+        from drivine.connection.sqlite.sqlite_connection_provider import SqliteConnectionProvider
+
+        if not self._database_name:
+            raise DrivineError("SQLite requires a database name: the path of its file")
+        for setting, given in (("host", self._host), ("port", self._port), ("user_name", self._user_name)):
+            if given:
+                logger.warning("%s is ignored by SQLite, which keeps a graph in a file", setting)
+        return SqliteConnectionProvider(name, self._database_name, self._pool_max, graph=self._default_graph_path)

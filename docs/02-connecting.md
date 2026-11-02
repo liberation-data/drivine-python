@@ -142,5 +142,56 @@ applied whole or not at all.
   reads, which narrows the search; `load_matching` scores the same with it and without it, and reads words, a
   `"phrase"`, `+must`, `-not` and a `prefix*`.
 
+### SQLite
+
+SQLite keeps a graph in a file, with no server: drivine4j's store, in the same tables as Postgres, so a file one library
+wrote, drivine4j, Drivine for TypeScript or this one, the others read and write as it is. It takes SQLite 3.45 or later
+through Python's own `sqlite3` module, so there is nothing to install; where Python's SQLite is older, install
+`pysqlite3-binary` and Drivine uses it. Models, the query DSL and the object manager are the same as on the other
+stores; the persistence manager runs plain SQL, with cursors and transactions. Cypher you write is refused for now: its
+compiler targets Postgres and Oracle, and SQLite follows
+([#93](https://github.com/liberation-data/drivine-python/issues/93)).
+
+```
+DATABASE_TYPE=SQLITE
+DATABASE_NAME=/var/lib/app/graph.db   # the file's path: there is no host, port, user or password
+DATABASE_DEFAULT_GRAPH_PATH=drivine   # names the graph's tables; this is the default
+```
+
+Or in code, `registry.builder().database_type(DatabaseType.SQLITE).database_name("graph.db").register("graph")`. The
+file is made if it isn't there, and the graph's tables on the first connection, as on Postgres.
+
+**How a graph is stored.** `<graph>_node (nid INTEGER PRIMARY KEY, labels TEXT, props TEXT, stamp TEXT)`,
+`<graph>_edge (eid INTEGER PRIMARY KEY, src, dst REFERENCES <graph>_node ON DELETE CASCADE, type, props TEXT)` and
+`<graph>_schema`, the indexes and constraints Drivine made. Labels and properties are JSON text, not SQLite's binary
+`jsonb`, and labels are written sorted, with nothing escaped that JSON does not require: a label is found by its text.
+The stamp is a column. Moments compare and order to the nanosecond, whatever their offset.
+
+- A save is the plan of steps Postgres's write function carries out, carried out by a function Drivine registers on
+  each connection, `drivine_write`, under a savepoint: applied whole or not at all, in a transaction or not. The other
+  functions a statement calls are registered too: `drivine_delete`, `drivine_epoch`, `drivine_lower` (Unicode's lower
+  case, where SQLite's lowers ASCII), `drivine_similarity`, `drivine_regexp_count` and `REGEXP`. A statement of yours
+  may call them; a connection you open yourself has none of them.
+- A statement Drivine writes that gives back documents opens with `/* drivine:json */`, and its text values are read
+  as JSON. One you write is read as it is: a row is a dict of its columns, and `labels` and `props` are text.
+- A raw `where` is SQL over the root's row, as on Postgres; a property written as Cypher writes it, `n.name`, is read
+  as that property, as text.
+- A range index or a uniqueness constraint is a partial index over the property as a statement reads it, for the
+  label's nodes. A vector or a full-text index is recorded and nothing is made for it: `load_nearest` and
+  `load_matching` measure every node of the label.
+- `matches` takes a Python regular expression, matched against the whole value.
+
+**What a transaction gives.** Each connection writes ahead to a log, enforces foreign keys and waits for a locked file
+for up to its busy timeout, 30 seconds by default.
+
+- There is one writer at a time. A transaction takes the file's write lock as it begins (`BEGIN IMMEDIATE`), so even a
+  transaction that only reads waits for the lock, for up to the busy timeout. One that holds it longer than 5 seconds
+  is logged as a warning when it ends, committed, rolled back or released.
+- Reads outside a transaction don't wait for a writer: each reads the file as it last was.
+- Saves and deletes outside a transaction are run again when SQLite turns them away as contended (`SQLITE_BUSY`).
+- Each statement Drivine writes applies whole or not at all.
+- A connection you open yourself, with `sqlite3.connect`, has none of this: no log, no foreign keys, no busy timeout
+  and none of Drivine's functions.
+
 Drivine reads `os.environ`, and doesn't load `.env` files itself: use python-dotenv, pydantic-settings, or your
 platform's way.

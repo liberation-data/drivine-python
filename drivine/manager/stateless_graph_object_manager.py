@@ -484,6 +484,9 @@ class StatelessGraphObjectManager:
         A view that contains itself is deleted as it loads: every level of it, and what each level holds. A cascade
         that finds a node one level below such a relationship's max_depth is refused before anything is written,
         rather than leave that node and all it holds.
+
+        Outside a transaction, a delete the engine turns away because another writer held what it deletes is run again,
+        after a pause, as a save is.
         """
         target = self.registry.model_of(type_)
         predicate, values = self._condition(target, where, bindings)
@@ -491,7 +494,7 @@ class StatelessGraphObjectManager:
         values = {**values, "id": id}
         if cascade in (CascadeType.DELETE_ALL, CascadeType.DELETE_ORPHAN):
             await self._refuse_cascade_below_depth(target, predicate, values)
-        return await self.persistence_manager.get_one(statement.spec(values))
+        return await self._when_uncontended(lambda: self.persistence_manager.get_one(statement.spec(values)))
 
     async def _refuse_cascade_below_depth(
         self, target: TargetModel, where: str | None, values: Mapping[str, Any]
@@ -519,13 +522,14 @@ class StatelessGraphObjectManager:
     ) -> int:
         """
         Deletes every object a load with the same filter would find: its root, with the root's relationships. Without
-        a filter, every one. Returns the number deleted.
+        a filter, every one. Returns the number deleted. Outside a transaction, one the engine turns away because
+        another writer held what it deletes is run again, after a pause, as a save is.
         """
         target = self.registry.model_of(type_)
         where = await self._lookups(where, target)
         rendered = self._rendered(target, where, bindings, Query(), await self._filter_indexes(where))
         statement = self.backend.delete_all(target, rendered.where, rendered.labels_tested)
-        return await self.persistence_manager.get_one(statement.spec(rendered.bindings))
+        return await self._when_uncontended(lambda: self.persistence_manager.get_one(statement.spec(rendered.bindings)))
 
     async def save_all(
         self,

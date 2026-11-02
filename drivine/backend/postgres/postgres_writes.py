@@ -10,11 +10,11 @@ from drivine.backend.fragment_group import FragmentGroup
 from drivine.backend.graph_statement import GraphStatement
 from drivine.backend.matched_node import MatchedNode
 from drivine.backend.postgres.found_stamp import FoundStamp, stamps_by_place
-from drivine.backend.postgres.postgres_graph import PostgresGraph
 from drivine.backend.postgres.postgres_save_builder import absent, present, stored_key, without_key
 from drivine.backend.postgres.postgres_write_statement import PostgresWriteStatement
 from drivine.backend.save_statement_builder import id_of, object_props
 from drivine.backend.sql.node_writes import NodeWrites
+from drivine.backend.sql.plan_graph import PlanGraph
 from drivine.backend.sql.sql_graph import sql_text
 from drivine.backend.sql.sql_json import storable, to_json
 from drivine.backend.sql.write_plan import WritePlan
@@ -34,12 +34,13 @@ _PARAMETER = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)")
 
 class PostgresWrites:
     """
-    The writes beside a save, each a plan for drivine4j's write function, so stamps are kept as a save keeps them:
-    patch and patch_all, a batch of fragments, and relationships written on their own. A patch's values, and the
-    condition it holds to, are bound by the manager when it runs the statement, so its plan is made then.
+    The writes beside a save, each a plan for drivine4j's write function (see PlanGraph: Postgres's, or SQLite's), so
+    stamps are kept as a save keeps them: patch and patch_all, a batch of fragments, and relationships written on their
+    own. A patch's values, and the condition it holds to, are bound by the manager when it runs the statement, so its
+    plan is made then.
     """
 
-    def __init__(self, graph: PostgresGraph) -> None:
+    def __init__(self, graph: PlanGraph) -> None:
         self.graph = graph
 
     def patch_one(self, model: FragmentModel, where: str | None = None) -> GraphStatement:

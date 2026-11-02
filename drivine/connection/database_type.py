@@ -8,3 +8,4 @@ class DatabaseType(StrEnum):
     FALKORDB = "FALKORDB"
     MEMGRAPH = "MEMGRAPH"
     ORACLE = "ORACLE"
+    SQLITE = "SQLITE"

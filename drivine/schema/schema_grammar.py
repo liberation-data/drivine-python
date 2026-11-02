@@ -474,8 +474,8 @@ when each is. Its uniqueness constraints are a Redis command, and need a range i
 
 def schema_grammar_for(type: DatabaseType, graph: SqlGraph | None = None) -> SchemaGrammar:
     """
-    The engine's schema grammar; on Oracle and Postgres, over the tables of `graph` (the default graph when None, and
-    the graph of that name when it is another store's).
+    The engine's schema grammar; on Oracle, Postgres and SQLite, over the tables of `graph` (the default graph when
+    None, and the graph of that name when it is another store's).
     """
     if type is DatabaseType.ORACLE:
         from drivine.backend.oracle.oracle_graph import OracleGraph
@@ -487,6 +487,11 @@ def schema_grammar_for(type: DatabaseType, graph: SqlGraph | None = None) -> Sch
         from drivine.backend.postgres.postgres_schema_grammar import postgres_schema_grammar
 
         return postgres_schema_grammar(graph if isinstance(graph, PostgresGraph) else PostgresGraph(_name_of(graph)))
+    if type is DatabaseType.SQLITE:
+        from drivine.backend.sqlite.sqlite_graph import SqliteGraph
+        from drivine.backend.sqlite.sqlite_schema_grammar import sqlite_schema_grammar
+
+        return sqlite_schema_grammar(graph if isinstance(graph, SqliteGraph) else SqliteGraph(_name_of(graph)))
     grammars = {
         DatabaseType.NEO4J: NEO4J_SCHEMA,
         DatabaseType.MEMGRAPH: MEMGRAPH_SCHEMA,

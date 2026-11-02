@@ -348,7 +348,7 @@ def test_a_cypher_statement_takes_named_parameters_on_a_sql_store(cypher_pm: Per
         cypher_pm.query(positional)
 
 
-@pytest.mark.parametrize("store", [it for it in SQL_STORES if {"postgres": POSTGRES, "oracle": ORACLE}[it]])
+@pytest.mark.parametrize("store", [it for it in SQL_STORES if {"postgres": POSTGRES, "oracle": ORACLE}.get(it)])
 def test_a_write_in_a_transaction_rolled_back_leaves_nothing_and_runs_again_after(
     store: str, factory: PersistenceManagerFactory
 ):
@@ -363,7 +363,7 @@ def test_a_write_in_a_transaction_rolled_back_leaves_nothing_and_runs_again_afte
     assert pm.query(spec("MATCH (n:CyWrite) RETURN count(n)")) == [1]
 
 
-@pytest.mark.parametrize("store", [it for it in SQL_STORES if {"postgres": POSTGRES, "oracle": ORACLE}[it]])
+@pytest.mark.parametrize("store", [it for it in SQL_STORES if {"postgres": POSTGRES, "oracle": ORACLE}.get(it)])
 def test_a_cypher_statement_is_compiled_against_the_tables_of_the_graph_its_datasource_names(
     store: str, registry: DatabaseRegistry, factory: PersistenceManagerFactory
 ):

@@ -46,6 +46,7 @@ def new_graph(store: str, factory: PersistenceManagerFactory) -> Iterator[tuple[
         drop_graph(factory.get(store), name)
 
 
+@pytest.mark.written_in_cypher
 def test_cypher_through_a_persistence_manager_alone_writes_and_reads_on_a_new_graph(
     new_graph: tuple[DatabaseRegistry, str], factory: PersistenceManagerFactory, store: str
 ):

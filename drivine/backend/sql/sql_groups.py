@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping
-from typing import Any
+from typing import Any, Literal
 
 from drivine.annotation.direction import Direction
 from drivine.backend.graph_statement import GraphStatement
@@ -100,16 +100,19 @@ class SqlGroups(ABC):
                 f"WHERE p.nid = g.k{i})"
             )
 
-        def column_order(column: str) -> str:
-            return key_of(int(column[1:])) if column.startswith("k") else f"g.{column}"
+        def column_order(column: str, ascending: bool) -> str:
+            if not column.startswith("k"):
+                return self._ordered(f"g.{column}", ascending, "AGGREGATE")
+            i = int(column[1:])
+            return self._ordered(key_of(i), ascending, "PATH" if isinstance(keys[i][1], PathKey) else "KEY")
 
         ordered: list[tuple[str, str]] = []
         for name, direction in query.order_by:
             column = names.get(name)
             if column is None:
                 raise DrivineError(f"order_by names {name}, which is not a key or aggregate of the read.")
-            ordered.append((column, f"{column_order(column)} {'DESC' if direction == 'desc' else 'ASC'}"))
-        ties = [f"{column_order(f'k{i}')} ASC" for i in range(len(keys)) if not any(c == f"k{i}" for c, _ in ordered)]
+            ordered.append((column, column_order(column, direction != "desc")))
+        ties = [column_order(f"k{i}", True) for i in range(len(keys)) if not any(c == f"k{i}" for c, _ in ordered)]
         projected = [
             (f"k{i}", self._key_value(f"g.k{i}"))
             if not isinstance(group_key, PathKey)
@@ -128,10 +131,19 @@ class SqlGroups(ABC):
             *([f"    HAVING {' AND '.join(having)}"] if having else []),
             ") g",
             f"ORDER BY {', '.join([*(it for _, it in ordered), *ties])}",
-            *([f"OFFSET {whole_number(query.skip, 'skip')} ROWS"] if query.skip else []),
-            *([f"FETCH NEXT {whole_number(query.limit, 'limit')} ROWS ONLY"] if query.limit is not None else []),
+            *self._page(
+                whole_number(query.skip, "skip") if query.skip else None,
+                whole_number(query.limit, "limit") if query.limit is not None else None,
+            ),
         ]
         return GraphStatement("\n".join(text), bindings)
+
+    def _page(self, skip: int | None, limit: int | None) -> list[str]:
+        """The clauses that skip `skip` groups and keep `limit`, where either is given."""
+        return [
+            *([f"OFFSET {skip} ROWS"] if skip is not None else []),
+            *([f"FETCH NEXT {limit} ROWS ONLY"] if limit is not None else []),
+        ]
 
     def _having_value(self, parameter: str) -> str:
         """The bound value `having` compares an aggregate with, as the store reads a number bound without a type."""
@@ -152,6 +164,13 @@ class SqlGroups(ABC):
     @abstractmethod
     def _key_value(self, column: str) -> str:
         """A group's key column `column`, as the JSON value it is ordered and given back as."""
+
+    def _ordered(self, value: str, ascending: bool, kind: Literal["KEY", "PATH", "AGGREGATE"]) -> str:
+        """
+        An order term of `value`: a property key's JSON value, a path key's far node's id, or an aggregate. The store
+        orders its JSON as the graph engines do, a null last ascending, unless said.
+        """
+        return f"{value} {'ASC' if ascending else 'DESC'}"
 
     @abstractmethod
     def _id_value(self, property: str) -> str:

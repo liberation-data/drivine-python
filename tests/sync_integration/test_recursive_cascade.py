@@ -29,7 +29,7 @@ from drivine.sync import (
     StatelessGraphObjectManager,
     hop,
 )
-from tests.sync_integration.stores import create, equals, is_oracle, is_postgres, node_ids, nodes, relate
+from tests.sync_integration.stores import create, equals, is_oracle, is_postgres, is_sqlite, node_ids, nodes, relate
 
 
 class Session(NodeFragment, labels=["Session"]):
@@ -190,7 +190,7 @@ sub-session's. Each attachment hangs off its message alone.
 
 def seed(pm: PersistenceManager, graph: Graph) -> None:
     nodes_, edges = graph
-    if is_oracle(pm) or is_postgres(pm):
+    if is_oracle(pm) or is_postgres(pm) or is_sqlite(pm):
         for label, id in nodes_:
             create(pm, label, {"id": id})
         for src, type, dst in edges:

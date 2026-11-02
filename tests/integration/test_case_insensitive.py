@@ -31,7 +31,7 @@ from drivine import (
     refs,
     uniqueness_constraint,
 )
-from tests.integration.stores import create, is_oracle, is_postgres, nodes
+from tests.integration.stores import create, is_oracle, is_postgres, is_sqlite, nodes
 
 COPY = "__drivine.lower.email"
 NAME_COPY = "__drivine.lower.display_name"
@@ -84,6 +84,11 @@ async def set_copy(pm: PersistenceManager, label: str, uuid_: str, value: str) -
         statement = (
             f"UPDATE drivine_node n SET props = n.props || jsonb_build_object('{COPY}', CAST($value AS text)) "
             f"WHERE n.labels @> '[\"{label}\"]' AND (n.props ->> 'uuid') = $uuid"
+        )
+    elif is_sqlite(pm):
+        statement = (
+            f"UPDATE drivine_node SET props = json_set(props, '$.\"{COPY}\"', CAST($value AS TEXT)) "
+            f"WHERE instr(labels, '\"{label}\"') > 0 AND (props ->> '$.uuid') = $uuid"
         )
     else:
         statement = f"MATCH (n:{label} {{uuid: $uuid}}) SET n.`{COPY}` = $value"

@@ -8,6 +8,7 @@ from drivine.backend.postgres.postgres_store_text import (
     POSTGRES_STORE_VERSION,
 )
 from drivine.backend.sql.sql_graph import DEFAULT_GRAPH, SqlGraph, sql_text
+from drivine.backend.sql.write_plan import WritePlan, WriteReturns
 from drivine.drivine_error import DrivineError
 from drivine.model import stamps
 
@@ -42,6 +43,16 @@ class PostgresGraph(SqlGraph):
         Postgres runs a block's schema statements in its transaction, so the store is made whole or not at all.
         """
         return POSTGRES_STORE_ENSURING.replace(GRAPH_PLACEHOLDER, self.name)
+
+    def write_call(self, returns: WriteReturns) -> str:
+        """The statement that calls the graph's write function, as drivine4j calls it."""
+        call = (
+            f"{self.name}_write(CAST(${WritePlan.PLAN} AS jsonb), CAST(${WritePlan.SHAPES} AS jsonb), "
+            f"CAST(${WritePlan.MARK} AS text), '{returns}', CAST(${WritePlan.PATCHED_IF} AS text))"
+        )
+        # A count is a number, as the graph engines give it; a stamp is text.
+        value = "CAST(w.v AS bigint)" if returns == "COUNT" else "w.v"
+        return f"SELECT {value} FROM {call} AS w (v)"
 
 
 def _quoted(text: str) -> str:

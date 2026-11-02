@@ -12,28 +12,40 @@ logger = logging.getLogger("drivine.connection")
 
 _ORACLE_WILL_NOT_MAKE = re.compile(r"ORA-(01031|16000)\b")
 _POSTGRES_WILL_NOT_MAKE = ("42501", "25006")
+_SQLITE_READONLY = 8
 
 
 def will_not_make(failure: BaseException) -> bool:
     """
     Whether the store refused the block for good, so that running it again on the next connection would fail the
     same way: a user who may not make tables (ORA-01031 on Oracle, 42501 on Postgres), or a database open read-only
-    (ORA-16000; 25006, as on a hot standby). The failure and each cause under it are looked at.
+    (ORA-16000; 25006, as on a hot standby), or a SQLite file opened read-only (SQLITE_READONLY). The failure and each
+    cause under it are looked at.
     """
     return any_cause(
         failure,
         lambda it: (
-            bool(_ORACLE_WILL_NOT_MAKE.search(str(it))) or getattr(it, "sqlstate", None) in _POSTGRES_WILL_NOT_MAKE
+            bool(_ORACLE_WILL_NOT_MAKE.search(str(it)))
+            or getattr(it, "sqlstate", None) in _POSTGRES_WILL_NOT_MAKE
+            or _sqlite_code(it) == _SQLITE_READONLY
         ),
     )
 
 
+def _sqlite_code(failure: BaseException) -> int | None:
+    """The primary result code of a SQLite error; None for any other failure."""
+    code = getattr(failure, "sqlite_errorcode", None)
+    return code & 0xFF if isinstance(code, int) else None
+
+
 class GraphTables:
     """
-    The tables of the graph a SQL store's connection provider works on (Oracle, Postgres), made on the provider's first
-    connection: by `ensuring`, the statement that makes them when they aren't there and does nothing when they are, the
-    one an object manager on the store would need. So whatever is sent first, a persistence manager's Cypher or plain
-    SQL, an object manager's statement or a schema change, finds the tables.
+    The tables of the graph a SQL store's connection provider works on (Oracle, Postgres, SQLite), made on the
+    provider's first connection: by `ensuring`, the statement that makes them when they aren't there and does nothing
+    when they are, the one an object manager on the store would need (on SQLite, the statements; see
+    SqliteSession.ensure). So whatever is sent first, a persistence manager's Cypher or plain SQL, an object manager's
+    statement or a schema change, finds the tables.
+
 
     It runs once per pool: connections that ask at once, from tasks or threads, wait for the first, which runs it; once
     it has run, a connection asks nothing more. One that fails is run again by the next connection. The statement

@@ -2,7 +2,8 @@
 # change that, and run the script again.
 """
 A Cypher statement written for a graph engine runs on a SQL store, compiled to its SQL, and gives the same rows: each
-case of the Cypher spec (tests/cypher, see its README.md) is a test of its own on Neo4j, Postgres and Oracle.
+case of the Cypher spec (tests/cypher, see its README.md) is a test of its own on Neo4j, Postgres, Oracle and
+SQLite.
 queries.yaml reads the graph it writes, written again before each case; writes.yaml and temporal.yaml start from an
 empty graph. refusals.yaml is compiled with no store, by tests/unit/test_cypher_refusals.py.
 """
@@ -26,7 +27,12 @@ from tests.cypher.cypher_spec import (
     load,
 )
 
-NAMES = {DatabaseType.NEO4J: "neo4j", DatabaseType.POSTGRES: "postgres", DatabaseType.ORACLE: "oracle"}
+NAMES = {
+    DatabaseType.NEO4J: "neo4j",
+    DatabaseType.POSTGRES: "postgres",
+    DatabaseType.ORACLE: "oracle",
+    DatabaseType.SQLITE: "sqlite",
+}
 """The name a step gives each store by."""
 
 QUERIES = load("queries.yaml")

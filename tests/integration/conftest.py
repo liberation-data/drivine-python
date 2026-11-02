@@ -31,9 +31,6 @@ tests' own environment configures them, and Oracle when set.
 SQL_STORES = ("postgres", "oracle", "sqlite")
 """The stores that keep a graph in SQL tables."""
 
-CYPHER_REFUSED = ("sqlite",)
-"""The SQL stores that compile no Cypher yet: SQLite, until liberation-data/drivine-python#93."""
-
 
 @pytest.fixture(scope="session")
 async def registry() -> AsyncIterator[DatabaseRegistry]:
@@ -68,7 +65,12 @@ async def pm(request: pytest.FixtureRequest, factory: PersistenceManagerFactory)
     yield for_store(manager) if request.node.get_closest_marker("written_in_cypher") else manager
 
 
-CYPHER_STORES = ["default", *(["postgres"] if POSTGRES else []), *(["oracle"] if ORACLE else [])]
+CYPHER_STORES = [
+    "default",
+    *(["postgres"] if POSTGRES else []),
+    *(["oracle"] if ORACLE else []),
+    *(["sqlite"] if SQLITE else []),
+]
 """
 The registered names of the stores a Cypher statement is checked on, to give the same rows: Neo4j, and the SQL stores it
 is compiled for, as the tests' environment has them.
@@ -99,5 +101,3 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
         fails = item.get_closest_marker("fails_on_sql_stores")
         if fails and engine in SQL_STORES:
             item.add_marker(pytest.mark.xfail(reason=fails.args[0], strict=True))
-        if item.get_closest_marker("written_in_cypher") and engine in CYPHER_REFUSED:
-            item.add_marker(pytest.mark.skip(reason="Cypher is not compiled for SQLite yet (#93)."))

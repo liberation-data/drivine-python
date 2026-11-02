@@ -88,15 +88,15 @@ database.
 
 - Parameters are named, `$name`, and not a list; values are compared as JSON, so `'7'` is not `7`; dates and times
   come back as ISO 8601 text; on Oracle a cursor over a write is refused: see
-  [Cypher on Postgres and Oracle](04-statements.md#cypher-on-postgres-and-oracle).
+  [Cypher on Postgres, Oracle and SQLite](04-statements.md#cypher-on-postgres-oracle-and-sqlite).
 - On Postgres, float arithmetic, `sum()` and `avg()` are exact decimal, so they are more accurate: `0.1 + 0.2` is
   `0.3` there, where doubles give `0.30000000000000004`. A result differs from Neo4j's only around its 16th significant
   digit, and still comes back as a float. A list or a map read from a property orders the texts in it by the
   database's collation, where other text is ordered by its code points, as Cypher does
-  ([Cypher on Postgres and Oracle](04-statements.md#cypher-on-postgres-and-oracle)).
+  ([Cypher on Postgres, Oracle and SQLite](04-statements.md#cypher-on-postgres-oracle-and-sqlite)).
 - On Oracle, an empty text is null, and a text past 4,000 bytes is measured, cut, changed, searched and reversed
   whole; a quantified path pattern's `WHERE`, `reduce` and `map[key]` take less than on Postgres
-  ([Cypher on Postgres and Oracle](04-statements.md#cypher-on-postgres-and-oracle)).
+  ([Cypher on Postgres, Oracle and SQLite](04-statements.md#cypher-on-postgres-oracle-and-sqlite)).
 
 The object manager needs no Cypher at all, on any store: [the quick start](01-quick-start.md#quick-start) runs as written on Postgres and
 Oracle.

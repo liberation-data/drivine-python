@@ -41,7 +41,7 @@ the graph engines. A raw `where` is SQL over the node's row, `n`: its `labels`, 
 name) and `stamp`, say `JSON_VALUE(n.props, '$.name') = $name`. A property of the node may be written as Cypher writes
 it, `n.name = $name` (or ``n.`a name` ``), and is read as that property; a property compared with `true` or `false` is
 compared with the text a JSON boolean is read as. Your own statements are SQL too, unless written as
-Cypher (see [Cypher on Postgres and Oracle](04-statements.md#cypher-on-postgres-and-oracle)). `matches` takes a regular expression in
+Cypher (see [Cypher on Postgres, Oracle and SQLite](04-statements.md#cypher-on-postgres-oracle-and-sqlite)). `matches` takes a regular expression in
 Oracle's POSIX dialect, matched against the whole value. A leading `(?i)` ignores case; what Java adds, such as
 `(?:…)`, a look-around or `\b`, is not read. A backreference names the group the expression numbers it by,
 `\1` to `\8`; `\9` is refused, as the group that anchors the expression would make it the tenth, which POSIX does not
@@ -71,7 +71,7 @@ statements are kept, so where the object manager does what you need, it is the f
 
 Beside the tables an Oracle graph is made with one function, `<graph>_nulls_equal`, by which a compiled Cypher
 statement compares two lists or maps that may hold a null (see
-[Cypher on Postgres and Oracle](04-statements.md#cypher-on-postgres-and-oracle)). drivine4j and Drivine for TypeScript make it byte for
+[Cypher on Postgres, Oracle and SQLite](04-statements.md#cypher-on-postgres-oracle-and-sqlite)). drivine4j and Drivine for TypeScript make it byte for
 byte alike. Making it takes `CREATE PROCEDURE`, which the `RESOURCE` role grants, as well as the `CREATE TABLE` the
 tables take. A store an earlier version made gains it the next time a pool first connects to the graph. Where the user
 that makes the graph may not make a function, the graph is made without it, and Drivine logs a warning once for the
@@ -120,7 +120,7 @@ constraints Drivine made; and `<graph>_write`, the function a save's steps are c
 applied whole or not at all.
 
 - A statement you write yourself is SQL, unless written as Cypher (see
-  [Cypher on Postgres and Oracle](04-statements.md#cypher-on-postgres-and-oracle)). Parameters are named `$name`, as in Cypher, and a
+  [Cypher on Postgres, Oracle and SQLite](04-statements.md#cypher-on-postgres-oracle-and-sqlite)). Parameters are named `$name`, as in Cypher, and a
   statement is bound only the ones it names. A row comes back as a dict of its columns, a `jsonb` column as Python
   values.
 - A raw `where`, for a load or a delete, is SQL over the root's row: its `props`, `labels` and `stamp`, say
@@ -131,7 +131,7 @@ applied whole or not at all.
 - Text is ordered by the database's collation, so a page of mixed-case text may not be in the order Neo4j gives
   (`a, b, B` rather than `B, a, b`). The range indexes are made in that collation, so an order and a seek are read
   through them. Compiled Cypher orders text by its code points instead
-  ([Cypher on Postgres and Oracle](04-statements.md#cypher-on-postgres-and-oracle)).
+  ([Cypher on Postgres, Oracle and SQLite](04-statements.md#cypher-on-postgres-oracle-and-sqlite)).
 - A save checks the stamp, as on the graph engines. A save turned away by a serialization failure (`40001`) or a
   deadlock (`40P01`) is run again.
 - Index the id of each class you save: a range index or a uniqueness constraint is a partial index over the label's
@@ -148,9 +148,9 @@ SQLite keeps a graph in a file, with no server: drivine4j's store, in the same t
 wrote, drivine4j, Drivine for TypeScript or this one, the others read and write as it is. It takes SQLite 3.45 or later
 through Python's own `sqlite3` module, so there is nothing to install; where Python's SQLite is older, install
 `pysqlite3-binary` and Drivine uses it. Models, the query DSL and the object manager are the same as on the other
-stores; the persistence manager runs plain SQL, with cursors and transactions. Cypher you write is refused for now: its
-compiler targets Postgres and Oracle, and SQLite follows
-([#93](https://github.com/liberation-data/drivine-python/issues/93)).
+stores; the persistence manager runs plain SQL, with cursors and transactions, and Cypher you write is compiled to
+SQLite's SQL, as on Postgres and Oracle (`pip install "drivine[sqlite]"` adds the runtime its compiler takes): see
+[Cypher on Postgres, Oracle and SQLite](04-statements.md#cypher-on-postgres-oracle-and-sqlite).
 
 ```
 DATABASE_TYPE=SQLITE

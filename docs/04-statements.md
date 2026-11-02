@@ -22,7 +22,7 @@ await pm.execute(spec)                   # no results
 - A row of one column is its value, and a row of several is a list.
 - A failed statement raises `DrivineError`, which holds the specification, and the database's error as its cause.
 
-### Cypher on Postgres and Oracle
+### Cypher on Postgres, Oracle and SQLite
 
 A statement written as Cypher, with `cypher_statement` or `cypher_file`, is compiled to SQL over the graph's tables on
 Postgres and Oracle, and gives the rows a graph engine gives, as drivine4j compiles it:

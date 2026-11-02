@@ -12,7 +12,7 @@ from drivine.backend.sqlite.sqlite_graph import JSON_ROWS
 from drivine.connection.connection import Connection
 from drivine.connection.postgres.postgres_result_mapper import PostgresResultMapper
 from drivine.connection.sqlite.sqlite_cursor import SqliteCursor
-from drivine.connection.sqlite.sqlite_session import SqliteSession
+from drivine.connection.sqlite.sqlite_session import FULL_FLOATS_VERSION, SqliteSession, sqlite_module
 from drivine.cursor.cursor_specification import CursorSpecification
 from drivine.cypher.cypher_specification import RESULT, cypher_compiled
 from drivine.drivine_error import DrivineError
@@ -105,6 +105,7 @@ def _compiled(spec: QuerySpecification[Any], graph: str) -> tuple[str, Any, bool
     """
     sql, cypher = cypher_compiled(spec, "SQLITE", graph)
     if cypher is not None:
+        _warn_of_rounded_floats()
         assert sql.statement is not None
         sql.statement = dataclasses.replace(sql.statement, text=f"{JSON_ROWS}\n{sql.statement.text}")
         spec = sql
@@ -116,3 +117,25 @@ def _compiled(spec: QuerySpecification[Any], graph: str) -> tuple[str, Any, bool
         *([f"OFFSET {spec._skip}"] if spec._skip else []),
     ]
     return " ".join([statement.text, *paged]), spec.parameters, cypher is not None
+
+
+_warned: list[bool] = []
+"""Whether `_warn_of_rounded_floats` has warned: once for the process."""
+
+
+def _warn_of_rounded_floats() -> None:
+    """
+    Warns, once, where compiled Cypher runs on a SQLite older than FULL_FLOATS_VERSION: there a float is written to 15
+    significant digits wherever a value is JSON text, so `1.0 / 3` gives 0.333333333333333 (#376).
+    """
+    if _warned:
+        return
+    _warned.append(True)
+    version = sqlite_module().sqlite_version_info
+    if version < FULL_FLOATS_VERSION:
+        logger.warning(
+            "Cypher compiled for SQLite %s gives floats to 15 significant digits, and refuses a CALL { ... } that "
+            "groups by a variable it imports: SQLite 3.53 or later gives a graph engine's (liberation-data/"
+            "drivine-python#376). Use a Python built with a later SQLite, or pip install pysqlite3-binary.",
+            ".".join(str(it) for it in version),
+        )

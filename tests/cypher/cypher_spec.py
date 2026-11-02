@@ -18,11 +18,23 @@ import yaml
 
 SPEC = Path(__file__).parent
 
+
+def _sqlite_before_full_floats() -> set[str]:
+    """SQLite, where the SQLite Drivine uses is older than FULL_FLOATS_VERSION: see `HELD`."""
+    from drivine.connection.sqlite.sqlite_session import FULL_FLOATS_VERSION, sqlite_module
+
+    return {"sqlite"} if sqlite_module().sqlite_version_info < FULL_FLOATS_VERSION else set()
+
+
 GROUPS = {
     "graph": {"neo4j", "memgraph", "falkordb", "neptune"},
     "sql": {"postgres", "oracle", "sqlite"},
+    "sqlite-before-3.53": _sqlite_before_full_floats(),
 }
-"""The groups a step may name for its stores: the graph engines, and the stores Cypher is compiled to SQL for."""
+"""
+The groups a step may name for its stores: the graph engines, and the stores Cypher is compiled to SQL for. A hold may
+name SQLite older than 3.53 too, which is SQLite where the tests run on one.
+"""
 
 
 class _Loader(yaml.SafeLoader):
@@ -196,8 +208,19 @@ HELD: dict[str, dict[str, list[Hold]]] = {
     "queries.yaml": {
         # v0.21.0, liberation-data/drivine-cypher-spec#31: a NaN or infinite parameter is bound as a text
         # (drivine4j#295), and Oracle compares NaN equal to NaN (drivine4j#409, also #327); drivine4j#452 fixes both.
-        "NaN and the infinities as parameters": [Hold(164, ("sql",))],
+        # On SQLite step 6 gives null, as Neo4j does, as drivine4j and Drivine for TypeScript hold the rest there.
+        "NaN and the infinities as parameters": [
+            Hold(164, ("postgres", "oracle")),
+            Hold(164, ("sqlite",), (1, 2, 3, 4, 5, 7, 8, 9, 10, 12, 13, 14, 15, 16, 17, 18, 19)),
+        ],
         "NaN worked out": [Hold(164, ("oracle",), (2, 3))],
+        # SQLite before 3.53 writes a float to 15 significant digits, and refuses a subquery in json_each that groups
+        # by a column of its row (#376).
+        "Round to a fractional or negative precision": [Hold(376, ("sqlite-before-3.53",), (15, 17))],
+        "CALL imports only what it names": [Hold(376, ("sqlite-before-3.53",), (12,))],
+        "Float arithmetic": [Hold(376, ("sqlite-before-3.53",), (1, 2, 4, 5, 6))],
+        "Aggregates of floats": [Hold(376, ("sqlite-before-3.53",), (12,))],
+        "Functions of numbers": [Hold(376, ("sqlite-before-3.53",), (2, 8, 9, 11))],
     },
     "writes.yaml": {
         # v0.21.0, liberation-data/drivine-cypher-spec#31: as above, written.

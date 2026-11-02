@@ -31,6 +31,13 @@ logger = logging.getLogger("drivine.connection")
 MINIMUM_VERSION = (3, 45, 0)
 """The oldest SQLite Drivine's statements run on: drivine4j's, for its JSON functions and aggregate order."""
 
+FULL_FLOATS_VERSION = (3, 53, 0)
+"""
+The oldest SQLite that writes a float as text to 17 significant digits, not 15, as compiled Cypher needs it to give the
+floats a graph engine gives: each value is JSON text there. An older SQLite also refuses a subquery in `json_each` that
+groups by a column of the row it is in, which a `CALL { … }` that aggregates may compile to (#376).
+"""
+
 DEFAULT_BUSY_TIMEOUT = 30_000
 """How long a connection waits for a locked file, in ms: long enough for any one save to finish."""
 
@@ -45,9 +52,10 @@ _POSITIONAL = re.compile(r"\$(\d+)(?![0-9])")
 def sqlite_module() -> ModuleType:
     """
     The `sqlite3` module whose SQLite is 3.45 or later: Python's own, or `pysqlite3` where Python's is older and it is
-    installed (`pip install pysqlite3-binary`).
+    installed (`pip install pysqlite3-binary`). Where Python's is older than FULL_FLOATS_VERSION and `pysqlite3`'s is
+    later than Python's, `pysqlite3`, for compiled Cypher.
     """
-    if sqlite3.sqlite_version_info >= MINIMUM_VERSION:
+    if sqlite3.sqlite_version_info >= FULL_FLOATS_VERSION:
         return sqlite3
     try:
         import importlib
@@ -55,6 +63,10 @@ def sqlite_module() -> ModuleType:
         dbapi2: Any = importlib.import_module("pysqlite3.dbapi2")
     except ImportError:
         dbapi2 = None
+    if dbapi2 is not None and dbapi2.sqlite_version_info > sqlite3.sqlite_version_info >= MINIMUM_VERSION:
+        return cast(ModuleType, dbapi2)
+    if sqlite3.sqlite_version_info >= MINIMUM_VERSION:
+        return sqlite3
     if dbapi2 is not None and dbapi2.sqlite_version_info >= MINIMUM_VERSION:
         return cast(ModuleType, dbapi2)
     raise DrivineError(

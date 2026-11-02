@@ -116,7 +116,10 @@ def test_a_cypher_statement_is_compiled_to_sqlites_sql_and_gives_a_graph_engines
         {"from": "Ada", "to": "Charles", "since": 1833, "born": 1815.0}
     ]
     optional = "MATCH (n:CyConn) OPTIONAL MATCH (n)-[:KNOWS]->(m) RETURN [n.name, m.name] ORDER BY n.name"
-    assert pm.query(QuerySpecification[Any](cypher_statement(optional))) == [["Ada", "Charles"], ["Charles", None]]
+    assert pm.query(QuerySpecification[Any](cypher_statement(optional))) == [
+        ["Ada", "Charles"],
+        ["Charles", None],
+    ]
 
 
 class Writes:

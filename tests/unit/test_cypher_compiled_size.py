@@ -742,3 +742,73 @@ def test_an_aggregates_argument_compiled_only_to_see_whether_it_binds_declares_e
         sql = OracleCypherCompiler("g", nulls_equal_stored=False).compile(statement).sql
         assert len(re.findall(r"FUNCTION cy_nulls_equal\(", sql)) == 1, f"{statement}: {sql}"
         assert "THEN NULL ELSE (cy_nulls_equal(" in sql, f"{statement}: {sql}"
+
+
+@COMPILERS
+def test_a_truncation_with_fields_of_a_truncation_with_fields_writes_the_text_of_its_fields_once(
+    compiler: type[SqlCypherCompiler],
+) -> None:
+    # #326, drivine4j#469: the text a truncation makes of its fields is read twice to number its year as the store
+    # does. Written out twice, four nested compiled to about 18,000 characters on Oracle and Postgres; bound once, to
+    # about 9,000.
+    def truncated(times: int) -> str:
+        return (
+            "RETURN "
+            + "datetime.truncate('second', " * times
+            + "datetime('2017-10-11T12:31:14+01:00')"
+            + ", {hour: 3})" * times
+            + ".hour"
+        )
+
+    two, four = (len(compiler("g").compile(truncated(it)).sql) for it in (2, 4))
+    assert four < 12_000, four
+    assert four < 3 * two, (two, four)
+
+
+@COMPILERS
+def test_an_aggregate_of_a_case_that_tests_a_field_of_a_moment_added_to_twice_compiles_to_a_few_kilobytes(
+    compiler: type[SqlCypherCompiler],
+) -> None:
+    # #326, drivine4j#469: Oracle's search of an aggregate's CASE for a subquery wrote each long value out wherever it
+    # was read. Here it took a second and a half to compile; in drivine4j, with the reads of a year BC, 165 million
+    # characters, and with two additions past the JVM's longest string.
+    cypher = (
+        "MATCH (c:Claim) RETURN "
+        "count(CASE WHEN (datetime(c.at) + duration('PT1H') + duration('PT1H')).minute > 0 THEN 1 END)"
+    )
+    sql = compiler("g").compile(cypher).sql
+    assert len(sql) < 40_000, len(sql)
+
+
+_MOMENT = "(datetime(n.at) + duration('PT1H') + duration('PT1H')).minute"
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        f"MATCH (n:C) RETURN count(CASE WHEN EXISTS {{ MATCH (n)-->(m) WHERE m.x > 0 }} AND {_MOMENT} > 0 THEN 1 END)",
+        f"MATCH (n:C) RETURN count(CASE WHEN COUNT {{ (n)-->() }} > {_MOMENT} THEN 1 END)",
+        f"MATCH (n:C) RETURN collect(CASE WHEN {_MOMENT} > 0 THEN [(n)-->(m) | m.id] END)",
+        "MATCH (n:C) RETURN collect(CASE WHEN (datetime([(n)-->(m) | m.at][0]) + duration('PT1H') + "
+        "duration('PT1H')).minute > 0 THEN 1 END)",
+        f"MATCH (n:C) RETURN count(CASE WHEN reduce(a = 0, x IN n.l | a + {_MOMENT}) > 0 THEN 1 END)",
+    ],
+)
+def test_on_oracle_an_aggregate_of_a_case_beside_a_moment_added_to_twice_aggregates_no_subquery_and_declares_its_own(
+    statement: str,
+) -> None:
+    # #326, drivine4j#469: the search of the CASE for a subquery writes each long value beside what reads it, under
+    # names of no subquery: a subquery of the CASE's own, in such a value or beside it, is still found, and the
+    # aggregate reads it worked out first. What the search declares is given back: a reduce()'s step searched so
+    # declared a function reading those names.
+    sql = OracleCypherCompiler("g").compile(statement).sql
+    assert len(sql) < 60_000, len(sql)
+    assert "probed." not in sql, sql
+    # The statement's own aggregate, its first after the functions it declares.
+    lines = sql.splitlines()
+    query = lines[next(i for i, it in enumerate(lines) if it.startswith("SELECT")) :]
+    aggregate = next(it for it in query if re.search(r"\b(count|JSON_ARRAYAGG)\(", it))
+    assert "SELECT" not in aggregate.split("SELECT", 1)[-1], aggregate
+    declared = re.findall(r"FUNCTION (cy_\w+)\(", sql)
+    assert declared == list(dict.fromkeys(declared)), declared
+    assert all(len(re.findall(rf"\b{name}\(", sql)) > 1 for name in declared), declared

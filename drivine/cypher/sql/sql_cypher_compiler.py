@@ -6604,7 +6604,7 @@ class SqlCypherCompiler(ABC):
         # constant out of range is not worked out before any row.
         number = self.number(self.comparable(self.json(arguments[index])))
         return self.shared1(
-            f"CASE WHEN {text} IS NOT NULL THEN TRUNC({number}) END",
+            f"CASE WHEN {text} IS NOT NULL THEN {self.temporal_sql.trunc}({number}) END",
             lambda n: (
                 f"CASE WHEN {n} < 0 OR {n} > {MAX_COUNT} THEN {self.failure(out_of_range, n)} "
                 f"ELSE CAST({n} AS INTEGER) END"
@@ -6620,7 +6620,7 @@ class SqlCypherCompiler(ABC):
 
     def _truncated_whole(self, value: Value) -> str:
         """A value as a SQL whole number cut toward zero, as Neo4j reads `round()`'s precision."""
-        return f"CAST(TRUNC({self.number(self.comparable(self.json(value)))}) AS INTEGER)"
+        return f"CAST({self.temporal_sql.trunc}({self.number(self.comparable(self.json(value)))}) AS INTEGER)"
 
     def _rounded(
         self,
@@ -6671,7 +6671,11 @@ class SqlCypherCompiler(ABC):
             )
 
         return self.shared(
-            [self.comparable(self.json(value)), f"TRUNC({self.number(self.comparable(self.json(precision)))})"], rounded
+            [
+                self.comparable(self.json(value)),
+                f"{self.temporal_sql.trunc}({self.number(self.comparable(self.json(precision)))})",
+            ],
+            rounded,
         )
 
     def _out_of_places(self, x: str, precision: str) -> str:

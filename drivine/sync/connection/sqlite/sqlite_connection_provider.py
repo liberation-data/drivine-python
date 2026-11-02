@@ -61,7 +61,7 @@ class SqliteConnectionProvider(ConnectionProvider):
         except BaseException:
             self._give_back(session)
             raise
-        return SqliteConnection(session, self._give_back, f"sqlite.{next(_SESSIONS)}")
+        return SqliteConnection(session, self._give_back, f"sqlite.{next(_SESSIONS)}", self.graph.name or DEFAULT_GRAPH)
 
     def end(self) -> None:
         with self._pooling:

@@ -29,6 +29,20 @@ def test_the_clause_that_stamps_a_node_compiles_to_a_statement_of_a_few_kilobyte
 
 
 @COMPILERS
+def test_two_list_literals_of_a_hundred_items_a_null_among_them_compared_item_by_item_are_a_few_hundred_characters_each(
+    compiler: type[SqlCypherCompiler],
+) -> None:
+    # Each pair of literal items tested on both sides for a text past 4,000 bytes made 80,907 characters on Oracle in
+    # drivine4j, about four times the 20,879 before (liberation-data/drivine4j#476).
+    def item(i: int) -> str:
+        return [f"{i}", f"'s{i}'", "null", f"{i}.5", "true", f"[{i}, 'n']", f"{{k: {i}}}"][i % 7]
+
+    items = "[" + ", ".join(item(i) for i in range(100)) + "]"
+    sql = compiler("g").compile(f"RETURN {items} = {items}").sql
+    assert len(sql) < 25_000, len(sql)
+
+
+@COMPILERS
 def test_a_duration_added_to_a_value_read_from_the_store_grows_with_each_addition_not_exponentially(
     compiler: type[SqlCypherCompiler],
 ) -> None:
@@ -310,9 +324,10 @@ def test_a_where_that_searches_a_list_that_holds_no_null_compiles_to_the_search_
     sql = compiled("MATCH (c:Claim) WHERE c.a IN $l AND (c.b IN [1, 2] OR c.c > 1) RETURN c.id", {"l": [1, 2]})
     assert not tested(sql), sql
     # Nor of the list being null or holding a null, beside a value that holds none. On Oracle an item is compared with
-    # 'a' as a text, and is not equal to it where it is a text past 4,000 bytes (#291).
+    # 'a' as JSON where it is read as a VARCHAR2 or is no text, nor a list or a map; else it is not equal (#291,
+    # drivine4j#476).
     nullable = compiled("MATCH (c:Claim) WHERE 'a' IN c.tags AND c.a IN $l RETURN c.id", {"l": [1, None]})
-    assert not tested(re.sub(r"<> 'string' THEN \S+ = \S+ ELSE FALSE", "", nullable)), nullable
+    assert not tested(nullable.replace(" = JSON('\"a\"') ELSE FALSE END", "")), nullable
     # Nor in a quantified path pattern's WHERE, which keeps a step where it is true.
     stepped = compiled("MATCH (a:Claim) ((x)-[:R]->(y) WHERE y.a IN [1, 2]){1,3} (b) RETURN b.id")
     assert not tested(stepped), stepped

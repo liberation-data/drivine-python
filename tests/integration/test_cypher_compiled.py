@@ -1881,6 +1881,63 @@ async def test_a_text_past_32_kb_compares_equal_unequal_in_a_list_and_in_order_s
     await clear(cypher_pm)
 
 
+async def test_a_text_past_32_kb_is_in_no_list_of_short_items_null_where_one_is_null_on_several_rows(
+    cypher_pm: PersistenceManager,
+):
+    # On Oracle, n.t IN $l with a null and an empty item or one past 4,000 bytes in $l closed the session (ORA-03113):
+    # where no item was equal, the property was taken out as JSON over two rows to tell null from false. drivine4j's
+    # CypherQueryContract of liberation-data/drivine4j#475.
+    await clear(cypher_pm)
+    long = "a" * 40_000
+    for i in range(2):
+        await cypher_pm.query(spec("CREATE (:CyInNull {i: $i, t: $t})", {"i": i, "t": f"{long}{i}"}))
+    # Short items, and an empty one and one past 4,000 bytes, which are compared with the text as texts.
+    lists: list[tuple[list[Any], bool | None]] = [
+        (["abc", 5, None], None),
+        (["abc", None], None),
+        ([None], None),
+        (["abc", 5], False),
+        (["", None], None),
+        (["x" * 5_000, None], None),
+        (["", "abc"], False),
+    ]
+    parameters = {f"l{i}": items for i, (items, _) in enumerate(lists)}
+    async with one_session(cypher_pm):
+        for run in range(1, 4):
+            for i, (items, found) in enumerate(lists):
+                returned = f"MATCH (n:CyInNull) RETURN n.t IN $l{i} ORDER BY n.i"
+                filtered = f"MATCH (n:CyInNull) WHERE n.t IN $l{i} RETURN count(*)"
+                assert await asked_again(cypher_pm, returned, parameters) == [found, found], f"{items}, run {run}"
+                assert await asked_again(cypher_pm, filtered, parameters) == [0], f"{items} in a WHERE, run {run}"
+            # And written out, which is compared item by item.
+            written = "MATCH (n:CyInNull) RETURN n.t IN ['abc', 5, null] ORDER BY n.i"
+            assert await asked_again(cypher_pm, written, parameters) == [None, None], f"written, run {run}"
+    await clear(cypher_pm)
+
+
+async def test_a_text_of_4_000_bytes_compares_as_a_short_one_and_one_past_4_000_bytes_but_not_characters_as_a_long_one(
+    cypher_pm: PersistenceManager,
+):
+    # On Oracle a text is compared as a VARCHAR2 up to 4,000 bytes, and as a CLOB past them (#291): counted in bytes, so
+    # '€', three bytes, makes a text of 1,335 characters past them.
+    await clear(cypher_pm)
+    at = "€" * 1_333 + "a"
+    past = at + "b"
+    for i, t in enumerate([at, past]):
+        await cypher_pm.query(spec("CREATE (:CyBytes {i: $i, t: $t})", {"i": i, "t": t}))
+    parameters = {"at": at, "past": past, "l": [past, None]}
+    compared = (
+        "MATCH (n:CyBytes) RETURN [n.t = $at, n.t = $past, n.t IN [$at, 'x'], n.t IN $l, n.t < $past] ORDER BY n.i"
+    )
+    assert await cypher_pm.query(spec(compared, parameters)) == [
+        [True, False, True, None, True],
+        [False, True, False, True, False],
+    ]
+    filtered = "MATCH (n:CyBytes) WHERE n.t IN [$at, 'x'] RETURN n.i"
+    assert await cypher_pm.query(spec(filtered, parameters)) == [0]
+    await clear(cypher_pm)
+
+
 async def test_collect_distinct_beside_keys_other_aggregates_an_order_a_page_and_a_variable_outside_its_aggregates(
     cypher_pm: PersistenceManager,
 ):

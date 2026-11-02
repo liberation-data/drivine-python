@@ -141,9 +141,12 @@ def test_a_stored_text_is_compared_as_a_text_with_a_given_one_the_items_of_a_lis
     passed_on = sql("MATCH (n:Doc) WITH n.t AS t RETURN t IN $xs", {"xs": ["a", None]})
     assert re.search(r"JSON_SERIALIZE\(w\d+\.c1", passed_on) is None, passed_on
     # A list written out that holds a null is compared item by item, each item as equality compares it: the written
-    # ones, the null among them, as a given text or number is.
+    # ones, the null among them, as a given text or number is; beside the null, which is no list or map, a list or a
+    # map is not equal either.
     itemwise = sql("MATCH (n:Doc) RETURN n.t IN ['a', 5, null, $x]")
-    assert itemwise.count("NVL(JSON_VALUE(n1.props, '$.t.type()'), 'null') <> 'string' THEN") == 4, itemwise
+    assert itemwise.count("NVL(JSON_VALUE(n1.props, '$.t.type()'), 'null') <> 'string' THEN") == 3, itemwise
+    scalar = "NVL(JSON_VALUE(n1.props, '$.t.type()'), 'null') NOT IN ('string', 'array', 'object') THEN"
+    assert itemwise.count(scalar) == 1, itemwise
     assert "DBMS_LOB" not in itemwise, itemwise
     # An empty item, or one past 4,000 bytes, isn't, and both sides are compared as texts.
     for xs in [["a", ""], ["a", "€" * 1_334]]:
@@ -192,6 +195,38 @@ def test_a_stored_text_is_compared_as_a_text_with_a_given_one_the_items_of_a_lis
     assert f"AND NOT NVL(JSON_VALUE({w[1]}, '$.type()'), 'null') = 'null')" in passed_in, passed_in
 
 
+def test_an_in_of_given_items_an_empty_or_long_one_among_them_is_decided_without_reading_the_value_for_nulls():
+    # drivine4j#475: where no item was equal, the value was read for its nulls and compared with each item again, a
+    # stored text past 32 KB taken out as JSON over two rows, which closed the session (ORA-03113). An empty item, or
+    # one past 4,000 bytes, is compared with the value as a text, and decides as the others do.
+    # Items that hold no null are decided beside a value that may hold one, as in drivine4j's test: beside a property,
+    # which holds none, they are searched as before.
+    cases: list[tuple[str, dict[str, Any], str]] = [
+        ("MATCH (n:Doc) RETURN n.t IN $xs", {"xs": ["", None]}, " THEN TRUE ELSE NULL END"),
+        ("MATCH (n:Doc) RETURN n.t IN $xs", {"xs": ["x" * 5_000, None]}, " THEN TRUE ELSE NULL END"),
+        ("RETURN $v IN $xs", {"v": [1, None], "xs": ["", "abc"]}, " THEN TRUE ELSE FALSE END"),
+    ]
+    for cypher, parameters, decided in cases:
+        listed = sql(cypher, parameters)
+        assert f"{decided} AS c1" in listed, listed
+        assert "DBMS_LOB.COMPARE(" in listed, listed
+        assert re.search(r"JSON_SERIALIZE|nulls_equal|JSON_VALUE\(JSON_QUERY\(", listed) is None, listed
+
+
+def test_a_stored_list_or_map_is_not_compared_as_json_beside_a_single_value_the_statement_writes():
+    # drivine4j#476's fix: beside a written value of one kind, a list or a map is not equal, and isn't compared as JSON,
+    # which refuses one that holds a text past 32 KB (ORA-40180).
+    tags = sql("MATCH (n:Doc) WHERE 'a' IN n.tags RETURN n")
+    scalar = r"NOT IN \('string', 'array', 'object'\) THEN i\d+\.item = JSON\('\"a\"'\) ELSE FALSE END"
+    assert re.search(scalar, tags) is not None, tags
+    # Beside a written list or map, a stored one is compared as JSON, as before.
+    listed = sql("MATCH (n:Doc) RETURN n.tags = [1, null]")
+    assert (
+        "NVL(JSON_VALUE(n1.props, '$.tags.type()'), 'null') <> 'string' THEN "
+        "JSON_QUERY(n1.props, '$.tags' RETURNING JSON) = JSON_ARRAY("
+    ) in listed, listed
+
+
 def test_a_stored_text_is_compared_as_a_text_with_each_item_of_a_list_a_subquery_works_out_for_each_row():
     # The list worked out in a derived table inside a lateral view (#272), and the property read by its own path.
     filtered = sql("MATCH (n:Doc) WHERE n.t IN [(n)-->(q) | q.t] RETURN n")
@@ -223,20 +258,26 @@ def test_two_values_the_statement_writes_are_compared_as_json_and_beside_one_onl
     literals = sql("RETURN [7 IN [0, 's1', null, 3.5, true, [5, 'n'], {k: 6}], 'a' = 'a', [1] = [1, null]]")
     assert "DBMS_LOB" not in literals and "<> 'string'" not in literals, literals
     assert "JSON('7') = JSON_SCALAR(TO_BINARY_DOUBLE('3.5'))" in literals, literals
-    # Beside a written value that is no text or a short text, the other side alone is tested; beside an empty text,
-    # which Oracle reads as null, or one past 4,000 bytes, both are, as texts.
-    one = (
-        "CASE WHEN JSON_VALUE(n1.props, '$.t') IS NOT NULL OR NVL(JSON_VALUE(n1.props, '$.t.type()'), 'null') <> "
-        "'string' THEN JSON_QUERY(n1.props, '$.t' RETURNING JSON) = "
-    )
-    for written, value in [
-        ("'a'", "JSON('\"a\"')"),
-        ("[1, 2]", "JSON_ARRAY("),
-        ("{k: 1}", "JSON_OBJECT("),
-        ("1.5", "JSON_SCALAR(TO_BINARY_DOUBLE("),
+
+    # Beside a written value that is no text or a short text, the other side alone is tested, and beside one of one kind
+    # a list or a map is not equal (drivine4j#476); beside an empty text, which Oracle reads as null, or one past 4,000
+    # bytes, both are, as texts.
+    def tested(kinds: str) -> str:
+        return (
+            f"CASE WHEN JSON_VALUE(n1.props, '$.t') IS NOT NULL OR NVL(JSON_VALUE(n1.props, '$.t.type()'), 'null') "
+            f"{kinds} THEN JSON_QUERY(n1.props, '$.t' RETURNING JSON) = "
+        )
+
+    one = tested("<> 'string'")
+    scalar = tested("NOT IN ('string', 'array', 'object')")
+    for written, value, test in [
+        ("'a'", "JSON('\"a\"')", scalar),
+        ("[1, 2]", "JSON_ARRAY(", one),
+        ("{k: 1}", "JSON_OBJECT(", one),
+        ("1.5", "JSON_SCALAR(TO_BINARY_DOUBLE(", scalar),
     ]:
         compared = sql(f"MATCH (n:Doc), (m:Doc) RETURN m.t = n.t, {written} = n.t")
-        assert one + value in compared and "DBMS_LOB" in compared, f"{written}: {compared}"
+        assert test + value in compared and "DBMS_LOB" in compared, f"{written}: {compared}"
     # A float worked out, unlike one written, may be SQL's null, so is compared as any other value: null beside a long
     # text, not false.
     worked = sql("MATCH (n:Doc) RETURN toFloat(n.y) = n.t")

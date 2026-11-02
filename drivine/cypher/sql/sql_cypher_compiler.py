@@ -955,6 +955,16 @@ class SqlCypherCompiler(ABC):
         """
         return None
 
+    @property
+    def given_items_decided(self) -> bool:
+        """
+        Whether an `IN` of such items, where none is equal to the value, is null where they hold a null and else false,
+        as the statement is compiled, and the value is not read for its nulls: such items are equal to no value that
+        holds one, and a comparison with one of them is null only where the item is null. Else the value is read for its
+        nulls, and compared with each item again where none is equal, as with any list. See Oracle's.
+        """
+        return False
+
     @abstractmethod
     def holds_null(self, json: str) -> str | None:
         """
@@ -5678,10 +5688,10 @@ class SqlCypherCompiler(ABC):
             found_ = f"EXISTS (SELECT 1 FROM {self._elements_of(right, l_, i)} WHERE {matches(f'{i}.item', v)})"
             # Items the statement gives, none a list or a map, are equal to no value that holds a null, and a comparison
             # with one is null only where it is null: the value is not read for its nulls, a text past 32 KB taken out
-            # as JSON so closing Oracle's session (#291).
-            if test is not None:
-                cases.append(f"WHEN {test(v)} AND {found_} THEN TRUE")
-                return f"CASE {' '.join(cases)} ELSE {'NULL' if None in cast(list[Any], items) else 'FALSE'} END"
+            # as JSON so closing Oracle's session (#291, liberation-data/drivine4j#475). See `given_items_decided`.
+            if items is not None and self.given_items_decided:
+                cases.append(f"WHEN {'' if test is None else f'{test(v)} AND '}{found_} THEN TRUE")
+                return f"CASE {' '.join(cases)} ELSE {'NULL' if None in items else 'FALSE'} END"
             # A value that holds a null is equal to no item.
             held = None if whole else self.holds_null(v)
             cases.append(f"WHEN {f'NOT ({held}) AND ' if held is not None else ''}{found_} THEN TRUE")

@@ -494,7 +494,9 @@ class OracleCypherCompiler(SqlCypherCompiler):
         # a few hundred items, compared item by item, so stays as large as before, where Oracle ran out of memory.
         if _written(x) or _written(y):
             other, value = (x, y) if _written(y) else (y, x)
-            return self.shared_compared(other, value, lambda it: _one_sided(it[0], it[1]))
+            # Beside a value of one kind, a list or a map is not equal, and isn't compared as JSON (drivine4j#476).
+            containers = _written_scalar(value) is False
+            return self.shared_compared(other, value, lambda it: _one_sided(it[0], it[1], containers))
 
         def equal(sides: list[str]) -> str:
             a, b = sides
@@ -531,7 +533,15 @@ class OracleCypherCompiler(SqlCypherCompiler):
         """
         if self._as_json or not all(it is None or _read_short(it) for it in items):
             return None
-        return f"({_short(value)} IS NOT NULL OR NVL({_kind(value)}, 'null') <> 'string')"
+        return f"({_short_or_no_text(value)})"
+
+    @property
+    def given_items_decided(self) -> bool:
+        """
+        Not in a statement that writes, nor in the step of a `reduce()`, which compare as before (see `_as_json`): a
+        stored text past 32 KB, taken out as JSON to read its nulls, closed the session (liberation-data/drivine4j#475).
+        """
+        return not self._as_json
 
     def ordered(self, x: str, operator: str, y: str) -> str:
         """
@@ -1834,13 +1844,23 @@ def _text_order(x: str, operator: str, y: str) -> str:
     )
 
 
-def _one_sided(a: str, b: str) -> str:
+def _one_sided(a: str, b: str, containers: bool = True) -> str:
     """
     Whether the JSON value `a` is equal to `b`, which is no text or a text read as a `VARCHAR2`: as JSON where `a` is
     read as one too, or is no text, and else not, as `a` is then a longer text or an empty one; null where `a` is SQL's
-    null.
+    null. Where not `containers`, `b` being a value of one kind, a list or a map is not equal either, and isn't compared
+    as JSON, which refuses one that holds a text past 32 KB (ORA-40180).
     """
-    return f"CASE WHEN {_short(a)} IS NOT NULL OR NVL({_kind(a)}, 'null') <> 'string' THEN {a} = {b} ELSE FALSE END"
+    return f"CASE WHEN {_short_or_no_text(a, containers)} THEN {a} = {b} ELSE FALSE END"
+
+
+def _short_or_no_text(json: str, containers: bool = True) -> str:
+    """
+    Whether the JSON value is read as a `VARCHAR2`, a text of 1 to _SHORT_TEXT bytes, or is no text; SQL's null is no
+    text. Where not `containers`, a list or a map doesn't pass either.
+    """
+    kinds = "<> 'string'" if containers else "NOT IN ('string', 'array', 'object')"
+    return f"{_short(json)} IS NOT NULL OR NVL({_kind(json)}, 'null') {kinds}"
 
 
 def _read_short(given: Any) -> bool:
@@ -1864,14 +1884,22 @@ def _written(json: str) -> bool:
     `JSON_VALUE` reads as a `VARCHAR2`: a literal, `JSON('5')`, a float, or a list or a map it makes. Beside it the
     other side alone is tested (see `OracleCypherCompiler.json_equals`), as beside a value the statement is given.
     """
+    return _written_scalar(json) is not None
+
+
+def _written_scalar(json: str) -> bool | None:
+    """Whether the JSON, where it is `_written`, is a value of one kind (True) or a list or a map (False); None where it
+    isn't written."""
     literal_ = _WRITTEN_LITERAL.fullmatch(json)
     if literal_ is not None:
         value = json_.loads(literal_[1].replace("''", "'"))
-        return not isinstance(value, str) or _read_short(value)
+        if isinstance(value, (list, dict)):
+            return False
+        return True if not isinstance(value, str) or _read_short(value) else None
     # A float literal; and a list or a map, which its constructor makes whatever it holds, so never SQL's null.
-    return _WRITTEN_FLOAT.fullmatch(json) is not None or (
-        json.startswith(("JSON_ARRAY(", "JSON_OBJECT(")) and _enclosed(json)
-    )
+    if _WRITTEN_FLOAT.fullmatch(json) is not None:
+        return True
+    return False if json.startswith(("JSON_ARRAY(", "JSON_OBJECT(")) and _enclosed(json) else None
 
 
 def _enclosed(sql: str) -> bool:

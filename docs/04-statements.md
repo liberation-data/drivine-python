@@ -146,7 +146,11 @@ people = await pm.query(spec.bind({"city": "Sydney"}))
   Beside a number, a truth value or a short text the statement gives or writes, a list or a map it writes, or an `IN`
   of such items, only the other side is read for its kind (`n.name = $x`, `n.name = 'abc'`, `n.name IN $names`): over
   20,000 rows that costs about a fifth more for `=` and `IN`, and an order (`n.name > $x`, `n.i < 10000`) takes three
-  fifths to two thirds of the time it took.
+  fifths to two thirds of the time it took. Beside a single value the statement writes, a list or a map is not equal
+  and isn't compared as JSON. Where no item of an `IN` the statement gives or writes, none a list or a map, is equal,
+  the answer is null where they hold a null and else false, and the value isn't read again for its nulls, which took a
+  text past 32 KB out as JSON and crashed the session
+  ([drivine4j#475](https://github.com/liberation-data/drivine4j/issues/475)).
   A statement that writes, and the step of a `reduce`, which run as PL/SQL, compare as JSON, as before, and refuse a
   text past 32 KB: there a CLOB read from an unwound row's JSON crashed the session. A list or a map that holds such
   a text is compared as JSON anywhere, and refused. Between two texts, either past 4,000 bytes, that first differ where

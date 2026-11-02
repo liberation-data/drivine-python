@@ -11,16 +11,18 @@ import re
 import sqlite3
 import time
 from collections.abc import Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime
 from datetime import time as clock_time
 from decimal import Decimal
 from enum import Enum
 from types import ModuleType
-from typing import Any, cast
+from typing import Any, NoReturn, cast
 from uuid import UUID
 
 from drivine.backend.sql.sql_json import storable, to_json
 from drivine.backend.sqlite import sqlite_functions
+from drivine.backend.sqlite.sqlite_contention import ERRORS, locked
 from drivine.backend.sqlite.sqlite_graph import JSON_ROWS, SqliteGraph
 from drivine.drivine_error import DrivineError
 
@@ -75,19 +77,36 @@ class SqliteSession:
     - The log is synced at a checkpoint and not at each commit, as is safe with a write-ahead log: a commit may be lost
       to a power cut, and the file is never left corrupt.
 
-    Outside a transaction each statement commits as it runs. It is used by one caller at a time, from whichever thread
-    runs the call.
+    Outside a transaction each statement commits as it runs. It is used by one caller at a time. The async API runs
+    each call on `thread`, the connection's own: so a connection that waits for the file's lock keeps only its own
+    thread waiting, never one the connection holding the lock needs to finish, and a call made after one whose caller
+    was cancelled runs once that one has ended, never beside it.
     """
 
     def __init__(self, path: str, busy_timeout: int = DEFAULT_BUSY_TIMEOUT) -> None:
         module = sqlite_module()
-        self.connection: sqlite3.Connection = module.connect(
-            path, timeout=busy_timeout / 1000, isolation_level=None, check_same_thread=False
-        )
+        try:
+            self.connection: sqlite3.Connection = module.connect(
+                path, timeout=busy_timeout / 1000, isolation_level=None, check_same_thread=False
+            )
+        except module.Error as error:
+            # SQLite's message, as for a folder that is not there, does not name the file.
+            raise DrivineError(f"Could not open the SQLite file '{path}': {error}.") from error
+        self.thread = ThreadPoolExecutor(max_workers=1, thread_name_prefix="drivine-sqlite")
         self.failures = sqlite_functions.Failures()
         try:
+            deadline = time.monotonic() + busy_timeout / 1000
             for pragma in ("journal_mode = WAL", "foreign_keys = ON", "synchronous = NORMAL"):
-                self.connection.execute(f"PRAGMA {pragma}").close()
+                while True:
+                    try:
+                        self.connection.execute(f"PRAGMA {pragma}").close()
+                        break
+                    except ERRORS as error:
+                        # A connection opened as another closes, or recovers the log, is turned away at once, without
+                        # SQLite's wait: it tries again, as long as it waits for a locked file.
+                        if not locked(error) or time.monotonic() >= deadline:
+                            raise
+                        time.sleep(0.005)
             self.connection.execute(f"PRAGMA busy_timeout = {int(busy_timeout)}").close()
             sqlite_functions.register(self.connection, self.failures)
         except BaseException:
@@ -104,6 +123,9 @@ class SqliteSession:
         cursor = self.execute(statement, parameters)
         try:
             return rows(statement, cursor, cursor.fetchall())
+        except ERRORS as error:
+            # A function may fail at a later row, as it reaches it.
+            self._raise_told(error)
         finally:
             cursor.close()
 
@@ -115,8 +137,8 @@ class SqliteSession:
         sql, values = bindable(statement, parameters)
         try:
             return self.connection.execute(sql, values)
-        except sqlite3.Error as error:
-            raise self._told(error) from None
+        except ERRORS as error:
+            self._raise_told(error)
         except BaseException:
             self.failures.take()
             raise
@@ -125,8 +147,8 @@ class SqliteSession:
         """The next `count` rows of the cursor at most."""
         try:
             return rows(statement, cursor, cursor.fetchmany(count))
-        except sqlite3.Error as error:
-            raise self._told(error) from None
+        except ERRORS as error:
+            self._raise_told(error)
 
     def begin(self) -> None:
         """Opens a transaction, the file's write lock taken."""
@@ -148,7 +170,7 @@ class SqliteSession:
         """
         try:
             self.connection.execute("ROLLBACK").close()
-        except sqlite3.Error:
+        except ERRORS:
             if self.connection.in_transaction:
                 raise
         finally:
@@ -168,6 +190,7 @@ class SqliteSession:
 
     def close(self) -> None:
         self.connection.close()
+        self.thread.shutdown(wait=False)
 
     def _ended(self) -> None:
         """
@@ -185,13 +208,15 @@ class SqliteSession:
                 held * 1000,
             )
 
-    def _told(self, error: sqlite3.Error) -> BaseException:
-        """The failure a function raised, where SQLite says only that one did; the error itself otherwise."""
+    def _raise_told(self, error: Exception) -> NoReturn:
+        """
+        Raises the failure a function raised, caused by SQLite's error, where SQLite says only that one did; the error
+        itself otherwise.
+        """
         kept = self.failures.take()
         if kept is not None and _FUNCTION_FAILED in str(error):
-            kept.__cause__ = error
-            return kept
-        return error
+            raise kept from error
+        raise error
 
 
 def bindable(statement: str, parameters: Mapping[str, Any] | Sequence[Any]) -> tuple[str, Any]:

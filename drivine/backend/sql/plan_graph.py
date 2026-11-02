@@ -13,6 +13,8 @@ class PlanGraph(Protocol):
 
     name: str
     nodes: str
+    booleans: tuple[str, str]
+    """True and false as literals, as the store's driver binds them: on SQLite the integers 1 and 0."""
 
     def write_call(self, returns: WriteReturns) -> str:
         """The statement that carries out the plan bound as `$_plan`, giving back what `returns` asks."""

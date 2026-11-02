@@ -44,36 +44,47 @@ class SqliteConnection(Connection):
         self._release = release
         self.session_id = session_id
         self.result_mapper = PostgresResultMapper()
+        self._cursors: list[SqliteCursor[Any]] = []
+        """The cursors opened on the connection: each still open is closed as it is released (see release)."""
 
     async def query(self, spec: QuerySpecification[T]) -> list[T]:
         finalized = spec.finalized_copy("SQL")
         statement, parameters = _compiled(finalized)
         start = time.perf_counter()
-        rows = await concurrency.blocking(self.session.query, statement, parameters)
+        rows = await concurrency.blocking(self.session.query, statement, parameters, on=self.session.thread)
         log_statement(self.session_id, finalized, start)
         return self.result_mapper.map_query_results(rows, finalized)
 
     async def open_cursor(self, spec: CursorSpecification[T]) -> SqliteCursor[T]:
         finalized = spec.finalized_copy("SQL")
         statement, parameters = _compiled(finalized)
-        cursor = await concurrency.blocking(self.session.execute, statement, parameters)
-        return SqliteCursor(finalized, self.session, statement, cursor, self.result_mapper)
+        cursor = await concurrency.blocking(self.session.execute, statement, parameters, on=self.session.thread)
+        opened = SqliteCursor(finalized, self.session, statement, cursor, self.result_mapper)
+        self._cursors.append(opened)
+        return opened
 
     async def start_transaction(self) -> None:
-        await concurrency.blocking(self.session.begin)
+        await concurrency.blocking(self.session.begin, on=self.session.thread)
 
     async def commit_transaction(self) -> None:
-        await concurrency.blocking(self.session.commit)
+        await concurrency.blocking(self.session.commit, on=self.session.thread)
 
     async def rollback_transaction(self) -> None:
-        await concurrency.blocking(self.session.rollback)
+        await concurrency.blocking(self.session.rollback, on=self.session.thread)
 
     async def release(self, error: BaseException | None = None) -> None:
+        """
+        Closes each cursor still open, rolls back a transaction still open, and gives the connection back. A cursor not
+        read to its end holds the file as it was when it was opened, and the connection's next user would read that.
+        """
         if error is not None:
             logger.debug("Releasing SQLite connection %s with error: %s", self.session_id, error)
         try:
+            cursors, self._cursors = self._cursors, []
+            for cursor in cursors:
+                await cursor.close()
             if self.session.in_transaction:
-                await concurrency.blocking(self.session.rollback)
+                await concurrency.blocking(self.session.rollback, on=self.session.thread)
         finally:
             await self._release(self.session)
 

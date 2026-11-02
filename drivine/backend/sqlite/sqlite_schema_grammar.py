@@ -77,7 +77,7 @@ def _lower_copies(graph: SqliteGraph) -> LowerCopyStatements:
     def fill(label: str, property: str, batch: int) -> str:
         return (
             f"SELECT {LOWER_COPIES}({sql_text(graph.name)}, {sql_text(label)}, {sql_text(property)}, "
-            f'CAST({batch} AS INTEGER)) AS "written"'
+            f'{batch}) AS "written"'
         )
 
     def record(label: str, property: str) -> Recording:

@@ -30,6 +30,7 @@ from datetime import UTC, datetime
 from typing import Any, cast
 
 from drivine.backend.sqlite import sqlite_graph
+from drivine.backend.sqlite.sqlite_contention import ERRORS
 from drivine.backend.sqlite.sqlite_graph import SqliteGraph, has_label, path, text_of
 from drivine.backend.sqlite.sqlite_plan_writer import SqlitePlanWriter, Stopped
 from drivine.model import lower_copies
@@ -120,7 +121,7 @@ def _write(
         for it in (f"ROLLBACK TO {_SAVEPOINT}", f"RELEASE {_SAVEPOINT}"):
             try:
                 connection.execute(it).close()
-            except sqlite3.Error:
+            except ERRORS:
                 pass
         raise
     return json.dumps(given, ensure_ascii=False, separators=(",", ":"))
@@ -190,9 +191,17 @@ def _lower(text: str | None) -> str | None:
 
 
 _INSTANT = re.compile(
-    r"^(?P<date>[+-]?\d{4,}-\d{2}-\d{2})T(?P<hour>\d{2}):(?P<minute>\d{2})(?::(?P<second>\d{2})(?:[.,](?P<fraction>\d{1,9}))?)?"
-    r"(?P<zone>Z|[+-]\d{2}:\d{2}(?::\d{2})?)?$"
+    r"^(?P<date>[+-]?\d{4,}-\d{2}-\d{2})[Tt](?P<hour>\d{2}):(?P<minute>\d{2})(?::(?P<second>\d{2})(?:\.(?P<fraction>\d{0,9}))?)?"
+    r"(?P<zone>[Zz]|[+-]\d{2}(?::\d{2}(?::\d{2})?)?)?$",
+    re.ASCII,
 )
+"""
+A moment as Java's ISO parsers read one: `T` and `Z` in either case, a fraction after a point alone, and an offset of
+hours alone or with minutes and seconds.
+"""
+
+MAX_OFFSET_SECONDS = 18 * 3600
+"""The largest offset Java takes, ±18:00."""
 
 
 def epoch(text: Any) -> int | None:
@@ -218,14 +227,19 @@ def epoch(text: Any) -> int | None:
         return None
     zone = found["zone"]
     offset = 0
-    if zone and zone != "Z":
+    if zone and zone not in ("Z", "z"):
         sign = -1 if zone[0] == "-" else 1
-        parts = [int(it) for it in zone[1:].split(":")]
-        offset = sign * (parts[0] * 3600 + parts[1] * 60 + (parts[2] if len(parts) > 2 else 0))
+        hours, minutes, seconds_ = ([int(it) for it in zone[1:].split(":")] + [0, 0])[:3]
+        if minutes > 59 or seconds_ > 59 or hours * 3600 + minutes * 60 + seconds_ > MAX_OFFSET_SECONDS:
+            return None
+        offset = sign * (hours * 3600 + minutes * 60 + seconds_)
     seconds = int((moment - datetime(1970, 1, 1, tzinfo=UTC)).total_seconds()) - offset
     nanos = int((found["fraction"] or "").ljust(9, "0"))
-    value = seconds * 1_000_000_000 + nanos
-    return value if -(2**63) <= value < 2**63 else None
+    # As Java's multiplyExact then addExact: whole seconds that overflow are null, even where the fraction brings the
+    # sum back in range.
+    whole = seconds * 1_000_000_000
+    value = whole + nanos
+    return value if -(2**63) <= whole and value < 2**63 else None
 
 
 class _Patterns:

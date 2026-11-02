@@ -90,7 +90,7 @@ class SqliteQueryRenderer(SqlQueryRenderer):
             return self._listed(compared, self._list(test.value, path_)) or "1 = 0"
         if test.operator == "NOT_IN":
             any_ = self._listed(compared, self._list(test.value, path_))
-            return f"{present} AND NOT COALESCE({any_}, 0)" if any_ else present
+            return f"{present} AND NOT COALESCE({any_}, FALSE)" if any_ else present
         if test.operator == "HAS_ITEM":
             item = packed(test.value) if json_packed else super()._storable(test.value)
             return self._holds(row, name, item)
@@ -258,7 +258,7 @@ class SqliteQueryRenderer(SqlQueryRenderer):
         """Whether the row has the property, and not as a JSON null."""
         if property == stamps.PROPERTY:
             return f"{row}.stamp IS NOT NULL"
-        return f"COALESCE({json_type(row, property)} <> 'null', 0)"
+        return f"COALESCE({json_type(row, property)} <> 'null', FALSE)"
 
 
 def _declared_kind(scope: Scope, property: str) -> Kind | None:

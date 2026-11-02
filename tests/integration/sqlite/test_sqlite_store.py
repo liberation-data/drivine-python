@@ -280,3 +280,19 @@ async def test_a_grouped_read_orders_a_text_before_a_number_before_a_boolean_and
     assert [it["biggest"] for it in by_size] == [1, 2, 3, 5, None, None]
     by_size = await gom.groups.load(Tagged, keys=keyed, aggregates=biggest, order_by=[("biggest", "desc")])
     assert [it["biggest"] for it in by_size] == [None, None, 5, 3, 2, 1]
+
+
+class Flagged(NodeFragment, labels=["Flagged"]):
+    id: Annotated[str, NodeId()]
+    flag: bool = False
+    note: str = ""
+
+
+async def test_a_patch_where_a_boolean_is_bound_meets_the_node_a_load_with_the_same_where_finds(gom):
+    await gom.save(Flagged(id="f1", flag=True))
+    where = "(n.props ->> '$.\"flag\"') = $flag"
+    assert [it.id for it in await gom.load_all(Flagged, where, {"flag": True})] == ["f1"]
+    patched = await gom.patch(Flagged, "f1", set={"note": "met"}, where=where, bindings={"flag": True})
+    assert patched.applied
+    loaded = await gom.load(Flagged, "f1")
+    assert loaded is not None and loaded.note == "met"

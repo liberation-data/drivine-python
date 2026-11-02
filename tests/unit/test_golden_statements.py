@@ -56,6 +56,8 @@ from drivine.backend.postgres.postgres_backend import PostgresBackend
 from drivine.backend.postgres.postgres_graph import PostgresGraph
 from drivine.backend.postgres.postgres_save_statement import PostgresSaveStatement
 from drivine.backend.postgres.postgres_write_statement import PostgresWriteStatement
+from drivine.backend.sqlite.sqlite_backend import SqliteBackend
+from drivine.backend.sqlite.sqlite_graph import SqliteGraph
 from drivine.connection.database_type import DatabaseType
 from drivine.dsl.lower_copy_lookups import lowered_where
 from drivine.dsl.query import Query
@@ -100,7 +102,8 @@ GOLDEN = json.loads((Path(__file__).parent.parent / "golden" / "statements.json"
 CYPHER_WHERE = "n.name = $name"
 SQL_WHERE = "JSON_VALUE(n.props, '$.name') = $name"
 POSTGRES_WHERE = "(n.props ->> 'name') = $name"
-"""A filter in the store's own language: Cypher over `n`, or SQL over the node row `n` on Oracle and Postgres."""
+SQLITE_WHERE = "(n.props ->> '$.name') = $name"
+"""A filter in the store's own language: Cypher over `n`, or SQL over the node row `n` on the SQL stores."""
 
 
 def statements(grammar: CypherGrammar) -> dict[str, str]:
@@ -188,12 +191,46 @@ def lowered_indexed_read(backend: OracleBackend, registry: ModelRegistry) -> dic
 def postgres_statements() -> dict[str, str]:
     """
     Postgres's statements: the same cases, a filter in SQL, and the searches through an index. A write on Postgres is
-    one call of drivine4j's write function, the same text for every write, so the plan it binds is written too, its
-    fresh stamps written as `<stamp>`: TypeScript makes the same plan for the same object.
+    one call of drivine4j's write function, the same text for every write, so the plan it binds is written too.
     """
     backend = PostgresBackend(PostgresGraph())
     person = ModelRegistry().fragment(Person)
-    cases = written_cases(backend, POSTGRES_WHERE, True)
+    return {
+        **with_plans(written_cases(backend, POSTGRES_WHERE, True)),
+        "Person.nearest.indexed": backend.nearest(
+            person, NearestSearch("Person", "embedding", "EUCLIDEAN", 20, limit=5, table="3", dimensions=3)
+        ).text,
+        "Person.matching.indexed": backend.matching(
+            person,
+            MatchingSearch(
+                "Person", ("name", "bio"), 10, text="graph -relational", table="drivine_t_Personnamebio_4d5e6f"
+            ),
+        ).text,
+        "Person.searchIndexTable": backend.search_index_table("VECTOR", "Person", ["embedding"]).text,
+    }
+
+
+def sqlite_statements() -> dict[str, str]:
+    """
+    SQLite's statements: the same cases, a filter in SQL, and a search by a vector of a size, which measures only the
+    embeddings of that size. SQLite makes no search index, so there is no search through one. A write is a call of
+    `drivine_write`, which carries out the plan Postgres's function does, so its plan is written too.
+    """
+    backend = SqliteBackend(SqliteGraph())
+    person = ModelRegistry().fragment(Person)
+    return {
+        **with_plans(written_cases(backend, SQLITE_WHERE, True)),
+        "Person.nearest.sized": backend.nearest(
+            person, NearestSearch("Person", "embedding", "COSINE", 5, dimensions=3)
+        ).text,
+    }
+
+
+def with_plans(cases: dict[str, GraphStatement]) -> dict[str, str]:
+    """
+    Each case's text, and for a write through drivine4j's write function the plan it binds, its fresh stamps written as
+    `<stamp>`, under `<case>.plan`: TypeScript makes the same plan for the same object.
+    """
     # What the manager binds when it runs a patch, which its plan is made from.
     bound: dict[str, dict[str, Any]] = {
         "Person.patch": {"id": "p1", "set": {"name": "Ada", "bio": None}, "vectors": {}},
@@ -216,20 +253,7 @@ def postgres_statements() -> dict[str, str]:
             plan["patchedIf"] = parameters["_patchedIf"]
         shown = json.dumps(plan, separators=(",", ":"), ensure_ascii=False)
         plans[f"{name}.plan"] = re.sub(r"[0-9a-f]{16}:[0-9a-f]{16}", "<stamp>", shown)
-    return {
-        **{name: it.text for name, it in cases.items()},
-        **plans,
-        "Person.nearest.indexed": backend.nearest(
-            person, NearestSearch("Person", "embedding", "EUCLIDEAN", 20, limit=5, table="3", dimensions=3)
-        ).text,
-        "Person.matching.indexed": backend.matching(
-            person,
-            MatchingSearch(
-                "Person", ("name", "bio"), 10, text="graph -relational", table="drivine_t_Personnamebio_4d5e6f"
-            ),
-        ).text,
-        "Person.searchIndexTable": backend.search_index_table("VECTOR", "Person", ["embedding"]).text,
-    }
+    return {**{name: it.text for name, it in cases.items()}, **plans}
 
 
 def written(backend: GraphBackend, where: str, orphans: bool) -> dict[str, str]:
@@ -658,6 +682,10 @@ def test_writes_what_typescript_writes_for_postgres():
     expect_golden(
         "POSTGRES", {**postgres_statements(), **schema(schema_grammar_for(DatabaseType.POSTGRES, PostgresGraph()))}
     )
+
+
+def test_writes_what_typescript_writes_for_sqlite():
+    expect_golden("SQLITE", {**sqlite_statements(), **schema(schema_grammar_for(DatabaseType.SQLITE, SqliteGraph()))})
 
 
 def expect_golden(engine: str, statements: dict[str, str]) -> None:

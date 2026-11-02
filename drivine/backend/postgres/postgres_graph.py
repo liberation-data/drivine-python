@@ -44,6 +44,9 @@ class PostgresGraph(SqlGraph):
         """
         return POSTGRES_STORE_ENSURING.replace(GRAPH_PLACEHOLDER, self.name)
 
+    booleans: tuple[str, str] = ("'true'", "'false'")
+    """True and false written into a patch's query, as the driver binds them (see PlanGraph)."""
+
     def write_call(self, returns: WriteReturns) -> str:
         """The statement that calls the graph's write function, as drivine4j calls it."""
         call = (

@@ -2,7 +2,9 @@
 A connection to a SQLite file, as Drivine opens it: drivine4j's SqliteConnectionTest and SqliteLockWarningTest, ported.
 """
 
+import asyncio
 import logging
+import threading
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Annotated, Any
@@ -25,6 +27,7 @@ from drivine import (
 from drivine.backend.sqlite.sqlite_graph import JSON_ROWS
 from drivine.connection.sqlite import sqlite_session
 from drivine.connection.sqlite.sqlite_connection_provider import SqliteConnectionProvider
+from drivine.cursor.cursor_specification import CursorSpecification
 from drivine.schema.schema_grammar import schema_grammar_for
 
 
@@ -155,6 +158,45 @@ async def test_a_commit_sqlite_refuses_leaves_the_transaction_to_roll_back(path:
         await provider.end()
 
 
+async def test_a_transaction_whose_commit_sqlite_refuses_says_why_and_gives_its_connection_back_rolled_back(
+    pm: PersistenceManager,
+):
+    await rows(pm, "CREATE TABLE parent (id INTEGER PRIMARY KEY)")
+    await rows(pm, "CREATE TABLE child (parent INTEGER REFERENCES parent (id) DEFERRABLE INITIALLY DEFERRED)")
+
+    @transactional()
+    async def orphan() -> None:
+        await rows(pm, "INSERT INTO child (parent) VALUES (1)")
+
+    @transactional()
+    async def adopted() -> None:
+        await rows(pm, "INSERT INTO parent (id) VALUES (1)")
+        await rows(pm, "INSERT INTO child (parent) VALUES (1)")
+
+    with pytest.raises(DrivineError, match="Committing") as refused:
+        await orphan()
+    assert "FOREIGN KEY" in str(refused.value.__cause__)
+    # The connection went back to its pool with the transaction rolled back, and the next one commits on it.
+    assert await rows(pm, "SELECT COUNT(*) AS n FROM child") == [{"n": 0}]
+    await adopted()
+    assert await rows(pm, "SELECT COUNT(*) AS n FROM child") == [{"n": 1}]
+
+
+async def test_a_connection_given_back_after_its_pool_ended_is_closed_and_not_kept(path: str):
+    provider = SqliteConnectionProvider("sqlite", path)
+    connection = await provider.connect()
+    await provider.end()
+    await connection.release()
+    with pytest.raises(Exception, match="closed"):
+        connection.session.connection.execute("SELECT 1")
+    again = await provider.connect()
+    try:
+        assert again.session is not connection.session
+    finally:
+        await again.release()
+        await provider.end()
+
+
 async def test_a_transaction_sqlite_rolled_back_already_is_rolled_back_without_failing(path: str):
     provider = SqliteConnectionProvider("sqlite", path)
     try:
@@ -247,4 +289,100 @@ async def test_a_short_transaction_and_a_statement_outside_one_are_not_logged(
             await connection.release()
         assert not [it for it in caplog.records if "write lock" in it.getMessage()]
     finally:
+        await provider.end()
+
+
+async def test_a_cursor_left_unread_is_closed_as_its_connection_is_released_so_its_next_user_reads_what_is_committed(
+    path: str,
+):
+    provider = SqliteConnectionProvider("sqlite", path, pool_max=1)
+    try:
+        connection = await provider.connect()
+        await connection.query(QuerySpecification[Any]("CREATE TABLE t (v INTEGER)"))
+        await connection.query(QuerySpecification[Any]("INSERT INTO t VALUES (1), (2), (3)"))
+        cursor = await connection.open_cursor(CursorSpecification[Any]("SELECT v FROM t").batch_size(1))
+        await cursor.read(1)
+        await connection.release()
+        await cursor.close()  # closed already, as the connection was released: closing it again is nothing
+        other = SqliteConnectionProvider("other", path)
+        try:
+            writer = await other.connect()
+            await writer.query(QuerySpecification[Any]("INSERT INTO t VALUES (4)"))
+            await writer.release()
+        finally:
+            await other.end()
+        again = await provider.connect()
+        assert again.session is connection.session
+        assert await again.query(QuerySpecification[Any]("SELECT COUNT(*) AS n FROM t")) == [{"n": 4}]
+        await again.release()
+    finally:
+        await provider.end()
+
+
+@pytest.mark.async_only
+async def test_more_transactions_waiting_for_the_lock_than_the_loop_has_threads_keep_none_from_the_one_holding_it(
+    path: str,
+):
+    # More than the event loop's own executor has threads (32 at most): each waits for the file's lock on its
+    # connection's own thread, so the one holding the lock always has a thread to finish on.
+    provider = SqliteConnectionProvider("sqlite", path, busy_timeout=5000)
+
+    async def one() -> None:
+        connection = await provider.connect()
+        try:
+            await connection.start_transaction()
+            await connection.query(QuerySpecification[Any]("SELECT 1"))
+            await asyncio.sleep(0.005)
+            await connection.query(QuerySpecification[Any]("SELECT 2"))
+            await connection.commit_transaction()
+        finally:
+            await connection.release()
+
+    before = set(threading.enumerate())
+    try:
+        await asyncio.gather(*(one() for _ in range(40)))
+    finally:
+        await provider.end()
+    # Each connection's thread ends as the connection is closed: past the pool's ten as each is given back, the rest
+    # as the pool ends.
+    for thread in set(threading.enumerate()) - before:
+        if thread.name.startswith("drivine-sqlite"):
+            thread.join(5)
+            assert not thread.is_alive(), thread.name
+
+
+@pytest.mark.async_only
+async def test_a_call_made_after_one_whose_caller_was_cancelled_runs_once_it_ends_on_the_same_thread(path: str):
+    provider = SqliteConnectionProvider("sqlite", path)
+    connection = await provider.connect()
+    started, go_on = threading.Event(), threading.Event()
+    threads: list[int] = []
+
+    def hold() -> int:
+        threads.append(threading.get_ident())
+        started.set()
+        go_on.wait(5)
+        return 1
+
+    def where() -> int:
+        threads.append(threading.get_ident())
+        return 2
+
+    connection.session.connection.create_function("hold", 0, hold)
+    connection.session.connection.create_function("where_now", 0, where)
+    try:
+        held = asyncio.create_task(connection.query(QuerySpecification[Any]("SELECT hold() AS n")))
+        await asyncio.to_thread(started.wait, 5)
+        held.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await held
+        after = asyncio.create_task(connection.query(QuerySpecification[Any]("SELECT where_now() AS n")))
+        await asyncio.sleep(0.1)
+        assert not after.done()
+        go_on.set()
+        assert await after == [{"n": 2}]
+        assert len(threads) == 2 and threads[0] == threads[1]
+    finally:
+        go_on.set()
+        await connection.release()
         await provider.end()

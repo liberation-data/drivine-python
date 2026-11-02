@@ -55,7 +55,7 @@ class SqliteConnectionProvider(ConnectionProvider):
         """A connection, from the pool or newly opened; the graph's tables made first if this is the pool's first."""
         session = await self._session()
         try:
-            await self._tables.ensure(lambda _: concurrency.blocking(session.ensure, self.graph))
+            await self._tables.ensure(lambda _: concurrency.blocking(session.ensure, self.graph, on=session.thread))
         except BaseException:
             await self._give_back(session)
             raise
@@ -67,7 +67,7 @@ class SqliteConnectionProvider(ConnectionProvider):
             self._ended = True
         self._tables.forget()
         for session in idle:
-            await concurrency.blocking(session.close)
+            await concurrency.blocking(session.close, on=session.thread)
 
     async def _session(self) -> SqliteSession:
         async with self._pooling:
@@ -83,7 +83,7 @@ class SqliteConnectionProvider(ConnectionProvider):
             if kept:
                 self._idle.append(session)
         if not kept:
-            await concurrency.blocking(session.close)
+            await concurrency.blocking(session.close, on=session.thread)
 
     def __repr__(self) -> str:
         return f"{type(self).__name__}(name={self.name!r}, type={self.type.value}, path={self.path!r})"

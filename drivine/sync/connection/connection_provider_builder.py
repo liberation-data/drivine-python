@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import TYPE_CHECKING, Self
 
 from drivine.connection.connection_properties import ConnectionProperties
@@ -235,6 +236,11 @@ class ConnectionProviderBuilder:
 
         if not self._database_name:
             raise DrivineError("SQLite requires a database name: the path of its file")
+        if re.search(r":memory:|mode=memory", self._database_name):
+            raise DrivineError(
+                f"SQLite's path '{self._database_name}' names no file: each pooled connection would open a database "
+                "of its own. Give the path of a file."
+            )
         for setting, given in (("host", self._host), ("port", self._port), ("user_name", self._user_name)):
             if given:
                 logger.warning("%s is ignored by SQLite, which keeps a graph in a file", setting)

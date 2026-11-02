@@ -45,13 +45,11 @@ class SqliteSearch:
         self.graph = graph
 
     def nearest(self, target: TargetModel, search: NearestSearch) -> GraphStatement:
-        if search.dimensions is None:
-            raise DrivineError("A vector search on SQLite measures embeddings of the vector's size, which it is given.")
         score = f"{SIMILARITY}({json_value('c', search.property)}, $_vector, {sql_text(search.similarity)})"
         candidates = (
-            f"SELECT c.nid, {score} AS score FROM {self.graph.nodes} c WHERE "
-            f"{has_labels('c', [search.label])} AND {holds('c', search.property, search.dimensions)} "
-            f"ORDER BY score DESC NULLS LAST, c.nid LIMIT {search.k}"
+            f"SELECT k.nid, k.score FROM (SELECT c.nid, {score} AS score FROM {self.graph.nodes} c WHERE "
+            f"{has_labels('c', [search.label])} AND {holds('c', search.property, search.dimensions)}) k "
+            f"WHERE k.score IS NOT NULL ORDER BY k.score DESC, k.nid LIMIT {search.k}"
         )
         return self._scored(target, candidates, search.where, search.threshold, search.limit, search.depth)
 
@@ -116,15 +114,15 @@ class SqliteSearch:
         )
 
 
-def holds(alias: str, property: str, dimensions: int) -> str:
+def holds(alias: str, property: str, dimensions: int | None) -> str:
     """
-    Whether the row `alias` holds an embedding of `dimensions` under the property: a search measures only those, as an
-    embedding of another size is no point in the same space.
+    Whether the row `alias` holds an embedding under the property, of `dimensions` when given: a search by a vector
+    measures only those of its size, as an embedding of another size is no point in the same space.
     """
-    return (
-        f"{json_type(alias, property)} = 'array' AND "
-        f"json_array_length({column(alias, 'props')}, {path(property)}) = {dimensions}"
-    )
+    array = f"{json_type(alias, property)} = 'array'"
+    if dimensions is None:
+        return array
+    return f"{array} AND json_array_length({column(alias, 'props')}, {path(property)}) = {dimensions}"
 
 
 def searched_text(alias: str, properties: Sequence[str]) -> str:

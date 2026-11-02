@@ -96,18 +96,21 @@ class SqliteGraph(SqlGraph):
             names.append(sql_text(found.group(1).lower()))
         return f"SELECT COUNT(*) FROM sqlite_master WHERE lower(name) IN ({', '.join(names)})"
 
+    booleans: tuple[str, str] = ("1", "0")
+    """True and false written into a patch's query, as the driver binds them (see PlanGraph)."""
+
     def write_call(self, returns: WriteReturns) -> str:
         """
         The statement that carries out a plan by the write function of the connection, drivine4j's: the same text for
-        every plan of the graph. The function gives back a JSON array, read as rows: a stamp as a JSON string, as every
-        text value of a statement that opens with JSON_ROWS is JSON, and a count as a number.
+        every plan of the graph. The function gives back a JSON array, read as rows in order, each the SQL value
+        `json_each` gives: a stamp as text, a count as a number. Drivine for TypeScript's text, character for character
+        (drivine4j's reads the same rows as JSON, under JSON_ROWS).
         """
         call = (
             f"{WRITE}({sql_text(self.name)}, ${WritePlan.PLAN}, ${WritePlan.SHAPES}, ${WritePlan.MARK}, '{returns}', "
             f"${WritePlan.PATCHED_IF})"
         )
-        value = "w.value" if returns == "COUNT" else "json_quote(w.value)"
-        return f"{JSON_ROWS}\nSELECT {value} FROM json_each({call}) w ORDER BY w.key"
+        return f"SELECT w.value AS v FROM json_each({call}) w ORDER BY w.key"
 
 
 def quoted(text: str) -> str:

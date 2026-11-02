@@ -176,7 +176,9 @@ class PostgresWrites:
         `where`. The function runs it on its own, where no value can be bound, so each value `where` names is written
         in.
         """
-        written = _PARAMETER.sub(lambda it: _literal(bound[it[1]]) if it[1] in bound else it[0], where)
+        written = _PARAMETER.sub(
+            lambda it: _literal(bound[it[1]], self.graph.booleans) if it[1] in bound else it[0], where
+        )
         return f"SELECT COUNT(*) FROM {self.graph.nodes} n WHERE n.nid = $1 AND ({written})"
 
 
@@ -188,7 +190,7 @@ def _writes(props: Mapping[str, Any], lower: Sequence[str] = ()) -> NodeWrites:
     return NodeWrites(set=present(props), unset=absent(props), lower=list(lower))
 
 
-def _literal(value: Any) -> str:
+def _literal(value: Any, booleans: tuple[str, str]) -> str:
     """
     A value written into a statement as a literal, as a driver would bind it: a number as itself, anything else as
     text, which Postgres reads as the type the statement wants there, as it reads a value bound without a type. A number
@@ -197,7 +199,7 @@ def _literal(value: Any) -> str:
     if value is None:
         return "NULL"
     if isinstance(value, bool):
-        return sql_text("true" if value else "false")
+        return booleans[0] if value else booleans[1]
     if isinstance(value, (int, float)):
         return f"({value})"
     if isinstance(value, (datetime, date, time)):

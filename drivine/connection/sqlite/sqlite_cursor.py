@@ -31,10 +31,12 @@ class SqliteCursor(BufferedCursor[T]):
         self.result_mapper = result_mapper
 
     async def read(self, count: int) -> tuple[list[T], bool]:
-        rows = await concurrency.blocking(self.session.fetch, self.statement, self.cursor, count)
+        rows = await concurrency.blocking(
+            self.session.fetch, self.statement, self.cursor, count, on=self.session.thread
+        )
         return self.result_mapper.map_query_results(rows, self.spec), len(rows) < count
 
     async def close(self) -> None:
         if not self.closed:
             self.closed = True
-            await concurrency.blocking(self.cursor.close)
+            await concurrency.blocking(self.cursor.close, on=self.session.thread)

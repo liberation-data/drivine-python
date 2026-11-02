@@ -13,6 +13,7 @@ import pytest
 
 from drivine.backend.sqlite.sqlite_graph import JSON_ROWS
 from drivine.connection.sqlite import sqlite_session
+from drivine.cursor.cursor_specification import CursorSpecification
 from drivine.schema.schema_grammar import schema_grammar_for
 from drivine.sync import (
     ConnectionProperties,
@@ -157,6 +158,45 @@ def test_a_commit_sqlite_refuses_leaves_the_transaction_to_roll_back(path: str):
         provider.end()
 
 
+def test_a_transaction_whose_commit_sqlite_refuses_says_why_and_gives_its_connection_back_rolled_back(
+    pm: PersistenceManager,
+):
+    rows(pm, "CREATE TABLE parent (id INTEGER PRIMARY KEY)")
+    rows(pm, "CREATE TABLE child (parent INTEGER REFERENCES parent (id) DEFERRABLE INITIALLY DEFERRED)")
+
+    @transactional()
+    def orphan() -> None:
+        rows(pm, "INSERT INTO child (parent) VALUES (1)")
+
+    @transactional()
+    def adopted() -> None:
+        rows(pm, "INSERT INTO parent (id) VALUES (1)")
+        rows(pm, "INSERT INTO child (parent) VALUES (1)")
+
+    with pytest.raises(DrivineError, match="Committing") as refused:
+        orphan()
+    assert "FOREIGN KEY" in str(refused.value.__cause__)
+    # The connection went back to its pool with the transaction rolled back, and the next one commits on it.
+    assert rows(pm, "SELECT COUNT(*) AS n FROM child") == [{"n": 0}]
+    adopted()
+    assert rows(pm, "SELECT COUNT(*) AS n FROM child") == [{"n": 1}]
+
+
+def test_a_connection_given_back_after_its_pool_ended_is_closed_and_not_kept(path: str):
+    provider = SqliteConnectionProvider("sqlite", path)
+    connection = provider.connect()
+    provider.end()
+    connection.release()
+    with pytest.raises(Exception, match="closed"):
+        connection.session.connection.execute("SELECT 1")
+    again = provider.connect()
+    try:
+        assert again.session is not connection.session
+    finally:
+        again.release()
+        provider.end()
+
+
 def test_a_transaction_sqlite_rolled_back_already_is_rolled_back_without_failing(path: str):
     provider = SqliteConnectionProvider("sqlite", path)
     try:
@@ -246,5 +286,32 @@ def test_a_short_transaction_and_a_statement_outside_one_are_not_logged(path: st
             connection.query(QuerySpecification[Any]("SELECT 1"))
             connection.release()
         assert not [it for it in caplog.records if "write lock" in it.getMessage()]
+    finally:
+        provider.end()
+
+
+def test_a_cursor_left_unread_is_closed_as_its_connection_is_released_so_its_next_user_reads_what_is_committed(
+    path: str,
+):
+    provider = SqliteConnectionProvider("sqlite", path, pool_max=1)
+    try:
+        connection = provider.connect()
+        connection.query(QuerySpecification[Any]("CREATE TABLE t (v INTEGER)"))
+        connection.query(QuerySpecification[Any]("INSERT INTO t VALUES (1), (2), (3)"))
+        cursor = connection.open_cursor(CursorSpecification[Any]("SELECT v FROM t").batch_size(1))
+        cursor.read(1)
+        connection.release()
+        cursor.close()  # closed already, as the connection was released: closing it again is nothing
+        other = SqliteConnectionProvider("other", path)
+        try:
+            writer = other.connect()
+            writer.query(QuerySpecification[Any]("INSERT INTO t VALUES (4)"))
+            writer.release()
+        finally:
+            other.end()
+        again = provider.connect()
+        assert again.session is connection.session
+        assert again.query(QuerySpecification[Any]("SELECT COUNT(*) AS n FROM t")) == [{"n": 4}]
+        again.release()
     finally:
         provider.end()

@@ -6,8 +6,11 @@ written twice: drivine/sync/concurrency.py is its counterpart, over threading.
 from __future__ import annotations
 
 import asyncio
+import contextvars
+import functools
 import inspect
 from collections.abc import Callable
+from concurrent.futures import Executor
 from typing import Any, TypeAlias, TypeVar
 
 R = TypeVar("R")
@@ -26,12 +29,16 @@ async def sleep(seconds: float) -> None:
     await asyncio.sleep(seconds)
 
 
-async def blocking(function: Callable[..., R], *arguments: Any) -> R:
+async def blocking(function: Callable[..., R], *arguments: Any, on: Executor | None = None) -> R:
     """
     Runs a call that blocks, such as one of the `sqlite3` module, on a thread of its own, so the event loop goes on
-    meanwhile. The sync API calls it where it is.
+    meanwhile: on the executor `on` where one is given, as a SQLite connection gives its own (see SqliteSession.thread).
+    The sync API calls it where it is.
     """
-    return await asyncio.to_thread(function, *arguments)
+    if on is None:
+        return await asyncio.to_thread(function, *arguments)
+    call = functools.partial(contextvars.copy_context().run, function, *arguments)
+    return await asyncio.get_running_loop().run_in_executor(on, call)
 
 
 def runs_here(function: Callable[..., Any]) -> bool:

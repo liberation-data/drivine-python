@@ -174,35 +174,32 @@ class SqliteBackend:
         if not isinstance(target, GraphViewModel):
             raise DrivineError(f"A cascade follows a view's relationships. {root.type.__name__} is a NodeFragment.")
         cascaded = SqliteViews(self.graph).cascade(target, "n.nid IN (SELECT nid FROM cascade_roots)")
-        roots = f"cascade_roots AS (SELECT {ROW_ALIAS}.nid {self._from(root, filter_)})"
-        if not cascaded.reached:
-            return PostgresStatement(f"WITH {roots}\n{self._deleted_roots('SELECT nid FROM cascade_roots')}")
-        union = "\n    UNION ALL ".join(cascaded.reached)
-        targets = (
-            f"cascade_targets AS (SELECT DISTINCT t.nid FROM ({union}) t "
-            "WHERE t.nid NOT IN (SELECT nid FROM cascade_roots))"
-        )
-        if cascade is not CascadeType.DELETE_ORPHAN:
-            return PostgresStatement(
-                "\n".join(
-                    [
-                        f"WITH {roots},",
-                        targets,
-                        self._deleted_roots("SELECT nid FROM cascade_roots UNION SELECT nid FROM cascade_targets"),
-                    ]
-                )
+        orphans = cascade is CascadeType.DELETE_ORPHAN and bool(cascaded.reached)
+        targets: list[str] = []
+        deleted = "SELECT nid FROM cascade_roots"
+        if cascaded.reached:
+            union = "\n    UNION ALL ".join(cascaded.reached)
+            targets.append(
+                f"cascade_targets AS (SELECT DISTINCT t.nid FROM ({union}) t "
+                "WHERE t.nid NOT IN (SELECT nid FROM cascade_roots)),"
             )
+            deleted = "SELECT nid FROM cascade_roots UNION SELECT nid FROM cascade_targets"
+        if orphans:
+            targets += [
+                "cascade_all AS (SELECT nid FROM cascade_roots UNION SELECT nid FROM cascade_targets),",
+                f"cascade_kept (nid) AS (\n    {kept_targets(self.graph, cascaded.followed, 'UNION')}),",
+            ]
+            deleted += " WHERE nid NOT IN (SELECT nid FROM cascade_kept)"
+        # The roots are counted before anything is deleted: the left of the sum is worked out first.
         return PostgresStatement(
             "\n".join(
                 [
-                    f"WITH RECURSIVE {roots},",
-                    f"{targets},",
-                    "cascade_all AS (SELECT nid FROM cascade_roots UNION SELECT nid FROM cascade_targets),",
-                    f"cascade_kept (nid) AS (\n    {kept_targets(self.graph, cascaded.followed, 'UNION')})",
-                    self._deleted_roots(
-                        "SELECT nid FROM cascade_roots UNION "
-                        "SELECT nid FROM cascade_targets WHERE nid NOT IN (SELECT nid FROM cascade_kept)"
-                    ),
+                    f"WITH {'RECURSIVE ' if orphans else ''}cascade_roots AS "
+                    f"(SELECT {ROW_ALIAS}.nid {self._from(root, filter_)}),",
+                    *targets,
+                    f"gone AS ({deleted})",
+                    "SELECT (SELECT COUNT(*) FROM cascade_roots) + 0 * "
+                    f'{DELETE}({sql_text(self.graph.name)}, (SELECT json_group_array(nid) FROM gone)) AS "deleted"',
                 ]
             )
         )
@@ -402,25 +399,9 @@ class SqliteBackend:
         Deletes the nodes `where` selects, with their relationships, and returns how many: `{deleted}`. SQLite has no
         delete that a query reads, so the nodes are selected first and deleted by the function Drivine registers.
         """
-        return PostgresStatement(self._deleted_nodes(f"SELECT {ROW_ALIAS}.nid {self._from(model, where)}"))
-
-    def _deleted_nodes(self, nids: str) -> str:
-        """The statement that deletes the nodes whose ids `nids` selects, and counts them: `{deleted}`."""
-        return (
-            f"SELECT {DELETE}({sql_text(self.graph.name)}, (SELECT json_group_array(nid) FROM (\n    {nids}))) "
-            'AS "deleted"'
-        )
-
-    def _deleted_roots(self, nids: str) -> str:
-        """
-        The statement that deletes the nodes whose ids `nids` selects, which hold every one of `cascade_roots`, and
-        counts the roots: `{deleted}`. The roots are counted first, by a subquery that is whole before the row that
-        deletes is read; and as many nodes are deleted as there are roots and more, so the lesser of the two is the
-        roots.
-        """
-        return (
-            f"SELECT min({DELETE}({sql_text(self.graph.name)}, (SELECT json_group_array(nid) FROM (\n    {nids}))), "
-            'r.roots) AS "deleted"\nFROM (SELECT COUNT(*) AS roots FROM cascade_roots) r'
+        return PostgresStatement(
+            f"SELECT {DELETE}({sql_text(self.graph.name)}, (SELECT json_group_array({ROW_ALIAS}.nid) "
+            f'{self._from(model, where)})) AS "deleted"'
         )
 
     @staticmethod
@@ -440,9 +421,11 @@ class SqliteBackend:
         return [
             *([f"ORDER BY {page.order_by}"] if page.order_by else []),
             *(
-                [f"LIMIT {page.limit if page.limit is not None else -1}"]
+                [
+                    f"LIMIT {page.limit if page.limit is not None else -1}"
+                    + (f" OFFSET {page.skip}" if page.skip is not None else "")
+                ]
                 if page.limit is not None or page.skip is not None
                 else []
             ),
-            *([f"OFFSET {page.skip}"] if page.skip is not None else []),
         ]

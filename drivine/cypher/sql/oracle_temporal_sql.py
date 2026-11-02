@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from drivine.cypher.sql.temporal import Temporal
-from drivine.cypher.sql.temporal_sql import Shared, TemporalSql, years_of
+from drivine.cypher.sql.temporal_sql import BC_BELOW, Shared, TemporalSql, years_of
 
 CLOCK = "CAST(SYS_EXTRACT_UTC(SYSTIMESTAMP) AS TIMESTAMP)"
 """The clock as the query that reads it starts, in UTC."""
@@ -39,11 +39,11 @@ class OracleTemporalSql(TemporalSql):
 
     def local(self, text: str, kind: Temporal) -> str:
         if kind is Temporal.DATE:
-            return f"TO_TIMESTAMP({text}, 'YYYY-MM-DD')"
+            return f"TO_TIMESTAMP({self.era_of(text)}, 'SYYYY-MM-DD')"
         if kind is Temporal.LOCAL_DATE_TIME:
-            return _iso(text, "TIMESTAMP")
+            return _iso(self.era_of(text), "TIMESTAMP")
         if kind is Temporal.DATE_TIME:
-            return _iso(self.unzoned(text), "TIMESTAMP")
+            return _iso(self.era_of(text, zoned=True), "TIMESTAMP")
         if kind is Temporal.LOCAL_TIME:
             return _iso(f"'1970-01-01T' || {text}", "TIMESTAMP")
         if kind is Temporal.TIME:
@@ -52,11 +52,47 @@ class OracleTemporalSql(TemporalSql):
 
     def utc(self, text: str, kind: Temporal) -> str:
         if kind is Temporal.DATE_TIME:
-            return f"CAST(SYS_EXTRACT_UTC({_iso(text, 'TIMESTAMP WITH TIME ZONE')}) AS TIMESTAMP)"
+            return f"CAST(SYS_EXTRACT_UTC({_iso(self.era_of(text), 'TIMESTAMP WITH TIME ZONE')}) AS TIMESTAMP)"
         if kind is Temporal.TIME:
             time = _iso("'1970-01-01T' || " + text, "TIMESTAMP WITH TIME ZONE")
             return f"CAST(SYS_EXTRACT_UTC({time}) AS TIMESTAMP)"
         return self.local(text, kind)
+
+    def era(self, text: str) -> str:
+        """
+        Oracle numbers a year BC from -1, with no year 0, in ISO text as in its own: so 1 BC, the year `0000`, is
+        `-0001`, and 45 BC, the year `-0044`, is `-0045`. See `bc_only`.
+        """
+        return self.shared(
+            [text],
+            lambda t: self.bc_only(
+                t[0],
+                f"ASCII({t[0]}) < {BC_BELOW}",
+                f"REGEXP_REPLACE({t[0]}, '^(-[0-9]{{4}}|0000)', "
+                f"TO_CHAR(TO_NUMBER(REGEXP_SUBSTR({t[0]}, '^-?[0-9]{{4}}')) - 1, 'FM0000'))",
+            ),
+        )
+
+    def text_year(self, text: str, kind: Temporal) -> str | None:
+        """
+        The digits the text opens with, and their sign; but the year of the timestamp where the text is `known_ad`,
+        whose year Oracle numbers so too, as reading the timestamp's is quicker on Oracle than a regular expression.
+        """
+        if kind not in (Temporal.DATE, Temporal.LOCAL_DATE_TIME, Temporal.DATE_TIME):
+            return None
+        if self.reads_ad(text):
+            return f"EXTRACT(YEAR FROM {self.local(text, kind)})"
+        return f"TO_NUMBER(REGEXP_SUBSTR({text}, '^-?[0-9]+'))"
+
+    def date(self, timestamp: str, then: str = "") -> str:
+        """Where it may be BC (`bc_only`), `SYYYY` writes a year with its sign, as Oracle numbers it."""
+        return self.bc_only(
+            timestamp,
+            f"{timestamp} < TIMESTAMP '0001-01-01 00:00:00'",
+            f"REGEXP_REPLACE(LTRIM(TO_CHAR({timestamp}, 'SYYYY-MM-DD{then}')), '^-[0-9]{{4}}', "
+            f"TO_CHAR(EXTRACT(YEAR FROM {timestamp}) + 1, 'FM0000'))",
+            super().date(timestamp, then),
+        )
 
     @property
     def now(self) -> str:
@@ -116,10 +152,7 @@ class OracleTemporalSql(TemporalSql):
             f, t = values
             since, until = (f"TO_CHAR({it}, 'DDHH24MISSFF6')" for it in (f, t))
             return self.shared(
-                [
-                    f"((EXTRACT(YEAR FROM {t}) - EXTRACT(YEAR FROM {f})) * 12 + EXTRACT(MONTH FROM {t}) - "
-                    f"EXTRACT(MONTH FROM {f}))"
-                ],
+                [f"(({self.year(t)} - {self.year(f)}) * 12 + EXTRACT(MONTH FROM {t}) - EXTRACT(MONTH FROM {f}))"],
                 lambda m: (
                     f"({m[0]} - CASE WHEN {m[0]} > 0 AND {until} < {since} THEN 1 "
                     f"WHEN {m[0]} < 0 AND {until} > {since} THEN -1 ELSE 0 END)"
@@ -149,7 +182,7 @@ class OracleTemporalSql(TemporalSql):
         if unit == "second":
             return f"CAST(CAST({timestamp} AS DATE) AS TIMESTAMP)"
         if unit == "millisecond":
-            return f"TO_TIMESTAMP(TO_CHAR({timestamp}, 'YYYY-MM-DD HH24:MI:SS.FF3'), 'YYYY-MM-DD HH24:MI:SS.FF3')"
+            return f"TO_TIMESTAMP(TO_CHAR({timestamp}, 'SYYYY-MM-DD HH24:MI:SS.FF3'), 'SYYYY-MM-DD HH24:MI:SS.FF3')"
         if unit == "microsecond":
             return timestamp
         years = years_of(unit)
@@ -158,7 +191,7 @@ class OracleTemporalSql(TemporalSql):
                 [timestamp],
                 lambda t: (
                     f"CAST(ADD_MONTHS(TRUNC(CAST({t[0]} AS DATE), 'YYYY'), "
-                    f"-12 * MOD(EXTRACT(YEAR FROM {t[0]}), {years})) AS TIMESTAMP)"
+                    f"-12 * MOD({self.year(t[0])}, {years})) AS TIMESTAMP)"
                 ),
             )
         return None

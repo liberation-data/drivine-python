@@ -8,7 +8,7 @@ from decimal import ROUND_DOWN, Decimal, InvalidOperation, localcontext
 
 from drivine.backend.sql.sql_graph import sql_text
 from drivine.cypher.sql.temporal import DURATION_PARTS, INSTANTS, OFFSET, Temporal
-from drivine.cypher.sql.temporal_sql import Shared, TemporalSql
+from drivine.cypher.sql.temporal_sql import GUARDED_UP_TO, Shared, TemporalSql
 
 
 class NoNumber(ValueError):
@@ -64,6 +64,12 @@ INSTANT_FIELDS = frozenset(
 )  # fmt: skip
 """The fields of a moment or a time of day read off its wall clock."""
 
+_T = '"T"'
+"""The `T` between a moment's date and its time, quoted as `to_char`'s pattern writes a letter as it is."""
+
+_READ_ONCE = frozenset({"year", "quarter", "month", "week", "day", "ordinalDay", "hour", "minute"})
+"""The INSTANT_FIELDS that read the timestamp once, on every store: see `TemporalSql.year`."""
+
 CALENDAR_FIELDS = frozenset({"week", "dayOfWeek", "ordinalDay", "quarter", "dayOfQuarter"})
 """The fields that give a date by the calendar's other fields, beside the year, in place of a month and a day: see
 `Temporals.of_calendar`."""
@@ -104,15 +110,19 @@ class Temporals:
     store keeps a moment: `2024-03-01`, `10:30:00`, `10:30:00+02:00`, `2024-03-01T10:30:00`,
     `2024-03-01T10:30:00.500Z`, `P1Y2M3DT4H`. A zoned value keeps the offset it was written with, its fields read on its
     wall clock and compared as the moment it is. A duration is months, days and seconds, as Cypher's is, and as a
-    Postgres interval is.
+    Postgres interval is. A year is numbered as Neo4j writes it, astronomically: `0000` is 1 BC and `-0044` is 45 BC,
+    and each store's TemporalSql reads and writes a year BC as the store keeps one.
 
     Every argument and result is SQL: a text, a number, or with `shared` a value written once where it is read more than
     once.
     """
 
-    def __init__(self, sql: TemporalSql, shared: Shared) -> None:
+    def __init__(self, sql: TemporalSql, shared: Shared, binding: Callable[[], bool] = lambda: True) -> None:
         self.sql = sql
         self.shared = shared
+        self._binding = binding
+        """Whether `shared` binds a long value in a subquery where the SQL is being written, rather than writing it
+        out."""
 
     # ----- Kinds -----
 
@@ -123,10 +133,36 @@ class Temporals:
     def by_kind(self, text: str, body: _Body, kinds: tuple[Temporal, ...] = INSTANTS) -> str:
         """The body of the kind among `kinds` that the text is, as its shape tells, and of the text, written once: null
         where it is none."""
-        return self.shared(
-            [text],
-            lambda t: f"CASE {' '.join(f'WHEN {self.is_kind(t[0], it)} THEN {body(it, t[0])}' for it in kinds)} END",
-        )
+        return self.shared([text], lambda t: self._of_kinds([t[0]], kinds, lambda kind: body(kind, t[0])))
+
+    def _of_kinds(self, texts: list[str], kinds: tuple[Temporal, ...], body: Callable[[Temporal], str]) -> str:
+        """
+        A `CASE` that gives the body of the kind among `kinds` that each of `texts` is: null where they are of none. On
+        a store that reads a year BC otherwise than ISO 8601 writes it, a kind with a date has a `WHEN` first, where
+        each is a text of a year from 1000 on (`Temporal.ad_pattern`), and the body there reads them as they are
+        (`TemporalSql.known_ad`); the kinds' own `WHEN`s follow those. So an ordinary date costs the tests of the kinds
+        before its own, as before years BC were read, and only a text the first `WHEN`s leave pays to be read as one. A
+        body that reads none of them as a store reads a year BC, as a year read off the text, has its kind's `WHEN`
+        alone, as has a long one where the compiler binds nothing (`_binding`), as in an aggregate's argument: a value
+        made of another is written out wherever it is read there, and a long body written twice would double it again
+        at each (see `TemporalSql.bc_only`).
+        """
+
+        def whens(test: Callable[[str], str], sql: str) -> str:
+            return f"WHEN {' AND '.join(test(it) for it in texts)} THEN {sql}"
+
+        first: list[str] = []
+        own: list[str] = []
+        for kind in kinds:
+            ad = kind.ad_pattern if self.sql.numbers_bc_from_one else None
+            if ad is None:
+                plain, read = body(kind), False
+            else:
+                plain, read = self.sql.known_ad(texts, lambda kind=kind: body(kind))
+            if read and ad is not None and (self._binding() or len(plain) <= GUARDED_UP_TO):
+                first.append(whens(lambda it, ad=ad: self.sql.matches(it, sql_text(ad)), plain))
+            own.append(whens(lambda it, kind=kind: self.is_kind(it, kind), body(kind) if read else plain))
+        return f"CASE {' '.join([*first, *own])} END"
 
     # ----- Moments and times of day -----
 
@@ -138,15 +174,17 @@ class Temporals:
         """
 
         def formatted(values: list[str]) -> str:
-            t = values[0]
+            return self.sql.as_ad(timestamp, [values[0]], lambda: written(values[0]))
+
+        def written(t: str) -> str:
             clock = f"to_char({t}, 'HH24:MI:SS') || {self._fraction(t)}"
             zone = offset if offset is not None else "'Z'"
             if kind is Temporal.DATE:
-                return f"to_char({t}, 'YYYY-MM-DD')"
+                return self.sql.date(t)
             if kind is Temporal.LOCAL_DATE_TIME:
-                text = f"to_char({t}, 'YYYY-MM-DD\"T\"') || {clock}"
+                text = f"{self.sql.date(t, _T)} || {clock}"
             elif kind is Temporal.DATE_TIME:
-                text = f"to_char({t}, 'YYYY-MM-DD\"T\"') || {clock} || {zone}"
+                text = f"{self.sql.date(t, _T)} || {clock} || {zone}"
             elif kind is Temporal.LOCAL_TIME:
                 text = clock
             elif kind is Temporal.TIME:
@@ -185,9 +223,13 @@ class Temporals:
 
     def convert(self, text: str, from_: Temporal, to: Temporal) -> str:
         """The text of `to` the text of `from_` is: a moment's date, a date's midnight, a local value's in UTC."""
-        return self.shared(
-            [text], lambda t: self.format(self.sql.local(t[0], from_), to, self._offset_of(t[0], from_, to))
-        )
+
+        def converted(t: str) -> str:
+            # The wall clock kept is of the text's year, so is written as one from 1000 on where the text's is.
+            clock = self.sql.local(t, from_)
+            return self.sql.as_ad(t, [clock], lambda: self.format(clock, to, self._offset_of(t, from_, to)))
+
+        return self.shared([text], lambda t: converted(t[0]))
 
     def convert_any(self, text: str, to: Temporal) -> str:
         """The text of `to` the text is, whatever kind its shape tells: null where it is none."""
@@ -277,7 +319,7 @@ class Temporals:
                     time,
                     timezone,
                     kind,
-                    lambda day: f"{whole(y, n)} AND {n} >= 1 AND EXTRACT(YEAR FROM {day}) = {y}",
+                    lambda day: f"{whole(y, n)} AND {n} >= 1 AND {self.sql.year(day)} = {y}",
                 )
 
             return self.shared([year, given("ordinalDay", 1)], ordinal)
@@ -302,7 +344,7 @@ class Temporals:
         def dated(d: list[str]) -> str:
             day = d[0]
             fields = {
-                "year": f"EXTRACT(YEAR FROM {day})",
+                "year": self.sql.year(day),
                 "month": f"EXTRACT(MONTH FROM {day})",
                 "day": f"CASE WHEN NOT ({valid(day)}) THEN 0 ELSE EXTRACT(DAY FROM {day}) END",
             }
@@ -323,11 +365,10 @@ class Temporals:
             lambda c: self.of({**time, **self._date_of(c[0])}, timezone, kind),
         )
 
-    @staticmethod
-    def _date_of(timestamp: str) -> dict[str, str]:
+    def _date_of(self, timestamp: str) -> dict[str, str]:
         """The year, the month and the day of the month of the timestamp, as `of` takes them."""
         return {
-            "year": f"EXTRACT(YEAR FROM {timestamp})",
+            "year": self.sql.year(timestamp),
             "month": f"EXTRACT(MONTH FROM {timestamp})",
             "day": f"EXTRACT(DAY FROM {timestamp})",
         }
@@ -418,10 +459,8 @@ class Temporals:
         """The wall clock the text reads, of the one of `kinds` it is: null where it is none."""
         if len(kinds) == 1:
             return self.sql.local(text, kinds[0])
-        whens = " ".join(
-            f"WHEN {self.is_kind(text, it)} THEN {self.sql.local(text, it)}" for it in INSTANTS if it in kinds
-        )
-        return f"CASE {whens} END"
+        among = tuple(it for it in INSTANTS if it in kinds)
+        return self._of_kinds([text], among, lambda kind: self.sql.local(text, kind))
 
     def _over_fields(
         self, day: str | None, clock: str | None, fields: dict[str, str], offset: str | None, kind: Temporal
@@ -537,14 +576,22 @@ class Temporals:
             return Field(f"TRUNC({self.sql.seconds_between(epoch, self.sql.utc(text, kind))} * 1000)", text=False)
         if name not in INSTANT_FIELDS:
             return None
-
-        return Field(self.shared([self.sql.local(text, kind)], lambda t: self._clock_field(t[0], name)), text=False)
+        if name == "year":
+            year = self.sql.text_year(text, kind)
+            if year is not None:
+                return Field(year, text=False)
+        # A field read from the timestamp once is read where it is: bound, a stored date's year was a subquery for each
+        # row.
+        local = self.sql.local(text, kind)
+        if name in _READ_ONCE:
+            return Field(self._clock_field(local, name), text=False)
+        return Field(self.shared([local], lambda t: self._clock_field(t[0], name)), text=False)
 
     def _clock_field(self, t: str, name: str) -> str:
         """A field of the wall clock `t`, a timestamp, by Cypher's name for it."""
         second = f"EXTRACT(SECOND FROM {t})"
         if name == "year":
-            return f"EXTRACT(YEAR FROM {t})"
+            return self.sql.year(t)
         if name == "quarter":
             return f"TRUNC((EXTRACT(MONTH FROM {t}) + 2) / 3)"
         if name == "month":
@@ -552,7 +599,7 @@ class Temporals:
         if name == "week":
             return self.sql.number(f"to_char({t}, 'IW')")
         if name == "weekYear":
-            return self.sql.number(f"to_char({t}, 'IYYY')")
+            return self.sql.week_year(t)
         if name == "day":
             return f"EXTRACT(DAY FROM {t})"
         if name == "ordinalDay":
@@ -611,11 +658,8 @@ class Temporals:
 
         def added(values: list[str]) -> str:
             t, d = values
-            clock = (
-                f"CASE {' '.join(f'WHEN {self.is_kind(t, it)} THEN {self.sql.local(t, it)}' for it in INSTANTS)} END"
-            )
             return self.shared(
-                [self._moved(clock, d, sign, self.is_kind(t, Temporal.DATE))],
+                [self._moved(self._clock(t, INSTANTS), d, sign, self.is_kind(t, Temporal.DATE))],
                 lambda moved: (
                     "CASE "
                     + " ".join(
@@ -656,12 +700,13 @@ class Temporals:
         if self.sql.truncate(unit, "NULL") is None:
             return None
         if overrides is None or (not overrides.fields and overrides.timezone is None):
-            return self.shared(
-                [text],
-                lambda t: self.format(
-                    self.sql.truncate(unit, self.sql.local(t[0], from_)) or "", to, self._offset_of(t[0], from_, to)
-                ),
-            )
+
+            def truncated(t: str) -> str:
+                # A truncation of a year from 1000 on is of one too, so is written as such.
+                cut = self.sql.truncate(unit, self.sql.local(t, from_)) or ""
+                return self.sql.as_ad(t, [cut], lambda: self.format(cut, to, self._offset_of(t, from_, to)))
+
+            return self.shared([text], lambda t: truncated(t[0]))
         given = overrides
         return self.shared(
             [text],
@@ -724,25 +769,21 @@ class Temporals:
         """Whether the text `a` stands to the text `b`, both of the kind, as the operator says: null where either is no
         such text."""
 
-        def compared(values: list[str]) -> str:
-            x, y = values
+        def test(x: str, y: str) -> str:
             if kind is Temporal.DURATION:
                 # A duration is equal to another of the same parts, and is in no order.
                 if operator not in ("=", "<>"):
-                    test = "NULL"
-                else:
-                    p, q = self._parts(x), self._parts(y)
-                    equal = f"({p.months} = {q.months} AND {p.days} = {q.days} AND {p.seconds} = {q.seconds})"
-                    test = equal if operator == "=" else f"NOT {equal}"
-            elif kind.zoned and operator in ("=", "<>"):
+                    return "NULL"
+                p, q = self._parts(x), self._parts(y)
+                equal = f"({p.months} = {q.months} AND {p.days} = {q.days} AND {p.seconds} = {q.seconds})"
+                return equal if operator == "=" else f"NOT {equal}"
+            if kind.zoned and operator in ("=", "<>"):
                 # Two zoned values are equal where they are the same moment at the same offset, as Neo4j has them.
                 equal = f"({self.sql.utc(x, kind)} = {self.sql.utc(y, kind)} AND {self.offset(x)} = {self.offset(y)})"
-                test = equal if operator == "=" else f"NOT {equal}"
-            else:
-                test = f"{self.sql.utc(x, kind)} {operator} {self.sql.utc(y, kind)}"
-            return f"CASE WHEN {self.is_kind(x, kind)} AND {self.is_kind(y, kind)} THEN {test} END"
+                return equal if operator == "=" else f"NOT {equal}"
+            return f"{self.sql.utc(x, kind)} {operator} {self.sql.utc(y, kind)}"
 
-        return self.shared([a, b], compared)
+        return self.shared([a, b], lambda v: self._of_kinds(v, (kind,), lambda _: test(v[0], v[1])))
 
     # ----- Durations -----
 
@@ -936,6 +977,17 @@ def canonical(text: str, kind: Temporal) -> str | None:
     # Python reads a fraction of a second of any length; Java, as drivine4j does, and Neo4j read nine digits at most.
     if re.search(r"[.,][0-9]{10,}$", local):
         raise ValueError("a second's fraction has at most nine digits")
+    # A year before 1, `0000` for 1 BC and `-0044` for 45 BC, as java.time reads it, which Python's date doesn't: read
+    # in a year after 0 of the same leap years and weeks, 400 years of the Gregorian calendar apart, and written back.
+    year = None
+    if from_.ad_pattern is not None and local[0] in "-0":
+        written_year = re.match("-?[0-9]{4}", local)
+        assert written_year is not None
+        year = int(written_year.group(0))
+        if year > 0:
+            year = None
+        else:
+            local = f"{year % 400 + 400:04d}{local[written_year.end() :]}"
     if from_ is Temporal.DATE:
         clock = datetime.combine(date.fromisoformat(local), time())
     elif from_ in (Temporal.LOCAL_DATE_TIME, Temporal.DATE_TIME):
@@ -951,11 +1003,17 @@ def canonical(text: str, kind: Temporal) -> str | None:
         fraction = f".{micros:06d}"
     clock_text = f"{clock.hour:02d}:{clock.minute:02d}:{clock.second:02d}{fraction}"
     zone = (offset or "Z") if kind.zoned else ""
+    day = f"{iso_year(clock.year if year is None else year)}-{clock.month:02d}-{clock.day:02d}"
     if kind is Temporal.DATE:
-        return clock.date().isoformat()
+        return day
     if kind in (Temporal.LOCAL_DATE_TIME, Temporal.DATE_TIME):
-        return f"{clock.date().isoformat()}T{clock_text}{zone}"
+        return f"{day}T{clock_text}{zone}"
     return f"{clock_text}{zone}"
+
+
+def iso_year(year: int) -> str:
+    """A year as ISO 8601 writes it, four digits after its sign: `0000` for 1 BC, `-0044` for 45 BC."""
+    return f"{'-' if year < 0 else ''}{abs(year):04d}"
 
 
 def _canonical_duration(text: str) -> str:

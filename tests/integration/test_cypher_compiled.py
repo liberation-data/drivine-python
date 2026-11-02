@@ -1386,6 +1386,102 @@ async def test_a_moment_from_calendar_fields_an_expression_gives_beside_a_time_i
     assert rows == [[[2021, 1, 3, 10, 30], [2024, 2, 29, 10, "+02:00"], [2024, 12, 31, 1, "-05:00"]]]
 
 
+async def test_a_year_before_1_is_numbered_as_neo4j_numbers_it_made_worked_out_written_and_read(
+    cypher_pm: PersistenceManager,
+):
+    # #326, drivine4j#469: Postgres and Oracle number a year BC from -1, with no year 0, and wrote 1 BC back as 0001;
+    # none read a year before 0. drivine4j's CypherTemporalContract.
+    await clear(cypher_pm)
+    assert await cypher_pm.query(
+        spec(
+            "RETURN [toString(date('0001-01-01') - duration('P1D')), toString(date({year: -44, month: 3, day: 15})), "
+            "toString(date({year: -1})), toString(date.truncate('millennium', date('0999-12-31'))), "
+            "toString(date.truncate('millennium', date('-1234-06-01'))), "
+            "toString(datetime.truncate('century', datetime('0050-06-01T10:00:00Z'))), date('-0044-03-15').year, "
+            "date('0000-06-01').year, toString(duration.between(date('0000-01-01'), date('0001-01-01'))), "
+            "date('-0044-03-15') < date('0001-01-01')]"
+        )
+    ) == [
+        [
+            "0000-12-31", "-0044-03-15", "-0001-01-01", "0000-01-01", "-1000-01-01", "0000-01-01T00:00:00Z", -44, 0,
+            "P1Y", True,
+        ]
+    ]  # fmt: skip
+    # The ISO week's year, a truncation's own year under fields given, and a truncation to the millisecond, which
+    # Oracle writes and reads with its sign.
+    assert await cypher_pm.query(
+        spec(
+            "RETURN [date('-0044-03-15').weekYear, toString(date.truncate('year', date('-0044-03-15'), {day: 2})), "
+            "toString(datetime.truncate('millisecond', datetime('-0044-03-15T12:00:00.1234Z'))), "
+            "toString(localdatetime.truncate('decade', localdatetime('-0044-03-15T12:00:00'), {month: 2}))]"
+        )
+    ) == [[-44, "-0044-01-02", "-0044-03-15T12:00:00.123Z", "-0040-02-01T00:00:00"]]
+    # Written and read back, its kind told by its text. Python's date has no year before 1, so the parameter is the
+    # date's text, where drivine4j's is a LocalDate.
+    await cypher_pm.execute(
+        spec(
+            "CREATE (:CyTemporal {id: 'a', day: date($day), at: datetime('-0044-03-15T12:00:00+02:00')})",
+            {"day": "-0044-03-15"},
+        )
+    )
+    assert await cypher_pm.query(
+        spec(
+            "MATCH (n:CyTemporal) RETURN [toString(n.day + duration('P1D')), n.day.year, "
+            "toString(n.at + duration('P1Y')), n.day < date('0001-01-01')]"
+        )
+    ) == [["-0044-03-16", -44, "-0043-03-15T12:00:00+02:00", True]]
+
+
+async def test_a_stored_value_of_any_year_compares_and_gives_its_year_as_neo4j_does_beside_a_value_written_or_given(
+    cypher_pm: PersistenceManager,
+):
+    # #326, drivine4j#487: Postgres and Oracle read a text whose year is 1000 or later as it is, with no test of its
+    # era, where a test of its kind has told them so; and read a year off the text. A year after 0 but before 1000, and
+    # one BC, take the other way.
+    await clear(cypher_pm)
+    years = [9999, 2024, 1000, 999, 1, 0, -1, -44, -4000]
+    await cypher_pm.execute(
+        spec(
+            "UNWIND range(0, size($years) - 1) AS i WITH i, $years[i] AS y "
+            "CREATE (:CyTemporal {id: i, day: date({year: y, month: 3, day: 15}), "
+            "ldt: localdatetime({year: y, month: 3, day: 15, hour: 12}), "
+            "at: datetime({year: y, month: 3, day: 15, hour: 12, timezone: '+02:00'})})",
+            {"years": years},
+        )
+    )
+    assert await cypher_pm.query(
+        spec("MATCH (n:CyTemporal) WITH n ORDER BY n.id RETURN collect([n.day.year, n.ldt.year, n.at.year])")
+    ) == [[[y, y, y] for y in years]]
+    # drivine4j's parameter is LocalDate.of(0, 6, 1), which Python's date can't be: its text, made a date.
+    assert await cypher_pm.query(
+        spec(
+            "MATCH (n:CyTemporal) WITH n ORDER BY n.id "
+            "RETURN collect([n.day < date('0001-01-01'), date('0000-03-15') <= n.day, n.day = date('-0044-03-15'), "
+            "n.day < date($p), n.at < datetime('0000-06-01T00:00:00Z'), n.ldt >= localdatetime('1000-01-01T00:00')])",
+            {"p": "0000-06-01"},
+        )
+    ) == [[[y <= 0, y >= 0, y == -44, y <= 0, y <= 0, y >= 1000] for y in years]]
+
+    # A truncation and a change of kind keep the stored value's year: written as main wrote it from 1000 on, by its
+    # era before.
+    def iso(y: int) -> str:
+        return f"{'-' if y < 0 else ''}{abs(y):04d}"
+
+    assert await cypher_pm.query(
+        spec(
+            "MATCH (n:CyTemporal) WITH n ORDER BY n.id "
+            "RETURN collect([toString(date.truncate('month', n.day)), toString(datetime.truncate('day', n.at)), "
+            "toString(date(n.at)), toString(localdatetime(n.at))])"
+        )
+    ) == [
+        [
+            [f"{iso(y)}-03-01", f"{iso(y)}-03-15T00:00:00+02:00", f"{iso(y)}-03-15", f"{iso(y)}-03-15T12:00:00"]
+            for y in years
+        ]
+    ]
+    # Two years BC are not compared here: two stored values compare by their text, which orders them backwards (#237).
+
+
 async def test_an_optional_call_in_a_writes_subquery_counts_what_it_finds_and_the_row_it_finds_nothing_for(
     cypher_pm: PersistenceManager,
 ):
@@ -2748,6 +2844,12 @@ async def test_aggregates_of_temporal_arithmetic_give_what_they_give_of_it_worke
     ) == [8]
     # A reduce() in the argument, which Oracle declares a function for.
     assert await query(f"UNWIND range(1, 3) AS i RETURN sum(reduce(a = 0, x IN [i] | a + ({z}).minute - i + x))") == [6]
+    # In a CASE, of a moment added to twice (#326, drivine4j#469): Oracle searches the CASE for a subquery, and what
+    # that search declares is not declared.
+    assert await query(
+        f"MATCH (n:CyAgg) RETURN count(CASE WHEN reduce(a = 0, x IN [1, 2] | a + ({t} + duration('PT1H')).minute) > 0 "
+        "THEN 1 END)"
+    ) == [5]
     # A list of temporal values, kept distinct, read back by its items' fields: Oracle reads no temporal list by
     # JSON_TABLE (drivine4j#331).
     assert await query(

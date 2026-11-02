@@ -9,15 +9,16 @@ class Temporal(Enum):
     """
     A kind of temporal value, as openCypher has them. On a SQL store a temporal value is the ISO 8601 text a store keeps
     a moment as, and `pattern` tells the kind from the text: a regular expression both stores read, written with
-    capturing groups alone, for Oracle's take no other kind.
+    capturing groups alone, for Oracle's take no other kind. A year is numbered as Neo4j and ISO 8601 number it,
+    astronomically: `0000` is 1 BC and `-0044` is 45 BC.
     """
 
-    DATE = ("^[0-9]{4}-[0-9]{2}-[0-9]{2}$", False)
+    DATE = ("^-?[0-9]{4}-[0-9]{2}-[0-9]{2}$", False)
     LOCAL_TIME = ("^[0-9]{2}:[0-9]{2}(:[0-9]{2}([.][0-9]+)?)?$", False)
     TIME = ("^[0-9]{2}:[0-9]{2}(:[0-9]{2}([.][0-9]+)?)?(Z|[+-][0-9]{2}:?[0-9]{2})$", True)
-    LOCAL_DATE_TIME = ("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}(:[0-9]{2}([.][0-9]+)?)?$", False)
+    LOCAL_DATE_TIME = ("^-?[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}(:[0-9]{2}([.][0-9]+)?)?$", False)
     DATE_TIME = (
-        "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}(:[0-9]{2}([.][0-9]+)?)?(Z|[+-][0-9]{2}:?[0-9]{2})$",
+        "^-?[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}(:[0-9]{2}([.][0-9]+)?)?(Z|[+-][0-9]{2}:?[0-9]{2})$",
         True,
     )
     DURATION = (
@@ -35,6 +36,17 @@ class Temporal(Enum):
     def function(self) -> str:
         """The name of the function that makes a value of this kind: `date`, `localdatetime`…"""
         return self.name.lower().replace("_", "")
+
+    @property
+    def ad_pattern(self) -> str | None:
+        """
+        Where this kind has a date, `pattern` for a text of it whose year is 1000 or later, which every store reads as
+        ISO 8601 writes it: no year BC, nor 0000, which Postgres and Oracle number otherwise. None for a kind of no
+        date.
+        """
+        if not self.pattern.startswith(_SIGNED_YEAR):
+            return None
+        return "^[1-9][0-9]{3}" + self.pattern[len(_SIGNED_YEAR) :]
 
     @property
     def instant(self) -> bool:
@@ -60,6 +72,9 @@ class Temporal(Enum):
             return Temporal.DURATION
         return None
 
+
+_SIGNED_YEAR = "^-?[0-9]{4}"
+"""How `pattern` opens for a kind with a date: the year, its sign before 1 BC."""
 
 INSTANTS = (Temporal.DATE_TIME, Temporal.LOCAL_DATE_TIME, Temporal.DATE, Temporal.TIME, Temporal.LOCAL_TIME)
 """The kinds of a moment or a time of day, the zoned before the local of each, as a text is told apart."""

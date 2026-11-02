@@ -198,10 +198,21 @@ HELD: dict[str, dict[str, list[Hold]]] = {
         # (drivine4j#295), and Oracle compares NaN equal to NaN (drivine4j#409, also #327); drivine4j#452 fixes both.
         "NaN and the infinities as parameters": [Hold(164, ("sql",))],
         "NaN worked out": [Hold(164, ("oracle",), (2, 3))],
+        # v0.22.0, liberation-data/drivine-cypher-spec#47: a float literal past a double's range is read as an
+        # infinity, not refused (drivine4j#295). Step 4, too small to tell from 0, passes.
+        "Float bounds": [Hold(323, ("postgres", "oracle"), (1, 2, 3))],
+        # v0.22.0, liberation-data/drivine-cypher-spec#32: an integer sum past a long's range is summed exactly, not
+        # given as a float as on Neo4j (drivine4j#339, fixed by drivine4j#455).
+        "Aggregates of floats": [Hold(293, ("postgres", "oracle"), _steps(13, 16))],
     },
     "writes.yaml": {
         # v0.21.0, liberation-data/drivine-cypher-spec#31: as above, written.
         "NaN and the infinities written": [Hold(164, ("sql",))],
+    },
+    "refusals.yaml": {
+        # v0.22.0, liberation-data/drivine-cypher-spec#47: a float literal past a double's range is read as an infinity,
+        # not refused (drivine4j#295).
+        "Float too large": [Hold(323, ("postgres", "oracle"))],
     },
 }
 """

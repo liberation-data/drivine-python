@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 
@@ -42,6 +43,19 @@ def years_of(unit: str) -> int | None:
     return _YEARS_OF.get(unit)
 
 
+BC_BELOW = 49
+"""
+The code of `1`: an ISO text whose first character's code is below it starts with `-` or `0`, as one with a year BC
+does, so a store's `era` rewrites it (`bc_only`), and reads any other, an ordinary date, as it is.
+"""
+
+GUARDED_UP_TO = 200
+"""The longest value `bc_only` tests: as long as the compiler writes a value where it is read, unbound."""
+
+_BOUND = re.compile(r"\bsh[0-9]+[.]v")
+"""A name of a value the compiler binds in a subquery, `sh2.v1`: see `SqlCypherCompiler.bound`."""
+
+
 class TemporalSql(ABC):
     """
     A store's SQL for temporal values, which Temporals works openCypher's out of. Its texts and timestamps are SQL: a
@@ -51,6 +65,10 @@ class TemporalSql(ABC):
 
     def __init__(self, shared: Shared) -> None:
         self.shared = shared
+        self._ad: list[str] = []
+        """The texts `known_ad` has been told are AD, where the SQL it writes reads them."""
+        self._read_ad = False
+        """Whether `era_of` has read a text `known_ad` was told is AD, since the `known_ad` it is in began."""
 
     @abstractmethod
     def local(self, text: str, kind: Temporal) -> str:
@@ -129,6 +147,119 @@ class TemporalSql(ABC):
         """The field (`YEAR`, `MONTH`, `DAY`, `HOUR`, `MINUTE`, `SECOND` with its fraction) of the timestamp, a
         number."""
         return f"EXTRACT({field} FROM {timestamp})"
+
+    @property
+    def numbers_bc_from_one(self) -> bool:
+        """
+        Whether the store numbers a year BC from -1, with no year 0, as Postgres and Oracle do, where Cypher numbers
+        years astronomically: 0 for 1 BC and -44 for 45 BC. Where it does, a year before 1 is one more than the store's.
+        """
+        return True
+
+    def year(self, timestamp: str) -> str:
+        """The year of the timestamp, a number, as Cypher numbers it: see `numbers_bc_from_one`."""
+        year = self.extract("YEAR", timestamp)
+        if not self.numbers_bc_from_one:
+            return year
+        return self.shared([year], lambda y: f"({y[0]} + CASE WHEN {y[0]} < 0 THEN 1 ELSE 0 END)")
+
+    def text_year(self, text: str, kind: Temporal) -> str | None:
+        """
+        The year of the ISO 8601 text of the kind, a date or a moment, a number, read off the text: the digits before
+        its month, with their sign, are the year as Cypher numbers it, so the text needs no `era` nor a cast to give it.
+        None for a time of day, and where the store reads the year off the timestamp, as it numbers years so already.
+        """
+        return None
+
+    def week_year(self, timestamp: str) -> str:
+        """The year of the ISO week of the timestamp, a number, as Cypher numbers a year: `to_char` writes one BC
+        unsigned."""
+
+        def week(t: str) -> str:
+            return self.number(f"{self.to_char}({t}, 'IYYY')")
+
+        if not self.numbers_bc_from_one:
+            return week(timestamp)
+        return self.shared(
+            [timestamp],
+            lambda t: f"CASE WHEN {self.extract('YEAR', t[0])} < 0 THEN 1 - {week(t[0])} ELSE {week(t[0])} END",
+        )
+
+    def date(self, timestamp: str, then: str = "") -> str:
+        """
+        The date of the timestamp as ISO 8601 writes it, `2024-03-15`, followed by the `to_char` pattern `then`: its
+        year as Cypher numbers it, `0000` for 1 BC and `-0044` for 45 BC. A store's own, and its `era`, read their
+        operand twice at most: a value an aggregate's argument reads is bound nowhere, and is written out again wherever
+        it is read.
+        """
+        return f"{self.to_char}({timestamp}, 'YYYY-MM-DD{then}')"
+
+    def era(self, text: str) -> str:
+        """
+        The ISO 8601 text of a date or a moment, its year numbered as Cypher numbers it, as the store reads one: itself,
+        where the store numbers years so too, or the year is after 0. A store's own reads the text more than once, so
+        binds it with `shared`: written out twice, a text that is itself a truncation or a value made of fields tripled
+        the statement.
+        """
+        return text
+
+    def known_ad(self, texts: list[str], block: Callable[[], str]) -> tuple[str, bool]:
+        """
+        The SQL `block` writes, reading each of `texts` as a text of a year from 1000 on, as a store reads ISO 8601:
+        where a test the statement makes first, a kind's `Temporal.ad_pattern`, has told it so. `era_of` then reads such
+        a text as it is, so an ordinary date costs neither `era`'s rewrite nor its test. And whether it read one so:
+        where it did not, the SQL is what `block` writes anyway.
+        """
+        outer = self._read_ad
+        self._read_ad = False
+        self._ad.extend(texts)
+        try:
+            sql = block()
+            return sql, self._read_ad
+        finally:
+            del self._ad[len(self._ad) - len(texts) :]
+            self._read_ad = outer or self._read_ad
+
+    def as_ad(self, of: str, derived: list[str], block: Callable[[], str]) -> str:
+        """
+        The SQL `block` writes, each of `derived` `known_ad` in it where `of` is: a value worked out of `of` whose year
+        is after 0 where `of`'s is from 1000 on, as a truncation's, or `of` itself bound to a name. Not always from 1000
+        on itself (the week-based year of `1000-01-01` starts on `0999-12-30`), but a store writes and reads every year
+        after 0 as ISO 8601 does.
+        """
+        return self.known_ad(derived, block)[0] if self.reads_ad(of) else block()
+
+    def reads_ad(self, text: str) -> bool:
+        """Whether the text is `known_ad` where the SQL being written reads it, which it then reads as a store reads
+        ISO 8601."""
+        read = text in self._ad
+        if read:
+            self._read_ad = True
+        return read
+
+    def era_of(self, text: str, zoned: bool = False) -> str:
+        """`era` of the text, `unzoned` first where `zoned`: the text as it is where it is `known_ad`."""
+        local = self.unzoned(text) if zoned else text
+        return local if self.reads_ad(text) else self.era(local)
+
+    def bc_only(self, value: str, test: str, bc: str, ad: str | None = None) -> str:
+        """
+        `bc`, what a store reads or writes the value as where its year may be BC, where `test`, a cheap test of the
+        value, says it may be; and `ad` (the value itself where None), how it reads or writes an ordinary one,
+        otherwise, so an ordinary date costs `test` and no more. A long value is one written out where it is read, as in
+        an aggregate's argument, which binds nothing: then `bc` alone, which reads it twice where the test reads it four
+        times, so a value read again and again doubles at each reading, not quadruples. A value that reads one the
+        compiler bound in a subquery (`_BOUND`) is one it worked out, not one read from the store, and is not tested
+        either: Oracle plans a statement whose subqueries test such values a great deal slower (in drivine4j, the min
+        and max of a list of moments worked out item by item took 12 seconds to plan, 4 without). A value `known_ad` is
+        `ad` alone.
+        """
+        otherwise = value if ad is None else ad
+        if self.reads_ad(value):
+            return otherwise
+        if len(value) > GUARDED_UP_TO or value == "NULL" or _BOUND.search(value):
+            return bc
+        return f"CASE WHEN {test} THEN {bc} ELSE {otherwise} END"
 
     def replace(self, text: str, pattern: str, replacement: str) -> str:
         """The text with every match of the pattern, a SQL text, replaced by the replacement."""

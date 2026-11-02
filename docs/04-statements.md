@@ -53,7 +53,21 @@ people = await pm.query(spec.bind({"city": "Sydney"}))
   or a reduce's variable, or carried past a write in the statement, it compares by its properties.
 - openCypher's temporal values are their ISO 8601 text, as the store keeps a moment: `date`, `datetime`, `duration` and
   the rest make one, their fields read, and two moments compare as the moments they are. A parameter of a `date`,
-  `time`, `datetime` or `timedelta` is a temporal value of its kind. A zoned value the statement makes sorts as its
+  `time`, `datetime` or `timedelta` is a temporal value of its kind. A year is numbered as Neo4j and ISO 8601 number
+  it, where Oracle and Postgres keep no year 0: `0000` is 1 BC and `-0044` is 45 BC, made, read, worked out,
+  truncated, written and read back ([#326](https://github.com/liberation-data/drivine-python/issues/326)). A stored
+  value whose year is 1000 or later is read as before; one of an earlier year is read by its era, so a statement that
+  reads a stored date or moment compiles to SQL up to three and a half times as long (a filter on a stored date, 1,005
+  characters on Oracle and 703 on Postgres before, is 2,831 and 2,211), and in drivine4j, which compiles the same SQL,
+  an aggregate of temporal arithmetic runs 8 to 10% slower (a `truncate` on Postgres, about 16%). Oracle counts days
+  before 1582-10-15 by the Julian calendar, so the day of the week, the ISO week, the day of the year and a leap day
+  of such a date are not Neo4j's ([#335](https://github.com/liberation-data/drivine-python/issues/335)). Two stored
+  values BC compare by their text, which orders them backwards
+  ([#237](https://github.com/liberation-data/drivine-python/issues/237)). Postgres and Oracle keep no date before
+  4713 BC, so a year before `-4712` that the store works out or reads, as `date({year: -9999})`, fails there. Python's
+  `date` and `datetime` have no year before 1, so a value BC is given as its ISO text to `date()` or `datetime()`.
+  Compiled Cypher on SQLite doesn't number a year before 1 yet: it comes with Cypher on SQLite
+  ([#93](https://github.com/liberation-data/drivine-python/issues/93)). A zoned value the statement makes sorts as its
   moment (`ORDER BY datetime(n.at)`); one read as a property sorts as its text, and so does a map that holds one. A
   list of them, or a list of lists of them, sorts item by item so in an `ORDER BY`, `min` and `max`. Oracle reads by
   their places, not with `JSON_TABLE`, the items of a list that holds temporal values the statement makes, at any

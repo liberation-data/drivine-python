@@ -225,12 +225,26 @@ HELD: dict[str, dict[str, list[Hold]]] = {
         "Round to a fractional or negative precision": [Hold(376, ("sqlite-rounding-floats",), (15, 17))],
         "CALL imports only what it names": [Hold(376, ("sqlite-before-3.53",), (12,))],
         "Float arithmetic": [Hold(376, ("sqlite-rounding-floats",), (1, 2, 4, 5, 6))],
-        "Aggregates of floats": [Hold(376, ("sqlite-rounding-floats",), (12,))],
         "Functions of numbers": [Hold(376, ("sqlite-rounding-floats",), (2, 8, 9, 11))],
+        # v0.22.0, liberation-data/drivine-cypher-spec#47: a float literal past a double's range is read as an
+        # infinity, not refused (drivine4j#295). Step 4, too small to tell from 0, passes.
+        # On SQLite step 1 is read as an infinity too, as on Postgres and Oracle here.
+        "Float bounds": [Hold(323, ("sql",), (1, 2, 3))],
+        # v0.22.0, liberation-data/drivine-cypher-spec#32: an integer sum past a long's range is summed exactly, not
+        # given as a float as on Neo4j (drivine4j#339, fixed by drivine4j#455).
+        "Aggregates of floats": [
+            Hold(293, ("postgres", "oracle"), _steps(13, 16)),
+            Hold(376, ("sqlite-rounding-floats",), (12,)),
+        ],
     },
     "writes.yaml": {
         # v0.21.0, liberation-data/drivine-cypher-spec#31: as above, written.
         "NaN and the infinities written": [Hold(164, ("sql",))],
+    },
+    "refusals.yaml": {
+        # v0.22.0, liberation-data/drivine-cypher-spec#47: a float literal past a double's range is read as an infinity,
+        # not refused (drivine4j#295).
+        "Float too large": [Hold(323, ("sql",))],
     },
 }
 """

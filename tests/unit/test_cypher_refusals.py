@@ -100,6 +100,26 @@ def test_a_date_written_as_a_text_that_is_no_date_is_refused_with_what_the_parse
 
 
 @pytest.mark.parametrize("compiler", COMPILERS.values(), ids=COMPILERS.keys())
+def test_a_leap_day_written_in_a_year_before_1_is_a_date_where_neo4j_has_that_year_leap(
+    compiler: type[SqlCypherCompiler],
+) -> None:
+    # #326: Python's date reads no year before 1, so the text is read 400 years on, which keeps its leap years: 0000
+    # (1 BC), -0004 and -0400 are leap years, -0001 and -0100 are not. And the earliest year is written back as it is.
+    sql = (
+        compiler("g")
+        .compile(
+            "RETURN [date('0000-02-29'), date('-0004-02-29'), date('-0400-02-29'), localdatetime('-9999-12-31T23:59')]"
+        )
+        .sql
+    )
+    for written in ('"0000-02-29"', '"-0004-02-29"', '"-0400-02-29"', '"-9999-12-31T23:59:00"'):
+        assert written in sql, sql
+    for day in ("-0001-02-29", "-0100-02-29"):
+        with pytest.raises(DrivineError, match=rf"^'{day}' is no date: .+"):
+            compiler("g").compile(f"RETURN date('{day}')")
+
+
+@pytest.mark.parametrize("compiler", COMPILERS.values(), ids=COMPILERS.keys())
 @pytest.mark.parametrize(
     "written",
     [

@@ -489,6 +489,12 @@ class SqlCypherCompiler(ABC):
         Whether a value's identity is carried out of a query as a column of its own (see Json.identity): not where the
         queries of a `UNION` in `CALL { … }` would give different columns, which compare by their properties instead.
         """
+        self._probing = False
+        """
+        Whether SQL is written only to be searched for a subquery of the statement's own, not run: `shared_bound` then
+        writes its values beside its body, read there by names of no subquery, so neither adds a `SELECT` (see
+        `_probed`).
+        """
         self._sharing = True
         """Whether `shared` binds a long value: not in an expression that aggregates, whose aggregate a subquery would
         take from its group, nor in a term a projection beside a variable-length walk sorts by that is none of its items
@@ -567,6 +573,8 @@ class SqlCypherCompiler(ABC):
 
     def shared_bound(self, values: Sequence[str], body: Body) -> str:
         """The body over the values `bound` as `shared` binds them, and counted so: see `_binds`."""
+        if self._probing:
+            return " ".join([*values, body([f"probed.v{i + 1}" for i in range(len(values))])])
         self._shared_bindings += 1
         return self.bound(values, body)
 
@@ -1418,7 +1426,7 @@ class SqlCypherCompiler(ABC):
     @cached_property
     def temporals(self) -> Temporals:
         """openCypher's temporal values: see Temporals."""
-        return Temporals(self.temporal_sql, self.shared)
+        return Temporals(self.temporal_sql, self.shared, lambda: self._sharing)
 
     # ----- A store's procedure, for a statement that writes -----
 
@@ -3603,10 +3611,14 @@ class SqlCypherCompiler(ABC):
                     for argument in e.arguments:
                         if not contains(argument, lambda it: isinstance(it, Case)):
                             continue
-                        sql = self._unshared(
+                        # Every subquery is written `SELECT`, so the argument's SQL is searched for one as it is, case
+                        # and all. Its long values are written once, as bound ones are (`_probed`): written out wherever
+                        # each was read, as an aggregate's argument writes them, a temporal CASE's SQL ran to 165
+                        # million characters in drivine4j (#469).
+                        sql = self._probed(
                             lambda argument=argument: self.json(self._expression(argument, select.scope)).sql
                         )
-                        if "SELECT" not in sql.upper():
+                        if "SELECT" not in sql:
                             continue
                         arguments[argument] = None
                         if e.name.lower() == "collect" and not any(it is e for it in sized):
@@ -3773,6 +3785,22 @@ class SqlCypherCompiler(ABC):
             work()
             return self._shared_bindings > bindings
         finally:
+            self._counter, self._shares, self._shared_bindings = counter, shares, bindings
+            del self._functions[functions:]
+
+    def _probed(self, work: Callable[[], str]) -> str:
+        """
+        What the work gives, its SQL only searched for a subquery of the statement's own: see `_probing`. The names it
+        takes and the functions it declares are given back, as `_binds_in` gives them back: a `reduce`'s step written
+        so would declare a function that reads no value it names.
+        """
+        was = self._probing
+        counter, shares, bindings, functions = self._counter, self._shares, self._shared_bindings, len(self._functions)
+        self._probing = True
+        try:
+            return work()
+        finally:
+            self._probing = was
             self._counter, self._shares, self._shared_bindings = counter, shares, bindings
             del self._functions[functions:]
 

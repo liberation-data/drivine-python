@@ -84,6 +84,11 @@ class SqliteTemporalSql(TemporalSql):
     def extract(self, field: str, timestamp: str) -> str:
         return self._temporal("extract", timestamp, f"'{field}'")
 
+    @property
+    def numbers_bc_from_one(self) -> bool:
+        """`drivine_temporal` numbers years as Cypher does, and `drivine_to_char` writes one before 0 with its sign."""
+        return False
+
     def _temporal(self, operation: str, *arguments: str) -> str:
         """`drivine_temporal`'s operation of the arguments."""
         return f"{sqlite_graph.TEMPORAL}('{operation}', {', '.join(arguments)})"

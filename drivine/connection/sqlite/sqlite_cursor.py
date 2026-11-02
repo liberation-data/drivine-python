@@ -8,6 +8,7 @@ from drivine.connection.postgres.postgres_result_mapper import PostgresResultMap
 from drivine.connection.sqlite.sqlite_session import SqliteSession
 from drivine.cursor.buffered_cursor import BufferedCursor
 from drivine.cursor.cursor_specification import CursorSpecification
+from drivine.cypher.cypher_specification import RESULT
 
 T = TypeVar("T")
 
@@ -22,6 +23,7 @@ class SqliteCursor(BufferedCursor[T]):
         statement: str,
         cursor: sqlite3.Cursor,
         result_mapper: PostgresResultMapper,
+        compiled: bool = False,
     ) -> None:
         super().__init__(spec.batch)
         self.spec = spec
@@ -29,12 +31,15 @@ class SqliteCursor(BufferedCursor[T]):
         self.statement = statement
         self.cursor = cursor
         self.result_mapper = result_mapper
+        self.compiled = compiled
+        """Whether the statement is compiled Cypher, which gives each row as its one column."""
 
     async def read(self, count: int) -> tuple[list[T], bool]:
         rows = await concurrency.blocking(
             self.session.fetch, self.statement, self.cursor, count, on=self.session.thread
         )
-        return self.result_mapper.map_query_results(rows, self.spec), len(rows) < count
+        results = [it[RESULT] for it in rows] if self.compiled else rows
+        return self.result_mapper.map_query_results(results, self.spec), len(rows) < count
 
     async def close(self) -> None:
         if not self.closed:

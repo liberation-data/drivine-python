@@ -23,7 +23,7 @@ from drivine.sync.cursor.cursor import Cursor
 T = TypeVar("T")
 S = TypeVar("S", bound=QuerySpecification[Any])
 
-SQL_TYPES = (DatabaseType.POSTGRES, DatabaseType.ORACLE)
+SQL_TYPES = (DatabaseType.POSTGRES, DatabaseType.ORACLE, DatabaseType.SQLITE)
 """The stores that keep a graph in SQL tables, and compile a Cypher statement to their SQL."""
 
 CYPHER = re.compile(r"^\s*(?://|(?:OPTIONAL\s+MATCH|MATCH|CREATE|MERGE)\s*(?:\w+\s*=\s*)?\(|UNWIND\s|RETURN\s)", re.I)

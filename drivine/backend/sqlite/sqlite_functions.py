@@ -11,6 +11,9 @@ drivine4j's `SqliteFunctions`, function for function, so a statement either libr
 - `drivine_lower` lowers text as Unicode does.
 - `drivine_epoch` reads a moment as nanoseconds since the epoch.
 
+Compiled Cypher calls the rest, for what Cypher does with its values, JSON text each, that SQLite does not: see
+sqlite_cypher_functions.
+
 A function that reads only its arguments is registered as deterministic, so SQLite may index an expression over it.
 
 A failure inside a function reaches the statement as "user-defined function raised exception", which says nothing of
@@ -24,14 +27,15 @@ import json
 import math
 import re
 import sqlite3
-from collections import OrderedDict
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any, cast
 
-from drivine.backend.sqlite import sqlite_graph
+from drivine.backend.sqlite import sqlite_cypher_functions, sqlite_graph
+from drivine.backend.sqlite.sqlite_arguments import text as text_of_argument
 from drivine.backend.sqlite.sqlite_contention import ERRORS
 from drivine.backend.sqlite.sqlite_graph import SqliteGraph, has_label, path, text_of
+from drivine.backend.sqlite.sqlite_patterns import Patterns
 from drivine.backend.sqlite.sqlite_plan_writer import SqlitePlanWriter, Stopped
 from drivine.model import lower_copies
 
@@ -80,6 +84,7 @@ def register(connection: sqlite3.Connection, failures: Failures) -> None:
     connection.create_function(REGEXP, 2, failures.kept(patterns.matches), deterministic=True)
     connection.create_function(sqlite_graph.LOWER, 1, failures.kept(_lower), deterministic=True)
     connection.create_function(sqlite_graph.EPOCH, 1, failures.kept(epoch), deterministic=True)
+    sqlite_cypher_functions.register(connection, failures.kept, patterns)
 
 
 def _write(
@@ -242,37 +247,11 @@ def epoch(text: Any) -> int | None:
     return value if -(2**63) <= whole and value < 2**63 else None
 
 
-class _Patterns:
+class _Patterns(Patterns):
     """
-    The regular expressions the functions of one connection have read, compiled once each: a search asks the same few
-    of every node it reads. An expression is Python's, with what Postgres's adds that Python's does not read: a POSIX
-    class, `[:alnum:]`, is the class it names in any script, as on a Postgres database whose text is Unicode. So an
-    expression a full-text search writes for Postgres reads the same here (see TextQuery).
+    The regular expressions the functions of one connection have read, compiled once each, as Java reads them: see
+    sqlite_patterns.
     """
-
-    _MAX = 256
-    _POSIX = {"[:alnum:]_": r"\w", "[:digit:]": r"\d", "[:space:]": r"\s"}
-    """
-    The POSIX classes TextQuery writes, as Python reads them: letters and digits of any script with `_` are a word
-    character.
-    """
-
-    def __init__(self) -> None:
-        self._compiled: OrderedDict[str, re.Pattern[str]] = OrderedDict()
-
-    def of(self, expression: str) -> re.Pattern[str]:
-        compiled = self._compiled.get(expression)
-        if compiled is None:
-            written = expression
-            for posix, python in self._POSIX.items():
-                written = written.replace(posix, python)
-            compiled = re.compile(written)
-            self._compiled[expression] = compiled
-            if len(self._compiled) > self._MAX:
-                self._compiled.popitem(last=False)
-        else:
-            self._compiled.move_to_end(expression)
-        return compiled
 
     def matches(self, expression: str | None, text: Any) -> int | None:
         """
@@ -281,7 +260,7 @@ class _Patterns:
         """
         if expression is None or text is None:
             return None
-        return 1 if self.of(expression).search(str(text)) else 0
+        return 1 if self.of(str(expression)).search(text_of_argument(text) or "") else 0
 
     def count(self, text: Any, expression: str | None) -> int:
         """
@@ -290,7 +269,7 @@ class _Patterns:
         """
         if text is None or expression is None:
             return 0
-        return sum(1 for _ in self.of(expression).finditer(str(text)))
+        return sum(1 for _ in self.of(str(expression)).finditer(text_of_argument(text) or ""))
 
 
 class _Similarity:

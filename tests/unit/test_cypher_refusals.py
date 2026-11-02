@@ -17,11 +17,16 @@ from drivine.cypher.cypher_reader import read_cypher
 from drivine.cypher.sql.oracle_cypher_compiler import OracleCypherCompiler
 from drivine.cypher.sql.postgres_cypher_compiler import PostgresCypherCompiler
 from drivine.cypher.sql.sql_cypher_compiler import SqlCypherCompiler, holds_subquery
+from drivine.cypher.sql.sqlite_cypher_compiler import SqliteCypherCompiler
 from tests.cypher.cypher_spec import HELD_FAILURES, Case, expanded, failure_matches, held_for, held_passes, load
 
 SPEC = load("refusals.yaml")
 
-COMPILERS: dict[str, type[SqlCypherCompiler]] = {"postgres": PostgresCypherCompiler, "oracle": OracleCypherCompiler}
+COMPILERS: dict[str, type[SqlCypherCompiler]] = {
+    "postgres": PostgresCypherCompiler,
+    "oracle": OracleCypherCompiler,
+    "sqlite": SqliteCypherCompiler,
+}
 
 
 @pytest.mark.parametrize("store", COMPILERS)

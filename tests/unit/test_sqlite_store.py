@@ -5,6 +5,7 @@ SqliteGraphTest, SqliteSqlTest, SqliteSchemaGrammarTest and SqliteBackendTest, p
 
 import json
 import sqlite3
+import sys
 from decimal import Decimal
 from pathlib import Path
 from typing import Annotated
@@ -360,3 +361,20 @@ class TestTheSession:
             assert session.failures.take() is None
         finally:
             session.close()
+
+    def test_pysqlite3_is_taken_where_pythons_sqlite_is_not_complete_for_compiled_cypher_and_its_is(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        from types import SimpleNamespace
+
+        from drivine.connection.sqlite import sqlite_session
+
+        later = SimpleNamespace(__name__="pysqlite3.dbapi2", sqlite_version_info=(3, 53, 0))
+        monkeypatch.setitem(sys.modules, "pysqlite3.dbapi2", later)
+        for pythons, its, chosen in ((True, True, sqlite3), (False, True, later), (False, False, sqlite3)):
+
+            def complete(module: object, pythons: bool = pythons, its: bool = its) -> bool:
+                return pythons if module is sqlite3 else its
+
+            monkeypatch.setattr(sqlite_session, "complete", complete)
+            assert sqlite_session.sqlite_module() is chosen

@@ -17,7 +17,7 @@ RESULT = "result"
 
 def cypher_compiled(
     spec: QuerySpecification[T],
-    store: Literal["POSTGRES", "ORACLE"],
+    store: Literal["POSTGRES", "ORACLE", "SQLITE"],
     graph: str,
     nulls_equal_stored: bool = True,
 ) -> tuple[QuerySpecification[T], CompiledCypher | None]:
@@ -39,6 +39,10 @@ def cypher_compiled(
             from drivine.cypher.sql.postgres_cypher_compiler import PostgresCypherCompiler
 
             compiled = PostgresCypherCompiler(graph).compile(statement.text, parameters)
+        elif store == "SQLITE":
+            from drivine.cypher.sql.sqlite_cypher_compiler import SqliteCypherCompiler
+
+            compiled = SqliteCypherCompiler(graph).compile(statement.text, parameters)
         else:
             from drivine.cypher.sql.oracle_cypher_compiler import OracleCypherCompiler
 

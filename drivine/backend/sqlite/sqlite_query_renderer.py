@@ -245,13 +245,14 @@ class SqliteQueryRenderer(SqlQueryRenderer):
     def _matches(self, text_: str, pattern: str) -> str:
         """
         A regular expression that must match the whole value, as Cypher's `=~` does. A leading `(?i)` ignores case.
-        SQLite has no regular expressions of its own, so the expression is Python's, read by the function SQLite's
-        `REGEXP` calls (see sqlite_functions). It is held to the whole value by a group that takes no number, so its own
-        groups keep theirs and a backreference names the group it was written for.
+        SQLite has no regular expressions of its own, so the expression is Java's, as on drivine4j, read by the function
+        SQLite's `REGEXP` calls (see sqlite_patterns). It is held to the whole value by a group that takes no number, so
+        its own groups keep theirs and a backreference names the group it was written for, and ends at `\\z`, the text's
+        end, where Java's `\\Z` and `$` would match before a line break that ends it.
         """
         ignore_case = pattern.startswith("(?i)")
         body = pattern[4:] if ignore_case else pattern
-        whole = ("(?i)" if ignore_case else "") + f"^(?:{body})" + r"\Z"
+        whole = ("(?i)" if ignore_case else "") + f"^(?:{body})" + r"\z"
         return f"{text_} REGEXP {self._text(whole)}"
 
     def _has(self, row: str, property: str) -> str:

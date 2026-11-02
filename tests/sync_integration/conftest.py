@@ -5,6 +5,7 @@ from collections.abc import Iterator
 
 import pytest
 
+from drivine.connection.sqlite.sqlite_session import FULL_FLOATS_VERSION, full_floats, sqlite_module
 from drivine.sync import (
     DatabaseRegistry,
     DatabaseType,
@@ -39,8 +40,30 @@ tests' own environment configures them, and Oracle when set.
 SQL_STORES = ("postgres", "oracle", "sqlite")
 """The stores that keep a graph in SQL tables."""
 
-CYPHER_REFUSED = ("sqlite",)
-"""The SQL stores that compile no Cypher yet: SQLite, until liberation-data/drivine-python#93."""
+SQLITE_ROUNDS_FLOATS = not full_floats(sqlite_module())
+"""Whether the SQLite the tests run on writes a float to 15 significant digits, as before 3.53 (#376)."""
+
+SQLITE_BEFORE_3_53 = sqlite_module().sqlite_version_info < FULL_FLOATS_VERSION
+"""
+Whether the SQLite the tests run on is older than 3.53, which refuses a subquery in json_each that groups by a column of
+its row (#376).
+"""
+
+
+def _reads_floats_exactly() -> bool:
+    connection = sqlite_module().connect(":memory:")
+    try:
+        texts = ["1.5e300", "-1.5e300", "1.7976931348623157e308", "1.0e-310", "5e-324"]
+        return all(connection.execute("SELECT json(?) ->> '$'", (it,)).fetchone()[0] == float(it) for it in texts)
+    finally:
+        connection.close()
+
+
+SQLITE_READS_FLOATS_INEXACTLY = not _reads_floats_exactly()
+"""
+Whether the SQLite the tests run on reads a float from text less exactly, 1.5E300 as 1.4999999999999998E300: one before
+3.53 does where it has no long double wider than a double, as on arm64, and not on x86-64 (#376).
+"""
 
 
 @pytest.fixture(scope="session")
@@ -76,7 +99,12 @@ def pm(request: pytest.FixtureRequest, factory: PersistenceManagerFactory) -> It
     yield for_store(manager) if request.node.get_closest_marker("written_in_cypher") else manager
 
 
-CYPHER_STORES = ["default", *(["postgres"] if POSTGRES else []), *(["oracle"] if ORACLE else [])]
+CYPHER_STORES = [
+    "default",
+    *(["postgres"] if POSTGRES else []),
+    *(["oracle"] if ORACLE else []),
+    *(["sqlite"] if SQLITE else []),
+]
 """
 The registered names of the stores a Cypher statement is checked on, to give the same rows: Neo4j, and the SQL stores it
 is compiled for, as the tests' environment has them.
@@ -93,7 +121,9 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     """
     A test marked `rolls_back` needs multi-statement transactions, which FalkorDB doesn't have. One marked
     `graph_engine_only` runs what a SQL store doesn't take, which the marker says. One marked `fails_on_sql_stores`
-    fails on them for the issue it names, until that is fixed.
+    fails on them for the issue it names, until that is fixed. One marked `needs_full_floats`, `needs_exact_float_reads`
+    or `needs_sqlite_3_53` fails on SQLite where the tests run on one that rounds floats to 15 digits, reads them from
+    text less exactly, or is older than 3.53 (#376).
     """
     for item in items:
         callspec = getattr(item, "callspec", None)
@@ -107,5 +137,14 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
         fails = item.get_closest_marker("fails_on_sql_stores")
         if fails and engine in SQL_STORES:
             item.add_marker(pytest.mark.xfail(reason=fails.args[0], strict=True))
-        if item.get_closest_marker("written_in_cypher") and engine in CYPHER_REFUSED:
-            item.add_marker(pytest.mark.skip(reason="Cypher is not compiled for SQLite yet (#93)."))
+        # A test over `cypher_pm` runs on the store it names, which the markers above leave as they are.
+        store = callspec.params.get("cypher_pm", engine) if callspec is not None else None
+        if item.get_closest_marker("needs_full_floats") and store == "sqlite" and SQLITE_ROUNDS_FLOATS:
+            reason = "This SQLite writes a float to 15 significant digits (#376)."
+            item.add_marker(pytest.mark.xfail(reason=reason, strict=True))
+        if item.get_closest_marker("needs_exact_float_reads") and store == "sqlite" and SQLITE_READS_FLOATS_INEXACTLY:
+            reason = "This SQLite reads 1.5E300 from text as 1.4999999999999998E300 (#376)."
+            item.add_marker(pytest.mark.xfail(reason=reason, strict=True))
+        if item.get_closest_marker("needs_sqlite_3_53") and store == "sqlite" and SQLITE_BEFORE_3_53:
+            reason = "SQLite before 3.53 groups by no outer column in json_each (#376)."
+            item.add_marker(pytest.mark.xfail(reason=reason, strict=True))

@@ -25,6 +25,26 @@ SIMILARITY = "drivine_similarity"
 REGEXP_COUNT = "drivine_regexp_count"
 LOWER = "drivine_lower"
 EPOCH = "drivine_epoch"
+EQUAL = "drivine_equal"
+CONTAINS = "drivine_contains"
+ADD = "drivine_add"
+CANONICAL = "drivine_canonical"
+CYPHER = "drivine_cypher"
+UPPER = "drivine_upper"
+SPLIT = "drivine_split"
+REVERSE = "drivine_reverse"
+UUID = "drivine_uuid"
+REGEX_GROUP = "drivine_regex_group"
+REGEX_REPLACE = "drivine_regexp_replace"
+TRUNC = "drivine_trunc"
+TO_CHAR = "drivine_to_char"
+TEMPORAL = "drivine_temporal"
+FLOAT_TEXT = "drivine_float_text"
+SORT_KEY = "drivine_sort_key"
+LIST_ORDER = "drivine_list_order"
+MATH = "drivine_math"
+ROUND = "drivine_round"
+FAIL = "drivine_fail"
 """The names of the functions Drivine registers on each connection (see sqlite_functions), drivine4j's."""
 
 Kind = Literal["TEXT", "NUMBER", "INSTANT", "DATE"]
@@ -139,7 +159,13 @@ def has_label(alias: str, label: str) -> str:
     quotes and all. A label is written whole, so it is found whole; and the test is deterministic, so it is the
     predicate of a partial index over the label's nodes, which a statement that makes it is answered by.
     """
-    return f"instr({column(alias, 'labels')}, {sql_text(quoted(label))}) > 0"
+    return holds_label(column(alias, "labels"), label)
+
+
+def holds_label(labels: str, label: str) -> str:
+    """Whether the JSON array of labels `labels` holds the label: the test `has_label` makes of a node's column, which
+    compiled Cypher makes too."""
+    return f"instr({labels}, {sql_text(quoted(label))}) > 0"
 
 
 def has_labels(alias: str, labels: Sequence[str]) -> str:

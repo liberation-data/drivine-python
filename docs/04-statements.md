@@ -22,10 +22,10 @@ await pm.execute(spec)                   # no results
 - A row of one column is its value, and a row of several is a list.
 - A failed statement raises `DrivineError`, which holds the specification, and the database's error as its cause.
 
-### Cypher on Postgres and Oracle
+### Cypher on Postgres, Oracle and SQLite
 
 A statement written as Cypher, with `cypher_statement` or `cypher_file`, is compiled to SQL over the graph's tables on
-Postgres and Oracle, and gives the rows a graph engine gives, as drivine4j compiles it:
+Postgres, Oracle and SQLite, and gives the rows a graph engine gives, as drivine4j compiles it:
 
 ```python
 from drivine import QuerySpecification, cypher_statement
@@ -34,8 +34,10 @@ spec = QuerySpecification(cypher_statement("MATCH (p:Person {city: $city}) RETUR
 people = await pm.query(spec.bind({"city": "Sydney"}))
 ```
 
-- A read is a query. A write (`CREATE`, `MERGE`, `SET`, `REMOVE`, `DELETE`) is an anonymous PL/SQL block on Oracle, and
-  a function made for the statement in `pg_temp` on Postgres: one statement, applied whole or not at all. A block hands
+- A read is a query. A write (`CREATE`, `MERGE`, `SET`, `REMOVE`, `DELETE`) is an anonymous PL/SQL block on Oracle,
+  a function made for the statement in `pg_temp` on Postgres, and on SQLite, which has no procedural language, steps
+  that `drivine_cypher`, a function Drivine registers on each connection, carries out under a savepoint: one statement,
+  applied whole or not at all. A block hands
   its rows back whole, so on Oracle a write is run with `query`, and a cursor over one is refused. On Postgres a cursor
   over a write writes when it is opened, as on a graph engine.
 - Parameters are named, `$name`: a statement bound to a list of them is refused.
@@ -64,10 +66,9 @@ people = await pm.query(spec.bind({"city": "Sydney"}))
   ([#237](https://github.com/liberation-data/drivine-python/issues/237)). Postgres and Oracle keep no date before
   4713 BC, so a year before `-4712` that the store works out or reads, as `date({year: -9999})`, fails there. Python's
   `date` and `datetime` have no year before 1, so a value BC is given as its ISO text to `date()` or `datetime()`.
-  Compiled Cypher on SQLite doesn't number a year before 1 yet: it comes with Cypher on SQLite
-  ([#93](https://github.com/liberation-data/drivine-python/issues/93)). A zoned value the statement makes sorts as its
-  moment (`ORDER BY datetime(n.at)`); one read as a property sorts as its text, and so does a map that holds one. A
-  list of them, or a list of lists of them, sorts item by item so in an `ORDER BY`, `min` and `max`. Oracle reads by
+  A zoned value the statement makes sorts as its moment (`ORDER BY datetime(n.at)`); one read as a property sorts as
+  its text, and so does a map that holds one. A list of them, or a list of lists of them, sorts item by item so in an
+  `ORDER BY`, `min` and `max`. Oracle reads by
   their places, not with `JSON_TABLE`, the items of a list that holds temporal values the statement makes, at any
   depth: a list of them, a list of lists or of maps of them (`collect(DISTINCT [l, l])`), one a `CASE`, `coalesce` or
   `reduce` may give, or one taken back out of a map; and the keys of any map, which `keys` reads from a list Oracle
@@ -199,7 +200,7 @@ people = await pm.query(spec.bind({"city": "Sydney"}))
 - What each statement gives is the [Cypher spec](https://github.com/liberation-data/drivine-cypher-spec), which the
   three Drivine libraries run alike.
 
-The parser runs on ANTLR's runtime, which `drivine[postgres]` and `drivine[oracle]` install.
+The parser runs on ANTLR's runtime, which `drivine[postgres]`, `drivine[oracle]` and `drivine[sqlite]` install.
 
 ### Cursors
 

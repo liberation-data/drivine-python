@@ -104,11 +104,22 @@ def test_the_functions_drivines_statements_call_are_there(pm: PersistenceManager
     assert row == {"lowered": "école", "count": 2, "matched": 1, "similarity": 1.0}
 
 
-def test_a_cypher_statement_is_refused_until_it_is_compiled_for_sqlite(pm: PersistenceManager):
+def test_a_cypher_statement_is_compiled_to_sqlites_sql_and_gives_a_graph_engines_rows(pm: PersistenceManager):
     from drivine.sync import cypher_statement
 
-    with pytest.raises(DrivineError, match="#93"):
-        pm.query(QuerySpecification[Any](cypher_statement("MATCH (n) RETURN n")))
+    written = (
+        "CREATE (a:CyConn {name: 'Ada', born: 1815})-[:KNOWS {since: 1833}]->(b:CyConn {name: 'Charles'}) RETURN a.name"
+    )
+    assert pm.query(QuerySpecification[Any](cypher_statement(written))) == ["Ada"]
+    read = "MATCH (a:CyConn)-[k:KNOWS]->(b) RETURN {from: a.name, to: b.name, since: k.since, born: a.born / 1.0}"
+    assert pm.query(QuerySpecification[Any](cypher_statement(read))) == [
+        {"from": "Ada", "to": "Charles", "since": 1833, "born": 1815.0}
+    ]
+    optional = "MATCH (n:CyConn) OPTIONAL MATCH (n)-[:KNOWS]->(m) RETURN [n.name, m.name] ORDER BY n.name"
+    assert pm.query(QuerySpecification[Any](cypher_statement(optional))) == [
+        ["Ada", "Charles"],
+        ["Charles", None],
+    ]
 
 
 class Writes:

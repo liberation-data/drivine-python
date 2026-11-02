@@ -24,7 +24,7 @@ with a graph:
 2. **Object manager** (`StatelessGraphObjectManager`): a high-level API that maps Pydantic models, with a query DSL
    whose typed references are stubs generated from your models.
 
-Cypher you write runs on Postgres and Oracle too, compiled to SQL. 0.3 is an alpha release: the API may still change.
+Cypher you write runs on Postgres, Oracle and SQLite too, compiled to SQL. 0.3 is an alpha release: the API may still change.
 
 ## Install
 
@@ -80,7 +80,8 @@ drivine4j's tables, so drivine4j and Drivine for TypeScript read and write it to
 - Each statement Drivine writes applies whole or not at all.
 - A connection you open yourself, with `sqlite3.connect`, gets none of this.
 
-Cypher is compiled for Postgres and Oracle, and not yet for SQLite: see [Connecting](docs/02-connecting.md#sqlite).
+Cypher you write is compiled to SQLite's SQL (`pip install "drivine[sqlite]"`): see
+[Cypher on a relational database](docs/03-cypher-on-a-relational-database.md).
 
 ## Documentation
 

@@ -5,7 +5,7 @@ from collections.abc import Iterator
 
 import pytest
 
-from drivine.connection.sqlite.sqlite_session import FULL_FLOATS_VERSION, sqlite_module
+from drivine.connection.sqlite.sqlite_session import complete, sqlite_module
 from drivine.sync import (
     DatabaseRegistry,
     DatabaseType,
@@ -40,8 +40,9 @@ tests' own environment configures them, and Oracle when set.
 SQL_STORES = ("postgres", "oracle", "sqlite")
 """The stores that keep a graph in SQL tables."""
 
-SQLITE_BEFORE_3_53 = sqlite_module().sqlite_version_info < FULL_FLOATS_VERSION
-"""Whether the SQLite the tests run on is older than 3.53, which compiled Cypher needs all of (#376)."""
+SQLITE_INCOMPLETE = not complete(sqlite_module())
+"""Whether the SQLite the tests run on is older than 3.53, or writes floats to 15 digits, as compiled Cypher may not
+(#376)."""
 
 
 @pytest.fixture(scope="session")
@@ -115,6 +116,6 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
             item.add_marker(pytest.mark.xfail(reason=fails.args[0], strict=True))
         # A test over `cypher_pm` runs on the store it names, which the markers above leave as they are.
         store = callspec.params.get("cypher_pm", engine) if callspec is not None else None
-        if item.get_closest_marker("needs_full_floats") and store == "sqlite" and SQLITE_BEFORE_3_53:
-            reason = "SQLite before 3.53 rounds a float to 15 significant digits, and groups by no outer column (#376)."
+        if item.get_closest_marker("needs_full_floats") and store == "sqlite" and SQLITE_INCOMPLETE:
+            reason = "This SQLite rounds a float to 15 significant digits, or groups by no outer column (#376)."
             item.add_marker(pytest.mark.xfail(reason=reason, strict=True))

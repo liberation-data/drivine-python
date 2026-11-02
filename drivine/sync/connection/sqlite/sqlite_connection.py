@@ -11,7 +11,7 @@ from typing import Any, TypeVar
 from drivine.backend.sql.sql_graph import DEFAULT_GRAPH
 from drivine.backend.sqlite.sqlite_graph import CYPHER, JSON_ROWS
 from drivine.connection.postgres.postgres_result_mapper import PostgresResultMapper
-from drivine.connection.sqlite.sqlite_session import FULL_FLOATS_VERSION, SqliteSession, sqlite_module
+from drivine.connection.sqlite.sqlite_session import SqliteSession, complete, sqlite_module
 from drivine.cursor.cursor_specification import CursorSpecification
 from drivine.cypher.cypher_specification import RESULT, cypher_compiled
 from drivine.drivine_error import DrivineError
@@ -134,17 +134,18 @@ _warned: list[bool] = []
 
 def _warn_of_rounded_floats() -> None:
     """
-    Warns, once, where compiled Cypher runs on a SQLite older than FULL_FLOATS_VERSION: there a float is written to 15
-    significant digits wherever a value is JSON text, so `1.0 / 3` gives 0.333333333333333 (#376).
+    Warns, once, where compiled Cypher runs on a SQLite that isn't `complete` for it: one older than 3.53, or one built
+    to write a float as text to 15 significant digits, as before 3.53, which compiled Cypher gives its floats to (#376).
     """
     if _warned:
         return
     _warned.append(True)
-    version = sqlite_module().sqlite_version_info
-    if version < FULL_FLOATS_VERSION:
+    module = sqlite_module()
+    if not complete(module):
         logger.warning(
-            "Cypher compiled for SQLite %s gives floats to 15 significant digits, and refuses a CALL { ... } that "
-            "groups by a variable it imports: SQLite 3.53 or later gives a graph engine's (liberation-data/"
-            "drivine-python#376). Use a Python built with a later SQLite, or pip install pysqlite3-binary.",
-            ".".join(str(it) for it in version),
+            "Cypher compiled for SQLite %s may give floats to 15 significant digits, and refuse a CALL { ... } that "
+            "groups by a variable it imports: SQLite 3.53 or later, writing floats to 17 digits, gives a graph "
+            "engine's (liberation-data/drivine-python#376). Use a Python built with a later SQLite, or "
+            "pip install pysqlite3-binary.",
+            module.sqlite_version,
         )

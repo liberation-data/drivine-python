@@ -70,3 +70,11 @@ def test_a_statement_reads_one_clock() -> None:
     sql = SqliteCypherCompiler("g").compile("RETURN [datetime(), datetime(), localdatetime()]", {}).sql
     clocks = set(re.findall(r"'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{6}'", sql))
     assert len(clocks) == 1, clocks
+
+
+def test_the_last_item_and_a_negative_index_are_read_by_a_path_sqlite_before_3_47_takes() -> None:
+    # SQLite before 3.47 refuses `-> -1`; the path `$[#-1]` it takes (#377).
+    sql = SqliteCypherCompiler("g").compile("WITH [1, 2, 3] AS l RETURN [last(l), l[-2], l[$i]]", {"i": -1}).sql
+    assert "-> '$[#-1]'" in sql
+    assert sql.count("replace(CAST(") == 2
+    assert not re.search(r"-> *(-|CAST)", sql)

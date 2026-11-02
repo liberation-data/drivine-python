@@ -22,7 +22,9 @@ Python's `re` reads another dialect, so each expression is written as Python rea
   digits as there are groups are written as Python writes them.
 
 A property Python keeps no table of, a script (`\\p{IsLatin}`), a block (`\\p{InGreek}`), `\\p{IsIdeographic}` or
-`\\p{IsEmoji}`, and `\\G`, `\\X` and `\\b{g}`, are refused, with a message that names them, rather than read otherwise.
+`\\p{IsEmoji}`, and `\\G`, `\\X` and `\\b{g}`, are refused, with a message that names them, rather than read
+otherwise; so is a `{` that begins no repetition, as Java refuses it. A look-behind of more than one length,
+`(?<=a|bc)`, which Java reads, Python's own compile refuses.
 Python's tables are of the Unicode its version knows, and Java's of its own, so a character new to one may be classed
 otherwise by the other. An empty match next to a character outside the basic plane is found once here, where Java,
 which reads UTF-16, finds it again between the two halves of the character (`drivine_regexp_count('😀a', '')` is 3
@@ -361,6 +363,10 @@ class JavaPattern:
                 self.out.append(f"(?:(?=[{_LINE_TERMINATORS}]|\\Z)(?!(?<=\\r)\\n))")
             else:
                 self.out.append(self._end_but_terminator())
+        elif c == "{" and not re.match(r"\d" if "x" in flags else r"\d+(?:,\d*)?\}", self.java[self.at :]):
+            # Java reads a `{` only as a repetition, `{2}`, `{2,}`, `{2,5}`, spaces after its first digit read past
+            # where `x` is in force: Python reads `{,2}` as `{0,2}`, and any other as itself.
+            self._refuse("a '{' begins no repetition Java reads")
         else:
             self.out.append(c)
 
@@ -509,8 +515,11 @@ class JavaPattern:
                 digits = java[self.at + 1 : end] if end > 0 else ""
                 self.at = end + 1
             else:
+                # Two digits, as Java reads `\\xhh`: `\\x4` is refused, not read as `\\x04`.
                 digits = java[self.at : self.at + 2]
                 self.at += 2
+                if len(digits) < 2:
+                    self._refuse("\\x names no character")
             if not re.fullmatch(r"[0-9a-fA-F]+", digits) or int(digits, 16) > MAX_CODE_POINT:
                 self._refuse("\\x names no character")
             return int(digits, 16)

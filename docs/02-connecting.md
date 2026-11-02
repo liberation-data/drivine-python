@@ -150,7 +150,11 @@ through Python's own `sqlite3` module, so there is nothing to install; where Pyt
 `pysqlite3-binary` and Drivine uses it. Models, the query DSL and the object manager are the same as on the other
 stores; the persistence manager runs plain SQL, with cursors and transactions, and Cypher you write is compiled to
 SQLite's SQL, as on Postgres and Oracle (`pip install "drivine[sqlite]"` adds the runtime its compiler takes): see
-[Cypher on Postgres, Oracle and SQLite](04-statements.md#cypher-on-postgres-oracle-and-sqlite).
+[Cypher on Postgres, Oracle and SQLite](04-statements.md#cypher-on-postgres-oracle-and-sqlite). Compiled Cypher wants
+SQLite 3.53 or later, writing a float as text to 17 significant digits as 3.53 does by default: on an older one, or one
+built to write 15, a float may lose its last digits and a `CALL { … }` that groups by a variable it imports is refused
+before 3.53, and Drivine logs a warning once. Where Python's SQLite isn't such a one and `pysqlite3`'s is, Drivine uses
+`pysqlite3` for the store, plain SQL and the object manager too.
 
 ```
 DATABASE_TYPE=SQLITE
@@ -181,7 +185,9 @@ The stamp is a column. Moments compare and order to the nanosecond, whatever the
 - A range index or a uniqueness constraint is a partial index over the property as a statement reads it, for the
   label's nodes. A vector or a full-text index is recorded and nothing is made for it: `load_nearest` and
   `load_matching` measure every node of the label.
-- `matches` takes a Python regular expression, matched against the whole value.
+- `matches` takes a regular expression in Java's dialect, as on drivine4j, matched against the whole value: a
+  `REGEXP` reads it as Java does, and refuses what Python can't read so, such as a script (`\p{IsLatin}`) or a
+  look-behind of more than one length.
 
 **What a transaction gives.** Each connection writes ahead to a log, enforces foreign keys and waits for a locked file
 for up to its busy timeout, 30 seconds by default.

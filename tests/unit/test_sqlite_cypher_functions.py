@@ -286,6 +286,16 @@ class TestRegularExpressions:
             refused = db.fails(sql)
             assert isinstance(refused, DrivineError) and "is not read on SQLite here" in str(refused)
 
+    def test_refuse_a_brace_or_a_hex_escape_java_refuses_rather_than_read_it_as_python_does(self, db: Database):
+        # Python reads `a{,2}` as `a{0,2}`, `x{` and `a{1,2` as themselves, and `\x4` as `\x04`.
+        for sql in ("'aa' REGEXP 'a{,2}'", "'x{' REGEXP 'x{'", "'a{1,2' REGEXP 'a{1,2'", "char(4) REGEXP '\\x4'"):
+            refused = db.fails(f"SELECT {sql}")
+            assert isinstance(refused, DrivineError) and "is not read on SQLite here" in str(refused)
+        assert db.row(
+            "SELECT 'aa' REGEXP '^(?:a{2})\\z', 'aaa' REGEXP '^(?:a{2,})\\z', 'x}' REGEXP 'x}', '{' REGEXP '[{]', "
+            "'aaa' REGEXP '^(?:(?x)a{1, 3})\\z', 'A' REGEXP '\\x41', '&' REGEXP '[a-z&&b]', 'b' REGEXP '[a-z&&b]'"
+        ) == (1, 1, 1, 1, 1, 1, 0, 1)
+
     def test_read_possessive_and_atomic_groups_names_back_references_and_quoted_text(self, db: Database):
         assert db.row(
             "SELECT 'aaa' REGEXP '^a*+a', 'aab' REGEXP '^(?:(?>a+)b)\\z', 'a1a' REGEXP '^(?:(?<x>a)1\\k<x>)\\z', "

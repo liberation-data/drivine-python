@@ -97,7 +97,8 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     """
     A test marked `rolls_back` needs multi-statement transactions, which FalkorDB doesn't have. One marked
     `graph_engine_only` runs what a SQL store doesn't take, which the marker says. One marked `fails_on_sql_stores`
-    fails on them for the issue it names, until that is fixed.
+    fails on them for the issue it names, until that is fixed. One marked `needs_full_floats` or `needs_sqlite_3_53`
+    fails on SQLite where the tests run on one that rounds floats to 15 digits or is older than 3.53 (#376).
     """
     for item in items:
         callspec = getattr(item, "callspec", None)

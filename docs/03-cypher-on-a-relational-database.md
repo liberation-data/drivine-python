@@ -1,9 +1,9 @@
 ## Cypher on a relational database
 
 Write a statement in Cypher once and run it on any store Drivine supports. Neo4j, Memgraph and FalkorDB run it as
-written. On **Postgres** and **Oracle**, the two SQL stores drivine-python supports, Drivine compiles it to SQL over
-the graph's node and edge tables, and the rows come back as a graph engine would give them. The tables are drivine4j's,
-so a graph written from Python is read alike from the JVM and Node.
+written. On **Postgres**, **Oracle** and **SQLite**, the SQL stores drivine-python supports, Drivine compiles it to
+SQL over the graph's node and edge tables, and the rows come back as a graph engine would give them. The tables are
+drivine4j's, so a graph written from Python is read alike from the JVM and Node.
 
 Postgres is the quickest to try:
 
@@ -79,7 +79,7 @@ FalkorDB.
 
 **What compiles.** What each statement gives, on each store, is the
 [Cypher spec](https://github.com/liberation-data/drivine-cypher-spec), shared by the three Drivine libraries;
-drivine-python passes it at v0.10.0 (pinned in [`tests/cypher/VERSION`](../tests/cypher/VERSION)). Reads, writes,
+drivine-python passes it at v0.22.0 (pinned in [`tests/cypher/VERSION`](../tests/cypher/VERSION)). Reads, writes,
 `UNION`, `CALL { … }`, `EXISTS { … }`, variable-length relationships, `shortestPath` and quantified path patterns all
 compile. Cypher the compiler doesn't take yet is refused by name, with a `DrivineError`, before anything is sent to the
 database.

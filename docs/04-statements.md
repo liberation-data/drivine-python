@@ -141,7 +141,9 @@ people = await pm.query(spec.bind({"city": "Sydney"}))
   ([#295](https://github.com/liberation-data/drivine-python/issues/295)), wherever the `coalesce()` is
   (`coalesce($p.q, n.bio)`, `size(trim(coalesce(n.bio, '')))`, `SET n.a = coalesce(n.bio, '')`): a text of at most
   4,000 bytes is read as a `VARCHAR2`, at no cost drivine4j measured (20,000 rows take 72 ms either way), and a longer
-  one through its text. Any other value is read as before, and so is a value of a map (`coalesce(m.a, 'z')`).
+  one through its text. Any other value is read as before, and so is a value of a map (`coalesce(m.a, 'z')`). In a
+  step of `reduce()`, where a node arrives as JSON, the property is still taken out as JSON and can close the session
+  ([#331](https://github.com/liberation-data/drivine-python/issues/331)).
 - On Oracle two texts are compared (`=`, `<>`, `<`, `>=`, `IN` …) as `VARCHAR2`s, and as CLOBs with
   `DBMS_LOB.COMPARE` where either is past 4,000 bytes
   ([#291](https://github.com/liberation-data/drivine-python/issues/291)).

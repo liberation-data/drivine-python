@@ -19,22 +19,30 @@ import yaml
 SPEC = Path(__file__).parent
 
 
-def _sqlite_incomplete() -> set[str]:
-    """SQLite, where the SQLite Drivine uses isn't complete for compiled Cypher (see `complete`): see `HELD`."""
-    from drivine.connection.sqlite.sqlite_session import complete, sqlite_module
+def _sqlite_rounding_floats() -> set[str]:
+    """SQLite, where the SQLite Drivine uses writes a float to 15 significant digits, as before 3.53: see `HELD`."""
+    from drivine.connection.sqlite.sqlite_session import full_floats, sqlite_module
 
-    return set() if complete(sqlite_module()) else {"sqlite"}
+    return set() if full_floats(sqlite_module()) else {"sqlite"}
+
+
+def _sqlite_before_3_53() -> set[str]:
+    """SQLite, where the SQLite Drivine uses is older than 3.53: see `HELD`."""
+    from drivine.connection.sqlite.sqlite_session import FULL_FLOATS_VERSION, sqlite_module
+
+    return {"sqlite"} if sqlite_module().sqlite_version_info < FULL_FLOATS_VERSION else set()
 
 
 GROUPS = {
     "graph": {"neo4j", "memgraph", "falkordb", "neptune"},
     "sql": {"postgres", "oracle", "sqlite"},
-    "sqlite-incomplete": _sqlite_incomplete(),
+    "sqlite-rounding-floats": _sqlite_rounding_floats(),
+    "sqlite-before-3.53": _sqlite_before_3_53(),
 }
 """
 The groups a step may name for its stores: the graph engines, and the stores Cypher is compiled to SQL for. A hold may
-name SQLite that isn't complete for compiled Cypher too, which is SQLite where the tests run on one: older than 3.53,
-or built to write floats to 15 digits (#376).
+name SQLite that writes floats to 15 digits, or SQLite older than 3.53, which is SQLite where the tests run on one
+(#376).
 """
 
 
@@ -212,13 +220,13 @@ HELD: dict[str, dict[str, list[Hold]]] = {
         # drivine4j holds the case on SQLite too, for drivine4j#295.
         "NaN and the infinities as parameters": [Hold(164, ("sql",))],
         "NaN worked out": [Hold(164, ("oracle",), (2, 3))],
-        # SQLite before 3.53, or one built to, writes a float to 15 significant digits; and before 3.53 refuses a
-        # subquery in json_each that groups by a column of its row (#376).
-        "Round to a fractional or negative precision": [Hold(376, ("sqlite-incomplete",), (15, 17))],
-        "CALL imports only what it names": [Hold(376, ("sqlite-incomplete",), (12,))],
-        "Float arithmetic": [Hold(376, ("sqlite-incomplete",), (1, 2, 4, 5, 6))],
-        "Aggregates of floats": [Hold(376, ("sqlite-incomplete",), (12,))],
-        "Functions of numbers": [Hold(376, ("sqlite-incomplete",), (2, 8, 9, 11))],
+        # A SQLite that writes a float to 15 significant digits, as before 3.53 or built to; and before 3.53 one that
+        # refuses a subquery in json_each that groups by a column of its row (#376).
+        "Round to a fractional or negative precision": [Hold(376, ("sqlite-rounding-floats",), (15, 17))],
+        "CALL imports only what it names": [Hold(376, ("sqlite-before-3.53",), (12,))],
+        "Float arithmetic": [Hold(376, ("sqlite-rounding-floats",), (1, 2, 4, 5, 6))],
+        "Aggregates of floats": [Hold(376, ("sqlite-rounding-floats",), (12,))],
+        "Functions of numbers": [Hold(376, ("sqlite-rounding-floats",), (2, 8, 9, 11))],
     },
     "writes.yaml": {
         # v0.21.0, liberation-data/drivine-cypher-spec#31: as above, written.

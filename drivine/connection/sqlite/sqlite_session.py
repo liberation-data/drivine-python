@@ -89,11 +89,11 @@ def complete(module: Any) -> bool:
     """
     name: str = module.__name__
     if name not in _COMPLETE:
-        _COMPLETE[name] = module.sqlite_version_info >= FULL_FLOATS_VERSION and _full_floats(module)
+        _COMPLETE[name] = module.sqlite_version_info >= FULL_FLOATS_VERSION and full_floats(module)
     return _COMPLETE[name]
 
 
-def _full_floats(module: Any) -> bool:
+def full_floats(module: Any) -> bool:
     """Whether the module's SQLite writes a float as text to 17 significant digits."""
     connection = module.connect(":memory:")
     try:

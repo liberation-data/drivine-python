@@ -2980,7 +2980,7 @@ def test_a_quotient_of_floats_is_written_without_the_zeros_its_scale_leaves(cyph
     ) == [[2.0, 3.5, 2.5, "2.0", "2.5", "3.5"]]
 
 
-@pytest.mark.needs_full_floats
+@pytest.mark.needs_sqlite_3_53
 def test_to_string_of_a_double_past_oracles_number_range_writes_its_shortest_digits(
     cypher_pm: PersistenceManager,
 ):
@@ -5292,7 +5292,7 @@ def test_random_uuid_bound_by_a_with_is_one_value_for_each_row_the_same_however_
         assert [lower, plus] == [a.lower(), a]
 
 
-@pytest.mark.needs_full_floats
+@pytest.mark.needs_sqlite_3_53
 def test_a_call_sees_only_the_variables_it_imports_and_a_name_it_does_not_import_is_a_new_variable_in_it(
     cypher_pm: PersistenceManager,
 ):

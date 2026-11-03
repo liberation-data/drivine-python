@@ -26,7 +26,9 @@ class CaseInsensitive:
 
         await pm.execute(
             QuerySpecification(
-                f"MATCH (a:Account {{id: $id}}) SET a.email = $email SET {lower_copies.set_clause('a', 'email')}"
+                cypher_statement(
+                    f"MATCH (a:Account {{id: $id}}) SET a.email = $email SET {lower_copies.set_clause('a', 'email')}"
+                )
             ).bind({"id": id, "email": email})
         )
         # or, after the writes:

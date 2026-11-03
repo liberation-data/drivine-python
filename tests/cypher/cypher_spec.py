@@ -220,17 +220,17 @@ HELD: dict[str, dict[str, list[Hold]]] = {
         # drivine4j holds the case on SQLite too, for drivine4j#295.
         "NaN and the infinities as parameters": [Hold(164, ("sql",))],
         # v0.25.0, liberation-data/drivine-cypher-spec#52: Postgres works a float divided or taken % by zero out as
-        # numeric, and fails (drivine4j#408); SQLite gives null, where drivine4j#539, the fix of drivine4j#295, gives
-        # NaN or an infinity. toFloat() of Java's names gives null on Postgres and SQLite (drivine4j#545), and on
-        # Oracle NaN compares equal to NaN (drivine4j#409).
+        # numeric, and fails, and SQLite gives null (drivine4j#408, whose fix, drivine4j#563, covers both).
+        # toFloat() of Java's names gives null on Postgres and SQLite (drivine4j#545), and on Oracle NaN compares equal
+        # to NaN (drivine4j#409).
         "NaN worked out": [
             Hold(164, ("oracle",), (2, 3)),
             Hold(327, ("oracle",), (18,)),
             Hold(351, ("postgres",), (*_steps(1, 6), 13)),
-            Hold(164, ("sqlite",), (1, 2, 4, 5, 6, 13)),
+            Hold(351, ("sqlite",), (1, 2, 4, 5, 6, 13)),
             Hold(382, ("postgres", "sqlite"), (16, 18, 19)),
         ],
-        "Floats written as text": [Hold(351, ("postgres",), (5,)), Hold(164, ("sqlite",), (5,))],
+        "Floats written as text": [Hold(351, ("postgres", "sqlite"), (5,))],
         # v0.25.0, liberation-data/drivine-cypher-spec#49: a float the statement makes is taken as a text function's
         # start or length, not refused (drivine4j#285).
         "Start and length of a text function": [Hold(353, ("sql",), _steps(6, 13))],
@@ -264,7 +264,7 @@ HELD: dict[str, dict[str, list[Hold]]] = {
         ],
         # v0.25.0, liberation-data/drivine-cypher-spec#53: a MERGE of a null property makes a new node each run, where
         # Neo4j fails (drivine4j#543); its NaN part waits for NaN to be carried (#164). Steps 8 and 13 count what the
-        # MERGEs made.
+        # MERGEs made, so on Oracle and SQLite step 13 waits for #164 too.
         "MERGE of a null or NaN property": [
             Hold(380, ("sql",), (1, 2, 4, 5, 6, 8, 13)),
             Hold(164, ("oracle",), (9, 10, 12, *_steps(14, 17))),

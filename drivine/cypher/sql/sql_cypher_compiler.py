@@ -367,8 +367,10 @@ class _Kind(Enum):
 class _Select:
     """The rows a part of a statement reads: its sources and joins, its conditions, and the variables it binds."""
 
-    def __init__(self, outer: Scope) -> None:
+    def __init__(self, outer: Scope, joined: Callable[[str], str]) -> None:
         self._outer = outer
+        self._joined = joined
+        """How a source after the first is joined to those before it: see `SqlCypherCompiler.joined`."""
         self.sources: list[str] = []
         self.where: list[str] = []
         self.bound: dict[str, Value] = {}
@@ -387,7 +389,7 @@ class _Select:
         self.bound[variable] = value
 
     def source(self, text: str) -> None:
-        self.sources.append(f"FROM {text}" if not self.sources else f"CROSS JOIN {text}")
+        self.sources.append(f"FROM {text}" if not self.sources else self._joined(text))
 
     def join(self, text: str) -> None:
         if not self.sources:
@@ -627,6 +629,18 @@ class SqlCypherCompiler(ABC):
         the rows it returns) are told.
         """
         return query
+
+    def joined(self, source: str) -> str:
+        """
+        The join of a source to the sources before it, every pair of their rows, in an order the store's planner may
+        choose. A function's rows that read a column of an earlier source (`json_each`, `jsonb_array_elements`) are
+        joined so too: the planner reads that source first.
+        """
+        return f"CROSS JOIN {source}"
+
+    def _select(self, outer: Scope) -> _Select:
+        """The rows a part of a statement reads, which sees the variables `outer` binds: see `_Select`."""
+        return _Select(outer, self.joined)
 
     def lateral(self, query: str, name: str, optional: bool, columns: Sequence[tuple[str, bool]]) -> str:
         """
@@ -1606,7 +1620,7 @@ class SqlCypherCompiler(ABC):
         return name
 
     def _query(self, query: Query) -> str:
-        select = _Select({})
+        select = self._select({})
         for clause in query.clauses:
             if isinstance(clause, Return):
                 return self._project(select, clause.projection, final=True).sql
@@ -1707,7 +1721,7 @@ class SqlCypherCompiler(ABC):
         """A `WITH` `_having` has read: see `_with`."""
         projected = self._project(select, with_.projection, final=False)
         name = self._alias("w")
-        next_ = _Select(outer or {})
+        next_ = self._select(outer or {})
         next_.walks = select.walks
         # A value made anew for each row is one value however often the clauses after read it: see `once`. Kept apart
         # from the query that reads it, where that query must not have it merged in: see `_cases_first`.
@@ -1814,7 +1828,7 @@ class SqlCypherCompiler(ABC):
         and all of them `where`: what it finds read by a lateral query, joined to keep the row when it finds nothing.
         With `seed`, the variable of a UUID made first for each row, each randomUUID() of `where` is read beside it.
         """
-        inner = _Select(row.scope)
+        inner = self._select(row.scope)
         self._patterns(inner, patterns, met_by_paths)
         if where is not None:
             if seed is None:
@@ -1858,7 +1872,7 @@ class SqlCypherCompiler(ABC):
                 distinct = not query.unions[0].all
 
                 def part(clauses: Sequence[Clause]) -> str:
-                    select = _Select(scope)
+                    select = self._select(scope)
                     for clause in clauses[:-1]:
                         select = self._read(select, clause, scope)
                     sql = self._project(select, _returned(clauses).projection, final=True).sql
@@ -1869,7 +1883,7 @@ class SqlCypherCompiler(ABC):
                     distinct, lambda: [part(it) for it in [query.clauses, *(u.clauses for u in query.unions)]]
                 )
                 return ("\nUNION\n" if distinct else "\nUNION ALL\n").join(parts)
-            select = _Select(scope)
+            select = self._select(scope)
             for clause in query.clauses:
                 if isinstance(clause, Return):
                     return self._project(select, clause.projection, final=False).sql
@@ -1913,7 +1927,7 @@ class SqlCypherCompiler(ABC):
         imports is gone after one. A leading `WITH *` passes on what it imports (`_starred_imports`).
         """
         imported = self._called_scope(call, clauses, select.scope)
-        inner = _Select(imported)
+        inner = self._select(imported)
         apart = self._imports_apart(imported, clauses)
         if apart is not None:
             source, values = apart
@@ -2269,7 +2283,7 @@ class SqlCypherCompiler(ABC):
         relationship = pattern.relationships[0] if len(pattern.relationships) == 1 else None
         if relationship is None or relationship.range is None or relationship.group is not None:
             unsupported("A shortest path of anything but one variable-length relationship")
-        inner = _Select(select.scope)
+        inner = self._select(select.scope)
         hops: list[_Hop] = []
         # Its ends named, to find the shortest between each two of them where they were not bound before it.
         first, last = pattern.nodes[0], pattern.nodes[-1]
@@ -2602,7 +2616,7 @@ class SqlCypherCompiler(ABC):
     def _procedure(self, query: Query) -> list[ProcedureStep]:
         """The steps of the procedure the query is: its reads, a loop over its rows for each write, and what it
         returns."""
-        select = _Select({})
+        select = self._select({})
         for clause in _creates(query.clauses):
             if isinstance(clause, Return):
                 self._step(steps.Return(self._project(select, clause.projection, final=True).sql))
@@ -2711,7 +2725,7 @@ class SqlCypherCompiler(ABC):
 
     def _rows(self) -> _Select:
         """The rows in ROWS, as a query reads them."""
-        select = _Select({})
+        select = self._select({})
         r = self._alias("r")
         select.source(self.elements(ROWS, r))
         select.order.append((self.item_no(r), False))
@@ -2724,7 +2738,7 @@ class SqlCypherCompiler(ABC):
         The row in ROW alone, as a statement of a write reads it, with the variables `needed` bound: a row may hold
         many, and each node or relationship bound is a join.
         """
-        select = _Select({})
+        select = self._select({})
         self._bind_row(select, ROW, needed, written)
         return select
 
@@ -4644,7 +4658,7 @@ class SqlCypherCompiler(ABC):
         )
 
     def _pattern_comprehension(self, expression: PatternComprehension, scope: Scope) -> Value:
-        inner = _Select(scope)
+        inner = self._select(scope)
         self._patterns(inner, [expression.pattern])
         if expression.where is not None:
             inner.where.append(self._condition(expression.where, inner.scope))
@@ -4818,7 +4832,7 @@ class SqlCypherCompiler(ABC):
         )
 
     def _exists(self, patterns: Sequence[Pattern], where: Expression | None, scope: Scope) -> Bool:
-        inner = _Select(scope)
+        inner = self._select(scope)
         self._patterns(inner, patterns)
         if where is not None:
             inner.where.append(self._condition(where, inner.scope))

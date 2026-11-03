@@ -460,13 +460,21 @@ class SqliteCypherCompiler(SqlCypherCompiler):
     def row_ord(self, alias: str) -> str:
         return f"({alias}.key + 1)"
 
+    def joined(self, source: str) -> str:
+        """
+        `JOIN … ON TRUE`, which SQLite's planner may reorder: SQLite reads its sources in the order written across a
+        `CROSS JOIN`, so a step `(n)-[r]->(m)` would read every pair of nodes before a relationship (#391). A
+        `json_each` that reads an earlier source is still read after it.
+        """
+        return f"JOIN {source} ON TRUE"
+
     def lateral(self, query: str, name: str, optional: bool, columns: Sequence[tuple[str, bool]]) -> str:
         """
         A JSON list of maps, a map for each row of the query, gathered in a subquery that may read the row it is in,
         and joined as `json_each` gives its items: SQLite joins no lateral query.
         """
         rows = self._gathered(query, name, columns)
-        return f"LEFT JOIN {rows} ON TRUE" if optional else f"CROSS JOIN {rows}"
+        return f"LEFT JOIN {rows} ON TRUE" if optional else self.joined(rows)
 
     def _gathered(self, query: str, name: str, columns: Sequence[tuple[str, bool]]) -> str:
         """The rows of the query, of the columns, as `json_each` gives the JSON list of maps they are gathered in,

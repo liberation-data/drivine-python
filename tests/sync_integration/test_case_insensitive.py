@@ -11,6 +11,7 @@ from typing import Annotated, Any
 import pytest
 from pydantic import create_model
 
+from drivine.query.statement import cypher_statement
 from drivine.sync import (
     CaseInsensitive,
     DatabaseType,
@@ -28,6 +29,7 @@ from drivine.sync import (
     StatelessGraphObjectManager,
     count,
     key,
+    lower_copies,
     range_index,
     refs,
     uniqueness_constraint,
@@ -115,7 +117,7 @@ class TestTheCopy:
     def test_is_no_change_to_the_stamp(self, gom, pm, label):
         account = fragment(label)
         first = gom.save(account(uuid="a1", email="Ada@X.com"))
-        # Out of step, as a write that bypassed Drivine leaves it: a save of the same values only puts it back.
+        # Out of step, as Cypher or SQL of your own leaves it: a save of the same values only puts it back.
         set_copy(pm, label, "a1", "stale")
         again = gom.save(account(uuid="a1", email="Ada@X.com"))
         assert (stored(pm, label))["a1"][COPY] == "ada@x.com"
@@ -146,7 +148,7 @@ class TestTheCopy:
     def test_a_patch_writes_it_only_on_a_node_it_changed(self, gom, pm, label):
         account = fragment(label)
         saved = gom.save(account(uuid="a1", email="Ann@X.com"))
-        # Out of step, as a write that bypassed Drivine leaves it: a patch that changes nothing leaves it so.
+        # Out of step, as Cypher or SQL of your own leaves it: a patch that changes nothing leaves it so.
         set_copy(pm, label, "a1", "stale")
         assert not (gom.patch(account, "a1", set={"email": "Ann@X.com"})).changed
         assert (stored(pm, label))["a1"][COPY] == "stale"
@@ -207,6 +209,48 @@ class TestLookups:
         set_copy(pm, label, "a1", "stale")
         assert (gom.indexes.recreate(spec)).status == "RECREATED"
         assert (stored(pm, label))["a1"][COPY] == "ada@x.com"
+
+    def test_cypher_of_your_own_keeps_no_copy_unless_it_sets_one_or_a_recreate_follows(self, gom, pm, label):
+        account = fragment(label)
+        spec = range_index(label, "email", ignore_case=True)
+        gom.save(account(uuid="c1", email="Ann@X.com"))
+        gom.indexes.ensure(spec)
+        q = refs(account)
+        set_copy_ = lower_copies.set_clause("n", "email")
+
+        def cypher(text: str) -> None:
+            pm.execute(QuerySpecification[Any](cypher_statement(text)))
+
+        def found(email: str) -> set[str]:
+            return {it.uuid for it in gom.load_all(account, q.email.eq_ignore_case(email))}
+
+        # Run as written, or compiled to SQL, a write adds nothing: the copy is stale, or missing.
+        cypher(f"MATCH (n:{label} {{uuid: 'c1'}}) SET n.email = 'Anne@X.com'")
+        cypher(f"CREATE (:{label} {{uuid: 'c2', email: 'Bob@X.com'}})")
+        assert found("ANNE@x.com") == set()
+        assert found("ann@x.com") == {"c1"}
+        assert found("bob@x.com") == set()
+
+        # The documented way: the copy set in the same statement, in a SET of its own.
+        cypher(f"MATCH (n:{label} {{uuid: 'c1'}}) SET n.email = 'Cat@X.com' SET {set_copy_}")
+        cypher(f"CREATE (n:{label} {{uuid: 'c3', email: 'Dan@X.com'}}) SET {set_copy_}")
+        assert found("CAT@x.com") == {"c1"}
+        assert found("dan@X.COM") == {"c3"}
+
+        # A REMOVE of the property leaves the copy, so the node is found by its old value; the same SET after it
+        # removes the copy.
+        cypher(f"MATCH (n:{label} {{uuid: 'c1'}}) REMOVE n.email")
+        assert (stored(pm, label))["c1"][COPY] == "cat@x.com"
+        assert found("cat@x.com") == {"c1"}
+        cypher(f"MATCH (n:{label} {{uuid: 'c3'}}) REMOVE n.email SET {set_copy_}")
+        assert COPY not in (stored(pm, label))["c3"]
+        assert found("dan@x.com") == set()
+
+        # Or a recreate after the writes, which fills every copy of the label in again.
+        gom.indexes.recreate(spec)
+        assert found("BOB@x.com") == {"c2"}
+        assert COPY not in (stored(pm, label))["c1"]
+        assert found("cat@x.com") == set()
 
     def test_an_item_made_anew_fills_the_copies_in_again_though_they_are_recorded(self, gom, pm, label):
         account = fragment(label)

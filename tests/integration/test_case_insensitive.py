@@ -27,10 +27,12 @@ from drivine import (
     StatelessGraphObjectManager,
     count,
     key,
+    lower_copies,
     range_index,
     refs,
     uniqueness_constraint,
 )
+from drivine.query.statement import cypher_statement
 from tests.integration.stores import create, is_oracle, is_postgres, is_sqlite, nodes
 
 COPY = "__drivine.lower.email"
@@ -114,7 +116,7 @@ class TestTheCopy:
     async def test_is_no_change_to_the_stamp(self, gom, pm, label):
         account = fragment(label)
         first = await gom.save(account(uuid="a1", email="Ada@X.com"))
-        # Out of step, as a write that bypassed Drivine leaves it: a save of the same values only puts it back.
+        # Out of step, as Cypher or SQL of your own leaves it: a save of the same values only puts it back.
         await set_copy(pm, label, "a1", "stale")
         again = await gom.save(account(uuid="a1", email="Ada@X.com"))
         assert (await stored(pm, label))["a1"][COPY] == "ada@x.com"
@@ -145,7 +147,7 @@ class TestTheCopy:
     async def test_a_patch_writes_it_only_on_a_node_it_changed(self, gom, pm, label):
         account = fragment(label)
         saved = await gom.save(account(uuid="a1", email="Ann@X.com"))
-        # Out of step, as a write that bypassed Drivine leaves it: a patch that changes nothing leaves it so.
+        # Out of step, as Cypher or SQL of your own leaves it: a patch that changes nothing leaves it so.
         await set_copy(pm, label, "a1", "stale")
         assert not (await gom.patch(account, "a1", set={"email": "Ann@X.com"})).changed
         assert (await stored(pm, label))["a1"][COPY] == "stale"
@@ -216,6 +218,48 @@ class TestLookups:
         await set_copy(pm, label, "a1", "stale")
         assert (await gom.indexes.recreate(spec)).status == "RECREATED"
         assert (await stored(pm, label))["a1"][COPY] == "ada@x.com"
+
+    async def test_cypher_of_your_own_keeps_no_copy_unless_it_sets_one_or_a_recreate_follows(self, gom, pm, label):
+        account = fragment(label)
+        spec = range_index(label, "email", ignore_case=True)
+        await gom.save(account(uuid="c1", email="Ann@X.com"))
+        await gom.indexes.ensure(spec)
+        q = refs(account)
+        set_copy_ = lower_copies.set_clause("n", "email")
+
+        async def cypher(text: str) -> None:
+            await pm.execute(QuerySpecification[Any](cypher_statement(text)))
+
+        async def found(email: str) -> set[str]:
+            return {it.uuid for it in await gom.load_all(account, q.email.eq_ignore_case(email))}
+
+        # Run as written, or compiled to SQL, a write adds nothing: the copy is stale, or missing.
+        await cypher(f"MATCH (n:{label} {{uuid: 'c1'}}) SET n.email = 'Anne@X.com'")
+        await cypher(f"CREATE (:{label} {{uuid: 'c2', email: 'Bob@X.com'}})")
+        assert await found("ANNE@x.com") == set()
+        assert await found("ann@x.com") == {"c1"}
+        assert await found("bob@x.com") == set()
+
+        # The documented way: the copy set in the same statement, in a SET of its own.
+        await cypher(f"MATCH (n:{label} {{uuid: 'c1'}}) SET n.email = 'Cat@X.com' SET {set_copy_}")
+        await cypher(f"CREATE (n:{label} {{uuid: 'c3', email: 'Dan@X.com'}}) SET {set_copy_}")
+        assert await found("CAT@x.com") == {"c1"}
+        assert await found("dan@X.COM") == {"c3"}
+
+        # A REMOVE of the property leaves the copy, so the node is found by its old value; the same SET after it
+        # removes the copy.
+        await cypher(f"MATCH (n:{label} {{uuid: 'c1'}}) REMOVE n.email")
+        assert (await stored(pm, label))["c1"][COPY] == "cat@x.com"
+        assert await found("cat@x.com") == {"c1"}
+        await cypher(f"MATCH (n:{label} {{uuid: 'c3'}}) REMOVE n.email SET {set_copy_}")
+        assert COPY not in (await stored(pm, label))["c3"]
+        assert await found("dan@x.com") == set()
+
+        # Or a recreate after the writes, which fills every copy of the label in again.
+        await gom.indexes.recreate(spec)
+        assert await found("BOB@x.com") == {"c2"}
+        assert COPY not in (await stored(pm, label))["c1"]
+        assert await found("cat@x.com") == set()
 
     async def test_an_item_made_anew_fills_the_copies_in_again_though_they_are_recorded(self, gom, pm, label):
         account = fragment(label)

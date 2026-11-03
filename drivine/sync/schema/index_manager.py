@@ -93,8 +93,8 @@ class IndexManager:
     def recreate(self, spec: S) -> EnsureResult[S]:
         """
         Drops the index over the label and properties, whatever its shape, and makes it as the spec says. An index that
-        ignores case fills the lowercased copies in again on every node of its label, recorded or not, where a write
-        that bypassed Drivine left one out of step.
+        ignores case fills the lowercased copies in again on every node of its label, recorded or not, where Cypher or
+        SQL of your own, which keeps no copy, left one out of step.
         """
         fill_in_lower_copies(self.copies, spec, True)
         self.drop(spec)

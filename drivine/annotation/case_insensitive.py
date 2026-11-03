@@ -18,6 +18,21 @@ class CaseInsensitive:
     `eq_ignore_case` and `contains_ignore_case` on the field with the copy, which the index serves; until then it
     lowercases the property itself, as it does for any other field.
 
-    A write that doesn't go through Drivine, Cypher or SQL of your own, doesn't keep the copy in step: set it with
-    `lower_copies.set_clause`, or recreate the index.
+    The object manager keeps the copy in step: `save`, `save_all`, `create`, `update`, `patch`, `patch_all` and the save
+    of a view. Cypher you send yourself does not, on any store: Drivine runs it as written, or compiles it to SQL, and
+    adds nothing to it. Nor does SQL of your own. Such a write to the property sets the copy too, in a `SET` of its own
+    after the one that writes the property, or is followed by a `recreate` of the index that ignores case, which fills
+    every copy of the label in again::
+
+        await pm.execute(
+            QuerySpecification(
+                cypher_statement(
+                    f"MATCH (a:Account {{id: $id}}) SET a.email = $email SET {lower_copies.set_clause('a', 'email')}"
+                )
+            ).bind({"id": id, "email": email})
+        )
+        # or, after the writes:
+        await gom.indexes.recreate(range_index("Account", "email", ignore_case=True))
+
+    `lower_copies.set_clause("a", "email")` gives ``a.`__drivine.lower.email` = toLower(a.email)``.
     """

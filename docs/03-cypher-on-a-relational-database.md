@@ -77,6 +77,11 @@ Leaving the assembly closes the pool. A write is one statement, applied whole or
 aren't there, so the program runs on a new database as it is. The same program runs unchanged on Neo4j, Memgraph and
 FalkorDB.
 
+A statement is compiled as written, and nothing is added to it. So a write of a
+[`CaseInsensitive`](06-fragments-and-views.md#lookups-that-ignore-case) property leaves the lowercased copy the object
+manager keeps beside it as it was, on these stores as on the graph engines: set the copy in the same statement, or
+refill it afterwards ([how](06-fragments-and-views.md#cypher-of-your-own)).
+
 **What compiles.** What each statement gives, on each store, is the
 [Cypher spec](https://github.com/liberation-data/drivine-cypher-spec), shared by the three Drivine libraries;
 drivine-python passes it at v0.22.0 (pinned in [`tests/cypher/VERSION`](../tests/cypher/VERSION)). Reads, writes,

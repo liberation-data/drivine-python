@@ -33,8 +33,8 @@ class LowerCopyCatalog:
     connection of its own: the first time a property is asked after, and again once what was read is `max_age` seconds
     old. A property that isn't recorded counts as not filled in, and a query lowercases the property itself, which gives
     the same answer without the index. A record is never taken back: every save keeps the copy in step, and `recreate`,
-    or an `ensure` that makes the item anew, fills it in again where a write that bypassed Drivine, or one made while
-    the field was not `CaseInsensitive`, left it out of step.
+    or an `ensure` that makes the item anew, fills it in again where Cypher or SQL of your own, which keeps no copy,
+    or a save made while the field was not `CaseInsensitive`, left it out of step.
     """
 
     def __init__(

@@ -5,9 +5,11 @@ database's own lowercasing of the property: `toLower` on the graph engines, `LOW
 lookup lowercases what it is given the same way, so the copy and the value compared with it are lowercased alike, and
 drivine4j, TypeScript's Drivine and drivine-python store and match the same thing.
 
-Every Drivine write of the node sets the copy from the property as stored once the write is done, and removes it where
-the property has no value. The copy is no part of whether a save changed the node: a save that leaves the property as it
-was gives the node no new stamp, whether or not the copy was already there. The layout is drivine4j's.
+Every write of the node by the object manager sets the copy from the property as stored once the write is done, and
+removes it where the property has no value. Cypher you send yourself does not, on any store, since Drivine runs it as
+written or compiles it to SQL and adds nothing to it: write the copy in it with `set_clause`, or `recreate` the index
+that ignores case afterwards. The copy is no part of whether a save changed the node: a save that leaves the property as
+it was gives the node no new stamp, whether or not the copy was already there. The layout is drivine4j's.
 """
 
 from __future__ import annotations

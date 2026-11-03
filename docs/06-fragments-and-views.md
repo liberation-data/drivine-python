@@ -136,6 +136,9 @@ await gom.load_all(Account, where=refs(Account).email.eq_ignore_case("Ada@Exampl
   await gom.indexes.recreate(range_index("Account", "email", ignore_case=True))
   ```
 
+  A constraint that ignores case has no `recreate`: `drop` it and `ensure` it again, which fills the copies in again as
+  it makes the constraint anew.
+
 ### Typed references
 
 `refs` is untyped: Python can't derive a reference type for each field from a class, as TypeScript does. A

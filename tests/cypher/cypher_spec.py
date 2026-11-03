@@ -230,6 +230,7 @@ HELD: dict[str, dict[str, list[Hold]]] = {
             Hold(351, ("sqlite",), (1, 2, 4, 5, 6, 13)),
             Hold(382, ("postgres", "sqlite"), (16, 18, 19)),
         ],
+        # v0.25.0, liberation-data/drivine-cypher-spec#52: as above, written by toString().
         "Floats written as text": [Hold(351, ("postgres", "sqlite"), (5,))],
         # v0.25.0, liberation-data/drivine-cypher-spec#49: a float the statement makes is taken as a text function's
         # start or length, not refused (drivine4j#285).

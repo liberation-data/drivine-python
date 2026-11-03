@@ -14,6 +14,8 @@ import pytest
 from drivine.backend.sqlite.sqlite_functions import Failures, register
 from drivine.backend.sqlite.sqlite_graph import SqliteGraph
 from drivine.connection.sqlite.sqlite_session import bindable
+from drivine.cypher.sql.oracle_cypher_compiler import OracleCypherCompiler
+from drivine.cypher.sql.postgres_cypher_compiler import PostgresCypherCompiler
 from drivine.cypher.sql.sqlite_cypher_compiler import SqliteCypherCompiler, _step_sql
 
 
@@ -125,3 +127,16 @@ def test_a_json_each_over_an_earlier_sources_column_is_read_after_it() -> None:
     nodes = next(i for i, it in enumerate(read) if re.fullmatch(r"SCAN n\d+", it))
     items = next(i for i, it in enumerate(read) if it.startswith("SCAN u"))
     assert nodes < items, read
+
+
+def test_a_lateral_query_joins_on_true_on_sqlite_where_postgres_and_oracle_keep_a_cross_join() -> None:
+    # A CALL that imports its row is a lateral query; SQLite joins its json_each as it joins any source.
+    called = SqliteCypherCompiler("g").compile("MATCH (a:P) CALL { WITH a MATCH (a)-->(b) RETURN b } RETURN a, b", {})
+    assert "JOIN json_each((SELECT json_group_array(" in called.sql
+    assert "CROSS JOIN" not in called.sql
+    # Postgres and Oracle reorder a CROSS JOIN as they do any join, and their SQL is as it was.
+    step = "MATCH (n)-[r]->(m) RETURN n, r, m"
+    for compiler in (PostgresCypherCompiler("g"), OracleCypherCompiler("g")):
+        sql = compiler.compile(step, {}).sql
+        assert "FROM g_node n1\n    CROSS JOIN g_node n2\n    CROSS JOIN g_edge e3" in sql
+        assert " ON TRUE" not in sql

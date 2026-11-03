@@ -29,6 +29,8 @@ from drivine import (
     uniqueness_constraint,
     vector_index,
 )
+from drivine.cypher.sql.sqlite_cypher_compiler import SqliteCypherCompiler
+from drivine.query.statement import cypher_statement
 from tests.models import Organization, Person, PersonCareer, WorkHistory
 
 
@@ -191,6 +193,44 @@ async def test_a_nodes_relationships_go_with_it(gom, pm):
     )
     assert await gom.delete(Organization, "o1") == 1
     assert await rows(pm, "SELECT COUNT(*) AS n FROM drivine_edge") == [{"n": 0}]
+
+
+# ----- Compiled Cypher -----
+
+
+@pytest.mark.parametrize(
+    ("cypher", "expected"),
+    [
+        (
+            "MATCH (a:Linked) OPTIONAL MATCH (a)-[:NEXT]->(b) MATCH (c:Linked) RETURN [a.id, b.id, c.id]",
+            [["a", "b", "a"], ["a", "b", "b"], ["a", "b", "c"]]
+            + [["b", None, "a"], ["b", None, "b"], ["b", None, "c"]]
+            + [["c", None, "a"], ["c", None, "b"], ["c", None, "c"]],
+        ),
+        (
+            "MATCH (a:Linked) OPTIONAL MATCH (a)-[:NEXT]->(b) UNWIND b.tags AS t RETURN [a.id, t]",
+            [["a", "x"], ["a", "y"]],
+        ),
+        (
+            "MATCH (a:Linked) CALL { WITH a MATCH (a)-[:NEXT]->(b) RETURN b } RETURN [a.id, b.id]",
+            [["a", "b"]],
+        ),
+    ],
+    ids=["an OPTIONAL MATCH then a MATCH", "an UNWIND of an OPTIONAL MATCH's node", "a CALL that imports its row"],
+)
+async def test_sources_sqlite_may_reorder_still_give_cyphers_rows(pm, cypher: str, expected: list[Any]):
+    # Joined ON TRUE rather than by CROSS JOIN (#391): after a LEFT JOIN, by a json_each over the node it may not find,
+    # and in a lateral query, SQLite's planner must still give each row Cypher does.
+    assert "CROSS JOIN" not in SqliteCypherCompiler("drivine").compile(cypher, {}).sql
+    await pm.execute(
+        QuerySpecification(
+            cypher_statement(
+                "CREATE (:Linked {id: 'a'})-[:NEXT]->(:Linked {id: 'b', tags: ['x', 'y']}), (:Linked {id: 'c'})"
+            )
+        )
+    )
+    found = await pm.query(QuerySpecification[Any](cypher_statement(cypher)))
+    assert sorted(found, key=lambda it: [str(v) for v in it]) == expected
 
 
 # ----- The schema -----

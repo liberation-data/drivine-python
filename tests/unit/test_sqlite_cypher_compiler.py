@@ -6,8 +6,14 @@ them. What the statements give is the Cypher spec's, run on SQLite in the integr
 
 import json
 import re
+import sqlite3
 from typing import Any
 
+import pytest
+
+from drivine.backend.sqlite.sqlite_functions import Failures, register
+from drivine.backend.sqlite.sqlite_graph import SqliteGraph
+from drivine.connection.sqlite.sqlite_session import bindable
 from drivine.cypher.sql.sqlite_cypher_compiler import SqliteCypherCompiler, _step_sql
 
 
@@ -78,3 +84,44 @@ def test_the_last_item_and_a_negative_index_are_read_by_a_path_sqlite_before_3_4
     assert "-> '$[#-1]'" in sql
     assert sql.count("replace(CAST(") == 2
     assert not re.search(r"-> *(-|CAST)", sql)
+
+
+def plan(cypher: str) -> list[str]:
+    """The tables SQLite reads for the statement, in the order its plan reads them: each `SCAN` and `SEARCH`."""
+    connection = sqlite3.connect(":memory:")
+    register(connection, Failures())
+    for statement in SqliteGraph("g").ddl:
+        connection.execute(statement)
+    sql, values = bindable(SqliteCypherCompiler("g").compile(cypher, {}).sql, {})
+    details = [row[3] for row in connection.execute(f"EXPLAIN QUERY PLAN {sql}", values)]
+    connection.close()
+    return [it for it in details if it.startswith(("SCAN ", "SEARCH "))]
+
+
+@pytest.mark.parametrize(
+    "cypher",
+    [
+        "MATCH (n)-[r]->(m) RETURN count(*)",
+        "MATCH (n)-[r]-(m) RETURN count(*)",
+        "MATCH (n)-[*1..2]-(m) RETURN count(*)",
+    ],
+)
+def test_sqlite_may_reorder_a_patterns_sources_so_a_step_reads_no_pair_of_nodes_before_a_relationship(
+    cypher: str,
+) -> None:
+    # Across a CROSS JOIN SQLite reads the tables in the order written: SCAN n1, SCAN n2, then the relationships, every
+    # pair of nodes (#391). Joined with JOIN … ON TRUE, it reads a node table in full once at most before an edge.
+    sql = SqliteCypherCompiler("g").compile(cypher, {}).sql
+    assert "CROSS JOIN" not in sql
+    read = plan(cypher)
+    edge = next(i for i, it in enumerate(read) if re.match(r"(SCAN|SEARCH) e\d+\b", it))
+    scans = [it for it in read[:edge] if re.fullmatch(r"SCAN n\d+", it)]
+    assert len(scans) <= 1, read
+
+
+def test_a_json_each_over_an_earlier_sources_column_is_read_after_it() -> None:
+    # A plain join leaves SQLite free to reorder; a json_each that reads n1's column is still read after n1.
+    read = plan("MATCH (n) UNWIND n.tags AS t RETURN t")
+    nodes = next(i for i, it in enumerate(read) if re.fullmatch(r"SCAN n\d+", it))
+    items = next(i for i, it in enumerate(read) if it.startswith("SCAN u"))
+    assert nodes < items, read

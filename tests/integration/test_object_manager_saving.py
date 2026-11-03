@@ -372,6 +372,7 @@ class TestUpdate:
         with pytest.raises(DrivineError, match="another id"):
             await gom.update(Person, "p1", lambda it: it.model_copy(update={"uuid": "p2"}))
 
+    @pytest.mark.written_in_cypher
     async def test_updates_a_node_whose_packed_text_another_writer_wrote_with_other_spacing_at_the_first_attempt(
         self, pm, gom
     ):
@@ -385,6 +386,7 @@ class TestUpdate:
         updated = await gom.load(Packed, "k1")
         assert updated is not None and (updated.text, updated.prefs) == ("two", {"a": 1})
 
+    @pytest.mark.written_in_cypher
     async def test_updates_a_node_that_holds_a_packed_field_as_a_list_another_writer_wrote_at_the_first_attempt(
         self, pm, gom
     ):
@@ -890,6 +892,7 @@ class TestLongText:
         loaded = await gom.load(Person, "p1")
         assert loaded == saved and loaded is not None and loaded.bio == text
 
+    @pytest.mark.written_in_cypher
     async def test_a_cypher_statement_writes_a_long_parameter(self, pm, gom, text):
         # A Cypher statement's parameter goes as its JSON text, which past 32,767 bytes is bound as a CLOB.
         await gom.save(Person(uuid="p1", name="Ada", bio="short"))

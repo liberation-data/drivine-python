@@ -70,7 +70,7 @@ drivine/
   model/          NodeFragment, RelationshipFragment, GraphView, markers, ModelRegistry, stamps
   dsl/            references, conditions, order expressions, the renderer
   backend/        GraphBackend, CypherBackend and CypherGrammar per engine, sql/, oracle/, postgres/
-  cypher/         Cypher compiled to SQL for Postgres and Oracle: the ANTLR parser, the syntax tree, the compilers
+  cypher/         Cypher compiled to SQL for Postgres, Oracle and SQLite: the ANTLR parser, the syntax tree, the compilers
   mapper/         rows to models, per-engine native values
   cursor/         async cursors
   schema/         SchemaCatalog, SchemaManager, IndexManager, ConstraintManager, per-engine DDL
@@ -307,8 +307,11 @@ The markers are the TypeScript decorators, renamed where Python has its own conv
 - `Relationship(type, direction=..., max_depth=...)`.
 - `GraphPath([hop(...)])`, `Count(type)`, `Aggregate(...)`.
 - `GraphProperty(name)`, `NodeLabels(...)`, `PropertyBag(...)`, `JsonPacked()`.
-- `ReadOnly()`, `Transient()`, `SortedBy(...)`, `EmptyWhenAbsent()`.
-- Schema markers: `RangeIndex`, `Unique`, `VectorIndex`, `FullTextIndex`, on the field or as class arguments.
+- `ReadOnly()`, `Transient()`, `SortedBy(...)`, `EmptyWhenAbsent()`, `CaseInsensitive()`.
+- Schema markers: `RangeIndex`, `Unique`, `VectorIndex`, `FullTextIndex`, on the field or as class arguments;
+  `RangeIndex(ignore_case=True)` and `Unique(ignore_case=True)` are over the lowercased copy a `CaseInsensitive()`
+  field keeps. The object manager keeps the copy; Cypher of your own doesn't, unless it sets the copy with
+  `lower_copies.set_clause`, as in drivine4j.
 
 `@Default` isn't needed: a Pydantic default applies when the property is absent. A stored null loading as the default
 is a validator, which the base class provides as `Annotated[str, NullAsDefault()] = "active"`.

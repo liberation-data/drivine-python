@@ -30,13 +30,16 @@ class SqlViews(ABC):
     correlated subquery over the relationship table, its nodes aggregated into a JSON array. A relationship is followed
     as many times as its max_depth along any one path; past that, a list is empty and a single absent.
 
-    Oracle and Postgres read a view alike; what is each store's own is its dialect: a JSON object and array, a node's
-    document, a label test, the nodes a relationship reaches to a depth, a property read as a number, and the hints
-    Oracle's subqueries carry.
+    Oracle, Postgres and SQLite read a view alike; what is each store's own is its dialect: a JSON object and array, a
+    node's document, a label test, the nodes a relationship reaches to a depth, a property read as a number, how a
+    query reads its first row alone, and the hints Oracle's subqueries carry.
     """
 
     empty_object: str
     """An empty JSON object."""
+
+    first_row = "FETCH FIRST 1 ROW ONLY"
+    """What ends a query that reads its first row alone."""
 
     def __init__(self, graph: SqlGraph, depth: Mapping[str, int] | None = None) -> None:
         self.graph = graph
@@ -168,7 +171,7 @@ class SqlViews(ABC):
         where = " AND ".join([step.x, *required])
         if rel.is_collection:
             return f"(SELECT {self._array_of(item)} {step.from_} AND {where})"
-        return f"(SELECT {item} {step.from_} AND {where} FETCH FIRST 1 ROW ONLY)"
+        return f"(SELECT {item} {step.from_} AND {where} {self.first_row})"
 
     def _deep_fragments(self, rel: RelationshipModel, from_: str, depth: int) -> str:
         """A list of fragments read over 1 to `depth` hops, each node once."""
@@ -179,7 +182,7 @@ class SqlViews(ABC):
         document = self.node_document(x)
         if rel.is_collection:
             return f"({self._select(nodes.hint)}{self._array_of(document)} {nodes.from_} {where})"
-        return f"({self._select(nodes.hint)}{document} {nodes.from_} {where} FETCH FIRST 1 ROW ONLY)"
+        return f"({self._select(nodes.hint)}{document} {nodes.from_} {where} {self.first_row})"
 
     def _path(self, path: PathModel, from_: str) -> str:
         """The nodes at the far end of a path, each once: in the order one of its hops names, where one does."""
@@ -190,7 +193,7 @@ class SqlViews(ABC):
             document = self.node_document(x)
             if path.is_collection:
                 return f"({self._select(nodes.hint)}{self._array_of(document)} {nodes.from_})"
-            return f"({self._select(nodes.hint)}{document} {nodes.from_} FETCH FIRST 1 ROW ONLY)"
+            return f"({self._select(nodes.hint)}{document} {nodes.from_} {self.first_row})"
         o = self.next_alias("o")
         direction = "ASC" if ordered.ascending else "DESC"
         nodes = (
@@ -203,7 +206,7 @@ class SqlViews(ABC):
         )
         if path.is_collection:
             return f"(SELECT {self._array_of(self.node_document(x), order)} {nodes})"
-        return f"(SELECT {self.node_document(x)} {nodes} ORDER BY {order} FETCH FIRST 1 ROW ONLY)"
+        return f"(SELECT {self.node_document(x)} {nodes} ORDER BY {order} {self.first_row})"
 
     def _ordered_path_nodes(self, path: PathModel, from_: str, ordered: Hop) -> str:
         """

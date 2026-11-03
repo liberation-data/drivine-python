@@ -29,6 +29,20 @@ def test_the_clause_that_stamps_a_node_compiles_to_a_statement_of_a_few_kilobyte
 
 
 @COMPILERS
+def test_two_list_literals_of_a_hundred_items_a_null_among_them_compared_item_by_item_are_a_few_hundred_characters_each(
+    compiler: type[SqlCypherCompiler],
+) -> None:
+    # Each pair of literal items tested on both sides for a text past 4,000 bytes made 80,907 characters on Oracle in
+    # drivine4j, about four times the 20,879 before (liberation-data/drivine4j#476).
+    def item(i: int) -> str:
+        return [f"{i}", f"'s{i}'", "null", f"{i}.5", "true", f"[{i}, 'n']", f"{{k: {i}}}"][i % 7]
+
+    items = "[" + ", ".join(item(i) for i in range(100)) + "]"
+    sql = compiler("g").compile(f"RETURN {items} = {items}").sql
+    assert len(sql) < 25_000, len(sql)
+
+
+@COMPILERS
 def test_a_duration_added_to_a_value_read_from_the_store_grows_with_each_addition_not_exponentially(
     compiler: type[SqlCypherCompiler],
 ) -> None:
@@ -309,9 +323,11 @@ def test_a_where_that_searches_a_list_that_holds_no_null_compiles_to_the_search_
 
     sql = compiled("MATCH (c:Claim) WHERE c.a IN $l AND (c.b IN [1, 2] OR c.c > 1) RETURN c.id", {"l": [1, 2]})
     assert not tested(sql), sql
-    # Nor of the list being null or holding a null, beside a value that holds none.
+    # Nor of the list being null or holding a null, beside a value that holds none. On Oracle an item is compared with
+    # 'a' as JSON where it is read as a VARCHAR2 or is no text, nor a list or a map; else it is not equal (#291,
+    # drivine4j#476).
     nullable = compiled("MATCH (c:Claim) WHERE 'a' IN c.tags AND c.a IN $l RETURN c.id", {"l": [1, None]})
-    assert not tested(nullable), nullable
+    assert not tested(nullable.replace(" = JSON('\"a\"') ELSE FALSE END", "")), nullable
     # Nor in a quantified path pattern's WHERE, which keeps a step where it is true.
     stepped = compiled("MATCH (a:Claim) ((x)-[:R]->(y) WHERE y.a IN [1, 2]){1,3} (b) RETURN b.id")
     assert not tested(stepped), stepped
@@ -455,6 +471,26 @@ def test_a_sign_nested_under_an_aggregate_compiles_to_about_the_statement_a_ceil
 
     sign, ceil = nested("sign"), nested("ceil")
     assert sign < ceil * 1.1, f"sign {sign}, ceil {ceil} characters"
+
+
+@COMPILERS
+def test_a_value_tested_with_in_against_a_long_list_literal_of_several_kinds_with_a_null_compiles_to_about_the_list(
+    compiler: type[SqlCypherCompiler],
+) -> None:
+    # #227: each item was compared with the value on its own, the value written out at each, so -1 IN 1,001 such items
+    # compiled to 1.6 MB on Oracle, and ran out of PGA. Its constants are now tested at once, as one list, and its nulls
+    # are one null. drivine4j's of liberation-data/drivine4j#360.
+    def item(i: int) -> str:
+        return [f"{i}", f"'s{i}'", "null", f"{i}.5", "true", f"[{i}, 'n']", f"{{k: {i}}}"][i % 7]
+
+    items = "[" + ", ".join(item(i) for i in range(1001)) + "]"
+    reference = len(compiler("g").compile(f"RETURN {items}").sql)
+    for value in ["-1", "0", "999999", "null", "[5, 'n']", "{k: 6}", "3.0", "true", "$p"]:
+        size = len(compiler("g").compile(f"RETURN {value} IN {items}", {"p": -1}).sql)
+        assert size < reference * 1.2, f"{value} IN the list: {size} characters, the list alone {reference}"
+    for statement in [f"MATCH (n) WHERE n.v IN {items} RETURN n", f"UNWIND [-1, [5, null]] AS x RETURN x IN {items}"]:
+        size = len(compiler("g").compile(statement).sql)
+        assert size < reference * 1.2, f"{statement[:40]}: {size} characters, the list alone {reference}"
 
 
 @COMPILERS
@@ -706,3 +742,73 @@ def test_an_aggregates_argument_compiled_only_to_see_whether_it_binds_declares_e
         sql = OracleCypherCompiler("g", nulls_equal_stored=False).compile(statement).sql
         assert len(re.findall(r"FUNCTION cy_nulls_equal\(", sql)) == 1, f"{statement}: {sql}"
         assert "THEN NULL ELSE (cy_nulls_equal(" in sql, f"{statement}: {sql}"
+
+
+@COMPILERS
+def test_a_truncation_with_fields_of_a_truncation_with_fields_writes_the_text_of_its_fields_once(
+    compiler: type[SqlCypherCompiler],
+) -> None:
+    # #326, drivine4j#469: the text a truncation makes of its fields is read twice to number its year as the store
+    # does. Written out twice, four nested compiled to about 18,000 characters on Oracle and Postgres; bound once, to
+    # about 9,000.
+    def truncated(times: int) -> str:
+        return (
+            "RETURN "
+            + "datetime.truncate('second', " * times
+            + "datetime('2017-10-11T12:31:14+01:00')"
+            + ", {hour: 3})" * times
+            + ".hour"
+        )
+
+    two, four = (len(compiler("g").compile(truncated(it)).sql) for it in (2, 4))
+    assert four < 12_000, four
+    assert four < 3 * two, (two, four)
+
+
+@COMPILERS
+def test_an_aggregate_of_a_case_that_tests_a_field_of_a_moment_added_to_twice_compiles_to_a_few_kilobytes(
+    compiler: type[SqlCypherCompiler],
+) -> None:
+    # #326, drivine4j#469: Oracle's search of an aggregate's CASE for a subquery wrote each long value out wherever it
+    # was read. Here it took a second and a half to compile; in drivine4j, with the reads of a year BC, 165 million
+    # characters, and with two additions past the JVM's longest string.
+    cypher = (
+        "MATCH (c:Claim) RETURN "
+        "count(CASE WHEN (datetime(c.at) + duration('PT1H') + duration('PT1H')).minute > 0 THEN 1 END)"
+    )
+    sql = compiler("g").compile(cypher).sql
+    assert len(sql) < 40_000, len(sql)
+
+
+_MOMENT = "(datetime(n.at) + duration('PT1H') + duration('PT1H')).minute"
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        f"MATCH (n:C) RETURN count(CASE WHEN EXISTS {{ MATCH (n)-->(m) WHERE m.x > 0 }} AND {_MOMENT} > 0 THEN 1 END)",
+        f"MATCH (n:C) RETURN count(CASE WHEN COUNT {{ (n)-->() }} > {_MOMENT} THEN 1 END)",
+        f"MATCH (n:C) RETURN collect(CASE WHEN {_MOMENT} > 0 THEN [(n)-->(m) | m.id] END)",
+        "MATCH (n:C) RETURN collect(CASE WHEN (datetime([(n)-->(m) | m.at][0]) + duration('PT1H') + "
+        "duration('PT1H')).minute > 0 THEN 1 END)",
+        f"MATCH (n:C) RETURN count(CASE WHEN reduce(a = 0, x IN n.l | a + {_MOMENT}) > 0 THEN 1 END)",
+    ],
+)
+def test_on_oracle_an_aggregate_of_a_case_beside_a_moment_added_to_twice_aggregates_no_subquery_and_declares_its_own(
+    statement: str,
+) -> None:
+    # #326, drivine4j#469: the search of the CASE for a subquery writes each long value beside what reads it, under
+    # names of no subquery: a subquery of the CASE's own, in such a value or beside it, is still found, and the
+    # aggregate reads it worked out first. What the search declares is given back: a reduce()'s step searched so
+    # declared a function reading those names.
+    sql = OracleCypherCompiler("g").compile(statement).sql
+    assert len(sql) < 60_000, len(sql)
+    assert "probed." not in sql, sql
+    # The statement's own aggregate, its first after the functions it declares.
+    lines = sql.splitlines()
+    query = lines[next(i for i, it in enumerate(lines) if it.startswith("SELECT")) :]
+    aggregate = next(it for it in query if re.search(r"\b(count|JSON_ARRAYAGG)\(", it))
+    assert "SELECT" not in aggregate.split("SELECT", 1)[-1], aggregate
+    declared = re.findall(r"FUNCTION (cy_\w+)\(", sql)
+    assert declared == list(dict.fromkeys(declared)), declared
+    assert all(len(re.findall(rf"\b{name}\(", sql)) > 1 for name in declared), declared

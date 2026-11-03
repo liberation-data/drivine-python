@@ -56,7 +56,10 @@ from drivine.backend.postgres.postgres_backend import PostgresBackend
 from drivine.backend.postgres.postgres_graph import PostgresGraph
 from drivine.backend.postgres.postgres_save_statement import PostgresSaveStatement
 from drivine.backend.postgres.postgres_write_statement import PostgresWriteStatement
+from drivine.backend.sqlite.sqlite_backend import SqliteBackend
+from drivine.backend.sqlite.sqlite_graph import SqliteGraph
 from drivine.connection.database_type import DatabaseType
+from drivine.dsl.lower_copy_lookups import lowered_where
 from drivine.dsl.query import Query
 from drivine.manager.group_query import GroupQuery
 from drivine.model.graph_view_model import GraphViewModel
@@ -68,7 +71,10 @@ from drivine.schema.schema_grammar import (
     schema_grammar_for,
 )
 from drivine.schema.schema_item import SchemaItem
+from drivine.schema.schema_specs import made_as
 from tests.models import (
+    Account,
+    AccountFriends,
     ActorStats,
     ActorWithDirectors,
     ActorWithLatestMovie,
@@ -96,7 +102,8 @@ GOLDEN = json.loads((Path(__file__).parent.parent / "golden" / "statements.json"
 CYPHER_WHERE = "n.name = $name"
 SQL_WHERE = "JSON_VALUE(n.props, '$.name') = $name"
 POSTGRES_WHERE = "(n.props ->> 'name') = $name"
-"""A filter in the store's own language: Cypher over `n`, or SQL over the node row `n` on Oracle and Postgres."""
+SQLITE_WHERE = "(n.props ->> '$.name') = $name"
+"""A filter in the store's own language: Cypher over `n`, or SQL over the node row `n` on the SQL stores."""
 
 
 def statements(grammar: CypherGrammar) -> dict[str, str]:
@@ -164,24 +171,76 @@ def indexed_reads(backend: OracleBackend) -> dict[str, str]:
         "query.Dog.indexed": backend.load_all_fragments(dog, dogs.where, None, dogs.labels_tested).text,
         "query.Dog.indexed.deleteAll": backend.delete_all(dog, dogs.where, dogs.labels_tested).text,
         "query.Dog.notIndexed": backend.load_all_fragments(dog, names.where, None, names.labels_tested).text,
+        **lowered_indexed_read(backend, registry),
+    }
+
+
+def lowered_indexed_read(backend: OracleBackend, registry: ModelRegistry) -> dict[str, str]:
+    """Oracle's lookup of a lowercased copy through the labelled index over it."""
+    account = registry.fragment(Account)
+    indexed = [SchemaItem("Account", ("__drivine.lower.email",))]
+    where = lowered_where(refs(Account).email.eq_ignore_case("Ada@X.com"), account, {"email"})
+    query = backend.render_query(Query(where=where), account, lambda it: registry.fragment(it).labels, indexed)
+    return {
+        "query.Account.lowered.indexed": backend.load_all_fragments(
+            account, query.where, None, query.labels_tested
+        ).text
     }
 
 
 def postgres_statements() -> dict[str, str]:
     """
     Postgres's statements: the same cases, a filter in SQL, and the searches through an index. A write on Postgres is
-    one call of drivine4j's write function, the same text for every write, so the plan it binds is written too, its
-    fresh stamps written as `<stamp>`: TypeScript makes the same plan for the same object.
+    one call of drivine4j's write function, the same text for every write, so the plan it binds is written too.
     """
     backend = PostgresBackend(PostgresGraph())
     person = ModelRegistry().fragment(Person)
-    cases = written_cases(backend, POSTGRES_WHERE, True)
+    return {
+        **with_plans(written_cases(backend, POSTGRES_WHERE, True)),
+        "Person.nearest.indexed": backend.nearest(
+            person, NearestSearch("Person", "embedding", "EUCLIDEAN", 20, limit=5, table="3", dimensions=3)
+        ).text,
+        "Person.matching.indexed": backend.matching(
+            person,
+            MatchingSearch(
+                "Person", ("name", "bio"), 10, text="graph -relational", table="drivine_t_Personnamebio_4d5e6f"
+            ),
+        ).text,
+        "Person.searchIndexTable": backend.search_index_table("VECTOR", "Person", ["embedding"]).text,
+    }
+
+
+def sqlite_statements() -> dict[str, str]:
+    """
+    SQLite's statements: the same cases, a filter in SQL, and a search by a vector of a size, which measures only the
+    embeddings of that size. SQLite makes no search index, so there is no search through one. A write is a call of
+    `drivine_write`, which carries out the plan Postgres's function does, so its plan is written too.
+    """
+    backend = SqliteBackend(SqliteGraph())
+    person = ModelRegistry().fragment(Person)
+    return {
+        **with_plans(written_cases(backend, SQLITE_WHERE, True)),
+        "Person.nearest.sized": backend.nearest(
+            person, NearestSearch("Person", "embedding", "COSINE", 5, dimensions=3)
+        ).text,
+    }
+
+
+def with_plans(cases: dict[str, GraphStatement]) -> dict[str, str]:
+    """
+    Each case's text, and for a write through drivine4j's write function the plan it binds, its fresh stamps written as
+    `<stamp>`, under `<case>.plan`: TypeScript makes the same plan for the same object.
+    """
     # What the manager binds when it runs a patch, which its plan is made from.
     bound: dict[str, dict[str, Any]] = {
         "Person.patch": {"id": "p1", "set": {"name": "Ada", "bio": None}, "vectors": {}},
         "Person.patch.where": {"id": "p1", "set": {"name": "Ada"}, "vectors": {}, "name": "O'Brien"},
         "Person.patchAll": {
             "rows": [{"id": "p1", "props": {"name": "Ada"}, "vectors": {}}, {"id": 2, "props": {"bio": None}}]
+        },
+        "Account.patch": {"id": "a1", "set": {"email": "Ada@X.com"}, "vectors": {}},
+        "Account.patchAll": {
+            "rows": [{"id": "a1", "props": {"email": "Ada@X.com", "display_name": None}, "vectors": {}}]
         },
     }
     plans: dict[str, str] = {}
@@ -194,20 +253,7 @@ def postgres_statements() -> dict[str, str]:
             plan["patchedIf"] = parameters["_patchedIf"]
         shown = json.dumps(plan, separators=(",", ":"), ensure_ascii=False)
         plans[f"{name}.plan"] = re.sub(r"[0-9a-f]{16}:[0-9a-f]{16}", "<stamp>", shown)
-    return {
-        **{name: it.text for name, it in cases.items()},
-        **plans,
-        "Person.nearest.indexed": backend.nearest(
-            person, NearestSearch("Person", "embedding", "EUCLIDEAN", 20, limit=5, table="3", dimensions=3)
-        ).text,
-        "Person.matching.indexed": backend.matching(
-            person,
-            MatchingSearch(
-                "Person", ("name", "bio"), 10, text="graph -relational", table="drivine_t_Personnamebio_4d5e6f"
-            ),
-        ).text,
-        "Person.searchIndexTable": backend.search_index_table("VECTOR", "Person", ["embedding"]).text,
-    }
+    return {**{name: it.text for name, it in cases.items()}, **plans}
 
 
 def written(backend: GraphBackend, where: str, orphans: bool) -> dict[str, str]:
@@ -322,7 +368,7 @@ def queries(registry: ModelRegistry, backend: GraphBackend) -> dict[str, GraphSt
 
     m, c, a, p = refs(Movie), refs(PersonCareer), refs(Animal), refs(Customer)
     count_where, _ = backend.render_where(refs(Person).name.eq_ignore_case("ada"), registry.fragment(Person), labels)
-    return {
+    cases = {
         "query.Movie.where": load(
             registry.fragment(Movie),
             Query(
@@ -397,6 +443,34 @@ def queries(registry: ModelRegistry, backend: GraphBackend) -> dict[str, GraphSt
         ),
         "query.Person.count": backend.count_fragments(registry.fragment(Person), count_where),
     }
+    # Once every node has the copies of email and display_name: a lookup on either, of the root alone, reads the
+    # copy, the value lowercased by the store; one on name, or of an empty value, lowercases the property.
+    account, friends = refs(Account), refs(AccountFriends)
+    cases["query.Account.lowered"] = load(
+        registry.fragment(Account),
+        Query(
+            where=lowered_where(
+                [
+                    account.email.eq_ignore_case("Ada@X.com"),
+                    any_of(account.display_name.contains_ignore_case("AD"), account.name.eq_ignore_case("Ada")),
+                    not_(account.email.eq_ignore_case("")),
+                ],
+                registry.fragment(Account),
+                {"email", "display_name"},
+            )
+        ),
+    )
+    cases["query.AccountFriends.lowered"] = load(
+        registry.view(AccountFriends),
+        Query(
+            where=lowered_where(
+                [friends.account.email.eq_ignore_case("Ada@X.com"), friends.friends.email.eq_ignore_case("Bo")],
+                registry.view(AccountFriends),
+                {"email"},
+            )
+        ),
+    )
+    return cases
 
 
 STAMP = "aaaaaaaaaaaaaaaa:bbbbbbbbbbbbbbbb"
@@ -495,6 +569,24 @@ def saves(registry: ModelRegistry, backend: GraphBackend, where: str, orphans: b
             MatchedNode(fragment(Person), "p1"), "OWNS", Direction.OUTGOING, fragment(Dog)
         ),
     }
+    cases.update(
+        {
+            "Account.save": save(
+                fragment(Account), Account(uuid="a1", email="Ada@X.com", display_name="Ada L", name="Ada")
+            ),
+            "AccountFriends.save": save(
+                view(AccountFriends),
+                AccountFriends(
+                    account=Account(uuid="a1", email="Ada@X.com"), friends=[Account(uuid="a2", email="Bo@X.com")]
+                ),
+            ),
+            "saveAll.accounts": backend.fragment_batch(
+                [FragmentGroup(fragment(Account), [Account(uuid="a1", email="Ada@X.com")])], SaveOptions()
+            ),
+            "Account.patch": backend.patch_one(fragment(Account)),
+            "Account.patchAll": backend.patch_many(fragment(Account)),
+        }
+    )
     if orphans:
         cases["PersonCareer.delete.orphans"] = backend.delete(view(PersonCareer), None, CascadeType.DELETE_ORPHAN)
         cases["LocationHierarchy.delete.orphans"] = backend.delete(
@@ -535,7 +627,20 @@ def schema(grammar: SchemaGrammar) -> dict[str, str]:
             for it in statements
         )
 
+    ignoring_case: dict[str, str] = {}
+    # Made over the lowercased copies, under their own names; FalkorDB can make no constraint over a copy.
+    ignoring_case["schema.createRange.ignoreCase"] = shown(
+        grammar.create_range(made_as(range_index("Account", "email", ignore_case=True)))
+    )
+    if grammar is not FALKORDB_SCHEMA:
+        ignoring_case["schema.createUnique.ignoreCase"] = shown(
+            grammar.create_unique(made_as(uniqueness_constraint("Account", "email", ignore_case=True)))
+        )
+    ignoring_case["schema.lowerCopies.fill"] = grammar.lower_copies.fill("Account", "email", 10000)
+    ignoring_case["schema.lowerCopies.record"] = grammar.lower_copies.record("Account", "email").statement
+    ignoring_case["schema.lowerCopies.read"] = grammar.lower_copies.read
     return {
+        **ignoring_case,
         "schema.listRanges": grammar.list_ranges.statement,
         "schema.listUniques": grammar.list_uniques.statement,
         "schema.listVectors": grammar.list_vectors.statement,
@@ -577,6 +682,10 @@ def test_writes_what_typescript_writes_for_postgres():
     expect_golden(
         "POSTGRES", {**postgres_statements(), **schema(schema_grammar_for(DatabaseType.POSTGRES, PostgresGraph()))}
     )
+
+
+def test_writes_what_typescript_writes_for_sqlite():
+    expect_golden("SQLITE", {**sqlite_statements(), **schema(schema_grammar_for(DatabaseType.SQLITE, SqliteGraph()))})
 
 
 def expect_golden(engine: str, statements: dict[str, str]) -> None:

@@ -25,7 +25,7 @@ from drivine.drivine_error import DrivineError
 from drivine.manager.null_policy import NullPolicy
 from drivine.manager.removed_targets import RemovedTargets
 from drivine.manager.save_options import SaveOptions
-from drivine.model import stamps
+from drivine.model import lower_copies, stamps
 from drivine.model.fragment_model import FragmentModel
 from drivine.model.graph_view_model import GraphViewModel
 from drivine.model.model_registry import RESERVED_PREFIX, ModelRegistry
@@ -48,6 +48,8 @@ class _NodeWrite:
     """A merge patch: a null removes the property."""
     record: tuple[str, bool] | None = None
     """For an open NodeLabels field: the property recording the labels it wrote, and whether it is replaced."""
+    lower: list[str] = field(default_factory=lambda: [])
+    """The properties whose lowercased copies the write keeps: the `CaseInsensitive` fields' of the node's class."""
 
 
 @dataclass
@@ -75,6 +77,8 @@ class OracleSaveBuilder:
         self._stamped: list[_Stamped] = []
         self._count = 0
         self._options = SaveOptions()
+        self._lowers = False
+        """Whether the block writes lowercased copies, and so declares `lower_node`."""
 
     def build(
         self, target_: TargetModel, obj: Any, options: SaveOptions | None = None, create_only: bool = False
@@ -157,6 +161,7 @@ class OracleSaveBuilder:
                 "    END IF;",
                 f"    restamp(v_root, apply_node(v_root, {p['props']}, {p['add']}, {p['remove']}, {p['record']}, "
                 f"{p['replace_record']}) OR v_made);",
+                *(f"    {it}" for it in self._lowering(write, "v_root")),
                 "END IF;",
             ]
         )
@@ -192,6 +197,7 @@ class OracleSaveBuilder:
                     f"{variable} := write_node({p['match']}, {p['id']}, {p['labels']}, {p['props']}, {p['add']}, "
                     f"{p['remove']}, {p['record']}, {p['replace_record']});"
                 )
+                out.extend(self._lowering(write, variable))
                 related = rel.related
                 rel_props = (
                     self._bind(to_json(props_of(related, item, [related.target_field])))
@@ -296,7 +302,7 @@ class OracleSaveBuilder:
             'RETURNING CLOB) AS "result:json" FROM dual'
         )
         body = "\n".join(f"    {it}" for it in self._body)
-        text = f"""{prelude(self.graph, self._declarations)}
+        text = f"""{prelude(self.graph, self._declarations, self._lowers)}
 BEGIN
 {body}
     IF v_ok THEN
@@ -327,6 +333,7 @@ END;"""
             [] if model is found else [it for it in model.labels if it not in found.labels],
             [],
             props,
+            lower=list(model.lower_copied),
         )
         if labels_clear is not None and model.node_labels:
             labels_field = model.node_labels
@@ -349,6 +356,16 @@ END;"""
             if labels_field.members is None:
                 write.record = (labels_field.record_property, labels_clear)
         return write
+
+    def _lowering(self, write: _NodeWrite, variable: str) -> list[str]:
+        """
+        The call that writes the lowercased copies of the write's `CaseInsensitive` properties on the node `variable`,
+        from what it now holds, once its properties are written and its change told: none for a model with none.
+        """
+        if not write.lower:
+            return []
+        self._lowers = True
+        return [f"lower_node({variable}, {self._bind(to_json(write.lower))});"]
 
     def _node_params(self, write: _NodeWrite) -> dict[str, str]:
         assert write.model.node_id_property is not None
@@ -396,15 +413,16 @@ END;"""
         return f"${name}"
 
 
-def prelude(graph: OracleGraph, declarations: Sequence[str]) -> str:
+def prelude(graph: OracleGraph, declarations: Sequence[str], lowers: bool = False) -> str:
     """
     The declarations every writing block holds: its state, and the procedures its body calls. The offered stamp is
-    bound as `$x_stamp`.
+    bound as `$x_stamp`. With `lowers`, it declares `lower_node` too, for a block that writes lowercased copies.
     """
     nodes = graph.nodes
     edges = graph.edges
     t = stamps.TOKEN
     declared = "\n".join(f"    {it}" for it in declarations)
+    lowering = f"\n\n{_lower_node(nodes)}" if lowers else ""
     return f"""DECLARE
     v_offered VARCHAR2(40) := $x_stamp;
     v_root NUMBER;
@@ -571,6 +589,38 @@ def prelude(graph: OracleGraph, declarations: Sequence[str]) -> str:
                 END IF;
             END LOOP;
         END IF;
+    END;{lowering}"""
+
+
+def _lower_node(nodes: str) -> str:
+    """
+    `lower_node`: writes on the node the lowercased copy of each property `p_keys`, a JSON array, names, from what it
+    holds, and removes the copy of one that holds nothing, which an empty text is on Oracle. Oracle lowercases it, as it
+    lowercases what a lookup compares the copy with: see lower_copies. It is called once a write's change is told, so
+    the copies are no part of it.
+    """
+    return f"""    -- Writes the lowercased copy of each property p_keys names from what the node holds, and removes the copy of one
+    -- that holds nothing. Called once the write's change is told: the copies are no part of it.
+    PROCEDURE lower_node(p NUMBER, p_keys VARCHAR2) IS
+        held CLOB;
+        o JSON_OBJECT_T;
+        lowered JSON_ARRAY_T := JSON_ARRAY_T.parse(p_keys);
+        k VARCHAR2(4000);
+        v VARCHAR2(32767);
+    BEGIN
+        SELECT JSON_SERIALIZE(props RETURNING CLOB) INTO held FROM {nodes} WHERE nid = p;
+        o := JSON_OBJECT_T.parse(held);
+        FOR i IN 0 .. lowered.get_size - 1 LOOP
+            k := lowered.get_string(i);
+            v := NULL;
+            IF o.has(k) AND NOT o.get(k).is_null THEN v := LOWER(o.get_string(k)); END IF;
+            -- Oracle keeps an empty text as null, so an empty property has no copy.
+            IF v IS NULL THEN o.remove('{lower_copies.PREFIX}' || k);
+            ELSE o.put('{lower_copies.PREFIX}' || k, v); END IF;
+        END LOOP;
+        -- An object type's methods are PL/SQL's: called in SQL, they are refused (ORA-40573).
+        held := o.to_clob();
+        UPDATE {nodes} SET props = JSON(held) WHERE nid = p;
     END;"""
 
 

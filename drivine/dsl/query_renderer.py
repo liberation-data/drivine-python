@@ -46,6 +46,9 @@ _BINARY = {
 }
 """The operators written between the property and its value."""
 
+_LOWERED = {"EQ_LOWERED": "=", "CONTAINS_LOWERED": "CONTAINS"}
+"""The comparisons with a lowercased copy, each written between the copy and the value lowercased."""
+
 
 @dataclass(frozen=True)
 class _Aliases:
@@ -290,6 +293,9 @@ class QueryRenderer:
         if operator in ("CONTAINS_IGNORE_CASE", "EQ_IGNORE_CASE"):
             word = "=" if operator == "EQ_IGNORE_CASE" else "CONTAINS"
             return f"toLower({expression}) {word} {self._bind(str(test.value).lower())}"
+        if operator in _LOWERED:
+            # A lowercased copy, compared with the value as the engine lowercases it: see lower_copies.
+            return f"{expression} {_LOWERED[operator]} toLower({self._bind(str(test.value))})"
         if operator == "HAS_ITEM":
             return f"{self._bind(packed(test.value))} IN {expression}"
         if operator == "IS_NULL":

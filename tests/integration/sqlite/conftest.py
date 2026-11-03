@@ -1,0 +1,41 @@
+"""
+A SQLite file of each test's own: SQLite needs no container, so these suites run wherever the tests do. drivine4j's
+SqliteTestDatabase does the same.
+"""
+
+from collections.abc import AsyncIterator
+from pathlib import Path
+
+import pytest
+
+from drivine import (
+    DatabaseRegistry,
+    DatabaseType,
+    PersistenceManager,
+    PersistenceManagerFactory,
+    StatelessGraphObjectManager,
+)
+
+
+@pytest.fixture
+def path(tmp_path: Path) -> str:
+    """The file the test's store is kept in, not yet made."""
+    return str(tmp_path / "graph.db")
+
+
+@pytest.fixture
+async def sqlite_registry(path: str) -> AsyncIterator[DatabaseRegistry]:
+    registry = DatabaseRegistry()
+    registry.builder().database_type(DatabaseType.SQLITE).database_name(path).register("sqlite")
+    yield registry
+    await registry.close()
+
+
+@pytest.fixture
+def pm(sqlite_registry: DatabaseRegistry) -> PersistenceManager:
+    return PersistenceManagerFactory(sqlite_registry).get("sqlite")
+
+
+@pytest.fixture
+def gom(pm: PersistenceManager) -> StatelessGraphObjectManager:
+    return StatelessGraphObjectManager(pm)

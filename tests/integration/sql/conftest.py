@@ -1,12 +1,12 @@
 import pytest
 
 from drivine import PersistenceManager, PersistenceManagerFactory, StatelessGraphObjectManager
-from tests.integration.conftest import ORACLE, POSTGRES
+from tests.integration.conftest import ORACLE, POSTGRES, SQLITE
 
-SQL_STORES = [*(["postgres"] if POSTGRES else []), *(["oracle"] if ORACLE else [])]
+SQL_STORES = [*(["postgres"] if POSTGRES else []), *(["oracle"] if ORACLE else []), *(["sqlite"] if SQLITE else [])]
 """
-The SQL stores an object manager keeps a graph in, as configured: Postgres as the tests' own environment configures it,
-and Oracle with ORACLE_TESTS=true. These suites run on each.
+The SQL stores an object manager keeps a graph in, as configured: Postgres and SQLite as the tests' own environment
+configures them, and Oracle with ORACLE_TESTS=true. These suites run on each.
 """
 
 

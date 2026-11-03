@@ -172,7 +172,8 @@ def test_on_oracle_a_value_in_a_parameter_that_is_no_map_or_past_a_number_is_rea
     given = {"p": {"text": "x", "l": ["x"]}, "d": date(2020, 1, 2), "i": 0}
     read = OracleCypherCompiler("g").compile("RETURN [$p.l.x, $d.year, $p.l[0], $p['l'][-1], $p.l[$i].x]", given).sql
     assert "JSON_QUERY(JSON_QUERY($_cy_p, '$.l' RETURNING JSON), '$.x' RETURNING JSON)" in read, read
-    assert "EXTRACT(YEAR FROM" in read and "JSON($_cy_d)" in read, read
+    # The date's year is read off its text (#326), which is read from the parameter as it is.
+    assert "JSON($_cy_d)" in read, read
     assert "'$.l[" not in read and "'$.l.x'" not in read and "JSON($_cy_p" not in read, read
     # A list parameter is no map either.
     listed = OracleCypherCompiler("g").compile("RETURN $l[0].x", {"l": [{"x": 1}]}).sql

@@ -1,18 +1,21 @@
 """
 Writes a graph into a SQL store's tables directly, so reads are tested before writes are, as TypeScript's SqlSeed: on
-Postgres and on Oracle, each in its own SQL.
+Postgres, Oracle and SQLite, each in its own SQL.
 """
 
 import json
 from typing import Any, Literal
 
 from drivine import DatabaseType, PersistenceManager, QuerySpecification
+from drivine.backend.sqlite.sqlite_graph import JSON_ROWS
 
 
 def raw_property(pm: PersistenceManager, property: str, as_: Literal["TEXT", "NUMBER"] = "TEXT") -> str:
     """A raw `where` over the node row `n`, in the store's SQL: a property as text, or as a number."""
     if pm.type is DatabaseType.ORACLE:
         return f"JSON_VALUE(n.props, '$.{property}'{' RETURNING NUMBER' if as_ == 'NUMBER' else ''})"
+    if pm.type is DatabaseType.SQLITE:
+        return f"(n.props ->> '$.\"{property}\"')"
     return f"CAST(n.props ->> '{property}' AS numeric)" if as_ == "NUMBER" else f"(n.props ->> '{property}')"
 
 
@@ -27,6 +30,8 @@ def raw_props(pm: PersistenceManager, scope: str) -> str:
             "SELECT JSON_TRANSFORM(n.props, KEEP '$') AS \"props\" FROM drivine_node n "
             f"WHERE JSON_EXISTS(n.labels, '$?(@ == \"{scope}\")')"
         )
+    if pm.type is DatabaseType.SQLITE:
+        return f'{JSON_ROWS}\nSELECT n.props AS "props" FROM drivine_node n WHERE instr(n.labels, \'"{scope}"\') > 0'
     return f'SELECT n.props AS "props" FROM drivine_node n WHERE n.labels @> \'["{scope}"]\''
 
 
@@ -41,14 +46,19 @@ class SqlSeed:
         self.scope = scope
         self.key = key
         self.oracle = pm.type is DatabaseType.ORACLE
+        self.sqlite = pm.type is DatabaseType.SQLITE
 
     async def clear(self) -> None:
-        await self.pm.execute(QuerySpecification[Any](f"DELETE FROM drivine_node n WHERE {self._carries('n')}"))
+        # SQLite names a table a delete reads only with AS, which Oracle refuses.
+        table = "drivine_node AS n" if self.sqlite else "drivine_node n"
+        await self.pm.execute(QuerySpecification[Any](f"DELETE FROM {table} WHERE {self._carries('n')}"))
 
     async def node(self, labels: list[str], props: dict[str, Any], stamp: str | None = None) -> None:
         text = (
             "INSERT INTO drivine_node (labels, props, stamp) VALUES (JSON($labels), JSON($props), $stamp)"
             if self.oracle
+            else "INSERT INTO drivine_node (labels, props, stamp) VALUES ($labels, $props, $stamp)"
+            if self.sqlite
             else "INSERT INTO drivine_node (labels, props, stamp) VALUES (CAST($labels AS jsonb), "
             "CAST($props AS jsonb), CAST($stamp AS varchar))"
         )
@@ -62,9 +72,17 @@ class SqlSeed:
         def at(alias: str) -> str:
             if self.oracle:
                 return f"{self._carries(alias)} AND JSON_VALUE({alias}.props, '$.{self.key}') = ${alias}"
+            if self.sqlite:
+                return f"{self._carries(alias)} AND {alias}.props ->> '$.\"{self.key}\"' = CAST(${alias} AS TEXT)"
             return f"{self._carries(alias)} AND {alias}.props ->> '{self.key}' = CAST(${alias} AS text)"
 
-        values = "$type, JSON($props)" if self.oracle else "CAST($type AS text), CAST($props AS jsonb)"
+        values = (
+            "$type, JSON($props)"
+            if self.oracle
+            else "$type, $props"
+            if self.sqlite
+            else "CAST($type AS text), CAST($props AS jsonb)"
+        )
         await self.pm.execute(
             QuerySpecification[Any](
                 f"INSERT INTO drivine_edge (src, dst, type, props) SELECT a.nid, b.nid, {values} "
@@ -76,4 +94,6 @@ class SqlSeed:
         """Whether the node row carries the seed's scope label."""
         if self.oracle:
             return f"JSON_EXISTS({alias}.labels, '$?(@ == \"{self.scope}\")')"
+        if self.sqlite:
+            return f"instr({alias}.labels, '\"{self.scope}\"') > 0"
         return f"{alias}.labels @> '[\"{self.scope}\"]'"

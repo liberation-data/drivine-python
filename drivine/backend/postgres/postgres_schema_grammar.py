@@ -9,7 +9,9 @@ from drivine.backend.postgres.postgres_graph import PostgresGraph, has_labels, t
 from drivine.backend.postgres.postgres_search import embedding, holds, searched_text
 from drivine.backend.sql.sql_catalog import CATALOG_KINDS, CatalogKind, catalog_properties, catalog_record
 from drivine.backend.sql.sql_graph import sql_text
+from drivine.model import lower_copies
 from drivine.schema.full_text_index_spec import FullTextIndexSpec
+from drivine.schema.lower_copy_statements import LOWER_COPY_KIND, LowerCopyStatements, Recording, catalog_entries
 from drivine.schema.range_index_spec import RangeIndexSpec
 from drivine.schema.schema_grammar import SchemaGrammar, portable_pins, sampled_node_id
 from drivine.schema.schema_item import SchemaItem
@@ -57,6 +59,49 @@ def postgres_schema_grammar(graph: PostgresGraph) -> SchemaGrammar:
         # drivine4j makes pgvector's index with its own parameters.
         unsupported_vector_tuning=portable_pins,
         conflicts=grammar.conflicts,
+        lower_copies=_lower_copies(graph),
+    )
+
+
+def _lower_copies(graph: PostgresGraph) -> LowerCopyStatements:
+    """
+    The lowercased copies on Postgres, as drivine4j's `PostgresLowerCopies` writes them: a property of the node's
+    JSON, filled in by an update of the label's nodes that Postgres lowercases with `lower`, and removed where the
+    property has no value; recorded as a row of the graph's catalog, of kind `LOWER_COPY`.
+    """
+
+    def fill(label: str, property: str, batch: int) -> str:
+        copy_key = sql_text(lower_copies.of(property))
+        return "\n".join(
+            [
+                "WITH written AS (",
+                f"    UPDATE {graph.nodes} n",
+                f"    SET props = CASE WHEN n.props ->> {sql_text(property)} IS NULL THEN n.props - {copy_key}",
+                f"                     ELSE n.props || jsonb_build_object({copy_key}, lower(n.props ->> "
+                f"{sql_text(property)})) END",
+                "    WHERE n.nid IN (",
+                f"        SELECT m.nid FROM {graph.nodes} m",
+                f"        WHERE {has_labels('m', [label])} AND {text_of('m', lower_copies.of(property))} IS DISTINCT "
+                f"FROM lower({text_of('m', property)})",
+                f"        LIMIT {batch})",
+                "    RETURNING 1)",
+                'SELECT count(*) AS "written" FROM written',
+            ]
+        )
+
+    def record(label: str, property: str) -> Recording:
+        return Recording(
+            f"INSERT INTO {graph.catalog} (kind, label, properties, name, object_name, details) "
+            f"VALUES ({sql_text(LOWER_COPY_KIND)}, {sql_text(label)}, {sql_text(catalog_properties([property]))}, "
+            "NULL, NULL, '{}') ON CONFLICT (kind, label, properties) DO NOTHING"
+        )
+
+    return LowerCopyStatements(
+        read=f'SELECT label AS "label", properties AS "properties" FROM {graph.catalog} WHERE kind = '
+        f"{sql_text(LOWER_COPY_KIND)}",
+        fill=fill,
+        record=record,
+        entries=catalog_entries,
     )
 
 

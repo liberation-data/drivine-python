@@ -167,6 +167,11 @@ class PostgresQueryRenderer(SqlQueryRenderer):
             return self._matches(text, _string(value))
         if operator == "CONTAINS_IGNORE_CASE":
             return f"strpos(lower({text}), {self._text(_string(value).lower())}) > 0"
+        # A lowercased copy, compared with the value as Postgres lowercases it: see lower_copies.
+        if operator == "EQ_LOWERED":
+            return f"{text} = lower({self._text(value)})"
+        if operator == "CONTAINS_LOWERED":
+            return f"strpos({text}, lower({self._text(value)})) > 0"
         return f"lower({text}) = {self._text(_string(value).lower())}"
 
     def _text(self, value: Any) -> str:

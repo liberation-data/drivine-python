@@ -31,6 +31,11 @@ class FragmentModel(FieldMapping):
     """The full-text indexes the fragment declares, each by its stored property names."""
     schema: list[SchemaDeclaration] = field(default_factory=lambda: [])
     """The schema items the fragment declares, on its fields and as class arguments."""
+    lower_copied: list[str] = field(default_factory=lambda: [])
+    """
+    The stored names of the `CaseInsensitive` fields, in the order of their fields' names, each of which a save gives a
+    lowercased copy: see lower_copies.
+    """
 
     def __repr__(self) -> str:
         return f"FragmentModel({self.type.__name__}, labels={self.labels})"

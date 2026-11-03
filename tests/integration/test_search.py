@@ -423,7 +423,7 @@ async def sized_docs(request: pytest.FixtureRequest, gom: StatelessGraphObjectMa
     engine = gom.persistence_manager.type
     if engine == DatabaseType.MEMGRAPH:
         pytest.skip("Memgraph refuses to store an embedding of another size than its index's.")
-    if not indexed and engine not in (DatabaseType.ORACLE, DatabaseType.POSTGRES):
+    if not indexed and engine not in (DatabaseType.ORACLE, DatabaseType.POSTGRES, DatabaseType.SQLITE):
         pytest.skip("A graph engine searches only through an index.")
     spec = vector_index("SizedTest", "embedding", 4)
     await gom.indexes.drop(spec)
@@ -476,7 +476,7 @@ class TestLoadNearestOfAnotherSize:
         self, gom, sized_docs
     ):
         wide = {"top_k": SIZED_WIDE, "search_k": SIZED_WIDE}
-        if gom.persistence_manager.type not in (DatabaseType.ORACLE, DatabaseType.POSTGRES):
+        if gom.persistence_manager.type not in (DatabaseType.ORACLE, DatabaseType.POSTGRES, DatabaseType.SQLITE):
             # A graph engine searches only through its index, which refuses a vector of another size.
             with pytest.raises(Exception):  # noqa: B017
                 await gom.load_nearest(SizedDoc, MIS_SIZED_QUERY, **wide)
@@ -487,7 +487,7 @@ class TestLoadNearestOfAnotherSize:
     async def test_leaves_out_a_node_whose_embedding_is_of_another_size_from_a_search_partitioned_with_no_index(
         self, gom, sized_docs
     ):
-        if gom.persistence_manager.type not in (DatabaseType.ORACLE, DatabaseType.POSTGRES):
+        if gom.persistence_manager.type not in (DatabaseType.ORACLE, DatabaseType.POSTGRES, DatabaseType.SQLITE):
             pytest.skip("A graph engine searches a partition only through an index made for it.")
         found = await gom.load_nearest(SizedDoc, SIZED_QUERY, top_k=SIZED_WIDE, partition_label="SizedCorpus")
         assert _ids(found) == ["A"]

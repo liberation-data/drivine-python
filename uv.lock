@@ -1,5 +1,5 @@
 version = 1
-revision = 5
+revision = 3
 requires-python = ">=3.11"
 
 [[package]]
@@ -386,7 +386,7 @@ wheels = [
 
 [[package]]
 name = "drivine"
-version = "0.3.1"
+version = "0.3.2"
 source = { editable = "." }
 dependencies = [
     { name = "pi-pilgrim" },
@@ -409,6 +409,9 @@ postgres = [
     { name = "psycopg", extra = ["binary"] },
     { name = "psycopg-pool" },
 ]
+sqlite = [
+    { name = "antlr4-python3-runtime" },
+]
 testing = [
     { name = "pytest" },
     { name = "testcontainers" },
@@ -428,6 +431,7 @@ dev = [
 requires-dist = [
     { name = "antlr4-python3-runtime", marker = "extra == 'oracle'", specifier = ">=4.13.2,<4.14" },
     { name = "antlr4-python3-runtime", marker = "extra == 'postgres'", specifier = ">=4.13.2,<4.14" },
+    { name = "antlr4-python3-runtime", marker = "extra == 'sqlite'", specifier = ">=4.13.2,<4.14" },
     { name = "falkordb", marker = "extra == 'falkordb'", specifier = ">=1.2" },
     { name = "neo4j", marker = "extra == 'neo4j'", specifier = ">=5.20" },
     { name = "oracledb", marker = "extra == 'oracle'", specifier = ">=3.0" },
@@ -438,7 +442,7 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'testing'", specifier = ">=8" },
     { name = "testcontainers", marker = "extra == 'testing'", specifier = ">=4.8" },
 ]
-provides-extras = ["neo4j", "pilgrim", "testing", "falkordb", "oracle", "postgres"]
+provides-extras = ["neo4j", "pilgrim", "testing", "falkordb", "oracle", "postgres", "sqlite"]
 
 [package.metadata.requires-dev]
 dev = [

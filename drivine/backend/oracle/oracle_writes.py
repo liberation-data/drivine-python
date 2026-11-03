@@ -28,6 +28,8 @@ class OracleWrites:
         self.graph = graph
         self._pending: dict[str, Any] = {}
         """Bindings the helpers below name, taken by the next block."""
+        self._lowers = False
+        """Whether the next block writes lowercased copies, and so declares `lower_node`."""
 
     def patch_one(self, model: FragmentModel, where: str | None = None) -> GraphStatement:
         """Writes `$set` (a merge patch) to the node with id `$id` if it meets `where`: `{found, applied, changed}`."""
@@ -49,6 +51,7 @@ class OracleWrites:
                 "INTO v_patch FROM dual;",
                 "        v_changed := apply_node(v_root, v_patch, '[]', '[]', NULL, FALSE);",
                 "        restamp(v_root, v_changed);",
+                *(f"        {it}" for it in self._lowering(model, "IF v_changed THEN ", " END IF;")),
                 "    END IF;",
                 "END IF;",
                 "OPEN c FOR SELECT JSON_OBJECT('found' VALUE v_root IS NOT NULL, 'applied' VALUE NVL(v_meets, 0) > 0, "
@@ -80,6 +83,7 @@ class OracleWrites:
                 f"        SELECT stamp INTO v_found FROM {self.graph.nodes} WHERE nid = v_root FOR UPDATE;",
                 "        v_changed := apply_node(v_root, v_patches(i), '[]', '[]', NULL, FALSE);",
                 "        restamp(v_root, v_changed);",
+                *(f"        {it}" for it in self._lowering(model, "IF v_changed THEN ", " END IF;")),
                 "    END IF;",
                 "    v_out.EXTEND;",
                 "    SELECT JSON_SERIALIZE(JSON_OBJECT('id' VALUE JSON(v_ids(i)), 'found' VALUE v_root IS NOT NULL, "
@@ -133,6 +137,7 @@ class OracleWrites:
                 body.append(
                     f"v_root := write_node({match}, {id_}, {labels}, {bind(to_json(props))}, '[]', '[]', NULL, FALSE);"
                 )
+                body.extend(self._lowering(group.model))
         reads("after")
         result = ", ".join(
             f"JSON_OBJECT('before' VALUE JSON(v_before{i}), 'after' VALUE JSON(v_after{i}) RETURNING JSON)"
@@ -275,11 +280,25 @@ class OracleWrites:
         k = json_key(_id_property(model))
         return f"{has_labels('n', model.labels)} AND JSON_EXISTS(n.props, '$?(@{k} == $v)' PASSING JSON(:1) AS \"v\")"
 
+    def _lowering(self, model: FragmentModel, before: str = "", after: str = "") -> list[str]:
+        """
+        The call that writes the lowercased copies of the model's `CaseInsensitive` properties on the node `v_root`,
+        from what it now holds, once its change is told (see lower_copies), between `before` and `after`: none for a
+        model with none. The block it is in declares `lower_node`.
+        """
+        if not model.lower_copied:
+            return []
+        self._lowers = True
+        name = f"x_lower{len(self._pending)}"
+        self._pending[name] = to_json(model.lower_copied)
+        return [f"{before}lower_node(v_root, ${name});{after}"]
+
     def _block(
         self, declarations: list[str], body: list[str], bindings: Mapping[str, Any] | None = None
     ) -> GraphStatement:
         lines = "\n".join(f"    {it}" for it in body)
-        text = f"""{prelude(self.graph, declarations)}
+        lowers, self._lowers = self._lowers, False
+        text = f"""{prelude(self.graph, declarations, lowers)}
 BEGIN
 {lines}
     DBMS_SQL.RETURN_RESULT(c);

@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
-from drivine.backend.postgres.postgres_graph import PostgresGraph
 from drivine.backend.postgres.postgres_save_statement import PostgresSaveStatement
 from drivine.backend.postgres.postgres_write_statement import PostgresWriteStatement
 from drivine.backend.save_statement import SaveStatement
@@ -21,6 +20,7 @@ from drivine.backend.save_statement_builder import (
 )
 from drivine.backend.sql.node_writes import NodeWrites
 from drivine.backend.sql.owned_labels import OwnedLabels
+from drivine.backend.sql.plan_graph import PlanGraph
 from drivine.backend.sql.root_step import RootStep
 from drivine.backend.sql.sql_json import to_json
 from drivine.backend.sql.sql_saves import fragment_of, stamp_excluded
@@ -54,18 +54,20 @@ class _NodeWrite:
     """A merge patch: a null removes the property."""
     record: tuple[str, bool] | None = None
     """For an open NodeLabels field: the property recording the labels it wrote, and whether it is replaced."""
+    lower: list[str] = field(default_factory=lambda: [])
+    """The properties whose lowercased copies the write keeps: the `CaseInsensitive` fields' of the node's class."""
 
 
 class PostgresSaveBuilder:
     """
-    Writes a save as one plan for drivine4j's write function, applied whole or not at all, with or without a
-    transaction. It decides what OracleSaveBuilder decides, from the same model: the root found (or made) and locked,
-    checked against the object's stamp when it carries one, its properties written and its labels set; the
-    relationships named in `replace` trimmed; then each related node written and joined, as deep as the view goes. The
-    function keeps stamps by drivine4j's rules, which are the Cypher save's.
+    Writes a save as one plan for drivine4j's write function (see PlanGraph: Postgres's, or SQLite's), applied whole or
+    not at all, with or without a transaction. It decides what OracleSaveBuilder decides, from the same model: the root
+    found (or made) and locked, checked against the object's stamp when it carries one, its properties written and its
+    labels set; the relationships named in `replace` trimmed; then each related node written and joined, as deep as the
+    view goes. The function keeps stamps by drivine4j's rules, which are the Cypher save's.
     """
 
-    def __init__(self, graph: PostgresGraph, registry: ModelRegistry | None = None) -> None:
+    def __init__(self, graph: PlanGraph, registry: ModelRegistry | None = None) -> None:
         self.graph = graph
         self.registry = registry
         self._plan = WritePlan()
@@ -209,6 +211,7 @@ class PostgresSaveBuilder:
             add=write.add,
             drop=write.remove,
             owned=OwnedLabels(write.record[0], write.record[1], write.model.labels) if write.record else None,
+            lower=write.lower,
         )
         return self._plan.node(
             self._plan.shape(write.model.labels, key),
@@ -235,7 +238,7 @@ class PostgresSaveBuilder:
 
     def _statement(self, root: FragmentModel, root_object: Any, expected: str | None) -> SaveStatement:
         return PostgresSaveStatement.made(
-            PostgresWriteStatement.call(self.graph, "STAMPS"),
+            self.graph.write_call("STAMPS"),
             {**PostgresWriteStatement.plan_bindings(self._plan), "root": {"id": id_of(root, root_object)}},
             root,
             root_object,
@@ -262,6 +265,7 @@ class PostgresSaveBuilder:
             [] if model is found else [it for it in model.labels if it not in found.labels],
             [],
             props,
+            lower=list(model.lower_copied),
         )
         if labels_clear is not None and model.node_labels:
             labels_field = model.node_labels

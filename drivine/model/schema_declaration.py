@@ -16,3 +16,5 @@ class SchemaDeclaration:
     dimensions: int | None = None
     hnsw_m: int | None = None
     hnsw_ef_construction: int | None = None
+    ignore_case: bool = False
+    """Whether a range index or uniqueness constraint is over the lowercased copies of its properties."""

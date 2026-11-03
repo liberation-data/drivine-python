@@ -32,11 +32,17 @@ class GroupOperations:
         query: Callable[[GraphStatement], list[Any]],
         mapper: GraphObjectMapper,
         backend: GraphBackend,
+        lookups: Callable[[FragmentModel, Any], Any] | None = None,
     ) -> None:
+        """
+        `lookups` gives a condition with its case-insensitive comparisons of the source's `CaseInsensitive` properties
+        made comparisons with their lowercased copies, where every node is known to have them: see lower_copy_lookups.
+        """
         self._registry = registry
         self._query = query
         self._mapper = mapper
         self._backend = backend
+        self._lookups = lookups
 
     def load(
         self,
@@ -67,6 +73,8 @@ class GroupOperations:
         A path key's value is the node it reaches, mapped to its class.
         """
         model = self._registry.fragment(source)
+        if where is not None and not isinstance(where, str) and self._lookups is not None:
+            where = self._lookups(model, where)
         query = GroupQuery(
             keys,
             {name: self._written_filter(it) for name, it in (aggregates or {}).items()},

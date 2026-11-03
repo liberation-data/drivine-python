@@ -21,7 +21,7 @@ from drivine.manager.null_policy import NullPolicy
 from drivine.manager.removed_targets import RemovedTargets
 from drivine.manager.save_options import SaveOptions
 from drivine.mapper.graph_object_mapper import empty_collection
-from drivine.model import stamps
+from drivine.model import lower_copies, stamps
 from drivine.model.field_mapping import FieldMapping
 from drivine.model.fragment_model import FragmentModel
 from drivine.model.graph_view_model import GraphViewModel
@@ -196,7 +196,16 @@ class SaveStatementBuilder:
         else:
             label_sets, label_changes = [], []
         changed = " OR ".join([changes("n", "$root.props"), *vector_changes, *bag_changes, *label_changes])
-        write = [f"SET {restamp('n', changed)}", "SET n += $root.props", *vector_sets, *bag_sets, *label_sets]
+        write = [
+            f"SET {restamp('n', changed)}",
+            "SET n += $root.props",
+            *vector_sets,
+            *bag_sets,
+            *label_sets,
+            # The lowercased copies, from the properties as now written, after the change was tested: in a SET of their
+            # own, since an engine may read every value of one SET before it writes any.
+            *lower_copies.clauses("n", model.lower_copied),
+        ]
         expected = getattr(obj, model.stamp_field, None) if model.stamp_field else None
         if self._create_only:
             if expected is not None:
@@ -431,6 +440,7 @@ class SaveStatementBuilder:
                 f"SET {t} += {row}.props",
                 *row_vector_sets,
                 *subtype_labels,
+                *lower_copies.clauses(t, self._lower_copied(root)),
                 f"MERGE {_pattern(part.rel, parent, '', t)} ON CREATE SET {relink(parent)}, {relink(t)}",
             ]
             children = part.children
@@ -555,6 +565,15 @@ class SaveStatementBuilder:
             sets.append(f"SET {stored} = ${name}")
             changed.append(f"{stored} IS NOT NULL" if value is None else f"({stored} IS NULL OR {stored} <> ${name})")
         return sets, changed
+
+    def _lower_copied(self, target_: FragmentModel) -> list[str]:
+        """
+        The properties whose lowercased copies a related node of `target_` is given: its own `CaseInsensitive` fields',
+        and those of each subclass the save holds, as a row of a subclass is written by the same clause. A copy of a
+        property the node doesn't hold is none.
+        """
+        models = [target_, *self._subtypes.get(id(target_), [])]
+        return list(dict.fromkeys(it for model in models for it in model.lower_copied))
 
     def _concrete_model(self, target_: FragmentModel, obj: Any) -> FragmentModel:
         """The model of the object's own class, where it is a subclass of the field's target."""

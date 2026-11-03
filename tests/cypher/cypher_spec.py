@@ -6,21 +6,44 @@ drivine-cypher-spec. drivine4j's CypherSpec, ported.
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import pytest
 import yaml
 
 SPEC = Path(__file__).parent
 
+
+def _sqlite_rounding_floats() -> set[str]:
+    """SQLite, where the SQLite Drivine uses writes a float to 15 significant digits, as before 3.53: see `HELD`."""
+    from drivine.connection.sqlite.sqlite_session import full_floats, sqlite_module
+
+    return set() if full_floats(sqlite_module()) else {"sqlite"}
+
+
+def _sqlite_before_3_53() -> set[str]:
+    """SQLite, where the SQLite Drivine uses is older than 3.53: see `HELD`."""
+    from drivine.connection.sqlite.sqlite_session import FULL_FLOATS_VERSION, sqlite_module
+
+    return {"sqlite"} if sqlite_module().sqlite_version_info < FULL_FLOATS_VERSION else set()
+
+
 GROUPS = {
     "graph": {"neo4j", "memgraph", "falkordb", "neptune"},
     "sql": {"postgres", "oracle", "sqlite"},
+    "sqlite-rounding-floats": _sqlite_rounding_floats(),
+    "sqlite-before-3.53": _sqlite_before_3_53(),
 }
-"""The groups a step may name for its stores: the graph engines, and the stores Cypher is compiled to SQL for."""
+"""
+The groups a step may name for its stores: the graph engines, and the stores Cypher is compiled to SQL for. A hold may
+name SQLite that writes floats to 15 digits, or SQLite older than 3.53, which is SQLite where the tests run on one
+(#376).
+"""
 
 
 class _Loader(yaml.SafeLoader):
@@ -116,10 +139,15 @@ def load(file: str) -> CypherSpec:
 
 
 def expanded(value: Any) -> Any:
-    """The value with each `{$repeat: text, times: n}` in it written out: the text repeated n times."""
+    """
+    The value with each `{$repeat: text, times: n}` in it written out, the text repeated n times, and each `{$float:
+    "NaN"}`, `{$float: "Infinity"}` and `{$float: "-Infinity"}` the float it names.
+    """
     if isinstance(value, Mapping):
         if set(value) == {"$repeat", "times"}:  # pyright: ignore[reportUnknownArgumentType]
             return str(value["$repeat"]) * int(value["times"])
+        if set(value) == {"$float"}:  # pyright: ignore[reportUnknownArgumentType]
+            return float(str(value["$float"]))
         return {key: expanded(it) for key, it in value.items()}  # pyright: ignore[reportUnknownVariableType]
     if isinstance(value, list):
         return [expanded(it) for it in value]  # pyright: ignore[reportUnknownVariableType]
@@ -136,7 +164,8 @@ def canonical(value: Any, step: Step, sort: bool | None = None) -> Any:
     if isinstance(value, int):
         return ("int", value)
     if isinstance(value, float):
-        return ("float", value)
+        # NaN in the rows is the same as NaN there, though it is equal to nothing.
+        return ("float", "NaN") if math.isnan(value) else ("float", value)
     if isinstance(value, Mapping):
         entries = {str(key): canonical(it, step) for key, it in value.items()}  # pyright: ignore[reportUnknownVariableType]
         return ("ordered", tuple(entries.items())) if step.key_order else entries
@@ -165,6 +194,118 @@ def failure_matches(step: Step, failure: BaseException) -> bool:
     if isinstance(step.error, list):
         return message in step.error
     return True
+
+
+@dataclass(frozen=True)
+class Hold:
+    """Steps of a case held on some stores until the issue whose port makes them pass lands: see `HELD`."""
+
+    issue: int
+    """The issue of drivine-python's whose port makes the steps pass."""
+    on: tuple[str, ...]
+    """The stores or groups the steps are held on."""
+    steps: tuple[int, ...] | None = None
+    """The steps, from 1; every step of the case where None."""
+
+
+def _steps(first: int, last: int) -> tuple[int, ...]:
+    """The steps from `first` to `last`."""
+    return tuple(range(first, last + 1))
+
+
+HELD: dict[str, dict[str, list[Hold]]] = {
+    "queries.yaml": {
+        # v0.21.0, liberation-data/drivine-cypher-spec#31: a NaN or infinite parameter is bound as a text
+        # (drivine4j#295), and Oracle compares NaN equal to NaN (drivine4j#409, also #327); drivine4j#452 fixes both.
+        # drivine4j holds the case on SQLite too, for drivine4j#295.
+        "NaN and the infinities as parameters": [Hold(164, ("sql",))],
+        # v0.25.0, liberation-data/drivine-cypher-spec#52: Postgres works a float divided or taken % by zero out as
+        # numeric, and fails, and SQLite gives null (drivine4j#408, whose fix, drivine4j#563, covers both).
+        # toFloat() of Java's names gives null on Postgres and SQLite (drivine4j#545), and on Oracle NaN compares equal
+        # to NaN (drivine4j#409).
+        "NaN worked out": [
+            Hold(164, ("oracle",), (2, 3)),
+            Hold(327, ("oracle",), (18,)),
+            Hold(351, ("postgres",), (*_steps(1, 6), 13)),
+            Hold(351, ("sqlite",), (1, 2, 4, 5, 6, 13)),
+            Hold(382, ("postgres", "sqlite"), (16, 18, 19)),
+        ],
+        # v0.25.0, liberation-data/drivine-cypher-spec#52: as above, written by toString().
+        "Floats written as text": [Hold(351, ("postgres", "sqlite"), (5,))],
+        # v0.25.0, liberation-data/drivine-cypher-spec#49: a float the statement makes is taken as a text function's
+        # start or length, not refused (drivine4j#285).
+        "Start and length of a text function": [Hold(353, ("sql",), _steps(6, 13))],
+        # v0.25.0, liberation-data/drivine-cypher-spec#48: on Oracle a path a WITH passes on gives the first row's
+        # nodes and relationships on every row (drivine4j#537).
+        "A path a WITH passes on": [Hold(371, ("oracle",), (*_steps(1, 10), 12, 13, 16))],
+        # A SQLite that writes a float to 15 significant digits, as before 3.53 or built to; and before 3.53 one that
+        # refuses a subquery in json_each that groups by a column of its row (#376).
+        "Round to a fractional or negative precision": [Hold(376, ("sqlite-rounding-floats",), (15, 17))],
+        "CALL imports only what it names": [Hold(376, ("sqlite-before-3.53",), (12,))],
+        "Float arithmetic": [Hold(376, ("sqlite-rounding-floats",), (1, 2, 4, 5, 6))],
+        "Functions of numbers": [Hold(376, ("sqlite-rounding-floats",), (2, 8, 9, 11))],
+        # v0.22.0, liberation-data/drivine-cypher-spec#47: a float literal past a double's range is read as an
+        # infinity, not refused (drivine4j#295). Step 4, too small to tell from 0, passes.
+        # On SQLite step 1 is read as an infinity too, as on Postgres and Oracle here.
+        "Float bounds": [Hold(323, ("sql",), (1, 2, 3))],
+        # v0.22.0, liberation-data/drivine-cypher-spec#32: an integer sum past a long's range is summed exactly, not
+        # given as a float as on Neo4j (drivine4j#339, fixed by drivine4j#455).
+        "Aggregates of floats": [
+            Hold(293, ("postgres", "oracle"), _steps(13, 16)),
+            Hold(376, ("sqlite-rounding-floats",), (12,)),
+        ],
+    },
+    "writes.yaml": {
+        # v0.21.0, liberation-data/drivine-cypher-spec#31: as above, written. Step 6 writes and reads nothing back,
+        # so it passes. On SQLite step 7 needs drivine4j#544's fix too, once infinities are stored.
+        "NaN and the infinities written": [
+            Hold(164, ("oracle",), (1, 2, 3, 7)),
+            Hold(164, ("postgres",), (4,)),
+            Hold(164, ("sqlite",), (1, 2, 5, 7)),
+        ],
+        # v0.25.0, liberation-data/drivine-cypher-spec#53: a MERGE of a null property makes a new node each run, where
+        # Neo4j fails (drivine4j#543); its NaN part waits for NaN to be carried (#164). Steps 8 and 13 count what the
+        # MERGEs made, so on Oracle and SQLite step 13 waits for #164 too.
+        "MERGE of a null or NaN property": [
+            Hold(380, ("sql",), (1, 2, 4, 5, 6, 8, 13)),
+            Hold(164, ("oracle",), (9, 10, 12, *_steps(14, 17))),
+            Hold(164, ("sqlite",), (12,)),
+        ],
+    },
+    "refusals.yaml": {
+        # v0.22.0, liberation-data/drivine-cypher-spec#47: a float literal past a double's range is read as an infinity,
+        # not refused (drivine4j#295).
+        "Float too large": [Hold(323, ("sql",))],
+        # v0.25.0, liberation-data/drivine-cypher-spec#49: as in queries.yaml.
+        "Start or length of a text function": [Hold(353, ("sql",), _steps(6, 13))],
+    },
+}
+"""
+The steps of a spec tag past what drivine-python runs that a port here has yet to make pass, by file and case. Each is
+run, and must fail; one that passes fails, so that its hold is taken out when its port lands. As Drivine for
+TypeScript's.
+"""
+
+
+def held_for(file: str, case: Case, index: int, store: str) -> int | None:
+    """The issue the step at `index` (from 0) of the case of `file` is held for on `store`, if it is: see `HELD`."""
+    for hold in HELD.get(file, {}).get(case.name, []):
+        named = any(it == store or store in GROUPS.get(it, set()) for it in hold.on)
+        if named and (hold.steps is None or index + 1 in hold.steps):
+            return hold.issue
+    return None
+
+
+HELD_FAILURES = (Exception, pytest.fail.Exception)
+"""What a held step fails with: the store's or the compiler's failure, or the check's."""
+
+
+def held_passes(file: str, case: Case, index: int, store: str, issue: int) -> str:
+    """What is said of a held step that passes."""
+    return (
+        f"{file}, {case.name}, step {index + 1} is held on {store} for liberation-data/drivine-python#{issue}, and "
+        "passes: take it out of HELD."
+    )
 
 
 def check_rows(step: Step, rows: list[Any], where: str) -> None:

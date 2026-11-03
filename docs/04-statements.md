@@ -22,10 +22,10 @@ await pm.execute(spec)                   # no results
 - A row of one column is its value, and a row of several is a list.
 - A failed statement raises `DrivineError`, which holds the specification, and the database's error as its cause.
 
-### Cypher on Postgres and Oracle
+### Cypher on Postgres, Oracle and SQLite
 
 A statement written as Cypher, with `cypher_statement` or `cypher_file`, is compiled to SQL over the graph's tables on
-Postgres and Oracle, and gives the rows a graph engine gives, as drivine4j compiles it:
+Postgres, Oracle and SQLite, and gives the rows a graph engine gives, as drivine4j compiles it:
 
 ```python
 from drivine import QuerySpecification, cypher_statement
@@ -34,8 +34,10 @@ spec = QuerySpecification(cypher_statement("MATCH (p:Person {city: $city}) RETUR
 people = await pm.query(spec.bind({"city": "Sydney"}))
 ```
 
-- A read is a query. A write (`CREATE`, `MERGE`, `SET`, `REMOVE`, `DELETE`) is an anonymous PL/SQL block on Oracle, and
-  a function made for the statement in `pg_temp` on Postgres: one statement, applied whole or not at all. A block hands
+- A read is a query. A write (`CREATE`, `MERGE`, `SET`, `REMOVE`, `DELETE`) is an anonymous PL/SQL block on Oracle,
+  a function made for the statement in `pg_temp` on Postgres, and on SQLite, which has no procedural language, steps
+  that `drivine_cypher`, a function Drivine registers on each connection, carries out under a savepoint: one statement,
+  applied whole or not at all. A block hands
   its rows back whole, so on Oracle a write is run with `query`, and a cursor over one is refused. On Postgres a cursor
   over a write writes when it is opened, as on a graph engine.
 - Parameters are named, `$name`: a statement bound to a list of them is refused.
@@ -51,9 +53,22 @@ people = await pm.query(spec.bind({"city": "Sydney"}))
   or a reduce's variable, or carried past a write in the statement, it compares by its properties.
 - openCypher's temporal values are their ISO 8601 text, as the store keeps a moment: `date`, `datetime`, `duration` and
   the rest make one, their fields read, and two moments compare as the moments they are. A parameter of a `date`,
-  `time`, `datetime` or `timedelta` is a temporal value of its kind. A zoned value the statement makes sorts as its
-  moment (`ORDER BY datetime(n.at)`); one read as a property sorts as its text, and so does a map that holds one. A
-  list of them, or a list of lists of them, sorts item by item so in an `ORDER BY`, `min` and `max`. Oracle reads by
+  `time`, `datetime` or `timedelta` is a temporal value of its kind. A year is numbered as Neo4j and ISO 8601 number
+  it, where Oracle and Postgres keep no year 0: `0000` is 1 BC and `-0044` is 45 BC, made, read, worked out,
+  truncated, written and read back ([#326](https://github.com/liberation-data/drivine-python/issues/326)). A stored
+  value whose year is 1000 or later is read as before; one of an earlier year is read by its era, so a statement that
+  reads a stored date or moment compiles to SQL up to three and a half times as long (a filter on a stored date, 1,005
+  characters on Oracle and 703 on Postgres before, is 2,831 and 2,211), and in drivine4j, which compiles the same SQL,
+  an aggregate of temporal arithmetic runs 8 to 10% slower (a `truncate` on Postgres, about 16%). Oracle counts days
+  before 1582-10-15 by the Julian calendar, so the day of the week, the ISO week, the day of the year and a leap day
+  of such a date are not Neo4j's ([#335](https://github.com/liberation-data/drivine-python/issues/335)). Two stored
+  values BC compare by their text, which orders them backwards
+  ([#237](https://github.com/liberation-data/drivine-python/issues/237)). Postgres and Oracle keep no date before
+  4713 BC, so a year before `-4712` that the store works out or reads, as `date({year: -9999})`, fails there. Python's
+  `date` and `datetime` have no year before 1, so a value BC is given as its ISO text to `date()` or `datetime()`.
+  A zoned value the statement makes sorts as its moment (`ORDER BY datetime(n.at)`); one read as a property sorts as
+  its text, and so does a map that holds one. A list of them, or a list of lists of them, sorts item by item so in an
+  `ORDER BY`, `min` and `max`. Oracle reads by
   their places, not with `JSON_TABLE`, the items of a list that holds temporal values the statement makes, at any
   depth: a list of them, a list of lists or of maps of them (`collect(DISTINCT [l, l])`), one a `CASE`, `coalesce` or
   `reduce` may give, or one taken back out of a map; and the keys of any map, which `keys` reads from a list Oracle
@@ -70,6 +85,20 @@ people = await pm.query(spec.bind({"city": "Sydney"}))
   is named, and that walks no variable-length relationship or quantified path pattern of its own; on Postgres they may.
   What isn't compiled yet (a path returned whole, `SKIP` of an expression…) is
   refused by name before anything is sent, and what isn't Cypher with where it went wrong.
+- A value whose kind the statement fixes (a literal, a list or a map written, or a variable a `WITH` binds to one) is
+  refused where an operator or a function takes another kind, as Neo4j refuses it when it plans the statement:
+  `RETURN 123 AND true` fails with `AND takes a truth value, not an integer, as in Neo4j.`, and so do
+  `WITH 123 AS x RETURN x.num` and `RETURN 1 IN 'foo'`. A step of 0 in `range()`, written or given, a parameter given
+  as the index of a list or a map written that isn't indexed by its kind, and a map, or a list of maps or of lists,
+  written in `SET`, are refused too, though Neo4j fails on them only when a row reaches them. A value whose kind is
+  known only when the row is read, such as a property or a parameter, is compiled: where it is of the wrong kind, the
+  statement may give null where Neo4j fails. A variable used as two kinds is refused, as Neo4j refuses it:
+  `MATCH (a)-[a]->()` fails with `a is a node, and is used as a relationship: a variable is of one kind, as in Neo4j.`
+  So is one a pattern makes where it is bound already: `MATCH (a) CREATE (a)`, a path variable bound before its
+  `MATCH`, or a relationship variable bound as something else.
+- `truncate` takes each unit Neo4j does, from `millennium` to `microsecond`, and a map of fields to set on the value
+  cut short (`date.truncate('month', d, {day: 2})`), but not yet a nanosecond, a week's or a quarter's field, or a
+  named zone.
 - `CALL db.labels()` and `CALL db.relationshipTypes()` compile, alone or within a query with `YIELD`, and give each
   label and type something has now, read from the nodes and relationships; any other procedure is refused. A parameter
   may be named by a keyword (`$limit`), as in Neo4j. Functions of numbers (`exp`, `log`, `sin`, `atan2`, `round` by a
@@ -123,6 +152,33 @@ people = await pm.query(spec.bind({"city": "Sydney"}))
   1.4 to 2.5 times a plain read as drivine4j measured it, and the list is written out whole for it. Any other item is
   read as before, and so is an unwound item. A list made of a long property (`[n.bio, 'y']`) still takes the property
   out as JSON, as above.
+- So are reads of an argument of `coalesce()` that is a property of a node or a relationship
+  ([#295](https://github.com/liberation-data/drivine-python/issues/295)), wherever the `coalesce()` is
+  (`coalesce($p.q, n.bio)`, `size(trim(coalesce(n.bio, '')))`, `SET n.a = coalesce(n.bio, '')`): a text of at most
+  4,000 bytes is read as a `VARCHAR2`, at no cost drivine4j measured (20,000 rows take 72 ms either way), and a longer
+  one through its text. Any other value is read as before, and so is a value of a map (`coalesce(m.a, 'z')`). In a
+  step of `reduce()`, where a node arrives as JSON, the property is still taken out as JSON and can close the session
+  ([#331](https://github.com/liberation-data/drivine-python/issues/331)).
+- On Oracle two texts are compared (`=`, `<>`, `<`, `>=`, `IN` …) as `VARCHAR2`s, and as CLOBs with
+  `DBMS_LOB.COMPARE` where either is past 4,000 bytes
+  ([#291](https://github.com/liberation-data/drivine-python/issues/291)).
+  As JSON, `=` of a text past about 32 KB was refused (ORA-40180), even `n.bio = 'abc'` where one node's bio was that
+  long, and `<` of one read from the store over two rows or more crashed the session (ORA-03113), as the bug above did.
+  A property compared so is read by its own path, and such a query carries `NO_JSON_TABLE_TRANSFORM` (see below).
+  Beside a number, a truth value or a short text the statement gives or writes, a list or a map it writes, or an `IN`
+  of such items, only the other side is read for its kind (`n.name = $x`, `n.name = 'abc'`, `n.name IN $names`): over
+  20,000 rows that costs about a fifth more for `=` and `IN`, and an order (`n.name > $x`, `n.i < 10000`) takes three
+  fifths to two thirds of the time it took. Beside a single value the statement writes, a list or a map is not equal
+  and isn't compared as JSON. Where no item of an `IN` the statement gives or writes, none a list or a map, is equal,
+  the answer is null where they hold a null and else false, and the value isn't read again for its nulls, which took a
+  text past 32 KB out as JSON and crashed the session
+  ([drivine4j#475](https://github.com/liberation-data/drivine4j/issues/475)).
+  A statement that writes, and the step of a `reduce`, which run as PL/SQL, compare as JSON, as before, and refuse a
+  text past 32 KB: there a CLOB read from an unwound row's JSON crashed the session. A list or a map that holds such
+  a text is compared as JSON anywhere, and refused. Between two texts, either past 4,000 bytes, that first differ where
+  one has a character past U+FFFF and the other one from U+E000 to U+FFFF, the order is the other way round from
+  Cypher's, as a CLOB compares by UTF-16 units. See "Two texts, compared" in
+  [docs/oracle-long-json-string-crash.md](../docs/oracle-long-json-string-crash.md).
 - On Oracle an `OPTIONAL CALL` or an `OPTIONAL MATCH` is joined `ON 1 = 1`, where Postgres joins `ON TRUE`. This works
   around an Oracle bug, seen on 23.26.3: in a scalar subquery, as a `COUNT { … }` is compiled, a join `ON TRUE` is
   refused (ORA-00907) or crashes the session (ORA-03113, with ORA-07445 in the alert log)
@@ -133,7 +189,9 @@ people = await pm.query(spec.bind({"city": "Sydney"}))
   Oracle's JSON table transformation reads several JSON values of one node's row by one `JSON_TABLE`, and so rewritten
   beside another node's table the query lost that node's label and property tests, giving rows its pattern doesn't
   have and values of the wrong node, or crashing the session (ORA-03113)
-  ([#258](https://github.com/liberation-data/drivine-python/issues/258)). A query of one table carries no hint.
+  ([#258](https://github.com/liberation-data/drivine-python/issues/258)). A query of one table carries no hint, unless
+  it compares a property (see above): there the transformation lost the property's reads beside a quantifier's
+  subquery.
 - On Oracle a list worked out on each row by a subquery (`keys(n)`, `[i IN range(1, k) | i]`, `[(p)-->(q) | q.name]`)
   is read from a derived table inside a lateral view. This works around an Oracle bug, seen on 23.26.3: a subquery
   that reads the row, in the select list of a lateral view that begins a subquery's `FROM`, was worked out once for
@@ -142,7 +200,7 @@ people = await pm.query(spec.bind({"city": "Sydney"}))
 - What each statement gives is the [Cypher spec](https://github.com/liberation-data/drivine-cypher-spec), which the
   three Drivine libraries run alike.
 
-The parser runs on ANTLR's runtime, which `drivine[postgres]` and `drivine[oracle]` install.
+The parser runs on ANTLR's runtime, which `drivine[postgres]`, `drivine[oracle]` and `drivine[sqlite]` install.
 
 ### Cursors
 

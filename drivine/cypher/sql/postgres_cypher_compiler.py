@@ -11,6 +11,7 @@ from typing import Any, cast
 from drivine.cypher.sql.compiled_cypher import CompiledCypher
 from drivine.cypher.sql.parameters import OBJECT, cypher_json, json_text, jsonable
 from drivine.cypher.sql.postgres_temporal_sql import PostgresTemporalSql
+from drivine.cypher.sql.procedure_step import ProcedureStep
 from drivine.cypher.sql.sql_cypher_compiler import (
     CALLER,
     COUNT,
@@ -667,7 +668,7 @@ class PostgresCypherCompiler(SqlCypherCompiler):
     def right_text(self, text: str, count: str) -> str:
         return f"right({text}, {count})"
 
-    def procedure(self, body: list[str], parameters: dict[str, Any]) -> CompiledCypher:
+    def procedure(self, program: Sequence[ProcedureStep], parameters: dict[str, Any]) -> CompiledCypher:
         """
         A function of the session's own, `pg_temp`, made for the procedure, then called: Postgres runs a block that
         returns rows or takes parameters no other way. It is named for its text, so a statement run again replaces it
@@ -690,7 +691,7 @@ class PostgresCypherCompiler(SqlCypherCompiler):
         ]
         for depth in range(1, NESTING + 1):
             declared += [f"    {SAVED}{depth} jsonb;", f"    {GATHERED}{depth} jsonb;", f"    {CALLER}{depth} jsonb;"]
-        text = "\n".join([*declared, "BEGIN", indent("\n".join(body)), "END"])
+        text = "\n".join([*declared, "BEGIN", indent("\n".join(self.statements(program))), "END"])
         digest = hashlib.sha256(text.encode()).hexdigest()
         function = f"pg_temp.drivine_cypher_{digest[:24]}"
         # The body is quoted with dollars, by a tag no text in it holds: a text of `$cy$` would end it. The first of

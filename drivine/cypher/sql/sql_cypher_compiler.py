@@ -4,13 +4,17 @@ import dataclasses
 import functools
 import logging
 import math
+import re
 from abc import ABC, abstractmethod
+from calendar import isleap
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
 from functools import cached_property
 from typing import Any, NoReturn, TypeVar, cast
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from drivine.backend.sql.sql_graph import sql_text as literal
 from drivine.cypher.ast.clause import (
@@ -62,18 +66,44 @@ from drivine.cypher.ast.expression import (
 )
 from drivine.cypher.ast.node_pattern import NodePattern
 from drivine.cypher.ast.pattern import Pattern, Shortest
-from drivine.cypher.ast.projection import Projection, ProjectionItem
+from drivine.cypher.ast.projection import Projection, ProjectionItem, SortItem
 from drivine.cypher.ast.query import Query
 from drivine.cypher.ast.relationship_pattern import Direction, RelationshipPattern
 from drivine.cypher.ast.remove_item import RemoveItem, RemoveProperty
 from drivine.cypher.ast.set_item import SetAdd, SetItem, SetProperty, SetReplace
 from drivine.cypher.cypher_reader import read_cypher
+from drivine.cypher.sql import procedure_step as steps
+from drivine.cypher.sql.aggregates import check_aggregates
 from drivine.cypher.sql.compiled_cypher import CompiledCypher
+from drivine.cypher.sql.cypher_syntax import bracketed, imports, plain_with
 from drivine.cypher.sql.parameters import Parameters, cypher_json, jsonable
+from drivine.cypher.sql.procedure_step import ProcedureStep
 from drivine.cypher.sql.temporal import Temporal
-from drivine.cypher.sql.temporal_sql import TemporalSql
-from drivine.cypher.sql.temporals import FIELD_NAMES, NoNumber, Temporals, canonical
-from drivine.cypher.sql.value import Bool, Entities, Json, Node, Path, Relationship, Value
+from drivine.cypher.sql.temporal_sql import TRUNCATION_UNITS, TemporalSql
+from drivine.cypher.sql.temporals import (
+    CALENDAR_FIELDS,
+    FIELD_NAMES,
+    SELECTORS,
+    NoNumber,
+    Overrides,
+    TemporalBase,
+    Temporals,
+    canonical,
+)
+from drivine.cypher.sql.value import (
+    Bool,
+    Entities,
+    Json,
+    Known,
+    Node,
+    Path,
+    Relationship,
+    Value,
+    capital_noun_of,
+    known_of,
+    noun_of,
+)
+from drivine.cypher.sql.variable_kinds import check_variable_kinds
 from drivine.drivine_error import DrivineError
 from drivine.model import stamps
 
@@ -86,6 +116,9 @@ Scope = Mapping[str, Value]
 
 Body = Callable[[list[str]], str]
 """SQL written over values, each as `shared` names it."""
+
+Reading = Callable[[Expression], Expression | None]
+"""What a part of an expression is read as, if it is read as something else: see `_aggregates_first`."""
 
 # ----- The variables of a procedure -----
 
@@ -396,6 +429,8 @@ class _Projected:
     sql: str
     scope: dict[str, Value]
     order: list[tuple[str, bool]]
+    columns: list[tuple[str, bool]]
+    """The query's columns, each named and whether it holds JSON, as `lateral` takes them."""
 
 
 class SqlCypherCompiler(ABC):
@@ -454,6 +489,12 @@ class SqlCypherCompiler(ABC):
         Whether a value's identity is carried out of a query as a column of its own (see Json.identity): not where the
         queries of a `UNION` in `CALL { … }` would give different columns, which compare by their properties instead.
         """
+        self._probing = False
+        """
+        Whether SQL is written only to be searched for a subquery of the statement's own, not run: `shared_bound` then
+        writes its values beside its body, read there by names of no subquery, so neither adds a `SELECT` (see
+        `_probed`).
+        """
         self._sharing = True
         """Whether `shared` binds a long value: not in an expression that aggregates, whose aggregate a subquery would
         take from its group, nor in a term a projection beside a variable-length walk sorts by that is none of its items
@@ -481,6 +522,11 @@ class SqlCypherCompiler(ABC):
     def compile_query(self, query: Query, parameters: Mapping[str, Any]) -> CompiledCypher:
         """The statement, read already, with its parameters' values, as SQL: a query, or a procedure where it
         writes."""
+        # A variable used as two kinds, or made where it is bound already, is refused for that, before what is not
+        # compiled yet.
+        check_variable_kinds(query)
+        # An aggregate in a WHERE too.
+        check_aggregates(query, is_aggregate, children)
         if query.unions:
             return self._with_functions(self._union(query, parameters))
         if not any(writes(it) for it in query.clauses):
@@ -493,6 +539,7 @@ class SqlCypherCompiler(ABC):
                     as_path=self.parameter_path,
                 )
             )
+            self._give(query)
             return self._with_functions(CompiledCypher(self.planned(self._query(query)), self._parameters.values))
         self.procedural = True
         # A procedure takes its parameters as one object, and reads each from it.
@@ -509,6 +556,7 @@ class SqlCypherCompiler(ABC):
         # The parameters' text is written before the procedure's body is: on Oracle, writing it is what says whether the
         # body reads it as extended JSON.
         values = self._parameters.values
+        self._give(query)
         body = self._procedure(query)
         return self.procedure(body, values)
 
@@ -525,6 +573,8 @@ class SqlCypherCompiler(ABC):
 
     def shared_bound(self, values: Sequence[str], body: Body) -> str:
         """The body over the values `bound` as `shared` binds them, and counted so: see `_binds`."""
+        if self._probing:
+            return " ".join([*values, body([f"probed.v{i + 1}" for i in range(len(values))])])
         self._shared_bindings += 1
         return self.bound(values, body)
 
@@ -534,6 +584,10 @@ class SqlCypherCompiler(ABC):
 
     def shared_sum(self, a: str, b: str, body: Body) -> str:
         """The body over the sides of a `+`, as `shared` binds them: see Oracle's."""
+        return self.shared([a, b], body)
+
+    def shared_compared(self, a: str, b: str, body: Body) -> str:
+        """The body over the sides of a comparison, an `IN` among them, as `shared` binds them: see Oracle's."""
         return self.shared([a, b], body)
 
     def shared1(self, value: str, body: Callable[[str], str]) -> str:
@@ -574,13 +628,26 @@ class SqlCypherCompiler(ABC):
         """
         return query
 
-    def lateral(self, query: str, name: str, optional: bool) -> str:
+    def lateral(self, query: str, name: str, optional: bool, columns: Sequence[tuple[str, bool]]) -> str:
         """
         The join of the lateral query `query`, named `name`, to the row: an `OPTIONAL CALL`'s or an `OPTIONAL MATCH`'s
-        keeps the row it finds nothing for, and a `CALL`'s doesn't.
+        keeps the row it finds nothing for, and a `CALL`'s doesn't. `columns` names its columns, each and whether it
+        holds JSON, which `lateral_column` reads.
         """
         text = f"(\n{indent(query)}\n) {name}"
         return f"LEFT JOIN LATERAL {text} ON TRUE" if optional else f"CROSS JOIN LATERAL {text}"
+
+    def lateral_column(self, name: str, column: str, json: bool) -> str:
+        """The column of the rows named `name` that a `lateral` join gives, which holds JSON where `json`."""
+        return f"{name}.{column}"
+
+    def _laterally(self, value: Value, name: str, columns: Sequence[tuple[str, bool]]) -> Value:
+        """The value, whose columns are named for a query not yet named (PENDING), read from the rows named `name`
+        that a `lateral` join gives, of the columns `columns`."""
+        json = dict(columns)
+        return _map_sql(
+            value, lambda sql: _PENDING_COLUMN.sub(lambda m: self.lateral_column(name, m[1], json[m[1]]), sql)
+        )
 
     def once(self, query: str) -> str:
         """
@@ -613,10 +680,16 @@ class SqlCypherCompiler(ABC):
                 as_path=self.parameter_path,
             )
         )
-        rows = "\nUNION ALL\n".join(
-            f"SELECT {i + 1} AS part, {self.row_number} AS n, q.result "
-            f"FROM (\n{indent(self._query(Query(clauses)))}\n) q"
-            for i, clauses in enumerate(parts)
+        # Every query's names, before any is compiled: a name made in one is no variable of a later one's.
+        self._give(query)
+        # Its rows are compared, as a UNION without ALL compares them: see `_comparing_parts`.
+        rows = self._comparing_parts(
+            not query.unions[0].all,
+            lambda: "\nUNION ALL\n".join(
+                f"SELECT {i + 1} AS part, {self.row_number} AS n, q.result "
+                f"FROM (\n{indent(self._query(Query(clauses)))}\n) q"
+                for i, clauses in enumerate(parts)
+            ),
         )
         if query.unions[0].all:
             sql = f"SELECT u.result FROM (\n{indent(rows)}\n) u\nORDER BY u.part, u.n"
@@ -736,6 +809,14 @@ class SqlCypherCompiler(ABC):
         """
         return self.property_of(props, key)
 
+    def coalesced_property(self, props: str, key: str) -> str:
+        """
+        The property `key` of the node or relationship whose properties are `props`, where it is an argument of
+        `coalesce()`: as `property_of` reads it, null where it is JSON's null, but on a store that must read such an
+        argument apart.
+        """
+        return self.null_if_json_null(self.property_of(props, key))
+
     def row_value(self, keys: Sequence[str]) -> str:
         """
         The value at `keys`, each of a map in the one before, in the row a write is making (ROW), where a statement of
@@ -788,6 +869,14 @@ class SqlCypherCompiler(ABC):
     @abstractmethod
     def elements(self, json: str, alias: str) -> str:
         """The items of the JSON list as rows named `alias`, with columns `item` and `item_no`, counted from 1."""
+
+    def item(self, alias: str) -> str:
+        """The item, as JSON, of the row named `alias` that `elements` gives."""
+        return f"{alias}.item"
+
+    def item_no(self, alias: str) -> str:
+        """The place in its list, counted from 1, of the row named `alias` that `elements` gives."""
+        return f"{alias}.item_no"
 
     def temporal_elements(self, json: str, alias: str) -> str:
         """
@@ -893,6 +982,30 @@ class SqlCypherCompiler(ABC):
         """Whether the JSON values, neither of them null, are equal as JSON: `'7'` is not `7`, and `1` is `1.0`."""
         return f"{x} = {y}"
 
+    def given_equals(self, x: str, y: str, given: Any) -> str:
+        """Whether the JSON value `x` is equal to `y`, the JSON of `given`, a value the statement gives that is not
+        null."""
+        return self.json_equals(x, y)
+
+    def given_items_test(self, value: str, items: Sequence[Any]) -> str | None:
+        """
+        A test of the JSON value `value` alone, where an `IN` of it in a list whose items the statement writes or is
+        given, `items`, each a text, a number, a truth value or null, compares each item with it as JSON only where the
+        test holds, and finds it in none where it doesn't: None where each item is compared by `json_equals`. See
+        Oracle's.
+        """
+        return None
+
+    @property
+    def given_items_decided(self) -> bool:
+        """
+        Whether an `IN` of such items, where none is equal to the value, is null where they hold a null and else false,
+        as the statement is compiled, and the value is not read for its nulls: such items are equal to no value that
+        holds one, and a comparison with one of them is null only where the item is null. Else the value is read for its
+        nulls, and compared with each item again where none is equal, as with any list. See Oracle's.
+        """
+        return False
+
     @abstractmethod
     def holds_null(self, json: str) -> str | None:
         """
@@ -952,10 +1065,23 @@ class SqlCypherCompiler(ABC):
         says (`<`, `>=`…)."""
         return f"{x} {operator} {y}"
 
+    def bool_json(self, sql: str) -> str:
+        """A SQL truth value as JSON's `true` or `false`, or null."""
+        return self.scalar(sql)
+
     def sort_key(self, json: str) -> str:
         """What an order sorts the JSON value by: JSON's null as SQL's, which comes last, as a graph engine orders
         null."""
         return self.null_if_json_null(json)
+
+    def order_term(self, term: str, descending: bool) -> str:
+        """The term of an `ORDER BY`, ascending or `descending`: null after every value ascending, and before them
+        descending."""
+        return f"{term} DESC" if descending else term
+
+    def whole_quotient(self, a: str, b: str) -> str:
+        """The whole number of times the SQL whole number `b` goes into `a`, short of a fraction."""
+        return f"trunc({a} / {b})"
 
     def open_sort_key(self, json: str) -> list[str]:
         """
@@ -967,6 +1093,30 @@ class SqlCypherCompiler(ABC):
         `sort_key` alone.
         """
         return [self.sort_key(json)]
+
+    def json_null_sort_key(self, json: str) -> list[str]:
+        """
+        `open_sort_key` of a value that may be JSON's null (Json.json_null): JSON's null ties with SQL's, as Cypher has
+        one null, so a term after it decides their order (#314). Where a store's `open_sort_key` does not tie them
+        already, it says so.
+        """
+        return self.open_sort_key(json)
+
+    def compared_null(self, json: str) -> str:
+        """
+        The JSON value `json`, JSON's null read as SQL's, where rows are given by it to a `UNION` that compares them,
+        and by default where they are grouped or kept distinct (`grouped_null`): as `null_if_json_null`, but where a
+        store binds a long value in a subquery there, which no store groups by, written out where it is read.
+        """
+        return self.null_if_json_null(json)
+
+    def grouped_null(self, json: str) -> str:
+        """
+        The JSON value `json` as rows are grouped or kept distinct by it, JSON's null and SQL's one: as
+        `compared_null`, but where a store makes them one more cheaply in a value that each row reads alike, as SQL's
+        null read as JSON's, it says so (#314).
+        """
+        return self.compared_null(json)
 
     def list_sort_key(self, json: str) -> str:
         """What an order sorts the JSON by where the statement makes it a list (Json.list): as `sort_key`, where the
@@ -989,13 +1139,13 @@ class SqlCypherCompiler(ABC):
 
         def key(of: str, at: int) -> str:
             alias = f"mk{at}"
-            item = f"{alias}.item"
+            item = self.item(alias)
             if at == 1:
                 item_key = self.temporal_sql.sortable(self.temporals.moment(self.text(item), kind))
             else:
                 item_key = key(item, at - 1)
             joined = self.joined_texts(
-                f"CASE WHEN {self.is_json_null(item)} THEN '~' ELSE {item_key} END", f"{alias}.item_no"
+                f"CASE WHEN {self.is_json_null(item)} THEN '~' ELSE {item_key} END", self.item_no(alias)
             )
             return f"(SELECT COALESCE({joined}, '') || '!' FROM {self.temporal_elements(of, alias)})"
 
@@ -1023,9 +1173,9 @@ class SqlCypherCompiler(ABC):
         `c.name + 1` compiles as it did before floats were so written. NaN and the infinities count as given neither
         way: Postgres binds them as texts, so a number may be added to one as text.
         """
-        if _is_given_number(given):
+        if is_given_number(given):
             return literal(java_text(given))
-        if isinstance(given, str) or given is MADE_TEXT or _is_given_number(other):
+        if isinstance(given, str) or given is MADE_TEXT or is_given_number(other):
             return plain(json)
         return written(json)
 
@@ -1121,6 +1271,14 @@ class SqlCypherCompiler(ABC):
     @abstractmethod
     def id_rows(self, list_: str, alias: str) -> str:
         """The ids of the list as rows named `alias`, with columns `id` and `ord`, in its order."""
+
+    def row_id(self, alias: str) -> str:
+        """The id of the row named `alias` that `id_rows` gives."""
+        return f"{alias}.id"
+
+    def row_ord(self, alias: str) -> str:
+        """The place in its list, counted from 1, of the row named `alias` that `id_rows` gives."""
+        return f"{alias}.ord"
 
     walks_read_row = True
     """
@@ -1268,25 +1426,62 @@ class SqlCypherCompiler(ABC):
     @cached_property
     def temporals(self) -> Temporals:
         """openCypher's temporal values: see Temporals."""
-        return Temporals(self.temporal_sql, self.shared)
+        return Temporals(self.temporal_sql, self.shared, lambda: self._sharing)
 
     # ----- A store's procedure, for a statement that writes -----
 
     @abstractmethod
-    def procedure(self, body: list[str], parameters: dict[str, Any]) -> CompiledCypher:
+    def procedure(self, program: Sequence[ProcedureStep], parameters: dict[str, Any]) -> CompiledCypher:
         """
-        The statement that runs the procedure whose statements are `body`, each ending in `;`, and gives the rows it
-        returns, of one column (see `return_rows`), with the parameters it binds. The procedure declares the variables
-        this module names (PARAMS, ROWS …) and sets PARAMS from the object bound at parameters.OBJECT.
+        The statement that runs the procedure whose steps are `program`, and gives the rows it returns, of one column,
+        with the parameters it binds. Its variables are those this module names (PARAMS, ROWS …), PARAMS the object
+        bound at parameters.OBJECT. A store with a procedural language writes the steps in it: see `statements`.
         """
 
-    @abstractmethod
+    def statements(self, program: Sequence[ProcedureStep], depth: int = 0) -> list[str]:
+        """
+        The steps `program` as the statements of a procedural language, each ending in `;`, indented by how deep in
+        loops and conditions it is, from `depth`: a loop over a query's rows is `FOR … IN (…) LOOP`, a value set into a
+        variable `SELECT … INTO …` or `… := …`, and the rows returned and a failure the store's own, `return_rows` and
+        `raise_`.
+        """
+        prefix = "    " * depth
+
+        def line(text: str) -> str:
+            return "\n".join(prefix + it for it in text.split("\n")) if prefix else text
+
+        lines: list[str] = []
+        for step in program:
+            if isinstance(step, steps.Select):
+                lines.append(line(f"{self.planned(f'SELECT {step.expression} INTO {step.variable}{step.from_}')};"))
+            elif isinstance(step, steps.Let):
+                lines.append(line(f"{step.variable} := {step.expression};"))
+            elif isinstance(step, steps.Loop):
+                query = self.planned(step.query)
+                head = (
+                    f"FOR {step.record} IN (\n{indent(query)}\n) LOOP"
+                    if step.multiline
+                    else f"FOR {step.record} IN ({query}) LOOP"
+                )
+                lines += [line(head), *self.statements(step.body, depth + 1), line("END LOOP;")]
+            elif isinstance(step, steps.If):
+                lines += [line(f"IF {step.condition} THEN"), *self.statements(step.body, depth + 1), line("END IF;")]
+            elif isinstance(step, steps.Raise):
+                lines.append(line(self.raise_(step.message)))
+            elif isinstance(step, steps.Execute):
+                lines.append(line(f"{step.statement}{f' INTO {step.into}' if step.into is not None else ''};"))
+            else:
+                lines += [line(it) for it in self.return_rows(self.planned(step.query))]
+        return lines
+
     def return_rows(self, query: str) -> list[str]:
-        """The statements that return the rows of the query, whose one column is `result`."""
+        """The statements of a procedural language that return the rows of the query, whose one column is `result`:
+        see `statements`."""
+        raise NotImplementedError("This store writes its procedure in no procedural language.")
 
-    @abstractmethod
     def raise_(self, message: str) -> str:
-        """The statement that fails the procedure with the message."""
+        """The statement of a procedural language that fails the procedure with the message: see `statements`."""
+        raise NotImplementedError("This store writes its procedure in no procedural language.")
 
     @abstractmethod
     def failure(self, message: str, value: str) -> str:
@@ -1329,10 +1524,9 @@ class SqlCypherCompiler(ABC):
     def _begin(self, parameters: Parameters) -> None:
         self._parameters = parameters
         self._counter = 0
-        self._body: list[str] = []
-        """The procedure's statements, in order."""
-        self._depth = 0
-        """How deep in loops and conditions the next statement is, for its indent."""
+        self._blocks: list[list[ProcedureStep]] = [[]]
+        """The procedure's steps, in order: the steps of each loop and condition being written within it, innermost
+        last."""
         self._kinds: dict[str, _Kind] = {}
         """The variables a row holds, and what each is: what ROWS and ROW carry from clause to clause."""
         self._carried: dict[str, Json] = {}
@@ -1353,6 +1547,12 @@ class SqlCypherCompiler(ABC):
         The order of the rows the projection being compiled reads, which `collect` gathers them in, as Cypher gathers
         them: a group's rows are not read in the order of the query they come from.
         """
+        self._distinct_parts = False
+        """
+        Whether the query compiled is a part of a `UNION` without ALL, whose rows are compared as a whole: there a value
+        that may be JSON's null (Json.json_null) is given as SQL's, as Cypher has one null (#314). Set only for the work
+        `_comparing_parts` does, so an exception leaves it as it was.
+        """
         self._stepping = False
         """Whether a quantified path pattern's conditions are being compiled: what they hold is in its walk's step."""
         self._filtering = False
@@ -1360,10 +1560,50 @@ class SqlCypherCompiler(ABC):
         self._filtered = False
         """Whether the expression `_value_of` has begun is read by a `WHERE` for its truth alone, as `_filtering` said
         as it began."""
+        self._made_anew: set[str] = set()
+        """
+        The variables made here for a randomUUID() made first, for each row: no variable of the statement's, though one
+        may be quoted as named alike: see `_anew_variable`.
+        """
+        self._queries: list[Query] = []
+        """The queries given to compile (`_give`), whose names `_anew_variable` keeps clear of, not yet in
+        `_query_texts`."""
+        self._query_texts: set[str] = set()
+        """Each text of the queries given to compile, as far as its first space, gathered when `_anew_variable` needs
+        it."""
 
     def _alias(self, prefix: str) -> str:
         self._counter += 1
         return f"{prefix}{self._counter}"
+
+    def _give(self, query: Query) -> None:
+        """
+        Holds the query among the `_queries`: the statement's whole, before any query of it is compiled, so a name made
+        in one query of a `UNION` is named as no later one's variable is.
+        """
+        self._queries.append(query)
+
+    def _anew_variable(self) -> str:
+        """
+        A variable of `_made_anew`'s, new: named as no variable of the statement's is, nor begins, so one quoted alike,
+        `` `#anew2` `` or `` `#anew2 row` ``, is not taken for it, hidden from a star or read as its UUID.
+        """
+        name = self._hidden(ANEW)
+        self._made_anew.add(name)
+        return name
+
+    def _hidden(self, prefix: str) -> str:
+        """
+        A name new to the statement, `prefix` and a number: named as no text of the queries given to compile is, nor
+        begins, so a variable quoted alike, `` `#having2` ``, stays the statement's.
+        """
+        for query in self._queries:
+            _texts_in(query, self._query_texts)
+        self._queries.clear()
+        name = self._alias(prefix)
+        while name in self._query_texts:
+            name = self._alias(prefix)
+        return name
 
     def _query(self, query: Query) -> str:
         select = _Select({})
@@ -1378,67 +1618,231 @@ class SqlCypherCompiler(ABC):
     def _read(self, select: _Select, clause: Clause, outer: Scope | None = None) -> _Select:
         """
         A reading clause over the rows the select reads, and the rows the clauses after it read: a `WITH` is a query of
-        its own. `outer` is what a subquery reads from the row it is in.
+        its own. `outer` is what a subquery reads from the row it is in. A `WITH *` alone where nothing is bound passes
+        on nothing, as Neo4j has it, and is left out: SQL has no query of no column (#304). Its `WHERE` is met on the
+        rows it reads, which hold what that reads; with `DISTINCT`, an order, `SKIP` or `LIMIT` it is refused, as it
+        was.
         """
         if isinstance(clause, Match):
-            self._match(select, clause)
-            return select
+            return self._match(select, clause)
         if isinstance(clause, Unwind):
-            self._unwind(select, clause)
-            return select
+            made = self._anew_before(select, [clause.list], whole=True)
+            rows, (listed,) = made if made is not None else (select, [clause.list])
+            self._unwind(rows, dataclasses.replace(clause, list=listed))
+            return rows
         if isinstance(clause, With):
+            if (
+                clause.projection.star
+                and not clause.projection.items
+                and plain_with(dataclasses.replace(clause, where=None))
+                and all(it in self._made_anew for it in select.bound)
+            ):
+                return self._filtered_rows(select, clause.where) if clause.where is not None else select
             return self._with(select, clause, outer or {})
         if isinstance(clause, Call):
-            self._call(select, clause)
-            return select
+            return self._anew_call(select, clause)
         raise DrivineError(f"{type(clause).__name__} reads nothing")
 
     def _with(self, select: _Select, with_: With, outer: Scope | None = None, apart: bool = False) -> _Select:
         """A `WITH`: a query of its own, which the rest of the statement reads from, as it reads `outer`."""
+        read, hidden = self._having(with_)
+        next_ = self._with_having(select, read, outer, apart)
+        for it in hidden:
+            next_.bound.pop(it, None)
+        return next_
+
+    def _having(self, with_: With) -> tuple[With, list[str]]:
+        """
+        A `WITH` that groups its rows, as one that aggregates or is `DISTINCT` does, read as Neo4j reads its `WHERE`,
+        which filters the groups, as SQL's HAVING does (#313), and the names of the items made for it. Each aggregate
+        the `WHERE` holds, outside a comprehension's or a quantifier's own expressions, is made an item of the `WITH`,
+        of its own where no item is that aggregate, named as no variable is, and the `WHERE` reads that item. A key the
+        `WITH` groups by, written there as the item is, before its name, is read as that item, as in `WITH i AS j,
+        count(*) AS c WHERE i > 1`; a variable an item is named after is that item, in a larger expression too. Keys and
+        aggregates are compared as grouping compares them (`_grouping_key`): `TOUPPER(x)` is the key `toUpper(x)`. The
+        items made are no variables of the statement's: the `WITH` is read, then they are left out of what it binds.
+        The `WITH` as it is where it groups nothing, or has no `WHERE`. As drivine4j's.
+        """
+        where = with_.where
+        items = with_.projection.items
+        if where is None or (
+            not with_.projection.distinct and not any(contains(it.expression, is_aggregate) for it in items)
+        ):
+            return with_, []
+        names = {it.name for it in items}
+        keys = {
+            _grouping_key(it.expression): it.name
+            for it in items
+            if not contains(it.expression, is_aggregate) and variables_in(it.expression)
+        }
+        # An aggregate an item is already is read by that item's name.
+        aggregates = {_grouping_key(it.expression): it.name for it in items if is_aggregate(it.expression)}
+        lifted: dict[Expression, ProjectionItem] = {}
+
+        def read(part: Expression) -> Expression | None:
+            key = _grouping_key(part)
+            if is_aggregate(part):
+                name = aggregates.get(key)
+                if name is None:
+                    if key not in lifted:
+                        # Named as no text of the statement's is, so an item quoted alike stays the statement's.
+                        lifted[key] = ProjectionItem(part, self._hidden(HAVING))
+                    name = lifted[key].name
+                return Variable(name)
+            # `WITH i + 10 AS i … WHERE i + 10 > 20` reads the item i, as Neo4j does: no key is read where an item is
+            # named.
+            if any(it in names for it in variables_in(part)):
+                return part if isinstance(part, Variable) else None
+            name = keys.get(key)
+            return Variable(name) if name is not None else None
+
+        condition = replaced(where, read)
+        if condition == where:
+            return with_, []
+        made = list(lifted.values())
+        projection = dataclasses.replace(with_.projection, items=(*items, *made))
+        return dataclasses.replace(with_, projection=projection, where=condition), [it.name for it in made]
+
+    def _with_having(self, select: _Select, with_: With, outer: Scope | None = None, apart: bool = False) -> _Select:
+        """A `WITH` `_having` has read: see `_with`."""
         projected = self._project(select, with_.projection, final=False)
         name = self._alias("w")
         next_ = _Select(outer or {})
         next_.walks = select.walks
         # A value made anew for each row is one value however often the clauses after read it: see `once`. Kept apart
         # from the query that reads it, where that query must not have it merged in: see `_cases_first`.
-        anew = any(contains(it.expression, is_anew) for it in with_.projection.items)
+        anew = any(holds_anew(it.expression) for it in with_.projection.items)
         sql = self.once(projected.sql) if anew else projected.sql
         next_.source(f"(\n{indent(self.called(sql) if apart else sql)}\n) {name}")
         for variable, value in projected.scope.items():
             next_.bind(variable, _columns_of(value, name))
         for column, descending in projected.order:
             next_.order.append((f"{name}.{column}", descending))
-        if with_.where is not None:
-            next_.where.append(self._condition(with_.where, next_.scope))
-        return next_
+        return self._filtered_rows(next_, with_.where) if with_.where is not None else next_
 
-    def _match(self, select: _Select, match: Match) -> None:
+    def _filtered_rows(
+        self, select: _Select, where: Expression, anew: Callable[[Expression], bool] | None = None
+    ) -> _Select:
+        """
+        The rows the select reads kept where `where` holds; each randomUUID() it reads (`anew` tells one, `is_anew`
+        where not given) made first, for each row, as `_anew_before` makes it, then the condition over those rows.
+        """
+        made = self._anew_before(select, [where], whole=True, anew=anew)
+        rows, (read,) = made if made is not None else (select, [where])
+        rows.where.append(self._condition(read, rows.scope))
+        return rows
+
+    def _seeded_rows(self, select: _Select) -> tuple[_Select, str]:
+        """
+        The rows the select reads with a UUID made for each, in a `WITH *` of its own, and its variable's name, which is
+        no variable of the statement's: see `_project`.
+        """
+        seed = self._anew_variable()
+        made = Projection(False, True, (ProjectionItem(RANDOM_UUID, seed),), (), None, None)
+        return self._with(select, With(made, None), self._around(select), apart=True), seed
+
+    @staticmethod
+    def _around(select: _Select) -> dict[str, Value]:
+        """What the select reads from around it: the variables of its scope it does not bind itself."""
+        return {variable: value for variable, value in select.scope.items() if variable not in select.bound}
+
+    def _anew_call(self, select: _Select, call: Call) -> _Select:
+        """
+        A `CALL { … }` over the rows the select reads; one whose query holds a randomUUID() (`query_holds_anew`) first
+        given a UUID made for each row, in a `WITH *` of its own, which its query unwinds before its own clauses. A
+        query that reads nothing of the row it is joined to is worked out once for the statement, by each store, and
+        every row was given the same UUID (drivine4j#412): so it reads the row. That UUID, and the variable its query
+        unwinds it to, are no variables of the statement's: see `_project`, and `_called_scope`, which carries them into
+        the query whatever it imports.
+        """
+        if not query_holds_anew(call.query):
+            self._call(select, call)
+            return select
+        rows, seed = self._seeded_rows(select)
+        row = f"{seed} row"
+        self._made_anew.add(row)
+
+        def read(clauses: Sequence[Clause]) -> tuple[Clause, ...]:
+            return (Unwind(ListLiteral((Variable(seed),)), row), *clauses)
+
+        query = dataclasses.replace(
+            call.query,
+            clauses=read(call.query.clauses),
+            unions=tuple(dataclasses.replace(it, clauses=read(it.clauses)) for it in call.query.unions),
+        )
+        self._call(rows, dataclasses.replace(call, query=query))
+        return rows
+
+    def _match(self, select: _Select, match: Match) -> _Select:
+        """
+        A `MATCH` over the rows the select reads. Each randomUUID() its condition reads is made for each row it finds,
+        first (`_filtered_rows`). An `OPTIONAL MATCH` finds its rows in a lateral query, which reads nothing of the row
+        where its pattern does not: Oracle worked it out once for the statement, and kept every row's match or none
+        (drivine4j#412). There each is read beside a UUID made first for the row (`_seeded_rows`, `seeded`), so the
+        lateral query reads the row, then made for each row it finds. A shortest path's condition is met where its
+        paths are found, in a lateral query too, which Postgres worked out once where each row joins the same two
+        nodes: each is read beside the row's UUID there as well, and made in the condition.
+        """
         # A shortest path is the shortest of the paths that meet the WHERE, as Cypher finds it: the WHERE is met where
         # they are found.
         shortest_where = match.where if match.patterns[-1].shortest is not None else None
         where = match.where if shortest_where is None else None
+        seeded_first = (
+            match.where is not None and holds_anew(match.where) and (match.optional or shortest_where is not None)
+        )
+        row, seed = self._seeded_rows(select) if seeded_first else (select, None)
+        met_by_paths = (
+            seeded(shortest_where, seed, self._made_anew, True)
+            if shortest_where is not None and seed is not None
+            else shortest_where
+        )
         if not match.optional:
-            self._patterns(select, match.patterns, shortest_where)
-            if where is not None:
-                select.where.append(self._condition(where, select.scope))
-            return
-        # What is found is read by a lateral query, joined to keep the row when it finds nothing.
-        inner = _Select(select.scope)
-        self._patterns(inner, match.patterns, shortest_where)
+            self._patterns(row, match.patterns, met_by_paths)
+            return self._filtered_rows(row, where) if where is not None else row
+        return self._optional_match(row, match.patterns, met_by_paths, where, seed)
+
+    def _optional_match(
+        self,
+        row: _Select,
+        patterns: Sequence[Pattern],
+        met_by_paths: Expression | None,
+        where: Expression | None,
+        seed: str | None,
+    ) -> _Select:
+        """
+        An `OPTIONAL MATCH` of the patterns over the rows `row` reads, those of a shortest path's meeting `met_by_paths`
+        and all of them `where`: what it finds read by a lateral query, joined to keep the row when it finds nothing.
+        With `seed`, the variable of a UUID made first for each row, each randomUUID() of `where` is read beside it.
+        """
+        inner = _Select(row.scope)
+        self._patterns(inner, patterns, met_by_paths)
         if where is not None:
-            inner.where.append(self._condition(where, inner.scope))
-        scope = select.scope
-        found = {variable: value for variable, value in inner.bound.items() if variable not in scope}
+            if seed is None:
+                inner = self._filtered_rows(inner, where)
+            else:
+                inner = self._filtered_rows(
+                    inner, seeded(where, seed, self._made_anew, True), lambda it: is_seeded(it, self._made_anew)
+                )
+        scope = row.scope
+        found = {
+            variable: value
+            for variable, value in inner.bound.items()
+            if variable not in scope and variable not in self._made_anew
+        }
         if not found and not inner.sources:
-            return
+            return row
         name = self._alias("o")
         # Each variable found under a name of its own: a variable may be called what SQL will not take.
         named = [(variable, value, self._alias("v")) for variable, value in found.items()]
         columns = [it for _, value, column in named for it in _columns(value, column, self._identities)] or ["1 AS one"]
+        kinds = [it for _, value, column in named for it in _column_kinds(value, column, self._identities)] or [
+            ("one", False)
+        ]
         text = [f"SELECT {', '.join(columns)}", *inner.from_(), *_present(inner.where_clause())]
-        select.join(self.lateral("\n".join(text), name, optional=True))
+        row.join(self.lateral("\n".join(text), name, True, kinds))
         for variable, value, column in named:
-            select.bind(variable, _columns_of(value, name, column, self._identities))
+            row.bind(variable, self._laterally(_columns_of(value, PENDING, column, self._identities), name, kinds))
+        return row
 
     def _correlated(self, query: Query, scope: Scope, what: str) -> str:
         """
@@ -1452,14 +1856,18 @@ class SqlCypherCompiler(ABC):
             if query.unions:
                 # Each query's rows as one value each, as a statement's are; without ALL, each once.
                 distinct = not query.unions[0].all
-                parts: list[str] = []
-                for clauses in [query.clauses, *(it.clauses for it in query.unions)]:
+
+                def part(clauses: Sequence[Clause]) -> str:
                     select = _Select(scope)
                     for clause in clauses[:-1]:
                         select = self._read(select, clause, scope)
                     sql = self._project(select, _returned(clauses).projection, final=True).sql
                     result = self.comparable(Json("q.result", ordered=True)) if distinct else "q.result"
-                    parts.append(f"SELECT {result} AS result FROM (\n{indent(sql)}\n) q")
+                    return f"SELECT {result} AS result FROM (\n{indent(sql)}\n) q"
+
+                parts = self._comparing_parts(
+                    distinct, lambda: [part(it) for it in [query.clauses, *(u.clauses for u in query.unions)]]
+                )
                 return ("\nUNION\n" if distinct else "\nUNION ALL\n").join(parts)
             select = _Select(scope)
             for clause in query.clauses:
@@ -1478,37 +1886,44 @@ class SqlCypherCompiler(ABC):
             unsupported("A write in CALL { … }")
         order = self._row_order
         if not call.query.unions:
-            projected = self._called_part(select, call.query.clauses, None, distinct=False)
+            projected = self._called_part(select, call, call.query.clauses, None, distinct=False)
         else:
-            projected = self._called_union(select, call.query)
+            projected = self._called_union(select, call)
         self._row_order = order
         _redeclared(projected.scope, select.bound)
         name = self._alias("c")
-        select.join(self.lateral(self.called(projected.sql), name, call.optional))
+        select.join(self.lateral(self.called(projected.sql), name, call.optional, projected.columns))
         for variable, value in projected.scope.items():
-            if call.optional and isinstance(value, Json):
+            returned = self._laterally(value, name, projected.columns)
+            if call.optional and isinstance(returned, Json):
                 # A value taken from a write's row is null here where the call finds nothing: it is read as returned.
-                value = dataclasses.replace(value, row_keys=None)
-            select.bind(variable, _columns_of(value, name))
+                returned = dataclasses.replace(returned, row_keys=None)
+            select.bind(variable, returned)
         for column, descending in projected.order:
-            select.order.append((f"{name}.{column}", descending))
+            select.order.append((self.lateral_column(name, column, False), descending))
 
     def _called_part(
-        self, select: _Select, clauses: Sequence[Clause], names: list[str] | None, distinct: bool
+        self, select: _Select, call: Call, clauses: Sequence[Clause], names: list[str] | None, distinct: bool
     ) -> _Projected:
         """
-        One query of a `CALL { … }`, for the row the select reads: its returned items in the order `names` lists them,
-        where a `UNION` names them so, and kept distinct with `distinct`.
+        One query of the call, `clauses`, for the row the select reads: its returned items in the order `names` lists
+        them, where a `UNION` names them so, and kept distinct with `distinct`. It sees only the variables of the row it
+        imports (`_called_scope`): any other name in it is a new variable, as in Cypher (#294). What its brackets
+        import it sees throughout, after a `WITH` that does not pass it on too, as Neo4j has it; what a leading `WITH`
+        imports is gone after one. A leading `WITH *` passes on what it imports (`_starred_imports`).
         """
-        inner = _Select(select.scope)
-        apart = self._imports_apart(select.scope, clauses)
+        imported = self._called_scope(call, clauses, select.scope)
+        inner = _Select(imported)
+        apart = self._imports_apart(imported, clauses)
         if apart is not None:
-            source, imports = apart
+            source, values = apart
             inner.source(source)
-            for variable, value in imports.items():
+            for variable, value in values.items():
                 inner.bind(variable, value)
-        for clause in clauses[:-1]:
-            inner = self._read(inner, clause, select.scope)
+        outer: Scope = imported if bracketed(call) else {}
+        reading = clauses[:-1] if bracketed(call) else self._starred_imports(clauses[:-1], list(imported))
+        for clause in reading:
+            inner = self._read(inner, clause, outer)
         projection = _returned(clauses).projection
         if names is not None:
             items = tuple(next(it for it in projection.items if it.name == name) for name in names)
@@ -1517,6 +1932,47 @@ class SqlCypherCompiler(ABC):
         return self._project(
             inner, dataclasses.replace(projection, items=items, distinct=distinct or projection.distinct), final=False
         )
+
+    def _starred_imports(self, clauses: Sequence[Clause], imports: list[str]) -> Sequence[Clause]:
+        """
+        The reading `clauses` of a `CALL { … }` without brackets, its leading `WITH *` naming each variable it `imports`
+        in place of its star (#304): those are no variables its query binds, so the star gave none of them, and was
+        refused where nothing else was bound. Not one the compiler made (see `_anew_call`), which the statement never
+        named. Where it imports none, the `WITH` is as it was, and passes on nothing (`_read`). With brackets, Neo4j's
+        star gives none of what they import, which the query sees throughout anyway, so their clauses are as they were.
+        """
+        leading = next(
+            (i for i, it in enumerate(clauses) if not (isinstance(it, Unwind) and it.variable in self._made_anew)),
+            None,
+        )
+        clause = clauses[leading] if leading is not None else None
+        named = sorted(it for it in imports if it not in self._made_anew)
+        if leading is None or not isinstance(clause, With) or not clause.projection.star or not named:
+            return clauses
+        items = tuple(
+            ProjectionItem(Variable(name), name)
+            for name in named
+            if not any(it.name == name for it in clause.projection.items)
+        )
+        projection = dataclasses.replace(clause.projection, star=False, items=items + clause.projection.items)
+        return [*clauses[:leading], dataclasses.replace(clause, projection=projection), *clauses[leading + 1 :]]
+
+    def _called_scope(self, call: Call, clauses: Sequence[Clause], scope: Scope) -> dict[str, Value]:
+        """
+        The variables of the row, `scope`, that the query `clauses` of the call sees: those it imports (`imports`), and
+        each the compiler made for it, whatever it imports. Those are no variables of the statement's: the UUID made for
+        each row that `_anew_call` unwinds before the clauses, so a query holding a randomUUID() reads the row
+        (drivine4j#412). Imports are read from the clauses after that `UNWIND`, as the statement wrote them, so a
+        leading `WITH` imports still.
+        """
+        first = next(
+            (i for i, it in enumerate(clauses) if not (isinstance(it, Unwind) and it.variable in self._made_anew)),
+            len(clauses),
+        )
+        imported = imports(call, clauses[first:], [it for it in scope if it not in self._made_anew])
+        return {
+            variable: value for variable, value in scope.items() if variable in imported or variable in self._made_anew
+        }
 
     def _imports_apart(self, scope: Scope, clauses: Sequence[Clause]) -> tuple[str, dict[str, Value]] | None:
         """
@@ -1555,9 +2011,20 @@ class SqlCypherCompiler(ABC):
         imports = {variable: _columns_of(value, name, column, self._identities) for variable, value, column in named}
         return f"({self.bound_select(', '.join(columns))}) {name}", imports
 
-    def _called_union(self, select: _Select, query: Query) -> _Projected:
+    def _comparing_parts(self, distinct: bool, work: Callable[[], T]) -> T:
+        """The work, its parts of a `UNION` compared as a whole where `distinct` (`_distinct_parts`), as it was
+        after."""
+        was = self._distinct_parts
+        self._distinct_parts = distinct
+        try:
+            return work()
+        finally:
+            self._distinct_parts = was
+
+    def _called_union(self, select: _Select, call: Call) -> _Projected:
         """A `UNION` in a `CALL { … }`: each query's rows, the same items of the same kinds, matched by name as Cypher
         matches them."""
+        query = call.query
         parts = [query.clauses, *(it.clauses for it in query.unions)]
         if len({it.all for it in query.unions}) > 1:
             raise DrivineError("UNION and UNION ALL are not mixed in one statement, as in Cypher.")
@@ -1568,7 +2035,9 @@ class SqlCypherCompiler(ABC):
         if any({item.name for item in it.projection.items} != set(names) for it in returns):
             raise DrivineError("Each query of a UNION returns the same names, as in Cypher.")
         distinct = not query.unions[0].all
-        projected = [self._called_part(select, it, names, distinct) for it in parts]
+        projected = self._comparing_parts(
+            distinct, lambda: [self._called_part(select, call, it, names, distinct) for it in parts]
+        )
         kinds = {tuple(type(value) for value in it.scope.values()) for it in projected}
         if len(kinds) > 1:
             unsupported("A UNION in CALL { … } whose queries return values of different kinds")
@@ -1583,7 +2052,9 @@ class SqlCypherCompiler(ABC):
             was = self._identities
             self._identities = False
             try:
-                projected = [self._called_part(select, it, names, distinct) for it in parts]
+                projected = self._comparing_parts(
+                    distinct, lambda: [self._called_part(select, call, it, names, distinct) for it in parts]
+                )
             finally:
                 self._identities = was
         sql = ("\nUNION\n" if distinct else "\nUNION ALL\n").join(
@@ -1592,7 +2063,10 @@ class SqlCypherCompiler(ABC):
         # A value is of a temporal kind where each query makes it of that one, and a text, or a list of texts, where
         # each makes it one. It is at keys of a write's row (`row_keys`) only where each query takes it from those: a
         # property of it is read from the row there, which would read the first query's value for every query's rows.
-        # It is read from an unwound item (`from_list`) only where each query reads it from one.
+        # It is read from an unwound item (`from_list`) only where each query reads it from one. It may be JSON's null
+        # (`json_null`) where any query's may be, so that what reads it after compares that null and SQL's as one
+        # (#321). It is a list (`list`) only where each query makes it one, so that an order sorts the others' numbers
+        # and maps by their kinds, not as lists; and it holds no null (`flat`) only where each query's holds none.
         scope: dict[str, Value] = {}
         for variable, value in projected[0].scope.items():
             if not isinstance(value, Json):
@@ -1603,6 +2077,7 @@ class SqlCypherCompiler(ABC):
             items = {it.items if isinstance(it, Json) else None for it in all_}
             item_items = {it.item_items if isinstance(it, Json) else None for it in all_}
             row_keys = {it.row_keys if isinstance(it, Json) else None for it in all_}
+            known = {it.known if isinstance(it, Json) else None for it in all_}
             scope[variable] = dataclasses.replace(
                 value,
                 row_keys=next(iter(row_keys)) if len(row_keys) == 1 else None,
@@ -1613,8 +2088,14 @@ class SqlCypherCompiler(ABC):
                 temporals=any(isinstance(it, Json) and it.temporals for it in all_),
                 text=all(_is_text(it) for it in all_),
                 texts=all(_holds_texts(it) for it in all_),
+                # Its kind is known only where each query writes it as a value of that one.
+                known=next(iter(known)) if len(known) == 1 else None,
+                json_null=any(_may_be_json_null(it) for it in all_),
+                list=all(_is_list(it) for it in all_),
+                item_lists=all(_holds_lists(it) for it in all_),
+                flat=all(isinstance(it, Json) and it.flat for it in all_),
             )
-        return _Projected(sql, scope, [])
+        return _Projected(sql, scope, [], projected[0].columns)
 
     def _unwind(self, select: _Select, unwind: Unwind) -> None:
         listed = self._expression(unwind.list, select.scope)
@@ -1625,12 +2106,12 @@ class SqlCypherCompiler(ABC):
             select.source(self.elements(listed.ids, name))
             row = self._alias("e" if listed.relationships else "n")
             if listed.relationships:
-                select.join(f"LEFT JOIN {self.edges} {row} ON {row}.eid = {self.id_of(f'{name}.item', None)}")
+                select.join(f"LEFT JOIN {self.edges} {row} ON {row}.eid = {self.id_of(self.item(name), None)}")
                 select.bind(unwind.variable, _relationship(row))
             else:
-                select.join(f"LEFT JOIN {self.nodes} {row} ON {row}.nid = {self.id_of(f'{name}.item', None)}")
+                select.join(f"LEFT JOIN {self.nodes} {row} ON {row}.nid = {self.id_of(self.item(name), None)}")
                 select.bind(unwind.variable, _node(row))
-            select.order.append((f"{name}.item_no", False))
+            select.order.append((self.item_no(name), False))
             return
 
         # A value that is no list is one row, and null no rows, as in Cypher.
@@ -1640,11 +2121,12 @@ class SqlCypherCompiler(ABC):
 
         items = self.shared1(self.comparable(self.json(listed)), items_of)
         select.source(self._elements_of(listed, items, name))
-        # An item of a list of texts, or of a text, is a text; an item of a list that holds no null holds none.
+        # An item of a list of texts, or of a text, is a text; an item of a list that holds no null holds none, nor is
+        # JSON's null.
         select.bind(
             unwind.variable,
             Json(
-                f"{name}.item",
+                self.item(name),
                 temporal=_items_of(listed),
                 items=_item_items_of(listed),
                 temporals=_item_temporals_of(listed),
@@ -1652,9 +2134,10 @@ class SqlCypherCompiler(ABC):
                 text=_holds_texts(listed) or _is_text(listed),
                 flat=self._is_flat(listed),
                 from_list=True,
+                json_null=not self._is_flat(listed),
             ),
         )
-        select.order.append((f"{name}.item_no", False))
+        select.order.append((self.item_no(name), False))
 
     def _distinct(self, a: _Hop, b: _Hop) -> str:
         """That no relationship of the hop `a` is one of `b`'s."""
@@ -1814,6 +2297,12 @@ class SqlCypherCompiler(ABC):
             f"{from_} AS from_nid",
             f"{to} AS to_nid",
         ]
+        kinds = [
+            *(it for _, value, column in found for it in _column_kinds(value, column, self._identities)),
+            ("len", False),
+            ("from_nid", False),
+            ("to_nid", False),
+        ]
         paths = "\n".join([f"SELECT {', '.join(columns)}", *inner.from_(), *_present(inner.where_clause())])
         name = self._alias("sp")
         s = self._alias("s")
@@ -1830,9 +2319,9 @@ class SqlCypherCompiler(ABC):
                 f"FROM (\n{indent(paths)}\n) {s}"
             )
             text = f"SELECT * FROM (\n{indent(least)}\n) {self._alias('s')}\nWHERE len = least"
-        select.join(self.lateral(text, name, optional=False))
+        select.join(self.lateral(text, name, False, kinds))
         for variable, value, column in found:
-            select.bind(variable, _columns_of(value, name, column, self._identities))
+            select.bind(variable, self._laterally(_columns_of(value, PENDING, column, self._identities), name, kinds))
 
     def _types(self, type_: str, types: Sequence[str]) -> str | None:
         """That the relationship type is one of the types; None when any will do."""
@@ -2041,7 +2530,10 @@ class SqlCypherCompiler(ABC):
         u = self._alias("u")
         v = self._alias("v")
         listed = self.comparable(Json(self.aggregate_list(self.scalar(f"{v}.id"), f"{v}.ord"), ordered=True))
-        counted = f"SELECT {u}.id, {u}.ord, COUNT(*) OVER () AS cnt FROM {self.id_rows(list_, u)}"
+        counted = (
+            f"SELECT {named(self.row_id(u), 'id')}, {named(self.row_ord(u), 'ord')}, COUNT(*) OVER () AS cnt "
+            f"FROM {self.id_rows(list_, u)}"
+        )
         return (
             f"(SELECT {listed} FROM ({counted}) {v} "
             f"WHERE {v}.ord > {first} AND MOD({v}.ord - {first + 1}, {stride}) = 0 AND {v}.ord <= {v}.cnt - {leave})"
@@ -2069,7 +2561,7 @@ class SqlCypherCompiler(ABC):
     def _id_list(self, list_: str) -> str:
         """The store's list of ids as a JSON list of them, in its order: null where the list is."""
         u = self._alias("u")
-        listed = self.comparable(Json(self.aggregate_list(self.scalar(f"{u}.id"), f"{u}.ord"), ordered=True))
+        listed = self.comparable(Json(self.aggregate_list(self.scalar(self.row_id(u)), self.row_ord(u)), ordered=True))
         return f"CASE WHEN {list_} IS NOT NULL THEN (SELECT {listed} FROM {self.id_rows(list_, u)}) END"
 
     def _entities_json(self, entities: Entities) -> str:
@@ -2086,9 +2578,9 @@ class SqlCypherCompiler(ABC):
             else:
                 table, value, id_ = self.nodes, self.json(_node(row)).sql, "nid"
             return (
-                f"CASE WHEN {ids} IS NOT NULL THEN (SELECT {self.aggregate_list(value, f'{u}.item_no')} "
+                f"CASE WHEN {ids} IS NOT NULL THEN (SELECT {self.aggregate_list(value, self.item_no(u))} "
                 f"FROM {self.elements(ids, u)} LEFT JOIN {table} {row} "
-                f"ON {row}.{id_} = {self.id_of(f'{u}.item', None)}) END"
+                f"ON {row}.{id_} = {self.id_of(self.item(u), None)}) END"
             )
 
         return self.shared1(entities.ids, listed)
@@ -2107,19 +2599,16 @@ class SqlCypherCompiler(ABC):
 
     # ----- A statement that writes -----
 
-    def _procedure(self, query: Query) -> list[str]:
-        """The statements of the procedure the query is: its reads, a loop over its rows for each write, and what it
+    def _procedure(self, query: Query) -> list[ProcedureStep]:
+        """The steps of the procedure the query is: its reads, a loop over its rows for each write, and what it
         returns."""
         select = _Select({})
         for clause in _creates(query.clauses):
             if isinstance(clause, Return):
-                for statement in self.return_rows(
-                    self.planned(self._project(select, clause.projection, final=True).sql)
-                ):
-                    self._emit(statement)
+                self._step(steps.Return(self._project(select, clause.projection, final=True).sql))
             else:
                 select = self._next(select, clause)
-        return self._body
+        return _single(self._blocks)
 
     def _next(self, select: _Select, clause: Clause) -> _Select:
         """The clause over the rows the select reads, written for them where it writes: the rows the clauses after it
@@ -2135,20 +2624,31 @@ class SqlCypherCompiler(ABC):
             self._write(clause)
         return self._rows()
 
-    def _emit(self, statement: str) -> None:
-        prefix = "    " * self._depth
-        self._body.append("\n".join(prefix + line for line in statement.split("\n")) if prefix else statement)
+    def _step(self, step: ProcedureStep) -> None:
+        self._blocks[-1].append(step)
+
+    def _block(self, body: Callable[[], None]) -> list[ProcedureStep]:
+        """The steps the body writes, as the body of a loop or a condition."""
+        self._blocks.append([])
+        body()
+        return self._blocks.pop()
+
+    def _loop(self, record: str, query: str, body: Callable[[], None], multiline: bool = False) -> None:
+        """The body for each row of the query, whose `item` is `record`.item: see procedure_step.Loop."""
+        self._step(steps.Loop(record, query, multiline, self._block(body)))
+
+    def _branch(self, condition: str, body: Callable[[], None]) -> None:
+        """The body where the condition holds."""
+        self._step(steps.If(condition, self._block(body)))
 
     def _assign(self, variable: str, sql: str) -> None:
-        self._select_into(f"SELECT {sql} INTO {variable}")
+        self._step(steps.Select(variable, sql, ""))
 
-    def _select_into(self, query: str) -> None:
-        """The query, a `SELECT … INTO`, as a statement of the procedure, with what the store's planner is told."""
-        self._emit(f"{self.planned(query)};")
+    def _let(self, variable: str, sql: str) -> None:
+        self._step(steps.Let(variable, sql))
 
-    def _loop(self, query: str) -> None:
-        """The head of a loop over each row of the query, as `RECORD`, with what the store's planner is told of it."""
-        self._emit(f"FOR {RECORD} IN ({self.planned(query)}) LOOP")
+    def _execute(self, statement: str, into: str | None = None) -> None:
+        self._step(steps.Execute(statement, into))
 
     def _key(self, variable: str) -> str:
         if variable not in self._keys:
@@ -2176,9 +2676,13 @@ class SqlCypherCompiler(ABC):
             else:
                 self._kinds[variable] = _Kind.PATH
             entries.append((self._key(variable), self._held(value)))
-        listed = self.comparable(Json(self.aggregate_list(self.json_object(entries), _order_of(select)), ordered=True))
-        self._select_into(
-            "\n".join([f"SELECT {listed} INTO {ROWS}", *self._from(select), *_present(select.where_clause())])
+        listed = self.comparable(
+            Json(self.aggregate_list(self.json_object(entries), self._order_of(select)), ordered=True)
+        )
+        self._step(
+            steps.Select(
+                ROWS, listed, "".join(f"\n{it}" for it in [*self._from(select), *_present(select.where_clause())])
+            )
         )
 
     def _held(self, value: Value) -> str:
@@ -2198,6 +2702,10 @@ class SqlCypherCompiler(ABC):
             )
         return self.comparable(self.json(value))
 
+    def _order_of(self, select: _Select) -> str | None:
+        """The order the select reads its rows in, as an `ORDER BY` lists it: None where it has none."""
+        return ", ".join(self.order_term(term, descending) for term, descending in select.order) or None
+
     def _from(self, select: _Select) -> list[str]:
         return select.from_() or ["FROM (SELECT 1) one"]
 
@@ -2206,8 +2714,8 @@ class SqlCypherCompiler(ABC):
         select = _Select({})
         r = self._alias("r")
         select.source(self.elements(ROWS, r))
-        select.order.append((f"{r}.item_no", False))
-        self._bind_row(select, f"{r}.item")
+        select.order.append((self.item_no(r), False))
+        self._bind_row(select, self.item(r))
         self._unread = (select, select.size())
         return select
 
@@ -2220,13 +2728,23 @@ class SqlCypherCompiler(ABC):
         self._bind_row(select, ROW, needed, written)
         return select
 
-    def _bind_row(self, select: _Select, row: str, needed: set[str] | None = None, written: bool = False) -> None:
+    def _bind_row(
+        self,
+        select: _Select,
+        row: str,
+        needed: set[str] | None = None,
+        written: bool = False,
+        kinds: dict[str, _Kind] | None = None,
+        values: dict[str, Json] | None = None,
+    ) -> None:
         """
         Binds into the select each variable the row holds, of `needed` where given: a node or a relationship is read
         from its table, as it is now. With `written`, the row is ROW, and a value and each property of it are read as
-        `row_value` reads them, for a statement that works out what a write writes.
+        `row_value` reads them, for a statement that works out what a write writes. Each is of its kind in `kinds`, and
+        a value as it was carried in `values`: those of the rows now, but for a row held from before.
         """
-        for variable, kind in self._kinds.items():
+        values = self._carried if values is None else values
+        for variable, kind in (self._kinds if kinds is None else kinds).items():
             if needed is not None and variable not in needed:
                 continue
             key = self._key(variable)
@@ -2239,7 +2757,7 @@ class SqlCypherCompiler(ABC):
                 select.join(f"LEFT JOIN {self.edges} {e} ON {e}.eid = {self.id_of(row, key)}")
                 select.bind(variable, _relationship(e))
             elif kind is _Kind.VALUE:
-                carried = self._carried.get(variable)
+                carried = values.get(variable)
                 select.bind(
                     variable,
                     Json(
@@ -2256,6 +2774,7 @@ class SqlCypherCompiler(ABC):
                         flat=carried.flat if carried else False,
                         row_keys=(key,) if written else None,
                         from_list=not written,
+                        known=carried.known if carried else None,
                     ),
                 )
             elif kind in (_Kind.NODES, _Kind.RELATIONSHIPS):
@@ -2286,7 +2805,7 @@ class SqlCypherCompiler(ABC):
         else:
             needed = {name for it in read for name in variables_in(it)}
         select = self._row(needed, written=True)
-        self._select_into("\n".join([f"SELECT {value(select.scope)} INTO {variable}", *self._from(select)]))
+        self._step(steps.Select(variable, value(select.scope), "".join(f"\n{it}" for it in self._from(select))))
 
     def _write(self, clause: Clause) -> None:
         """One write: made for each row of ROWS in turn, and the rows it leaves put back there."""
@@ -2295,46 +2814,52 @@ class SqlCypherCompiler(ABC):
         if deleting:
             self._assign(DOOMED, self.literal_json([]))
         r = self._alias("r")
-        self._loop(f"SELECT {r}.item FROM {self.elements(ROWS, r)} ORDER BY {r}.item_no")
-        self._depth += 1
-        self._emit(f"{ROW} := {RECORD}.item;")
-        if isinstance(clause, Create):
-            for pattern in clause.patterns:
-                self._create(pattern, merging=False)
-            self._keep()
-        elif isinstance(clause, Merge):
-            self._merge(clause)
-        elif isinstance(clause, SetClause):
-            for item in clause.items:
-                self._set(item)
-            self._keep()
-        elif isinstance(clause, Remove):
-            for item in clause.items:
-                self._remove(item)
-            self._keep()
-        elif isinstance(clause, Delete):
-            self._delete(clause)
-            self._keep()
-        else:
-            raise DrivineError(f"{type(clause).__name__} reads")
-        self._depth -= 1
-        self._emit("END LOOP;")
-        self._emit(f"{ROWS} := {OUT};")
+
+        def each() -> None:
+            self._let(ROW, f"{RECORD}.item")
+            if isinstance(clause, Create):
+                for pattern in clause.patterns:
+                    self._create(pattern, merging=False)
+                self._keep()
+            elif isinstance(clause, Merge):
+                self._merge(clause)
+            elif isinstance(clause, SetClause):
+                for item in clause.items:
+                    self._set(item)
+                self._keep()
+            elif isinstance(clause, Remove):
+                for item in clause.items:
+                    self._remove(item)
+                self._keep()
+            elif isinstance(clause, Delete):
+                self._delete(clause)
+                self._keep()
+            else:
+                raise DrivineError(f"{type(clause).__name__} reads")
+
+        self._loop(
+            RECORD,
+            f"SELECT {named(self.item(r), 'item')} FROM {self.elements(ROWS, r)} ORDER BY {self.item_no(r)}",
+            each,
+        )
+        self._let(ROWS, OUT)
         if deleting:
             # A node is deleted when the clause has deleted the relationships it deletes: one it does not delete must
             # not be there.
             d = self._alias("d")
-            doomed = f"SELECT {self.id_of(f'{d}.item', None)} FROM {self.elements(DOOMED, d)}"
-            self._select_into(
-                f"SELECT count(*) INTO {COUNT} FROM {self.edges} WHERE src IN ({doomed}) OR dst IN ({doomed})"
+            doomed = f"SELECT {self.id_of(self.item(d), None)} FROM {self.elements(DOOMED, d)}"
+            self._step(
+                steps.Select(COUNT, "count(*)", f" FROM {self.edges} WHERE src IN ({doomed}) OR dst IN ({doomed})")
             )
-            self._emit(f"IF {COUNT} > 0 THEN")
-            self._emit(
-                "    "
-                + self.raise_("A node is deleted that still has relationships: delete them first, or DETACH DELETE it.")
+            self._branch(
+                f"{COUNT} > 0",
+                lambda: self._step(
+                    steps.Raise(
+                        "A node is deleted that still has relationships: delete them first, or DETACH DELETE it."
+                    )
+                ),
             )
-            self._emit("END IF;")
-            self._emit(f"DELETE FROM {self.nodes} WHERE nid IN ({doomed});")
+            self._execute(f"DELETE FROM {self.nodes} WHERE nid IN ({doomed})")
 
     def _call_writing(self, call: Call) -> None:
         """
@@ -2363,17 +2888,38 @@ class SqlCypherCompiler(ABC):
         carried_before = dict(self._carried)
         returned_kinds: dict[str, _Kind] = {}
         returned_carried: dict[str, Json] = {}
-        self._emit(f"{kept} := {ROWS};")
+        self._let(kept, ROWS)
         if returned is not None:
             self._assign(gathered, self.literal_json([]))
+        # Only what the call imports is seen in it: any other name in it is a new variable, as in Cypher (#294).
+        imported = imports(call, call.query.clauses, before)
+        clauses = _imported(call.query.clauses, imported)
+        # Read again after each WITH, where brackets import them: see below.
+        rebound = bracketed(call) and any(isinstance(it, With) for it in clauses)
 
         def each() -> None:
-            if returned is not None:
-                self._emit(f"{caller} := {RECORD}.item;")
+            if returned is not None or rebound:
+                self._let(caller, f"{RECORD}.item")
+            self._restore(
+                {k: v for k, v in before.items() if k in imported},
+                {k: v for k, v in carried_before.items() if k in imported},
+            )
             select = self._rows()
-            for clause in _imported(call.query.clauses):
+            for clause in clauses:
                 if isinstance(clause, Return):
                     select = self._with(select, With(clause.projection, None))
+                elif isinstance(clause, With) and rebound:
+                    # What brackets import is seen throughout the call, as Neo4j has it, after a WITH that does not pass
+                    # it on too: read again from the row the call is written for, so `CALL (a) { WITH 1 AS one CREATE
+                    # (a)-[:R]->() }` joins the row's a, not a new node. Its WHERE reads them too, so it is met after;
+                    # one that filters groups reads the aggregates `_having` made items of the WITH.
+                    read, hidden = self._having(clause)
+                    w = self._with_having(select, dataclasses.replace(read, where=None))
+                    dropped = {it for it in imported if it not in w.scope}
+                    self._bind_row(w, caller, dropped, kinds=before, values=carried_before)
+                    select = self._filtered_rows(w, read.where) if read.where is not None else w
+                    for it in hidden:
+                        select.bound.pop(it, None)
                 else:
                     select = self._next(select, clause)
             if returned is not None:
@@ -2389,25 +2935,27 @@ class SqlCypherCompiler(ABC):
                         self.json_object(
                             [
                                 *((self._key(it), self.property_of(caller, self._key(it))) for it in before),
-                                *((self._key(it), self.property_of(f"{b}.item", self._key(it))) for it in gave),
+                                *((self._key(it), self.property_of(self.item(b), self._key(it))) for it in gave),
                             ]
                         ),
                         ordered=True,
                     )
                 )
                 both = (
-                    f"SELECT 1 AS part, {a}.item_no, {a}.item FROM {self.elements(gathered, a)} UNION ALL "
-                    f"SELECT 2 AS part, {b}.item_no, {row} AS item FROM {self.elements(ROWS, b)}"
+                    f"SELECT 1 AS part, {named(self.item_no(a), 'item_no')}, {named(self.item(a), 'item')} "
+                    f"FROM {self.elements(gathered, a)} UNION ALL "
+                    f"SELECT 2 AS part, {named(self.item_no(b), 'item_no')}, {row} AS item "
+                    f"FROM {self.elements(ROWS, b)}"
                 )
                 listed = self.comparable(Json(self.aggregate_list(f"{g}.item", f"{g}.part, {g}.item_no"), ordered=True))
-                self._select_into(f"SELECT {listed} INTO {gathered} FROM ({both}) {g}")
+                self._step(steps.Select(gathered, listed, f" FROM ({both}) {g}"))
 
         self._each_row(kept, each)
         if returned is None:
-            self._emit(f"{ROWS} := {kept};")
+            self._let(ROWS, kept)
             self._restore(before, carried_before)
         else:
-            self._emit(f"{ROWS} := {gathered};")
+            self._let(ROWS, gathered)
             self._restore({**before, **returned_kinds}, {**carried_before, **returned_carried})
         self._unread = None
         self._nesting -= 1
@@ -2418,13 +2966,17 @@ class SqlCypherCompiler(ABC):
         writes a `FOREACH` or a `CALL { … }` for each row: what one row writes is there for the next to read.
         """
         r = self._alias("r")
-        self._loop(f"SELECT {r}.item FROM {self.elements(rows, r)} ORDER BY {r}.item_no")
-        self._depth += 1
-        self._assign(ROWS, self.appended(self.literal_json([]), f"{RECORD}.item"))
-        self._unread = None
-        body()
-        self._depth -= 1
-        self._emit("END LOOP;")
+
+        def each() -> None:
+            self._assign(ROWS, self.appended(self.literal_json([]), f"{RECORD}.item"))
+            self._unread = None
+            body()
+
+        self._loop(
+            RECORD,
+            f"SELECT {named(self.item(r), 'item')} FROM {self.elements(rows, r)} ORDER BY {self.item_no(r)}",
+            each,
+        )
 
     def _foreach(self, foreach: Foreach) -> None:
         """
@@ -2440,11 +2992,11 @@ class SqlCypherCompiler(ABC):
         items = f"{GATHERED}{self._nesting}"
         before = dict(self._kinds)
         carried_before = dict(self._carried)
-        self._emit(f"{saved} := {ROWS};")
+        self._let(saved, ROWS)
         unwound = self._rows()
         self._unwind(unwound, Unwind(foreach.list, foreach.variable))
         self._carry(unwound)
-        self._emit(f"{items} := {ROWS};")
+        self._let(items, ROWS)
 
         def each() -> None:
             select = self._rows()
@@ -2452,7 +3004,7 @@ class SqlCypherCompiler(ABC):
                 select = self._next(select, clause)
 
         self._each_row(items, each)
-        self._emit(f"{ROWS} := {saved};")
+        self._let(ROWS, saved)
         self._restore(before, carried_before)
         self._unread = None
         self._nesting -= 1
@@ -2495,9 +3047,10 @@ class SqlCypherCompiler(ABC):
             elif kind is None:
                 properties = node.properties
                 self._evaluate(VALUE, [properties], functools.partial(self._written, properties))
-                self._emit(
+                self._execute(
                     f"INSERT INTO {self.nodes} (labels, props, stamp) VALUES ({self.literal_json(list(node.labels))}, "
-                    f"{self.strip_nulls(self._unstamped(VALUE))}, {self._stamp_of(VALUE)}) RETURNING nid INTO {ID};"
+                    f"{self.strip_nulls(self._unstamped(VALUE))}, {self._stamp_of(VALUE)}) RETURNING nid",
+                    ID,
                 )
                 ids.append(self._made(node.variable, _Kind.NODE))
             else:
@@ -2522,9 +3075,10 @@ class SqlCypherCompiler(ABC):
                 raise DrivineError("A relationship that CREATE makes has a direction.")
             properties = relationship.properties
             self._evaluate(VALUE, [properties], functools.partial(self._written, properties))
-            self._emit(
+            self._execute(
                 f"INSERT INTO {self.edges} (src, dst, type, props) VALUES ({src}, {dst}, {literal(type_)}, "
-                f"{self.strip_nulls(VALUE)}) RETURNING eid INTO {ID};"
+                f"{self.strip_nulls(VALUE)}) RETURNING eid",
+                ID,
             )
             self._made(relationship.variable, _Kind.RELATIONSHIP)
 
@@ -2560,28 +3114,28 @@ class SqlCypherCompiler(ABC):
         before = dict(self._kinds)
         held = self.with_entries(ROW, [(self._key(variable), self._held(value)) for variable, value in found.items()])
         match = [f"SELECT {held} AS item", *self._from(select), *_present(select.where_clause())]
-        self._emit(f"{FOUND} := FALSE;")
-        self._emit(f"FOR {MATCHED} IN (\n{indent(self.planned(chr(10).join(match)))}\n) LOOP")
-        self._depth += 1
-        self._emit(f"{FOUND} := TRUE;")
-        self._emit(f"{ROW} := {MATCHED}.item;")
-        for variable, value in found.items():
-            self._kinds[variable] = _Kind.NODE if isinstance(value, Node) else _Kind.RELATIONSHIP
-        for item in merge.on_match:
-            self._set(item)
-        self._keep()
-        self._depth -= 1
-        self._emit("END LOOP;")
+        self._let(FOUND, "FALSE")
+
+        def matched() -> None:
+            self._let(FOUND, "TRUE")
+            self._let(ROW, f"{MATCHED}.item")
+            for variable, value in found.items():
+                self._kinds[variable] = _Kind.NODE if isinstance(value, Node) else _Kind.RELATIONSHIP
+            for item in merge.on_match:
+                self._set(item)
+            self._keep()
+
+        self._loop(MATCHED, "\n".join(match), matched, multiline=True)
         self._kinds.clear()
         self._kinds.update(before)
-        self._emit(f"IF NOT {FOUND} THEN")
-        self._depth += 1
-        self._create(merge.pattern, merging=True)
-        for item in merge.on_create:
-            self._set(item)
-        self._keep()
-        self._depth -= 1
-        self._emit("END IF;")
+
+        def made() -> None:
+            self._create(merge.pattern, merging=True)
+            for item in merge.on_create:
+                self._set(item)
+            self._keep()
+
+        self._branch(f"NOT {FOUND}", made)
 
     def _target(self, variable: str, writing: str) -> tuple[str, str, str]:
         """The table the variable's node or relationship is a row of, its key column, and its id in ROW."""
@@ -2598,25 +3152,28 @@ class SqlCypherCompiler(ABC):
 
     def _set(self, item: SetItem) -> None:
         if isinstance(item, SetProperty):
+            _property_of_kind(item.value)
             table, id_, row = self._target(item.variable, "SET")
             self._evaluate(
                 VALUE, [item.value], lambda scope: self.comparable(self.json(self._expression(item.value, scope)))
             )
             if table == self.nodes and item.key == stamps.PROPERTY:
-                self._emit(f"UPDATE {self.nodes} SET stamp = {self.text(VALUE)} WHERE nid = {row};")
+                self._execute(f"UPDATE {self.nodes} SET stamp = {self.text(VALUE)} WHERE nid = {row}")
             else:
                 merged = self.merged("props", self.json_object([(item.key, VALUE)]))
-                self._emit(f"UPDATE {table} SET props = {merged} WHERE {id_} = {row};")
+                self._execute(f"UPDATE {table} SET props = {merged} WHERE {id_} = {row}")
         elif isinstance(item, SetReplace):
             table, id_, row = self._target(item.variable, "SET")
             self._evaluate(VALUE, [item.value], lambda scope: self._properties(self._expression(item.value, scope)))
             if table == self.nodes:
                 props = self.strip_nulls(self._unstamped(self._or_empty(VALUE)))
-                self._emit(
-                    f"UPDATE {self.nodes} SET props = {props}, stamp = {self._stamp_of(VALUE)} WHERE nid = {row};"
+                self._execute(
+                    f"UPDATE {self.nodes} SET props = {props}, stamp = {self._stamp_of(VALUE)} WHERE nid = {row}"
                 )
             else:
-                self._emit(f"UPDATE {table} SET props = {self.strip_nulls(self._or_empty(VALUE))} WHERE {id_} = {row};")
+                self._execute(
+                    f"UPDATE {table} SET props = {self.strip_nulls(self._or_empty(VALUE))} WHERE {id_} = {row}"
+                )
         elif isinstance(item, SetAdd):
             table, id_, row = self._target(item.variable, "SET")
             self._evaluate(VALUE, [item.value], lambda scope: self._properties(self._expression(item.value, scope)))
@@ -2627,10 +3184,10 @@ class SqlCypherCompiler(ABC):
                     f"ELSE {self._stamp_of(VALUE)} END"
                 )
                 props = self.merged("props", self._unstamped(self._or_empty(VALUE)))
-                self._emit(f"UPDATE {self.nodes} SET props = {props}, stamp = {stamp} WHERE nid = {row};")
+                self._execute(f"UPDATE {self.nodes} SET props = {props}, stamp = {stamp} WHERE nid = {row}")
             else:
-                self._emit(
-                    f"UPDATE {table} SET props = {self.merged('props', self._or_empty(VALUE))} WHERE {id_} = {row};"
+                self._execute(
+                    f"UPDATE {table} SET props = {self.merged('props', self._or_empty(VALUE))} WHERE {id_} = {row}"
                 )
         else:
             table, id_, row = self._target(item.variable, "SET")
@@ -2638,26 +3195,26 @@ class SqlCypherCompiler(ABC):
                 raise DrivineError(f"{item.variable} is not a node, and a label is set on one.")
             for label in item.labels:
                 labels = self.appended("labels", self.literal_json(label))
-                self._emit(
+                self._execute(
                     f"UPDATE {self.nodes} SET labels = {labels} "
-                    f"WHERE {id_} = {row} AND NOT {self.has_label('labels', label)};"
+                    f"WHERE {id_} = {row} AND NOT {self.has_label('labels', label)}"
                 )
 
     def _remove(self, item: RemoveItem) -> None:
         if isinstance(item, RemoveProperty):
             table, id_, row = self._target(item.variable, "REMOVE")
             if table == self.nodes and item.key == stamps.PROPERTY:
-                self._emit(f"UPDATE {self.nodes} SET stamp = NULL WHERE nid = {row};")
+                self._execute(f"UPDATE {self.nodes} SET stamp = NULL WHERE nid = {row}")
             else:
                 merged = self.merged("props", self.json_object([(item.key, self.literal_json(None))]))
-                self._emit(f"UPDATE {table} SET props = {merged} WHERE {id_} = {row};")
+                self._execute(f"UPDATE {table} SET props = {merged} WHERE {id_} = {row}")
         else:
             table, id_, row = self._target(item.variable, "REMOVE")
             if table != self.nodes:
                 raise DrivineError(f"{item.variable} is not a node, and a label is removed from one.")
             for label in item.labels:
-                self._emit(
-                    f"UPDATE {self.nodes} SET labels = {self.without_label('labels', label)} WHERE {id_} = {row};"
+                self._execute(
+                    f"UPDATE {self.nodes} SET labels = {self.without_label('labels', label)} WHERE {id_} = {row}"
                 )
 
     def _properties(self, value: Value) -> str:
@@ -2692,11 +3249,11 @@ class SqlCypherCompiler(ABC):
             targets.append((expression.name, self._target(expression.name, "DELETE")))
         for _, (table, _, row) in targets:
             if table == self.edges:
-                self._emit(f"DELETE FROM {self.edges} WHERE eid = {row};")
+                self._execute(f"DELETE FROM {self.edges} WHERE eid = {row}")
         for _, (table, _, row) in targets:
             if table == self.nodes:
                 if delete.detach:
-                    self._emit(f"DELETE FROM {self.nodes} WHERE nid = {row};")
+                    self._execute(f"DELETE FROM {self.nodes} WHERE nid = {row}")
                 else:
                     self._assign(DOOMED, self.appended(DOOMED, self.scalar(row)))
 
@@ -2708,13 +3265,36 @@ class SqlCypherCompiler(ABC):
         ordered, skipped and limited. Rows it does not order, group or keep distinct stay in the order the select reads
         them, as a graph engine keeps them.
         """
-        # As in Neo4j, a star gives the variables in the order of their names, before the items named after it.
-        starred = [ProjectionItem(Variable(it), it) for it in sorted(select.bound)] if projection.star else []
+        # As in Neo4j, a star gives the variables in the order of their names, before the items named after it: not a
+        # randomUUID() made first for a CALL or a condition (see `_anew_call`), which the statement never named.
+        starred = (
+            [ProjectionItem(Variable(it), it) for it in sorted(select.bound) if it not in self._made_anew]
+            if projection.star
+            else []
+        )
         items = [*starred, *projection.items]
         if not items:
             raise DrivineError("A projection has at least one item.")
+        # An order term, or a part of one, written as an item but for its functions' names' case is that item, as Neo4j
+        # names a function in any case: so `ORDER BY toupper(p.name)` after `TOUPPER(p.name) AS u` reads the item.
+        item_keys = [(_grouping_key(it.expression), it.expression) for it in items]
+
+        def as_written(part: Expression) -> Expression | None:
+            key = _grouping_key(part)
+            return next((written for k, written in item_keys if written != part and k == key), None)
+
+        projection = dataclasses.replace(
+            projection,
+            order_by=tuple(
+                dataclasses.replace(sort, expression=replaced(sort.expression, as_written))
+                for sort in projection.order_by
+            ),
+        )
         # Before _aggregates_first, which names each variable it groups by as an item of its own.
-        _require_explicit_grouping(items)
+        _require_explicit_grouping(items, projection.order_by, select.scope.keys())
+        made = self._anew_first(select, projection, items)
+        if made is not None:
+            return self._project(made[0], made[1], final)
         cased = self._cases_first(select, projection, items)
         if cased is not None:
             return self._project(cased[0], cased[1], final)
@@ -2736,7 +3316,7 @@ class SqlCypherCompiler(ABC):
                 len(items),
                 ", ".join(it.name for it in items),
             )
-        self._row_order = _order_of(select)
+        self._row_order = self._order_of(select)
         compiled = [
             (
                 item.name,
@@ -2745,13 +3325,11 @@ class SqlCypherCompiler(ABC):
             for item in items
         ]
         aggregating = any(contains(it.expression, is_aggregate) for it in items)
-        # Where rows are compared (DISTINCT, GROUP BY), JSON is compared as what compares.
+        # Where rows are compared (DISTINCT, GROUP BY), each item is compared as `_row_compared` has it.
         compared = projection.distinct or aggregating
-        columns: list[tuple[str, Value]] = []
-        for i, (_, value) in enumerate(compiled):
-            if compared and isinstance(value, Json) and value.ordered:
-                value = dataclasses.replace(value, sql=self.comparable(value), ordered=False)
-            columns.append((f"c{i + 1}", value))
+        columns: list[tuple[str, Value]] = [
+            (f"c{i + 1}", self._row_compared(value) if compared else value) for i, (_, value) in enumerate(compiled)
+        ]
         select_list = [it for column, value in columns for it in _columns(value, column, self._identities)]
         # An order is written over the items' names, and where nothing is grouped or kept distinct, the variables too.
         name = self._alias("p")
@@ -2789,7 +3367,15 @@ class SqlCypherCompiler(ABC):
                 after[column] = self._sortable(self._expression(sort.expression, item_columns))
                 sorts_anew = True
             elif item >= 0:
-                carried(column, lambda item=item: compiled[item][1], sort.expression)
+                # One that may be JSON's null, where rows are compared, as its column is grouped by: see
+                # `_row_compared`.
+                carried(
+                    column,
+                    lambda item=item: (
+                        columns[item][1] if compared and _may_be_json_null(compiled[item][1]) else compiled[item][1]
+                    ),
+                    sort.expression,
+                )
             elif compared and not contains(sort.expression, _aggregates):
                 after[column] = self._sortable(self._expression(sort.expression, item_columns))
             elif over_items is not None:
@@ -2858,7 +3444,13 @@ class SqlCypherCompiler(ABC):
         order = [(named, descending) for column, descending in sorts for named, _ in sorted_by(column)]
         if final:
             values = [self.json(_columns_of(value, name, column, self._identities)) for column, value in columns]
-            result = values[0].sql if len(values) == 1 else self.json_array([it.sql for it in values])
+            # A value that may be JSON's null is given as SQL's where a UNION compares rows by it; in a row of several,
+            # a list's item, SQL's null is JSON's (#314).
+            if len(values) == 1:
+                one = values[0]
+                result = self.compared_null(one.sql) if self._distinct_parts and one.json_null else one.sql
+            else:
+                result = self.json_array([it.sql for it in values])
             outer_columns = f"{self.returned(result)} AS result"
         else:
             outer = [
@@ -2872,9 +3464,7 @@ class SqlCypherCompiler(ABC):
         outer_lines = [f"SELECT {outer_columns}", f"FROM (\n{indent(source)}\n) {name}"]
         if sorts:
             terms = ", ".join(
-                f"{term}{' DESC' if descending else ''}"
-                for column, descending in sorts
-                for _, term in sorted_by(column)
+                self.order_term(term, descending) for column, descending in sorts for _, term in sorted_by(column)
             )
             outer_lines.append(f"ORDER BY {terms}")
         outer_lines += self.page(
@@ -2886,7 +3476,115 @@ class SqlCypherCompiler(ABC):
             item.name: _columns_of(value, PENDING, column, self._identities)
             for item, (column, value) in zip(items, columns, strict=True)
         }
-        return _Projected("\n".join(outer_lines), scope_out, order)
+        kinds = [
+            *(it for column, value in columns for it in _column_kinds(value, column, self._identities)),
+            *((column, False) for column, _ in order),
+        ]
+        return _Projected("\n".join(outer_lines), scope_out, order, kinds)
+
+    def _row_compared(self, value: Value) -> Value:
+        """
+        The value as rows are compared by it, where they are grouped or kept distinct: JSON as what compares, and JSON's
+        null, which a value read out of a map or a list may be (Json.json_null), and SQL's as one, as Cypher has one
+        null (#314). It may still be JSON's null, as Oracle's `grouped_null` gives it, so it is still read as one that
+        may be. In a part of a `UNION` that compares rows (`_distinct_parts`) it is SQL's, as another part's value that
+        is never JSON's null gives it.
+        """
+        if not isinstance(value, Json):
+            return value
+        if value.json_null:
+            it = self.comparable(value)
+            sql = self.compared_null(it) if self._distinct_parts else self.grouped_null(it)
+            return dataclasses.replace(value, sql=sql, ordered=False)
+        if value.ordered:
+            return dataclasses.replace(value, sql=self.comparable(value), ordered=False)
+        return value
+
+    def _anew_first(
+        self, select: _Select, projection: Projection, items: list[ProjectionItem]
+    ) -> tuple[_Select, Projection] | None:
+        """
+        The rows the select reads with each randomUUID() that a term of the projection reads inside a larger expression
+        made first (`_anew_before`), and the projection with the term reading that UUID's column; None where there is
+        none. A term that is a randomUUID() alone is a column of the projection already. Two items written alike are
+        given a UUID each, as in Neo4j; an order term written as an item reads that item's, as Neo4j sorts by the item.
+        """
+        item_terms = [it.expression for it in items]
+        order_terms = list(
+            dict.fromkeys(it.expression for it in projection.order_by if it.expression not in item_terms)
+        )
+        made = self._anew_before(select, [*item_terms, *order_terms], whole=False)
+        if made is None:
+            return None
+        rows, read = made
+        reads: dict[Expression, Expression] = {}
+        for term, term_read in zip([*item_terms, *order_terms], read, strict=True):
+            reads.setdefault(term, term_read)
+        kept = dataclasses.replace(
+            projection,
+            star=False,
+            items=tuple(dataclasses.replace(item, expression=term) for item, term in zip(items, read, strict=False)),
+            order_by=tuple(dataclasses.replace(it, expression=reads[it.expression]) for it in projection.order_by),
+        )
+        return rows, kept
+
+    def _anew_before(
+        self,
+        select: _Select,
+        terms: Sequence[Expression],
+        whole: bool,
+        anew: Callable[[Expression], bool] | None = None,
+    ) -> tuple[_Select, list[Expression]] | None:
+        """
+        The rows the select reads with each randomUUID() that `terms` read made first, for each row, in a `WITH *` of
+        its own, and each term as it reads that UUID's column, in their order; None where there is none, or, where not
+        `whole`, where each is a term alone. Worked out in the term, the UUID could be bound in a subquery that reads
+        nothing of the row (`shared`), or read in a comprehension's subquery that reads nothing of it either, and each
+        store works such a subquery out once for the statement: every row was given the same UUID (drivine4j#412). Made
+        first, it is a column of the row, as a `WITH`'s own randomUUID() is (`once`). One in a comprehension's, a
+        quantifier's, a reduce's or a pattern comprehension's own expressions is made again for each item there, as in
+        Neo4j: it is read beside a UUID made first for the row (`seeded`), so that subquery reads the row. Each call is
+        a UUID of its own, in two terms written alike too, as in Neo4j, where `randomUUID() = randomUUID()` is false.
+        `anew` tells a call, `is_anew` where not given: see `_optional_match` for another.
+        """
+        call: Callable[[Expression], bool] = anew or is_anew
+
+        # A call read beside a row's UUID already (is_seeded) reads the row: left as it is, as a call alone is.
+        def is_seeded_here(e: Expression) -> bool:
+            return is_seeded(e, self._made_anew)
+
+        def alone(term: Expression) -> bool:
+            return call(term) or is_seeded_here(term)
+
+        def holds(e: Expression) -> bool:
+            return call(e) or (not is_seeded_here(e) and any(holds(it) for it in children(e)))
+
+        in_bodies = any(seeded(it, ANEW, self._made_anew) != it for it in terms)
+        if not in_bodies and not any((whole or not alone(it)) and holds(it) for it in terms):
+            return None
+        made: list[ProjectionItem] = []
+        seed: str | None = None
+        if in_bodies:
+            seed = self._anew_variable()
+            made.append(ProjectionItem(RANDOM_UUID, seed))
+
+        def made_first(e: Expression) -> Expression | None:
+            if call(e):
+                name = self._anew_variable()
+                made.append(ProjectionItem(e, name))
+                return Variable(name)
+            return e if is_seeded_here(e) else None
+
+        reads: list[Expression] = []
+        for term in terms:
+            if not whole and alone(term):
+                reads.append(term)
+                continue
+            read = replaced(term, made_first)
+            reads.append(seeded(read, seed, self._made_anew) if seed is not None else read)
+        projection = Projection(False, True, tuple(made), (), None, None)
+        # Kept apart, as _shared_first keeps its own, so no store merges it back into the query that reads it.
+        return self._with(select, With(projection, None), self._around(select), apart=True), reads
 
     def _cases_first(
         self, select: _Select, projection: Projection, items: list[ProjectionItem]
@@ -2913,10 +3611,14 @@ class SqlCypherCompiler(ABC):
                     for argument in e.arguments:
                         if not contains(argument, lambda it: isinstance(it, Case)):
                             continue
-                        sql = self._unshared(
+                        # Every subquery is written `SELECT`, so the argument's SQL is searched for one as it is, case
+                        # and all. Its long values are written once, as bound ones are (`_probed`): written out wherever
+                        # each was read, as an aggregate's argument writes them, a temporal CASE's SQL ran to 165
+                        # million characters in drivine4j (#469).
+                        sql = self._probed(
                             lambda argument=argument: self.json(self._expression(argument, select.scope)).sql
                         )
-                        if "SELECT" not in sql.upper():
+                        if "SELECT" not in sql:
                             continue
                         arguments[argument] = None
                         if e.name.lower() == "collect" and not any(it is e for it in sized):
@@ -3026,8 +3728,7 @@ class SqlCypherCompiler(ABC):
             order_by=tuple(dataclasses.replace(it, expression=shared(it.expression)) for it in projection.order_by),
         )
         # Kept apart, as _cases_first keeps its own, so no store merges it back into the query that aggregates.
-        outer = {variable: value for variable, value in select.scope.items() if variable not in select.bound}
-        return self._with(select, With(with_, None), outer, apart=True), kept
+        return self._with(select, With(with_, None), self._around(select), apart=True), kept
 
     def _binds(self, expression: Expression, select: _Select) -> bool:
         """
@@ -3087,6 +3788,22 @@ class SqlCypherCompiler(ABC):
             self._counter, self._shares, self._shared_bindings = counter, shares, bindings
             del self._functions[functions:]
 
+    def _probed(self, work: Callable[[], str]) -> str:
+        """
+        What the work gives, its SQL only searched for a subquery of the statement's own: see `_probing`. The names it
+        takes and the functions it declares are given back, as `_binds_in` gives them back: a `reduce`'s step written
+        so would declare a function that reads no value it names.
+        """
+        was = self._probing
+        counter, shares, bindings, functions = self._counter, self._shares, self._shared_bindings, len(self._functions)
+        self._probing = True
+        try:
+            return work()
+        finally:
+            self._probing = was
+            self._counter, self._shares, self._shared_bindings = counter, shares, bindings
+            del self._functions[functions:]
+
     def _aggregates_first(
         self, select: _Select, projection: Projection, items: list[ProjectionItem]
     ) -> tuple[_Select, Projection] | None:
@@ -3105,16 +3822,29 @@ class SqlCypherCompiler(ABC):
         bound (`_aggregating`), so `max(n.title) + ': ' + max(n.first) + ' ' + max(n.last)` wrote each aggregate out
         again at every level, to 68 MB on Postgres, and ran the compiler out of memory on Oracle (drivine4j#373); and
         Oracle's CONTAINS binds its CLOBs in a subquery (see its `contains_text`), which reads no aggregate of the query
-        it is in (ORA-00937). Over the aggregates' columns, the operation binds its values as any item does. None where
-        the projection does none of these.
+        it is in (ORA-00937). Over the aggregates' columns, the operation binds its values as any item does. So too
+        where an item that aggregates reads a key that is a property (`_reads_outside_aggregates`), as `r.role +
+        count(*)` beside `r.role`: grouped in place, it would be grouped by the variable `r` it names, a row for each
+        relationship, where Neo4j gives one for each role (drivine4j#491); over the keys' columns, it reads the key's.
+        None where the projection does none of these.
         """
         terms = [*(it.expression for it in items), *(it.expression for it in projection.order_by)]
         # An order term reads an item by its name.
         by_name = {it.name: it.expression for it in items}
+        # A key that is a property, read by an item that aggregates: grouped by as itself, not by its variable.
+        properties = {
+            it.expression
+            for it in items
+            if isinstance(it.expression, Property) and not contains(it.expression, is_aggregate)
+        }
         if (
             not any(contains(it, _collects_distinct) or contains(it, _iterates_aggregate) for it in terms)
             and not any(self._binds_over_aggregates(it.expression, select) for it in items)
             and not any(self._binds_over_aggregates(it.expression, select, by_name) for it in projection.order_by)
+            and not any(
+                contains(it.expression, is_aggregate) and _reads_outside_aggregates(it.expression, properties)
+                for it in items
+            )
         ):
             return None
         # Named as no variable is, unless quoted so.
@@ -3135,9 +3865,145 @@ class SqlCypherCompiler(ABC):
             contains(term, found)
         keyed = [it.name for it in keys if isinstance(it, Variable)]
 
-        # A comprehension's, a quantifier's or a reduce's body is kept as it is, so a variable it names outside its own
-        # is kept too, and so is a pattern's or a subquery's. A subquery may name any variable: each the projection
-        # groups by is kept.
+        # A key is read where it is written in another case too: see `_grouping_key`.
+        key_names = {_grouping_key(it): name for it, name in keys.items()}
+
+        def kept(term: Expression) -> Expression | None:
+            key = key_names.get(_grouping_key(term)) if key_names else None
+            if key is not None:
+                return Variable(key)
+            if term in aggregates:
+                name = aggregates[term]
+                return (
+                    Function(DISTINCT_ITEMS, False, (Variable(name),)) if _collects_distinct(term) else Variable(name)
+                )
+            return None
+
+        # The term with each key in it read as `key` reads it, in a comprehension's, a quantifier's or a reduce's body
+        # too, where the body binds no variable the key reads.
+        def reading_keys(term: Expression, bound: AbstractSet[str], key: Reading) -> Expression:
+            def replacement(part: Expression) -> Expression | None:
+                if not any(it in bound for it in variables_in(part)):
+                    read = key(part)
+                    if read is not None:
+                        return read
+
+                def in_body(body: Expression, *names: str) -> Expression:
+                    return reading_keys(body, {*bound, *names}, key)
+
+                if isinstance(part, ListComprehension):
+                    return dataclasses.replace(
+                        part,
+                        list=reading_keys(part.list, bound, key),
+                        where=in_body(part.where, part.variable) if part.where is not None else None,
+                        projection=in_body(part.projection, part.variable) if part.projection is not None else None,
+                    )
+                if isinstance(part, Quantifier):
+                    return dataclasses.replace(
+                        part,
+                        list=reading_keys(part.list, bound, key),
+                        where=in_body(part.where, part.variable) if part.where is not None else None,
+                    )
+                if isinstance(part, Reduce):
+                    return dataclasses.replace(
+                        part,
+                        initial=reading_keys(part.initial, bound, key),
+                        list=reading_keys(part.list, bound, key),
+                        expression=in_body(part.expression, part.accumulator, part.variable),
+                    )
+                return None
+
+            return replaced(term, replacement)
+
+        # Neo4j reads `any(y IN list WHERE y = e)` as `e IN list`, and `none(…)` as `NOT e IN list`, where `e` reads no
+        # `y`; `y IN [e]` and `e IN [y]` are `y = e` to it. Not `all(…)` or `single(…)`, a WHERE that is more than the
+        # one comparison (`AND`, `OR`), `y.p = e`, or `y IN [e1, e2]`: those group by each variable `e` reads.
+        def read_as_in(part: Quantifier) -> bool:
+            where = part.where
+            if not isinstance(where, Binary) or part.kind not in (QuantifierKind.ANY, QuantifierKind.NONE):
+                return False
+            own = Variable(part.variable)
+
+            def compared_to(left: Expression, right: Expression) -> Expression | None:
+                return right if left == own else left if right == own else None
+
+            compared: Expression | None = None
+            if where.operator is BinaryOperator.EQUALS:
+                compared = compared_to(where.left, where.right)
+            elif (
+                where.operator is BinaryOperator.IN
+                and isinstance(where.right, ListLiteral)
+                and len(where.right.items) == 1
+            ):
+                compared = compared_to(where.left, where.right.items[0])
+            # A `y` that a comprehension, a quantifier or a reduce in `e` binds of its own is not the quantifier's.
+            return compared is not None and part.variable not in variables_read_in(compared)
+
+        # As Neo4j reads a key in an item that aggregates: by its name in a part that holds no aggregate, and in a list
+        # comprehension's WHERE, all through. In the projection of a comprehension over an aggregate, or the WHERE of a
+        # quantifier or the step of a reduce over one, Neo4j groups by each variable the key reads as well, so the body
+        # is kept as it is, and those variables beside: `[t IN collect(m.title) | r.role]` beside `r.role` gives a row
+        # for each `r`, where `[t IN collect(m.title) WHERE t STARTS WITH r.role]` and `count(*) + [y IN [1] |
+        # r.role][0]` give one for each role, and so does `any(t IN collect(m.title) WHERE t = r.role)`, which Neo4j
+        # reads as `r.role IN collect(m.title)`. `read` reads a key or an aggregate, and `key` a key in a body.
+        def rekeyed(term: Expression, read: Reading, key: Reading) -> Expression:
+            def replacement(part: Expression) -> Expression | None:
+                given = read(part)
+                if given is not None:
+                    return given
+                if not contains(part, is_aggregate):
+                    return reading_keys(part, frozenset(), key)
+                if isinstance(part, ListComprehension) and part.where is not None:
+                    return dataclasses.replace(
+                        part,
+                        list=rekeyed(part.list, read, key),
+                        where=reading_keys(part.where, {part.variable}, key),
+                    )
+                if isinstance(part, Quantifier) and part.where is not None and read_as_in(part):
+                    return dataclasses.replace(
+                        part,
+                        list=rekeyed(part.list, read, key),
+                        where=reading_keys(part.where, {part.variable}, key),
+                    )
+                return None
+
+            return replaced(term, replacement)
+
+        def key_of(part: Expression) -> Expression | None:
+            name = key_names.get(_grouping_key(part)) if key_names else None
+            return Variable(name) if name is not None else None
+
+        rekeyed_items = [dataclasses.replace(it, expression=rekeyed(it.expression, kept, key_of)) for it in items]
+
+        # An order term, or a part of one, that is an item is read by the item's name, as over a DISTINCT projection it
+        # can only be; a variable an item is named after is that item, not the variable of that name before it. In a
+        # body, as an item reads it.
+        item_names = {_grouping_key(it.expression): it.name for it in items}
+
+        def as_item(term: Expression) -> Expression | None:
+            if isinstance(term, Variable) and term.name in by_name:
+                return term
+            item = item_names.get(_grouping_key(term))
+            return Variable(item) if item is not None else None
+
+        def sorted_by(term: Expression) -> Expression | None:
+            item = as_item(term)
+            return item if item is not None else kept(term)
+
+        def sorted_by_key(term: Expression) -> Expression | None:
+            item = as_item(term)
+            return item if item is not None else key_of(term)
+
+        rekeyed_order = [
+            dataclasses.replace(sort, expression=rekeyed(sort.expression, sorted_by, sorted_by_key))
+            for sort in projection.order_by
+        ]
+
+        # A variable a comprehension's, a quantifier's or a reduce's body names outside its own is kept, but where it is
+        # read only in a key that `rekeyed` reads by its name; so is a pattern's or a subquery's. A subquery may name
+        # any variable: each the projection groups by is kept. A comprehension's own name is left out each time it is
+        # read, in its WHERE and its projection both, so a variable of the scope of that name is not grouped by
+        # (drivine4j#519).
         def named(expression: Expression) -> list[str]:
             if is_aggregate(expression):
                 return []
@@ -3162,15 +4028,21 @@ class SqlCypherCompiler(ABC):
                 own = keyed
             return _ordered(variables_outside_aggregates(expression), own, *(named(it) for it in children(expression)))
 
-        # An order term that aggregates may name a key too, by the variable the projection groups by.
+        # An order term that aggregates may name a key too, by the variable the projection groups by; or, as an item
+        # does, the variable of a key that is a property, in a body that groups by it.
+        keyed_in_order = _ordered(keyed, *(variables_in(it) for it in properties))
         scope = select.scope
         beside = [
             it
             for it in _ordered(
-                *(named(item.expression) for item in items if contains(item.expression, is_aggregate)),
                 *(
-                    [name for name in named(sort.expression) if name in keyed]
-                    for sort in projection.order_by
+                    named(rekeyed_item.expression)
+                    for item, rekeyed_item in zip(items, rekeyed_items, strict=True)
+                    if contains(item.expression, is_aggregate)
+                ),
+                *(
+                    [name for name in named(rekeyed_sort.expression) if name in keyed_in_order]
+                    for sort, rekeyed_sort in zip(projection.order_by, rekeyed_order, strict=True)
                     if contains(sort.expression, is_aggregate)
                 ),
             )
@@ -3197,34 +4069,7 @@ class SqlCypherCompiler(ABC):
             limit=None,
         )
 
-        def kept(term: Expression) -> Expression | None:
-            if term in keys:
-                return Variable(keys[term])
-            if term in aggregates:
-                name = aggregates[term]
-                return (
-                    Function(DISTINCT_ITEMS, False, (Variable(name),)) if _collects_distinct(term) else Variable(name)
-                )
-            return None
-
-        # An order term, or a part of one, that is an item is read by the item's name, as over a DISTINCT projection it
-        # can only be; a variable an item is named after is that item, not the variable of that name before it.
-        item_names = {it.expression: it.name for it in items}
-
-        def sorted_by(term: Expression) -> Expression | None:
-            if isinstance(term, Variable) and term.name in by_name:
-                return term
-            return Variable(item_names[term]) if term in item_names else kept(term)
-
-        keeping = dataclasses.replace(
-            projection,
-            star=False,
-            items=tuple(dataclasses.replace(it, expression=replaced(it.expression, kept)) for it in items),
-            order_by=tuple(
-                dataclasses.replace(sort, expression=replaced(sort.expression, sorted_by))
-                for sort in projection.order_by
-            ),
-        )
+        keeping = dataclasses.replace(projection, star=False, items=tuple(rekeyed_items), order_by=tuple(rekeyed_order))
         return self._with(select, With(grouped, None)), keeping
 
     def _held_first(
@@ -3245,7 +4090,10 @@ class SqlCypherCompiler(ABC):
             if not contains(item.expression, is_aggregate)
             and (
                 contains(item.expression, lambda it: isinstance(it, Parameter))
-                or any("SELECT" in key.upper() for key in _group_keys(self._expression(item.expression, select.scope)))
+                or any(
+                    "SELECT" in key.upper()
+                    for key in _group_keys(self._row_compared(self._expression(item.expression, select.scope)))
+                )
             )
         ]
         if not held:
@@ -3311,7 +4159,7 @@ class SqlCypherCompiler(ABC):
     def _expression(self, expression: Expression, scope: Scope) -> Value:
         """
         The value the expression gives in the scope: see `_value_of`. Marked Json.flat where it is known to hold no
-        null in a list or a map.
+        null in a list or a map, and with its Json.known kind where the statement writes it as a value of one.
         """
         outer = self._filtering
         # Only a condition joined by AND or OR is read for its truth alone: NOT, a CASE or a function reads null apart
@@ -3324,13 +4172,22 @@ class SqlCypherCompiler(ABC):
             value = self._value_of(expression, scope)
         finally:
             self._filtering = outer
+        if isinstance(value, Json) and value.known is None:
+            known = self._known_kind(expression, scope)
+            if known is not None:
+                value = dataclasses.replace(value, known=known)
         if isinstance(value, (Json, Entities)) and not value.flat and self._flat(expression, scope):
             return dataclasses.replace(value, flat=True)
         return value
 
     def _value_of(self, expression: Expression, scope: Scope) -> Value:
         if isinstance(expression, Literal):
-            return Json(self.literal_json(expression.value), text=isinstance(expression.value, str))
+            # A null written is JSON's null, as a map's is: see Json.json_null.
+            return Json(
+                self.literal_json(expression.value),
+                text=isinstance(expression.value, str),
+                json_null=expression.value is None,
+            )
         if isinstance(expression, Parameter):
             if self._given_parameters is not None and expression.name in self._given_parameters:
                 return self._given_parameters[expression.name]
@@ -3348,7 +4205,7 @@ class SqlCypherCompiler(ABC):
         if isinstance(expression, Property):
             in_parameter = self._in_parameter(expression)
             if in_parameter is not None:
-                return Json(in_parameter)
+                return Json(in_parameter, json_null=True)
             return self._property(self._expression(expression.subject, scope), expression.key)
         if isinstance(expression, HasLabels):
             subject = self._expression(expression.subject, scope)
@@ -3433,6 +4290,77 @@ class SqlCypherCompiler(ABC):
             texts=all(_is_text(it) for it in items),
         )
 
+    def _known_kind(self, expression: Expression, scope: Scope) -> Known | None:
+        """
+        The kind of value the expression is in the scope, where the statement writes it as one (Json.known): a literal,
+        a negated number, a list or a map written, or a variable bound to one. Read from the statement alone, compiling
+        nothing, so a check may run before its operand is compiled. None where the kind is left open, as it is for a
+        property, a parameter or a function's value: Neo4j checks those when the row is read.
+        """
+        if isinstance(expression, Literal):
+            return known_of(expression.value)
+        if isinstance(expression, Unary):
+            operand = self._known_kind(expression.operand, scope)
+            negated = expression.operator is UnaryOperator.NEGATE and operand in ("INTEGER", "FLOAT")
+            return operand if negated else None
+        if isinstance(expression, ListLiteral):
+            return "LIST"
+        if isinstance(expression, MapLiteral):
+            return "MAP"
+        if isinstance(expression, Variable):
+            value = scope.get(expression.name)
+            return value.known if isinstance(value, Json) else None
+        return None
+
+    def _index_of_kind(self, index: Index, scope: Scope) -> None:
+        """
+        Refuses `subject[index]` where the statement writes its subject as a value that is no list or map, or its index
+        as a value of a kind its subject is not indexed by (`_known_kind`): a list by an integer, a map by a text. As
+        Neo4j refuses it; where the subject's kind is left open, it is compiled as before. An index given as a parameter
+        is of its value's kind: the statement is compiled for each call, and its SQL is already made by that value, a
+        text read as a property and a number as an item, so one of the other kind would be read as neither.
+        """
+        subject = self._known_kind(index.subject, scope)
+        if subject is None:
+            return
+        if subject not in ("LIST", "MAP"):
+            raise DrivineError(
+                f"{capital_noun_of(subject)} is not a list or a map, and is indexed as one, as in Neo4j."
+            )
+        by: Known = "INTEGER" if subject == "LIST" else "TEXT"
+        kind = self._known_kind(index.index, scope)
+        if kind is None and isinstance(index.index, Parameter):
+            kind = known_of(self._known(index.index))
+        if kind is not None and kind != by:
+            raise DrivineError(
+                f"{capital_noun_of(subject)} is indexed by {noun_of(by)}, not {noun_of(kind)}, as in Neo4j."
+            )
+
+    def _in_of_kind(self, binary: Binary, scope: Scope) -> None:
+        """Refuses the binary where it is `IN` a value the statement writes as one of a kind other than a list
+        (`_known_kind`), as Neo4j refuses it."""
+        kind = self._known_kind(binary.right, scope) if binary.operator is BinaryOperator.IN else None
+        if kind is not None and kind != "LIST":
+            raise DrivineError(f"IN takes a list, not {noun_of(kind)}, as in Neo4j.")
+
+    def _require_condition(self, expression: Expression, scope: Scope, operator: str) -> None:
+        """Refuses the expression, an operand of `operator`, where its kind is known (`_known_kind`) to be other than a
+        truth value, as Neo4j refuses it."""
+        kind = self._known_kind(expression, scope)
+        if kind is not None and kind != "BOOLEAN":
+            raise DrivineError(f"{operator} takes a truth value, not {noun_of(kind)}, as in Neo4j.")
+
+    @staticmethod
+    def _require_kind(value: Value, allowed: Known, message: Callable[[str], str]) -> None:
+        """
+        Refuses the value, an argument, where the statement writes it as a value of a kind (Json.known) other than
+        `allowed`, with the message of that kind's noun, as Neo4j refuses it when it plans the statement. A value whose
+        kind the statement leaves open is compiled as before.
+        """
+        kind = value.known if isinstance(value, Json) else None
+        if kind is not None and kind != allowed:
+            raise DrivineError(message(noun_of(kind)))
+
     def _known(self, index: Expression) -> Any:
         """An index written, or bound to a parameter, is known: a text is the property of that name, a number an
         item."""
@@ -3474,6 +4402,7 @@ class SqlCypherCompiler(ABC):
         return self._parameters.json_at(subject.name, keys)
 
     def _index(self, expression: Index, scope: Scope) -> Value:
+        self._index_of_kind(expression, scope)
         index = expression.index
         listed: list[Value] = []
 
@@ -3490,7 +4419,7 @@ class SqlCypherCompiler(ABC):
         if isinstance(known, str):
             in_parameter = self._in_parameter(expression)
             if in_parameter is not None:
-                return Json(in_parameter)
+                return Json(in_parameter, json_null=True)
             return self._property(self._expression(expression.subject, scope), known)
         # An item of a list of nodes or relationships is the node or the relationship, so it is compared by its id; of
         # one collect gathers in this query, its properties, for a store reads no aggregate from a subquery. A pattern
@@ -3509,6 +4438,7 @@ class SqlCypherCompiler(ABC):
                 list=_holds_lists(subject_value()),
                 text=_holds_texts(subject_value()),
                 temporals=_item_temporals_of(subject_value()),
+                json_null=not self._is_flat(subject_value()),
             )
 
         def item(list_: str) -> str:
@@ -3530,6 +4460,7 @@ class SqlCypherCompiler(ABC):
             list=_holds_lists(subject_value()),
             text=_holds_texts(subject_value()),
             temporals=_item_temporals_of(subject_value()),
+            json_null=not self._is_flat(subject_value()),
         )
 
     def _entity_at(self, entities: Entities, at: str) -> Value:
@@ -3557,12 +4488,12 @@ class SqlCypherCompiler(ABC):
         if relationships:
             return (
                 f"FROM {self.elements(ids, name)} LEFT JOIN {self.edges} {row} "
-                f"ON {row}.eid = {self.id_of(f'{name}.item', None)}",
+                f"ON {row}.eid = {self.id_of(self.item(name), None)}",
                 _relationship(row),
             )
         return (
             f"FROM {self.elements(ids, name)} LEFT JOIN {self.nodes} {row} "
-            f"ON {row}.nid = {self.id_of(f'{name}.item', None)}",
+            f"ON {row}.nid = {self.id_of(self.item(name), None)}",
             _node(row),
         )
 
@@ -3589,7 +4520,7 @@ class SqlCypherCompiler(ABC):
             # Of null, null, as in Cypher, and not an empty list.
             return (
                 f"CASE WHEN {ids} IS NOT NULL THEN "
-                f"(SELECT {self.aggregate_list(value, f'{name}.item_no')} {from_}{filter_}) END"
+                f"(SELECT {self.aggregate_list(value, self.item_no(name))} {from_}{filter_}) END"
             )
 
         list_ = self.shared1(listed.ids, comprehended)
@@ -3615,7 +4546,7 @@ class SqlCypherCompiler(ABC):
         list_ = self.comparable(self.json(listed))
         name = self._alias("x")
         item = Json(
-            f"{name}.item",
+            self.item(name),
             temporal=_items_of(listed),
             items=_item_items_of(listed),
             temporals=_item_temporals_of(listed),
@@ -3623,14 +4554,14 @@ class SqlCypherCompiler(ABC):
         )
         inner = {**scope, expression.variable: item}
         projected = self._expression(expression.projection, inner) if expression.projection is not None else None
-        projection = self.json(projected).sql if projected is not None else f"{name}.item"
+        projection = self.json(projected).sql if projected is not None else self.item(name)
         filter_ = f" WHERE {self._condition(expression.where, inner)}" if expression.where is not None else ""
 
         # Of null, null, as in Cypher, and not an empty list.
         def comprehended(items: str) -> str:
             return (
                 f"CASE WHEN NOT {self.is_json_null(items)} THEN "
-                f"(SELECT {self.aggregate_list(projection, f'{name}.item_no')} "
+                f"(SELECT {self.aggregate_list(projection, self.item_no(name))} "
                 f"FROM {self._elements_of(listed, items, name)}{filter_}) END"
             )
 
@@ -3690,6 +4621,7 @@ class SqlCypherCompiler(ABC):
                     self.property_of(map_, it),
                     temporal=was_json.temporal if was_json else None,
                     items=was_json.items if was_json else None,
+                    known=was_json.known if was_json else None,
                 )
             inner[expression.accumulator] = Json(accumulator)
             inner[expression.variable] = Json(item, temporal=_items_of(listed), temporals=_item_temporals_of(listed))
@@ -3707,6 +4639,8 @@ class SqlCypherCompiler(ABC):
             self.reduce(self._alias("f"), initial, list_, step, context, context_step),
             # It may hold what its start, its list or a value of the row its step reads holds (#347).
             temporals=_has_temporals(start) or _has_temporals(listed) or any(_has_temporals(scope[it]) for it in read),
+            # Its step may give JSON's null, as a null written or read from a map does.
+            json_null=True,
         )
 
     def _pattern_comprehension(self, expression: PatternComprehension, scope: Scope) -> Value:
@@ -3715,13 +4649,24 @@ class SqlCypherCompiler(ABC):
         if expression.where is not None:
             inner.where.append(self._condition(expression.where, inner.scope))
         projected = self._expression(expression.projection, inner.scope)
+        # A body that reads no variable of the pattern's own, `[(p)-->() | p.name]`, is worked out for each of the
+        # pattern's rows in a derived table, and gathered from there: an aggregate that reads only the row's columns is
+        # an aggregate of the row's query, which Postgres refuses (#305). One that reads nothing of any row, a literal
+        # or a parameter, is the comprehension's aggregate as it is. Its path variable is its own even where the row
+        # holds that name, which it leaves to a new variable.
+        own = [it for it in variables_in_pattern(expression.pattern) if it not in scope]
+        own += _present(expression.pattern.variable)
+        read = variables_read_in(expression.projection)
+        apart = not any(it in own for it in read) and (len(read) > 0 or holds_subquery(expression.projection))
 
         def gathered(value: str) -> str:
-            return (
-                "("
-                + " ".join([f"SELECT {self.aggregate_list(value)}", *inner.from_(), *_present(inner.where_clause())])
-                + ")"
-            )
+            def rows(select: str) -> str:
+                return " ".join([select, *inner.from_(), *_present(inner.where_clause())])
+
+            if not apart:
+                return f"({rows(f'SELECT {self.aggregate_list(value)}')})"
+            each = self._alias("pc")
+            return f"(SELECT {self.aggregate_list(f'{each}.v')} FROM ({rows(f'SELECT {value} AS v')}) {each})"
 
         # A comprehension of nodes or relationships is a list of them, so a write to an item of it reaches them.
         if isinstance(projected, Node):
@@ -3804,7 +4749,7 @@ class SqlCypherCompiler(ABC):
                     lambda ids: quantified(*self._entity_items(ids, entities.relationships, name), f"{ids} IS NULL"),
                 )
             )
-        item = Json(f"{name}.item", temporal=_items_of(listed), temporals=_item_temporals_of(listed))
+        item = Json(self.item(name), temporal=_items_of(listed), temporals=_item_temporals_of(listed))
         return Bool(
             self.shared1(
                 self.comparable(self.json(listed)),
@@ -3844,7 +4789,7 @@ class SqlCypherCompiler(ABC):
                     *([f"{v}.item_no <= {bound(to)}"] if to is not None else []),
                 ]
                 rows = (
-                    f"SELECT {e}.item AS item, {e}.item_no AS item_no, COUNT(*) OVER () AS cnt "
+                    f"SELECT {self.item(e)} AS item, {self.item_no(e)} AS item_no, COUNT(*) OVER () AS cnt "
                     f"FROM {self._elements_of(listed, x, e)}"
                 )
                 gathered = self.comparable(Json(self.aggregate_list(f"{v}.item", f"{v}.item_no"), ordered=True))
@@ -3902,8 +4847,14 @@ class SqlCypherCompiler(ABC):
                 and subject.temporal is None
                 and subject.row_keys is None
                 and expression.key not in FIELD_NAMES
+                # One of a kind known other than a map is left to _property, which refuses it.
+                and not _known_no_map(subject)
             ):
-                return Json(self.item_value(self.comparable(subject), expression.key), temporals=subject.temporals)
+                return Json(
+                    self.item_value(self.comparable(subject), expression.key),
+                    temporals=subject.temporals,
+                    json_null=not subject.flat,
+                )
         return self._expression(expression, select.scope)
 
     def _property(self, subject: Value, key: str) -> Value:
@@ -3914,17 +4865,22 @@ class SqlCypherCompiler(ABC):
         if isinstance(subject, Relationship):
             return Json(self.property_of(subject.props, key))
         if isinstance(subject, Json):
+            # A value the statement writes as one of a kind other than a map has none, as Neo4j says when it plans the
+            # statement.
+            if _known_no_map(subject):
+                raise DrivineError(f"{capital_noun_of(cast(Known, subject.known))} has no properties.")
             field_ = self._temporal_field(subject, key)
             if field_ is not None:
                 return field_
             if subject.row_keys is not None:
                 keys = (*subject.row_keys, key)
-                return Json(self.row_value(keys), row_keys=keys)
+                return Json(self.row_value(keys), row_keys=keys, json_null=not subject.flat)
             taken = self.property_of(self.comparable(subject), key)
             return Json(
                 taken,
                 identity=self._identity_taken(subject, taken, True, lambda it: self.property_of(it, key)),
                 temporals=subject.temporals,
+                json_null=not subject.flat,
             )
         if isinstance(subject, Bool):
             raise DrivineError("A truth value has no properties.")
@@ -4067,11 +5023,10 @@ class SqlCypherCompiler(ABC):
                 raise DrivineError(f"'{text}' is no {function.name}.")
             return Json(self.literal_json(worked), temporal=kind)
         if isinstance(written, MapLiteral):
+            if kind is not Temporal.DURATION and any(key in SELECTORS for key, _ in written.entries):
+                return of(self._from_temporal(kind, function, written, scope))
             fields = {key: self._expression(value, scope) for key, value in written.entries}
-            known = DURATION_MAP_FIELDS if kind is Temporal.DURATION else INSTANT_MAP_FIELDS
-            unknown = next((it for it in fields if it not in known), None)
-            if unknown is not None:
-                unsupported(f"{function.name}() of a map with {unknown}")
+            _map_fields(kind, function.name, list(fields))
             numbers = {
                 key: self.number(self.comparable(self.json(value)))
                 for key, value in fields.items()
@@ -4081,7 +5036,19 @@ class SqlCypherCompiler(ABC):
                 return of(self.temporals.duration(numbers))
             timezone = fields.get("timezone")
             zone = self.text(self.comparable(self.json(timezone))) if timezone is not None else None
-            return of(self.temporals.of(numbers, zone, kind))
+            # A zone by name, which no store's text holds yet, is refused rather than given as null: so a value made
+            # from such a moment, `time({time: other})`, is refused too.
+            _map_zone(written.entries)
+            if not any(key in CALENDAR_FIELDS for key, _ in written.entries):
+                return of(self.temporals.of(numbers, zone, kind))
+            # A date or a moment takes a week, an ordinal day or a quarter in place of a month and a day: worked out
+            # here where the statement writes them, as `{year, month, day}` is made, else by the store.
+            date_ = _calendar_date(function.name, written.entries)
+            if date_ is None:
+                return of(self.temporals.of_calendar(numbers, zone, kind))
+            day = {key: value for key, value in numbers.items() if key not in CALENDAR_FIELDS}
+            day["year"], day["month"], day["day"] = (str(it) for it in date_)
+            return of(self.temporals.of(day, zone, kind))
         given = arguments[0]
         if not isinstance(given, Json):
             raise DrivineError(f"{function.name}() takes a text or a map of its fields.")
@@ -4091,6 +5058,121 @@ class SqlCypherCompiler(ABC):
         if given.temporal is not None and given.temporal.instant:
             return of(self.temporals.convert(text, given.temporal, kind))
         return of(self.temporals.convert_any(text, kind))
+
+    def _from_temporal(self, kind: Temporal, function: Function, written: MapLiteral, scope: Scope) -> str:
+        """
+        The SQL of a temporal value of the kind that the function makes of the map `written` with a `date`, a `time` or
+        a `datetime`, another temporal value whose fields it takes, with the map's others laid over them: see
+        `Temporals.over`. Fails as Neo4j fails: on a field the kind has none of, a `datetime` beside a `date` or a
+        `time`, a value written that is no temporal value or is of a kind that hasn't what it is to give, fields of two
+        calendars, a date of its fields that is not whole (a year, a month and a day; a week and a day of the week; an
+        ordinal day; a quarter and a day of the quarter) beside a value that gives the time, a field of the time without
+        the one above it where no value gives the time, and a number written that is not whole or past its field's
+        range. A zone by name is refused. As drivine4j's.
+        """
+        name = function.name
+        entries = dict(written.entries)
+        keys = entries.keys()
+        calendar = _over_keys(kind, name, keys)
+
+        def base(key: str, kinds: tuple[Temporal, ...]) -> TemporalBase | None:
+            value = entries.get(key)
+            return self._over_base(name, key, kinds, value, scope) if value is not None else None
+
+        datetime_ = base("datetime", (Temporal.DATE_TIME, Temporal.LOCAL_DATE_TIME))
+        date_ = datetime_ or base("date", (Temporal.DATE_TIME, Temporal.LOCAL_DATE_TIME, Temporal.DATE))
+        time = datetime_ or base(
+            "time", (Temporal.DATE_TIME, Temporal.LOCAL_DATE_TIME, Temporal.TIME, Temporal.LOCAL_TIME)
+        )
+        fields = {
+            key: self._over_field(name, key, value, keys, scope)
+            for key, value in written.entries
+            if key not in SELECTORS and key != "timezone"
+        }
+        zone = entries.get("timezone")
+        timezone = self._over_zone(name, zone, scope) if zone is not None else None
+        # A date of fields written as numbers alone is worked out here, as a map of them is (see _calendar_date).
+        if date_ is None and calendar is not None and calendar != "a month":
+            day = _calendar_date(
+                name, [(key, value) for key, value in written.entries if key == "year" or key in CALENDAR_FIELDS]
+            )
+            if day is not None:
+                fields = {key: value for key, value in fields.items() if key not in CALENDAR_FIELDS}
+                fields["year"], fields["month"], fields["day"] = (str(it) for it in day)
+        return self.temporals.over(date_, time, fields, timezone, kind)
+
+    def _over_field(self, name: str, key: str, value: Expression, keys: AbstractSet[str], scope: Scope) -> str:
+        """
+        The SQL number of the field `key` of a map given `name` that is laid over another temporal value, written as
+        `value`: a field written as null is its least (OVER_LEAST), as is one an expression gives as null. A number
+        written that is not whole, or past its field's range (OVER_RANGES; beside a millisecond or a microsecond given,
+        a microsecond or a nanosecond runs to the next one's), fails. `keys` are the map's fields.
+        """
+        range_, beside = _over_range(key, keys)
+        return self._map_number(name, key, value, OVER_LEAST.get(key, 0), range_, beside, scope)
+
+    def _map_number(
+        self,
+        name: str,
+        key: str,
+        value: Expression,
+        least: int,
+        range_: tuple[int, int] | None,
+        beside: str | None,
+        scope: Scope,
+    ) -> str:
+        """
+        The SQL number of the field `key` of a temporal map given `name` (a truncation's, or one laid over another
+        temporal value), written as `value`: `least` where it is written as null or an expression gives null, else a
+        number written that `_whole_field` takes in `range_`, the range it has `beside` another field where one is
+        named.
+        """
+        written = _written_number(value)
+        if written is None:
+            return f"COALESCE({self.number(self.comparable(self.json(self._expression(value, scope))))}, {least})"
+        if written.value is None:
+            return f"{least}"
+        return f"{_whole_field(name, key, written.value, range_, beside)}"
+
+    def _over_base(
+        self, name: str, key: str, kinds: tuple[Temporal, ...], value: Expression, scope: Scope
+    ) -> TemporalBase:
+        """
+        The value that `value`, written as the `date`, `time` or `datetime` field `key` of a map given `name`, gives
+        `Temporals.over`, where it is of one of `kinds`. A value written that is no temporal value, or one whose kind
+        the statement tells that is none of `kinds`, fails, as Neo4j fails on it.
+        """
+        nouns = [f"a {it.function}" for it in reversed(kinds)]
+
+        def refused(given: str) -> NoReturn:
+            raise DrivineError(f"{name}() takes {', '.join(nouns[:-1])} or {nouns[-1]} for {key}, not {given}.")
+
+        if isinstance(value, Literal):
+            refused(_shown_literal(value.value))
+        given = self._expression(value, scope)
+        if not isinstance(given, Json):
+            refused("a truth value" if isinstance(given, Bool) else "a node, a relationship or a path")
+        if given.known is not None:
+            refused(noun_of(given.known))
+        if given.temporal is not None and given.temporal not in kinds:
+            refused(f"a {given.temporal.function}")
+        return TemporalBase(
+            self.text(self.comparable(given)), (given.temporal,) if given.temporal is not None else kinds
+        )
+
+    def _over_zone(self, name: str, zone: Expression, scope: Scope) -> str:
+        """
+        The offset's SQL text of `zone`, the `timezone` of a map given `name` that is laid over another temporal value:
+        one written is refused where it is null or no offset (see `_zone_text`); one an expression gives is the store's
+        to check.
+        """
+        if zone == Literal(None):
+            raise DrivineError(f"{name}() takes a time zone, not null.")
+        if not isinstance(zone, Literal):
+            return self.text(self.comparable(self.json(self._expression(zone, scope))))
+        if not isinstance(zone.value, str):
+            raise DrivineError(f"{name}() takes a time zone, not {_written(zone.value)}.")
+        return _zone_text(zone.value)
 
     def _map_projection(self, projection: MapProjection, scope: Scope) -> Value:
         if projection.variable not in scope:
@@ -4180,11 +5262,14 @@ class SqlCypherCompiler(ABC):
     def _binary(self, binary: Binary, scope: Scope) -> Value:
         filter_ = self._filtered
         operator = binary.operator
+        self._in_of_kind(binary, scope)
         if operator in (BinaryOperator.EQUALS, BinaryOperator.NOT_EQUALS, BinaryOperator.IN):
             itemwise = self._itemwise(binary, scope)
             if itemwise is not None:
                 return Bool(f"(NOT {itemwise})" if operator is BinaryOperator.NOT_EQUALS else itemwise)
         if operator in (BinaryOperator.AND, BinaryOperator.OR, BinaryOperator.XOR):
+            for it in (binary.left, binary.right):
+                self._require_condition(it, scope, operator.value)
             left = self.bool(self._expression(binary.left, scope))
             right = self.bool(self._expression(binary.right, scope))
             if operator is BinaryOperator.AND:
@@ -4221,7 +5306,7 @@ class SqlCypherCompiler(ABC):
                     f"THEN {self.ordered(x, sql, y)} END"
                 )
 
-            return Bool(self.shared([a, b], ordered))
+            return Bool(self.shared_compared(a, b, ordered))
         if operator is BinaryOperator.ADD:
             # Two lists of nodes, or of relationships, are together a list of them.
             if (
@@ -4255,8 +5340,8 @@ class SqlCypherCompiler(ABC):
                 temporals=_has_temporals(left_value) or _has_temporals(right_value),
                 list=_is_list(left_value) or _is_list(right_value),
                 item_lists=_holds_lists(left_value) and (_holds_lists(right_value) or not _is_list(right_value)),
-                text=(text_left and (text_right or _is_given_number(given_right)))
-                or (text_right and _is_given_number(given_left)),
+                text=(text_left and (text_right or is_given_number(given_right)))
+                or (text_right and is_given_number(given_left)),
                 texts=(_holds_texts(left_value) and (_holds_texts(right_value) or text_right))
                 or (text_left and _holds_texts(right_value)),
             )
@@ -4270,7 +5355,7 @@ class SqlCypherCompiler(ABC):
                 x, y = values
                 return (
                     f"CASE WHEN {self.integral(x)} AND {self.integral(y)} THEN "
-                    f"{self.scalar(f'trunc({self.number(x)} / {self.number(y)})')} "
+                    f"{self.scalar(self.whole_quotient(self.number(x), self.number(y)))} "
                     f"ELSE {self.arithmetic(x, y, '/')} END"
                 )
 
@@ -4371,14 +5456,14 @@ class SqlCypherCompiler(ABC):
 
         def over(listed: str, at: int) -> str:
             e = self._alias("lc")
-            item = f"{e}.item"
+            item = self.item(e)
             mapped = (
                 each(item)
                 if at == 1
                 else f"CASE WHEN {self.type_of(item)} = 'array' THEN {over(item, at - 1)} ELSE {item} END"
             )
             items = self.aggregate_list(
-                f"CASE WHEN {self.is_json_null(item)} THEN {self.literal_json(None)} ELSE {mapped} END", f"{e}.item_no"
+                f"CASE WHEN {self.is_json_null(item)} THEN {self.literal_json(None)} ELSE {mapped} END", self.item_no(e)
             )
             return self.comparable(Json(f"(SELECT {items} FROM {self.temporal_elements(listed, e)})", ordered=True))
 
@@ -4435,12 +5520,13 @@ class SqlCypherCompiler(ABC):
         # given that is not null needs no test of its own, and a property that is not there is SQL's null; any other
         # value is tested.
         if given is not None:
-            equal = self.json_equals(a, b)
+            equal = self.given_equals(a, b, given)
             if not stored:
                 equal = f"CASE WHEN NOT {self.is_json_null(a)} THEN {equal} END"
         else:
-            equal = self.shared(
-                [a, b],
+            equal = self.shared_compared(
+                a,
+                b,
                 lambda it: (
                     f"CASE WHEN NOT {self.is_json_null(it[0])} AND NOT {self.is_json_null(it[1])} "
                     f"THEN {self.json_equals(it[0], it[1])} END"
@@ -4576,15 +5662,45 @@ class SqlCypherCompiler(ABC):
         if binary.operator is BinaryOperator.IN:
             if not isinstance(right, ListLiteral) or not right.items:
                 return None
-            # The item compiled once, and compared with each of the list's.
+            # The item compiled once, and compared with each of the list's. A null the list writes makes its
+            # comparison null whatever the value, so the nulls are one null term. A value that compares as JSON is
+            # tested at once, as `_membership` tests it against a list, against the items that are constants holding no
+            # null, where there are two or more: written one by one, a long list of mixed kinds compiled to megabytes on
+            # Oracle (#227). A value that may hold a null is tested against the texts, numbers and truth values apart,
+            # as one that holds none, which none of them is equal to but for a null; and against the lists and maps as
+            # membership tests such a value, item by item where it holds a null.
             item = self._expression(left, scope)
+            nulls = [it for it in right.items if isinstance(it, Literal) and it.value is None]
+            items = [it for it in right.items if not (isinstance(it, Literal) and it.value is None)]
+            constants: list[Expression] = []
+            others = items
+            if isinstance(item, Json) and _plain_json(item) and sum(1 for it in items if _constant(it)) > 1:
+                constants = [it for it in items if _constant(it)]
+                others = [it for it in items if not _constant(it)]
+            if self._is_flat(item):
+                scalars, containers = constants, []
+            else:
+                scalars = [it for it in constants if not isinstance(it, (ListLiteral, MapLiteral))]
+                containers = [it for it in constants if isinstance(it, (ListLiteral, MapLiteral))]
+            terms: list[str] = []
+            for written, flat in ((scalars, True), (containers, False)):
+                if written:
+                    within = ListLiteral(tuple(written))
+                    value = dataclasses.replace(cast(Json, item), flat=True) if flat else item
+                    in_ = Binary(BinaryOperator.IN, left, within)
+                    terms.append(self._membership(in_, value, self._expression(within, scope), scope, False))
             stored = self._stored(left, scope)
-            compared: list[str] = []
-            for listed in right.items:
+            for listed in others:
                 equals = Binary(BinaryOperator.EQUALS, left, listed)
                 a, b = self._compared(item, self._expression(listed, scope), equals)
-                compared.append(self._equality(a, b, listed, self._plain(left, listed, a, b, scope), stored))
-            return _grouped(compared, "OR")
+                terms.append(self._equality(a, b, listed, self._plain(left, listed, a, b, scope), stored))
+            # A null beside other terms takes its kind from them; alone, it is given one, as Postgres can't make a bare
+            # NULL JSON.
+            if not nulls:
+                return _grouped(terms, "OR")
+            if not terms:
+                return "(CASE WHEN 1 = 0 THEN FALSE END)"
+            return _grouped([*terms, "NULL"], "OR")
         if isinstance(left, ListLiteral) and isinstance(right, ListLiteral):
             if len(left.items) != len(right.items):
                 return "FALSE"
@@ -4682,9 +5798,42 @@ class SqlCypherCompiler(ABC):
         else:
             list_, x = self.comparable(self.json(right)), self.comparable(self.json(left))
         equals = self.identity_equals if identities else self.json_equals
+        # An item of a list whose items the statement writes or is given (see `_given_items`) is compared with the value
+        # as JSON, a plain equality, where the value meets the store's test, if it has one: see `given_items_test`.
+        items = None if id_ is not None or identities else self._given_items(binary.right)
+        test: Callable[[str], str] | None = None
+        if items is not None and self.given_items_test(x, items) is not None:
+            given_items = items
+
+            def tested(value: str) -> str:
+                return cast(str, self.given_items_test(value, given_items))
+
+            test = tested
 
         def matches(item: str, value: str) -> str:
-            return f"{item} = {value}" if id_ is not None else equals(item, value)
+            return f"{item} = {value}" if id_ is not None or test is not None else equals(item, value)
+
+        def found(around: Callable[[str, str], str] | None = None) -> str:
+            # Whether an item matches the value, as a semi-join the store answers: `EXISTS`, or with `around` that test
+            # and the value, each read once. Where there is a `test`, the value meets it too, tested once beside the
+            # `EXISTS`, not in it.
+            i = self._alias("i")
+
+            def exists(l_: str, v: str) -> str:
+                return f"EXISTS (SELECT 1 FROM {self._elements_of(right, l_, i)} WHERE {matches(self.item(i), v)})"
+
+            if test is not None:
+                test_ = test
+
+                def body(it: list[str]) -> str:
+                    found_ = f"({test_(it[1])} AND {exists(it[0], it[1])})"
+                    return found_ if around is None else around(found_, it[1])
+
+                return self.shared_compared(list_, x, body)
+            if around is None:
+                return exists(list_, x)
+            wrap = around
+            return self.shared_compared(list_, x, lambda it: wrap(exists(it[0], it[1]), it[1]))
 
         within = self._is_flat(right)
         # A node, a relationship or a value of one kind holds no null; nor does an item of a list that holds none.
@@ -4699,7 +5848,6 @@ class SqlCypherCompiler(ABC):
         # null: beside any list, read by a WHERE for its truth alone, it is equal as JSON only to an item Cypher finds
         # equal.
         if whole and (filter_ or (present_left and present_right and within)):
-            i = self._alias("i")
             # But JSON's null is equal as JSON to an item that is, so a value that may be JSON's null (not a property
             # read from the store, which is SQL's null where it is not there) is in a list that may hold a null only
             # where it is not null.
@@ -4711,25 +5859,12 @@ class SqlCypherCompiler(ABC):
                 and self.holds_null("x") is not None
             )
             if not nullable:
-                return f"EXISTS (SELECT 1 FROM {self._elements_of(right, list_, i)} WHERE {matches(f'{i}.item', x)})"
-            return self.shared(
-                [list_, x],
-                lambda it: (
-                    f"(EXISTS (SELECT 1 FROM {self._elements_of(right, it[0], i)} WHERE {matches(f'{i}.item', it[1])}) "
-                    f"AND NOT {self.is_json_null(it[1])})"
-                ),
-            )
+                return found()
+            return found(lambda exists, v: f"({exists} AND NOT {self.is_json_null(v)})")
         # A value that may be null, in a list that is not and holds none: in where an item is equal, null where the
         # value is null, else not, written so the store still answers the first as it did, as a semi-join.
         if present_right and within and whole and filled:
-            i = self._alias("i")
-            return self.shared(
-                [list_, x],
-                lambda it: (
-                    f"(EXISTS (SELECT 1 FROM {self._elements_of(right, it[0], i)} WHERE {matches(f'{i}.item', it[1])}) "
-                    f"OR CASE WHEN NOT {self.is_json_null(it[1])} THEN FALSE END)"
-                ),
-            )
+            return found(lambda exists, v: f"({exists} OR CASE WHEN NOT {self.is_json_null(v)} THEN FALSE END)")
 
         def body(values: list[str]) -> str:
             l_, v = values
@@ -4745,23 +5880,53 @@ class SqlCypherCompiler(ABC):
                     else f"CASE WHEN EXISTS (SELECT 1 FROM {self._elements_of(right, l_, j)}) THEN NULL ELSE FALSE END"
                 )
                 cases.append(f"WHEN {self.is_json_null(v)} THEN {empty}")
+            found_ = f"EXISTS (SELECT 1 FROM {self._elements_of(right, l_, i)} WHERE {matches(self.item(i), v)})"
+            # Items the statement gives, none a list or a map, are equal to no value that holds a null, and a comparison
+            # with one is null only where it is null: the value is not read for its nulls, a text past 32 KB taken out
+            # as JSON so closing Oracle's session (#291, liberation-data/drivine4j#475). See `given_items_decided`.
+            if items is not None and self.given_items_decided:
+                cases.append(f"WHEN {'' if test is None else f'{test(v)} AND '}{found_} THEN TRUE")
+                return f"CASE {' '.join(cases)} ELSE {'NULL' if None in items else 'FALSE'} END"
             # A value that holds a null is equal to no item.
             held = None if whole else self.holds_null(v)
-            found = f"EXISTS (SELECT 1 FROM {self._elements_of(right, l_, i)} WHERE {matches(f'{i}.item', v)})"
-            cases.append(f"WHEN {f'NOT ({held}) AND ' if held is not None else ''}{found} THEN TRUE")
+            cases.append(f"WHEN {f'NOT ({held}) AND ' if held is not None else ''}{found_} THEN TRUE")
             if not (within and whole):
                 k = self._alias("i")
                 undecided = (
-                    self.is_json_null(f"{k}.item")
+                    self.is_json_null(self.item(k))
                     if id_ is not None
-                    else f"({self._nullable_equals(f'{k}.item', v, equals)}) IS NULL"
+                    else f"({self._nullable_equals(self.item(k), v, equals)}) IS NULL"
                 )
                 cases.append(
                     f"WHEN EXISTS (SELECT 1 FROM {self._elements_of(right, l_, k)} WHERE {undecided}) THEN NULL"
                 )
             return f"CASE {' '.join(cases)} ELSE FALSE END"
 
-        return self.shared([list_, x], body)
+        return self.shared_compared(list_, x, body)
+
+    def _given_items(self, expression: Expression) -> list[Any] | None:
+        """
+        The items of the list the expression is, where the statement writes or is given each: a list literal of literals
+        and parameters, or a parameter. None where it is not so given, or holds a list or a map, whose items
+        `given_items_test` doesn't know.
+        """
+        if isinstance(expression, ListLiteral):
+            items: list[Any] = []
+            for item in expression.items:
+                if isinstance(item, Literal):
+                    items.append(item.value)
+                elif isinstance(item, Parameter):
+                    items.append(self._parameters.tree(item.name))
+                else:
+                    return None
+        elif isinstance(expression, Parameter):
+            tree = self._parameters.tree(expression.name)
+            if not isinstance(tree, list):
+                return None
+            items = cast(list[Any], tree)
+        else:
+            return None
+        return None if any(isinstance(it, (list, dict)) for it in items) else items
 
     def _identity_of(self, value: Value) -> str | None:
         """
@@ -4832,6 +5997,8 @@ class SqlCypherCompiler(ABC):
         return None
 
     def _unary(self, unary: Unary, scope: Scope) -> Value:
+        if unary.operator is UnaryOperator.NOT:
+            self._require_condition(unary.operand, scope, "NOT")
         operand = self._expression(unary.operand, scope)
         if unary.operator is UnaryOperator.NOT:
             return Bool(f"(NOT ({self.bool(operand)}))")
@@ -4908,7 +6075,22 @@ class SqlCypherCompiler(ABC):
             item_lists=all(_holds_lists(result) for _, result in results),
             text=all(_is_text(result) for _, result in results),
             texts=all(_holds_texts(result) for _, result in results),
+            json_null=any(_may_be_json_null(result) for _, result in results),
         )
+
+    def _coalesced(self, argument: Expression, value: Value, scope: Scope) -> str:
+        """
+        An argument of `coalesce()`, `value` as compiled from `argument`, null where it is JSON's null: a property of a
+        node or a relationship a variable names as `coalesced_property` reads it, which on Oracle reads a long text
+        through its text (liberation-data/drivine4j#459).
+        """
+        if isinstance(argument, Property) and isinstance(argument.subject, Variable):
+            subject = scope.get(argument.subject.name)
+            if isinstance(subject, Node) and argument.key != stamps.PROPERTY:
+                return self.coalesced_property(subject.props, argument.key)
+            if isinstance(subject, Relationship):
+                return self.coalesced_property(subject.props, argument.key)
+        return self.null_if_json_null(self.comparable(self.json(value)))
 
     def _function(self, function: Function, scope: Scope) -> Value:
         arguments = [self._expression(it, scope) for it in function.arguments]
@@ -4922,7 +6104,14 @@ class SqlCypherCompiler(ABC):
         name = function.name.lower()
         if name == "properties":
             subject = one()
-            return self.json(subject) if isinstance(subject, (Node, Relationship)) else subject
+            if isinstance(subject, (Node, Relationship)):
+                return self.json(subject)
+            self._require_kind(
+                subject,
+                "MAP",
+                lambda kind: f"properties() takes a node, a relationship or a map, not {kind}, as in Neo4j.",
+            )
+            return subject
         if name == "labels":
             subject = one()
             if isinstance(subject, Node):
@@ -4956,8 +6145,8 @@ class SqlCypherCompiler(ABC):
                 return self._relationship_list(subject.eids)
             raise DrivineError("relationships() takes a path.")
         if name == "coalesce":
-            coalesced = ", ".join(self.null_if_json_null(self.comparable(self.json(it))) for it in arguments)
             written = list(zip(function.arguments, arguments, strict=True))
+            coalesced = ", ".join(self._coalesced(argument, value, scope) for argument, value in written)
             return Json(
                 f"COALESCE({coalesced})",
                 temporal=_kind_of(written),
@@ -5066,6 +6255,12 @@ class SqlCypherCompiler(ABC):
         if name == "range":
             if len(arguments) not in (2, 3):
                 raise DrivineError("range() takes a start, an end and a step.")
+            for it in arguments:
+                self._require_kind(it, "INTEGER", lambda kind: f"range() takes integers, not {kind}, as in Neo4j.")
+            # A step written or given as 0 would never reach the end: a Decimal is given as the number it is.
+            step_given = jsonable(self._known(function.arguments[2])) if len(arguments) == 3 else None
+            if _is_number(step_given) and step_given == 0:
+                raise DrivineError("range() takes a step other than 0, as in Neo4j.")
             # Each argument read as a number first, as drivine4j reads them, so a statement's SQL is the same as its.
             numbers = [self.number(self.comparable(self.json(it))) for it in arguments]
             from_, to = numbers[:2]
@@ -5084,7 +6279,9 @@ class SqlCypherCompiler(ABC):
 
             def reversed_(x: str) -> str:
                 e = self._alias("e")
-                listed = self.comparable(Json(self.aggregate_list(f"{e}.item", f"{e}.item_no DESC"), ordered=True))
+                listed = self.comparable(
+                    Json(self.aggregate_list(self.item(e), f"{self.item_no(e)} DESC"), ordered=True)
+                )
                 return (
                     f"CASE {self.type_of(x)} WHEN 'string' THEN {self.texts([x], lambda t: self.reversed_text(t[0]))} "
                     f"WHEN 'array' THEN (SELECT {listed} FROM {self._elements_of(subject, x, e)}) END"
@@ -5105,10 +6302,10 @@ class SqlCypherCompiler(ABC):
 
             def tail(x: str) -> str:
                 e = self._alias("e")
-                listed = self.comparable(Json(self.aggregate_list(f"{e}.item", f"{e}.item_no"), ordered=True))
+                listed = self.comparable(Json(self.aggregate_list(self.item(e), self.item_no(e)), ordered=True))
                 return (
                     f"CASE WHEN {self.type_of(x)} = 'array' THEN "
-                    f"(SELECT {listed} FROM {self._elements_of(subject, x, e)} WHERE {e}.item_no > 1) END"
+                    f"(SELECT {listed} FROM {self._elements_of(subject, x, e)} WHERE {self.item_no(e)} > 1) END"
                 )
 
             return Json(
@@ -5138,7 +6335,7 @@ class SqlCypherCompiler(ABC):
             def empty(x: str) -> str:
                 size = self.function("size", x)
                 assert size is not None
-                return self.scalar(
+                return self.bool_json(
                     f"CASE WHEN {self.type_of(x)} = 'object' THEN {x} = {self.literal_json({})} "
                     f"WHEN {self.type_of(x)} IN ('array', 'string') THEN {self.number(size)} = 0 END"
                 )
@@ -5257,7 +6454,7 @@ class SqlCypherCompiler(ABC):
             now_kind = _temporal_of(name.split(".")[0])
             return Json(self.scalar(self.temporals.now(now_kind)), temporal=now_kind)
         if name in TEMPORAL_TRUNCATE:
-            return self._truncate(function, arguments, _temporal_of(name.split(".")[0]))
+            return self._truncate(function, arguments, _temporal_of(name.split(".")[0]), scope)
         if name in ("duration.between", "duration.inmonths", "duration.indays", "duration.inseconds"):
             return self._between(function, arguments, name)
         # A function the store has no SQL for is named before its arguments are counted.
@@ -5281,13 +6478,19 @@ class SqlCypherCompiler(ABC):
                 list=_holds_lists(one()),
                 text=_holds_texts(one()),
                 temporals=_item_temporals_of(one()),
+                json_null=not self._is_flat(one()),
             )
         return Json(result, text=name in TEXT_FUNCTIONS)
 
-    def _truncate(self, function: Function, arguments: list[Value], to: Temporal) -> Value:
-        """`date.truncate(unit, value)` and its like: the value cut short to the unit, as a value of `to`."""
-        if len(arguments) != 2:
+    def _truncate(self, function: Function, arguments: list[Value], to: Temporal, scope: Scope) -> Value:
+        """
+        `date.truncate(unit, value)` and its like: the value cut short to the unit, as a value of `to`, and with a map
+        of fields, `date.truncate(unit, value, {day: 2})`, those fields laid over it.
+        """
+        if len(arguments) < 2:
             raise DrivineError(f"{function.name}() takes a unit and a value.")
+        if len(arguments) > 3:
+            raise DrivineError(f"{function.name}() takes a unit, a value and a map of fields.")
         written = function.arguments[0]
         if not isinstance(written, Literal) or not isinstance(written.value, str):
             unsupported("A truncation to a unit an expression gives")
@@ -5295,14 +6498,15 @@ class SqlCypherCompiler(ABC):
         given = arguments[1]
         if not isinstance(given, Json):
             raise DrivineError(f"{function.name}() takes a unit and a value.")
+        fields = (
+            self._truncation_fields(function, unit, to, function.arguments[2], scope) if len(arguments) == 3 else None
+        )
 
         def cut(text: str, from_: Temporal) -> str:
-            truncated = self.temporals.truncate(unit, text, from_, to)
+            truncated = self.temporals.truncate(unit, text, from_, to, fields)
             if truncated is None:
-                raise DrivineError(
-                    f"{function.name}() truncates to year, quarter, month, week, day, hour, minute, second or "
-                    f"millisecond, not {unit}."
-                )
+                units = ", ".join(TRUNCATION_UNITS[:-1])
+                raise DrivineError(f"{function.name}() truncates to {units} or {TRUNCATION_UNITS[-1]}, not {unit}.")
             return truncated
 
         text = self.text(self.comparable(given))
@@ -5311,6 +6515,45 @@ class SqlCypherCompiler(ABC):
         else:
             truncated = self.temporals.by_kind(text, lambda from_, t: cut(t, from_))
         return Json(self.scalar(truncated), temporal=to)
+
+    def _truncation_fields(
+        self, function: Function, unit: str, kind: Temporal, written: Expression, scope: Scope
+    ) -> Overrides:
+        """
+        The fields the map `written`, the third argument of the function, gives the value of the kind it truncates, in
+        place of its own, as Neo4j takes them. A field of no such value, a day or a month beside a day of the week, a
+        number that is not whole, or a number written past its field's range (see TRUNCATION_RANGES; a microsecond
+        beside a millisecond given or kept by a cut to the unit runs to 999), fails, where a store would carry it into
+        the next field or fail on it at its own time. A field that is null is given as its least, as a map that leaves
+        it out makes a value: the year 0, the first month, day or day of the week, and no time; a time zone that is
+        null fails. Fields the stores have no SQL for yet (nanoseconds, the fields of a week or a quarter, a time zone
+        by name) are refused. As drivine4j's #468.
+        """
+        # Null gives no fields, as Neo4j has it.
+        if written == Literal(None):
+            return Overrides({})
+        if not isinstance(written, MapLiteral):
+            unsupported("A truncation's fields that an expression gives")
+        keys = _truncation_keys(function, kind, written.entries)
+        millis = "millisecond" in keys or unit == "millisecond"
+        timezone: str | None = None
+        fields: dict[str, str] = {}
+        for key, value in written.entries:
+            if key == "timezone":
+                timezone = _truncation_zone(function, value)
+            else:
+                fields[key] = self._truncation_number(function, key, value, millis, scope)
+        return Overrides(fields, timezone)
+
+    def _truncation_number(self, function: Function, key: str, value: Expression, millis: bool, scope: Scope) -> str:
+        """
+        The SQL number of the field `key` of a truncation of the function, which the value gives: see
+        `_truncation_fields`. With `millis`, a millisecond is given or kept, beside which a microsecond runs to 999.
+        """
+        beside = key == "microsecond" and millis
+        range_ = (0, 999) if beside else TRUNCATION_RANGES.get(key)
+        least = TRUNCATION_LEAST.get(key, 0)
+        return self._map_number(function.name, key, value, least, range_, "millisecond" if beside else None, scope)
 
     def _between(self, function: Function, arguments: list[Value], name: str) -> Value:
         """`duration.between(a, b)` and `duration.inMonths`, `inDays` and `inSeconds`: the duration from one value to
@@ -5389,7 +6632,7 @@ class SqlCypherCompiler(ABC):
         # constant out of range is not worked out before any row.
         number = self.number(self.comparable(self.json(arguments[index])))
         return self.shared1(
-            f"CASE WHEN {text} IS NOT NULL THEN TRUNC({number}) END",
+            f"CASE WHEN {text} IS NOT NULL THEN {self.temporal_sql.trunc}({number}) END",
             lambda n: (
                 f"CASE WHEN {n} < 0 OR {n} > {MAX_COUNT} THEN {self.failure(out_of_range, n)} "
                 f"ELSE CAST({n} AS INTEGER) END"
@@ -5405,7 +6648,7 @@ class SqlCypherCompiler(ABC):
 
     def _truncated_whole(self, value: Value) -> str:
         """A value as a SQL whole number cut toward zero, as Neo4j reads `round()`'s precision."""
-        return f"CAST(TRUNC({self.number(self.comparable(self.json(value)))}) AS INTEGER)"
+        return f"CAST({self.temporal_sql.trunc}({self.number(self.comparable(self.json(value)))}) AS INTEGER)"
 
     def _rounded(
         self,
@@ -5456,7 +6699,11 @@ class SqlCypherCompiler(ABC):
             )
 
         return self.shared(
-            [self.comparable(self.json(value)), f"TRUNC({self.number(self.comparable(self.json(precision)))})"], rounded
+            [
+                self.comparable(self.json(value)),
+                f"{self.temporal_sql.trunc}({self.number(self.comparable(self.json(precision)))})",
+            ],
+            rounded,
         )
 
     def _out_of_places(self, x: str, precision: str) -> str:
@@ -5507,7 +6754,7 @@ class SqlCypherCompiler(ABC):
         if isinstance(value, Json):
             return value
         if isinstance(value, Bool):
-            return Json(self.scalar(value.sql))
+            return Json(self.bool_json(value.sql))
         if isinstance(value, Node):
             return Json(self.node_json(value))
         if isinstance(value, Relationship):
@@ -5520,10 +6767,16 @@ class SqlCypherCompiler(ABC):
         )
 
     def bool(self, value: Value) -> str:
-        """A value as a condition: a boolean as itself, JSON's `true` and `false` as theirs, anything else as null."""
+        """
+        A value as a condition: a boolean as itself, JSON's `true` and `false` as theirs, anything else as null. One the
+        statement writes as a value of another kind (Json.known) is refused, as Neo4j refuses it when it plans the
+        statement.
+        """
         if isinstance(value, Bool):
             return value.sql
         if isinstance(value, Json):
+            if value.known is not None and value.known != "BOOLEAN":
+                raise DrivineError(f"{capital_noun_of(value.known)} is not a condition, as in Neo4j.")
             return self.bool_of(self.comparable(value))
         raise DrivineError("A node, a relationship or a path is not a condition.")
 
@@ -5562,6 +6815,9 @@ class SqlCypherCompiler(ABC):
             return self.comparable(self.json(value)), lambda it: [self.list_sort_key(it)]
         if not isinstance(value, Json) or temporal is not None or _is_text(value):
             return self.comparable(self.json(value)), lambda it: [self.sort_key(it)]
+        # One that may be JSON's null ties it with SQL's, so the next term decides between them (#314).
+        if _may_be_json_null(value):
+            return self.comparable(self.json(value)), self.json_null_sort_key
         return self.comparable(self.json(value)), self.open_sort_key
 
 
@@ -5570,6 +6826,11 @@ class SqlCypherCompiler(ABC):
 
 def indent(text: str) -> str:
     return "\n".join("    " + line for line in text.split("\n"))
+
+
+def named(sql: str, name: str) -> str:
+    """The SQL as the select-list entry of the column `name`: the column itself where the SQL reads one of that name."""
+    return sql if sql.endswith(f".{name}") else f"{sql} AS {name}"
 
 
 def unsupported(construct: str) -> NoReturn:
@@ -5614,6 +6875,179 @@ def is_anew(expression: Expression) -> bool:
     return isinstance(expression, Function) and expression.name.lower() == "randomuuid"
 
 
+ANEW = "#anew"
+"""
+What the name of a variable begins with that holds a randomUUID() made first, for each row: see
+`SqlCypherCompiler._anew_first`. Named as no variable is, unless quoted so: see `SqlCypherCompiler._anew_variable`.
+"""
+
+HAVING = "#having"
+"""
+What the name of an item begins with that a `WITH` that groups is given for an aggregate of its `WHERE`: see
+`SqlCypherCompiler._having`. Named as no variable of the statement is: see `SqlCypherCompiler._hidden`.
+"""
+
+RANDOM_UUID = Function("randomUUID", False, ())
+"""A call of `randomUUID()`, as a statement writes one."""
+
+
+def holds_anew(expression: Expression) -> bool:
+    """
+    Whether the expression holds a call of randomUUID() anywhere: in a comprehension's, a quantifier's, a reduce's or a
+    pattern comprehension's own expressions too, where `contains` does not look. Not in a subquery's query.
+    """
+    if isinstance(expression, ListComprehension):
+        return any(holds_anew(it) for it in _present(expression.list, expression.where, expression.projection))
+    if isinstance(expression, Quantifier):
+        return any(holds_anew(it) for it in _present(expression.list, expression.where))
+    if isinstance(expression, Reduce):
+        return any(holds_anew(it) for it in [expression.initial, expression.list, expression.expression])
+    if isinstance(expression, PatternComprehension):
+        return any(holds_anew(it) for it in _present(expression.where, expression.projection))
+    return is_anew(expression) or any(holds_anew(it) for it in children(expression))
+
+
+def query_holds_anew(query: Query) -> bool:
+    """Whether a clause of the query, or of a query it calls, holds a call of randomUUID() (`holds_anew`) in its
+    expressions."""
+
+    def projected(projection: Projection) -> bool:
+        terms = [*(it.expression for it in projection.items), *(it.expression for it in projection.order_by)]
+        return any(holds_anew(it) for it in terms)
+
+    for clause in [*query.clauses, *(c for u in query.unions for c in u.clauses)]:
+        if isinstance(clause, With):
+            found = projected(clause.projection) or (clause.where is not None and holds_anew(clause.where))
+        elif isinstance(clause, Return):
+            found = projected(clause.projection)
+        elif isinstance(clause, Unwind):
+            found = holds_anew(clause.list)
+        elif isinstance(clause, Match):
+            found = clause.where is not None and holds_anew(clause.where)
+        elif isinstance(clause, Call):
+            found = query_holds_anew(clause.query)
+        else:
+            found = False
+        if found:
+            return True
+    return False
+
+
+def seeded(
+    expression: Expression, seed: str, made: Iterable[str], in_body: bool = False, own: Sequence[str] = ()
+) -> Expression:
+    """
+    The expression with each randomUUID() in a comprehension's, a quantifier's, a reduce's or a pattern comprehension's
+    own expressions read beside the variable `seed`, made anew for each row: `CASE WHEN seed IS NULL THEN null ELSE
+    randomUUID() END`, which is randomUUID() still, as `seed` is never null. So the subquery that works the body out
+    reads the row, and a store works it out again for each row, as it does not for a subquery that reads nothing of it
+    (drivine4j#412). One so read already is left as it is (`is_seeded`, of the variables the compiler `made`). Each
+    item's variable is read beside `seed` too (`own`), the path's of a pattern comprehension, named here where it has
+    none: read beside the row's alone, a value bound in a subquery (`SqlCypherCompiler.shared`) reads nothing of the
+    item, and Postgres and Oracle worked it out once for all of them, so `[x IN range(1, 20) WHERE left(randomUUID(), 1)
+    < '8' | x]` kept every item or none; and an aggregate of a pattern comprehension's body that reads only the row's
+    columns is an aggregate of the row's query, which Postgres refuses.
+    """
+    made = set(made)
+
+    def body(part: Expression, variable: str) -> Expression:
+        return seeded(part, seed, made, True, [*own, variable])
+
+    def same(part: Expression) -> Expression:
+        return seeded(part, seed, made, in_body, own)
+
+    def replacement(e: Expression) -> Expression | None:
+        if is_seeded(e, made):
+            return e
+        if in_body and is_anew(e):
+            conditions: list[Expression] = [Unary(UnaryOperator.IS_NULL, Variable(it)) for it in [seed, *own]]
+            condition = functools.reduce(lambda a, b: Binary(BinaryOperator.AND, a, b), conditions)
+            return Case(None, ((condition, Literal(None)),), e)
+        return _seeded_body(e, seed, len(own), same, body)
+
+    return replaced(expression, replacement)
+
+
+def _seeded_body(
+    e: Expression,
+    seed: str,
+    depth: int,
+    same: Callable[[Expression], Expression],
+    body: Callable[[Expression, str], Expression],
+) -> Expression | None:
+    """
+    The expression, a comprehension, a quantifier, a reduce or a pattern comprehension, with its own expressions read
+    beside `seed` as `seeded` reads them: `same` for those read in its own scope, `body` for those read for each item. A
+    pattern comprehension's path is named after `seed` and how deep in bodies it is, `depth`, where it has no name.
+    None for any other expression, and for a pattern comprehension whose own expressions hold no randomUUID().
+    """
+    if isinstance(e, ListComprehension):
+        return dataclasses.replace(
+            e,
+            list=same(e.list),
+            where=body(e.where, e.variable) if e.where is not None else None,
+            projection=body(e.projection, e.variable) if e.projection is not None else None,
+        )
+    if isinstance(e, Quantifier):
+        return dataclasses.replace(
+            e, list=same(e.list), where=body(e.where, e.variable) if e.where is not None else None
+        )
+    if isinstance(e, Reduce):
+        return dataclasses.replace(
+            e, initial=same(e.initial), list=same(e.list), expression=body(e.expression, e.variable)
+        )
+    if isinstance(e, PatternComprehension):
+        # Named only where its body holds one, so a statement without randomUUID() is compiled as it was.
+        if not any(holds_anew(it) for it in _present(e.where, e.projection)):
+            return None
+        path = e.pattern.variable if e.pattern.variable is not None else f"{seed} path{depth}"
+        return dataclasses.replace(
+            e,
+            pattern=dataclasses.replace(e.pattern, variable=path),
+            where=body(e.where, path) if e.where is not None else None,
+            projection=body(e.projection, path),
+        )
+    return None
+
+
+def is_seeded(expression: Expression, made: Iterable[str]) -> bool:
+    """
+    Whether the expression is a randomUUID() read beside a variable made first for the row, as `seeded` reads one: of
+    those the compiler `made`, never a variable of the statement's named alike.
+    """
+    if not isinstance(expression, Case) or len(expression.alternatives) != 1:
+        return False
+    condition = expression.alternatives[0][0]
+    while isinstance(condition, Binary) and condition.operator is BinaryOperator.AND:
+        condition = condition.left
+    return (
+        isinstance(condition, Unary)
+        and condition.operator is UnaryOperator.IS_NULL
+        and isinstance(condition.operand, Variable)
+        and condition.operand.name in set(made)
+    )
+
+
+def _texts_in(value: Any, texts: set[str]) -> None:
+    """
+    Adds each text the value, a statement as read or any part of it, holds anywhere, as far as its first space: each of
+    its variables' names, and more (a label, a key, a text it gives), which is as much as a name made for it, with no
+    space, needs to keep clear of: see `SqlCypherCompiler._hidden`.
+    """
+    if isinstance(value, str):
+        texts.add(value.split(" ", 1)[0])
+    elif dataclasses.is_dataclass(value) and not isinstance(value, type):
+        for field in dataclasses.fields(value):
+            _texts_in(getattr(value, field.name), texts)
+    elif isinstance(value, (tuple, list, set, frozenset)):
+        for it in cast(Iterable[Any], value):
+            _texts_in(it, texts)
+    elif isinstance(value, dict):
+        for key, it in cast(dict[Any, Any], value).items():
+            _texts_in(key, texts)
+            _texts_in(it, texts)
+
+
 def _redeclared(returned: Iterable[str], bound: Iterable[str]) -> None:
     """
     Fails where a `CALL` returns or yields a variable of `returned` that is bound around it, in `bound`, as Neo4j fails:
@@ -5633,6 +7067,25 @@ def _redeclared(returned: Iterable[str], bound: Iterable[str]) -> None:
 def contains(expression: Expression, test: Callable[[Expression], bool]) -> bool:
     """Whether the expression holds an expression the test holds of, outside a nested query of its own."""
     return test(expression) or any(contains(it, test) for it in children(expression))
+
+
+def _reads_outside_aggregates(expression: Expression, parts: AbstractSet[Expression]) -> bool:
+    """
+    Whether the expression, outside its aggregates, holds one of `parts`, in a comprehension's, a quantifier's or a
+    reduce's body too.
+    """
+    if is_aggregate(expression):
+        return False
+    if expression in parts:
+        return True
+    bodies: list[Expression] = []
+    if isinstance(expression, ListComprehension):
+        bodies = _present(expression.where, expression.projection)
+    elif isinstance(expression, Quantifier):
+        bodies = _present(expression.where)
+    elif isinstance(expression, Reduce):
+        bodies = [expression.expression]
+    return any(_reads_outside_aggregates(it, parts) for it in [*children(expression), *bodies])
 
 
 def variables_outside_aggregates(expression: Expression) -> list[str]:
@@ -5679,6 +7132,49 @@ def variables_in(expression: Expression) -> list[str]:
             variables_in(expression.where) if expression.where is not None else [],
         )
     return _ordered_of(variables_in, children(expression))
+
+
+def variables_read_in(expression: Expression) -> list[str]:
+    """
+    The variables the expression reads of the scope it is in, each once, in the order it names them: those
+    `variables_in` gives, but for a name that a comprehension, a quantifier or a reduce binds of its own and reads only
+    inside, so `[m IN [p.name] | m]` reads `p` alone. A pattern's new variables can't be named so in Cypher, nor a
+    subquery's, so a pattern's are as `variables_in_pattern` gives them.
+    """
+
+    def without(names: list[str], *own: str) -> list[str]:
+        return [it for it in names if it not in own]
+
+    if isinstance(expression, Variable):
+        return [expression.name]
+    if isinstance(expression, MapProjection):
+        named = [it.name for it in expression.elements if isinstance(it, VariableElement)]
+        return _ordered([expression.variable], named, _ordered_of(variables_read_in, children(expression)))
+    if isinstance(expression, ListComprehension):
+        body = _ordered_of(variables_read_in, _present(expression.where, expression.projection))
+        return _ordered(variables_read_in(expression.list), without(body, expression.variable))
+    if isinstance(expression, Quantifier):
+        body = _ordered_of(variables_read_in, _present(expression.where))
+        return _ordered(variables_read_in(expression.list), without(body, expression.variable))
+    if isinstance(expression, Reduce):
+        body = variables_read_in(expression.expression)
+        return _ordered(
+            _ordered_of(variables_read_in, [expression.initial, expression.list]),
+            without(body, expression.accumulator, expression.variable),
+        )
+    if isinstance(expression, PatternComprehension):
+        return _ordered(
+            variables_in_pattern(expression.pattern),
+            _ordered_of(variables_read_in, _present(expression.where, expression.projection)),
+        )
+    if isinstance(expression, PatternPredicate):
+        return variables_in_pattern(expression.pattern)
+    if isinstance(expression, Exists):
+        return _ordered(
+            *(variables_in_pattern(it) for it in expression.patterns),
+            variables_read_in(expression.where) if expression.where is not None else [],
+        )
+    return _ordered_of(variables_read_in, children(expression))
 
 
 def parameters_in(expression: Expression) -> set[str]:
@@ -5954,43 +7450,45 @@ def _creates(clauses: Sequence[Clause]) -> list[Clause]:
     return merged
 
 
-def _imported(clauses: Sequence[Clause]) -> Sequence[Clause]:
-    """The clauses without an importing `WITH` of variables alone that opens them: every variable of the row is
-    seen."""
+def _imported(clauses: Sequence[Clause], imported: set[str]) -> Sequence[Clause]:
+    """
+    The clauses of a `CALL { … }` without a `WITH` that opens them and passes on variables it `imported` alone, as they
+    are: the row holds those already, and what brackets import is seen after it anyway, as Neo4j has it, so
+    `CALL (a, b) { WITH a SET b.x = 1 }` sets b's.
+    """
     first = clauses[0] if clauses else None
     if not isinstance(first, With):
         return clauses
     projection = first.projection
     importing = (
-        first.where is None
-        and not projection.distinct
-        and not projection.order_by
-        and projection.skip is None
-        and projection.limit is None
+        plain_with(first)
         and all(isinstance(it.expression, Variable) and it.expression.name == it.name for it in projection.items)
+        and (projection.star or all(it.name in imported for it in projection.items))
     )
     return clauses[1:] if importing else clauses
 
 
-def _order_of(select: _Select) -> str | None:
-    """The order the select reads its rows in, as an `ORDER BY` lists it: None where it has none."""
-    return ", ".join(f"{term} DESC" if descending else term for term, descending in select.order) or None
-
-
-def _require_explicit_grouping(items: Sequence[ProjectionItem]) -> None:
+def _require_explicit_grouping(
+    items: Sequence[ProjectionItem], order_by: Sequence[SortItem], scope: AbstractSet[str]
+) -> None:
     """
-    Refuses what Cypher refuses: an item that aggregates and names a variable outside its aggregates, where that
-    variable is not an item of its own, which a graph engine would have to group by without being told.
+    Refuses what Cypher refuses (Neo4j's 42I18): an item that aggregates and names a variable of `scope` outside its
+    aggregates and each key it reads, in a comprehension's, a quantifier's, a reduce's or a pattern's body too, which a
+    graph engine would have to group by without being told. A key is an item that does not aggregate, and Neo4j reads
+    one there only where it is a variable or a variable's property (`_is_plain_key`): `x.a + count(*)` beside `x.a`,
+    but not `toUpper(p.name) + count(*)` beside `toUpper(p.name)`; in a pattern's parts, only where it is a variable.
+    So too a term of `order_by` that aggregates, beside items that aggregate, and names a variable of `scope` outside an
+    item's name and an item that does not aggregate, whatever that item is, as Neo4j takes them. As drivine4j's
+    requireExplicitGrouping.
     """
-    keys = {
-        it.expression.name
-        for it in items
-        if not contains(it.expression, is_aggregate) and isinstance(it.expression, Variable)
-    }
+    grouping = [it for it in items if not contains(it.expression, is_aggregate)]
+    grouped = [_grouping_key(it.expression) for it in grouping]
+    keys = [it for it in grouped if _is_plain_key(it)]
+    variables = {it.name for it in keys if isinstance(it, Variable)}
     for item in items:
         if not contains(item.expression, is_aggregate):
             continue
-        implicit = [it for it in variables_outside_aggregates(item.expression) if it not in keys]
+        implicit = [it for it in _named_outside(item.expression, set(), scope, keys) if it not in variables]
         if implicit:
             named = ", ".join(implicit)
             raise DrivineError(
@@ -5998,6 +7496,127 @@ def _require_explicit_grouping(items: Sequence[ProjectionItem]) -> None:
                 f"would group by it without being told. Aggregate in a WITH first, as in WITH {named}, collect(…) AS "
                 "items RETURN { … }."
             )
+    if len(grouping) == len(items):
+        return
+    names = {it.name for it in items}
+    for sort in order_by:
+        if not contains(sort.expression, is_aggregate):
+            continue
+        # Not less the variables an item is: one an item renames, named in an order term's pattern, is a new variable
+        # of the pattern's to Neo4j, which matches any node, so it is refused rather than read as the key.
+        implicit = _named_outside(sort.expression, names, scope, grouped)
+        if implicit:
+            raise DrivineError(
+                f"A term of an ORDER BY aggregates, and names {', '.join(implicit)} outside its aggregates and the "
+                "items: Cypher would group by it without being told. Order by an item's name, or by an expression of "
+                "the items and aggregates."
+            )
+
+
+def _grouping_key(expression: Expression) -> Expression:
+    """
+    The expression as it is compared with a key that groups rows: each function's name in lower case, as Neo4j names a
+    function in any case, so `ORDER BY TOUPPER(x.a) + count(*)` reads the key `toUpper(x.a)`, in `_project`,
+    `_require_explicit_grouping` and `_aggregates_first`; in a comprehension's, a quantifier's or a reduce's body too.
+    The AST keeps the name as written. As drivine4j's keyOf.
+    """
+
+    def lowered(part: Expression) -> Expression | None:
+        if isinstance(part, Function):
+            arguments = tuple(_grouping_key(it) for it in part.arguments)
+            return dataclasses.replace(part, name=part.name.lower(), arguments=arguments)
+        if isinstance(part, ListComprehension):
+            return dataclasses.replace(
+                part,
+                list=_grouping_key(part.list),
+                where=_grouping_key(part.where) if part.where is not None else None,
+                projection=_grouping_key(part.projection) if part.projection is not None else None,
+            )
+        if isinstance(part, Quantifier):
+            where = _grouping_key(part.where) if part.where is not None else None
+            return dataclasses.replace(part, list=_grouping_key(part.list), where=where)
+        if isinstance(part, Reduce):
+            return dataclasses.replace(
+                part,
+                initial=_grouping_key(part.initial),
+                list=_grouping_key(part.list),
+                expression=_grouping_key(part.expression),
+            )
+        return None
+
+    return replaced(expression, lowered)
+
+
+def _is_key(expression: Expression, keys: Sequence[Expression]) -> bool:
+    """Whether the expression is one of `keys`, each a `_grouping_key`."""
+    return bool(keys) and _grouping_key(expression) in keys
+
+
+def _is_plain_key(expression: Expression) -> bool:
+    """
+    Whether the expression, an item that does not aggregate, is a key that an item that aggregates may read, as Neo4j
+    takes one there: a variable, or a variable's property. Not `x.a.b`, `x['a']` or `toUpper(x.a)`.
+    """
+    return isinstance(expression, Variable) or (
+        isinstance(expression, Property) and isinstance(expression.subject, Variable)
+    )
+
+
+def _named_outside(
+    expression: Expression, local: AbstractSet[str], scope: AbstractSet[str], keys: Sequence[Expression]
+) -> list[str]:
+    """
+    The variables of `scope` that the expression names outside its aggregates, and outside each part of it `keys`
+    holds, a comprehension's, a quantifier's, a reduce's or a pattern's body among them, but for those it binds or
+    `local` holds. A pattern binds each of its variables not of `scope`, and in its parts, as Neo4j reads them, a key
+    is only one that is a variable: `q.name = p.name` in a pattern comprehension's WHERE names `p`, though `p.name` is
+    a key. A subquery's own query is read for none.
+    """
+
+    def outside(part: Expression, inner: AbstractSet[str] = local) -> list[str]:
+        return _named_outside(part, inner, scope, keys)
+
+    def patterned(pattern: Pattern, parts: Sequence[Expression]) -> list[str]:
+        named = _ordered(variables_in_pattern(pattern), _present(pattern.variable))
+        bound = {*local, *(it for it in named if it not in scope)}
+        variables = [it for it in keys if isinstance(it, Variable)]
+        return _ordered(
+            [it for it in named if it in scope and it not in local],
+            *(_named_outside(it, bound, scope, variables) for it in parts),
+        )
+
+    if is_aggregate(expression) or _is_key(expression, keys):
+        return []
+    if isinstance(expression, Variable):
+        return [] if expression.name in local or expression.name not in scope else [expression.name]
+    if isinstance(expression, MapProjection):
+        # A map projection of a key reads the key, as Neo4j reads it.
+        variable = expression.variable
+        read = variable not in local and variable in scope and Variable(variable) not in keys
+        return _ordered([variable] if read else [], *(outside(it) for it in children(expression)))
+    if isinstance(expression, ListComprehension):
+        return _ordered(
+            outside(expression.list),
+            *(outside(it, {*local, expression.variable}) for it in _present(expression.where, expression.projection)),
+        )
+    if isinstance(expression, Quantifier):
+        return _ordered(
+            outside(expression.list),
+            *(outside(it, {*local, expression.variable}) for it in _present(expression.where)),
+        )
+    if isinstance(expression, Reduce):
+        return _ordered(
+            outside(expression.initial),
+            outside(expression.list),
+            outside(expression.expression, {*local, expression.accumulator, expression.variable}),
+        )
+    if isinstance(expression, PatternComprehension):
+        return patterned(expression.pattern, _present(expression.where, expression.projection))
+    if isinstance(expression, PatternPredicate):
+        return patterned(expression.pattern, [])
+    if isinstance(expression, Exists):
+        return _ordered(*(patterned(it, _present(expression.where)) for it in expression.patterns))
+    return _ordered(*(outside(it) for it in children(expression)))
 
 
 def _kind_of(values: Sequence[tuple[Expression, Value]]) -> Temporal | None:
@@ -6079,6 +7698,11 @@ def _holds_texts(value: Value) -> bool:
     return isinstance(value, Json) and value.texts
 
 
+def _may_be_json_null(value: Value) -> bool:
+    """Whether the value may be JSON's null: see Json.json_null."""
+    return isinstance(value, Json) and value.json_null
+
+
 def utf8_bytes(given: Any) -> int | None:
     """
     How many bytes the value the statement gives is in UTF-8, where it is a text; else None. A lone surrogate, which
@@ -6088,7 +7712,7 @@ def utf8_bytes(given: Any) -> int | None:
     return len(given.encode("utf-8", "surrogatepass")) if isinstance(given, str) else None
 
 
-def _is_given_number(value: Any) -> bool:
+def is_given_number(value: Any) -> bool:
     """Whether the value, given by the statement, is a number JSON holds as one: NaN and the infinities it holds as
     none."""
     return _is_number(value) and math.isfinite(value)
@@ -6144,6 +7768,39 @@ def _holds_temporals(listed: Value) -> bool:
     )
 
 
+def _plain_json(value: Json) -> bool:
+    """
+    Whether the value compares as its JSON, as `SqlCypherCompiler._membership` compares a value with a list's items: no
+    node, relationship or value that holds one, which compares by identity, and no temporal value, which compares by
+    its kind. One that may hold a null `_membership` compares as `_equality` does, null where an item is equal but for
+    the null.
+    """
+    return value.identity is None and not _holds_temporals(value) and value.temporal is None
+
+
+def _constant(expression: Expression) -> bool:
+    """
+    Whether the expression is a constant that holds no null: a number, a text or a truth value the statement writes, a
+    negated number, or a list or a map of such. As JSON, it is equal to a value that holds no null where Cypher finds
+    them equal.
+    """
+    if isinstance(expression, Literal):
+        return expression.value is not None
+    if isinstance(expression, Unary):
+        operand = expression.operand
+        return (
+            expression.operator is UnaryOperator.NEGATE
+            and isinstance(operand, Literal)
+            and isinstance(operand.value, (int, float))
+            and not isinstance(operand.value, bool)
+        )
+    if isinstance(expression, ListLiteral):
+        return all(_constant(it) for it in expression.items)
+    if isinstance(expression, MapLiteral):
+        return all(_constant(value) for _, value in expression.entries)
+    return False
+
+
 def _has_temporals(value: Value) -> bool:
     """Whether the statement makes the value a temporal value, or a list or a map that holds one at any depth: see
     Json.temporals."""
@@ -6163,6 +7820,448 @@ def _item_items_of(listed: Value) -> Temporal | None:
 
 def _is_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+TRUNCATION_DATE_FIELDS = (
+    "year",
+    "month",
+    "day",
+    "dayOfWeek",
+    "week",
+    "weekYear",
+    "quarter",
+    "dayOfQuarter",
+    "ordinalDay",
+)
+"""The fields of a date a truncation's map may give, as Neo4j takes them."""
+
+TRUNCATION_TIME_FIELDS = ("hour", "minute", "second", "millisecond", "microsecond", "nanosecond")
+"""The fields of a time of day a truncation's map may give, as Neo4j takes them."""
+
+TRUNCATION_FIELDS_NOT_COMPILED = frozenset({"nanosecond", "week", "weekYear", "quarter", "dayOfQuarter", "ordinalDay"})
+"""The fields a truncation's map may give that the stores have no SQL for yet: nanoseconds, and the fields of a week or
+a quarter."""
+
+TRUNCATION_RANGES: dict[str, tuple[int, int]] = {
+    "month": (1, 12),
+    "day": (1, 31),
+    "dayOfWeek": (1, 7),
+    "hour": (0, 23),
+    "minute": (0, 59),
+    "second": (0, 59),
+    "millisecond": (0, 999),
+    "microsecond": (0, 999999),
+}
+"""The values each field a truncation's map gives may take, as Neo4j takes them, but for the year, which runs past what
+a store's text holds."""
+
+TRUNCATION_LEAST = {"month": 1, "day": 1, "dayOfWeek": 1}
+"""The least of each field a truncation's map gives that is not 0, which a field given as null is."""
+
+FIELD_NOUNS = {
+    "dayOfWeek": "a day of the week",
+    "hour": "an hour",
+    "ordinalDay": "an ordinal day",
+    "dayOfQuarter": "a day of the quarter",
+}
+"""A temporal value's fields as a message names them, where it is not `a <field>`."""
+
+OVER_RANGES: dict[str, tuple[int, int]] = {
+    **TRUNCATION_RANGES,
+    "week": (1, 53),
+    "ordinalDay": (1, 366),
+    "quarter": (1, 4),
+    "dayOfQuarter": (1, 92),
+    "nanosecond": (0, 999_999_999),
+}
+"""The values each field a map laid over another temporal value gives may take, as Neo4j takes them, but for the year:
+see `_from_temporal`."""
+
+OVER_LEAST = {"month": 1, "day": 1, "week": 1, "dayOfWeek": 1, "ordinalDay": 1, "quarter": 1, "dayOfQuarter": 1}
+"""The least of each field a map laid over another temporal value gives that is not 0, which a field given as null
+is."""
+
+WHOLE_DATES = {
+    "a month": ("year", "month", "day"),
+    "a week": ("year", "week", "dayOfWeek"),
+    "an ordinal day": ("year", "ordinalDay"),
+    "a quarter": ("year", "quarter", "dayOfQuarter"),
+}
+"""The date's fields that make a whole date by each calendar, where no value gives the date: see `_from_temporal`."""
+
+TIME_ABOVE = (("minute", "hour"), ("second", "minute"), ("millisecond", "second"), ("microsecond", "second"),
+              ("nanosecond", "second"))  # fmt: skip
+"""Each field of the time that a map without a value that gives the time takes only beside another: see
+`_from_temporal`."""
+
+
+def _truncation_keys(function: Function, kind: Temporal, entries: Sequence[tuple[str, Expression]]) -> set[str]:
+    """
+    The keys of `entries`, a truncation's map of fields given the function, which truncates to the kind: refused where
+    Neo4j refuses one, as a field of no such value or a day or a month beside a day of the week, or where no store has
+    SQL for it yet.
+    """
+    takes = {
+        *(TRUNCATION_DATE_FIELDS if kind not in (Temporal.LOCAL_TIME, Temporal.TIME) else ()),
+        *(TRUNCATION_TIME_FIELDS if kind is not Temporal.DATE else ()),
+        *(("timezone",) if kind.zoned else ()),
+    }
+    for key, _ in entries:
+        if key not in takes:
+            raise DrivineError(f"{function.name}() takes no field {key}.")
+        if key in TRUNCATION_FIELDS_NOT_COMPILED:
+            unsupported(f"{function.name}() of a map with {key}")
+    keys = {key for key, _ in entries}
+    for it in ("day", "month"):
+        if it in keys and "dayOfWeek" in keys:
+            raise DrivineError(f"{function.name}() takes a {it} or a day of the week, not both.")
+    return keys
+
+
+def _whole_field(name: str, key: str, written: Any, range_: tuple[int, int] | None, beside: str | None) -> int:
+    """
+    The value written as the field `key` of a temporal map given `name`, where it is a whole number in `range_`, the
+    range it has `beside` another field given where one is named, as Neo4j takes it: fails on any other.
+    """
+    if not isinstance(written, int) or isinstance(written, bool):
+        raise DrivineError(f"{name}() takes a whole number for {key}, not {_shown_literal(written)}.")
+    if range_ is not None and not range_[0] <= written <= range_[1]:
+        noun = FIELD_NOUNS.get(key, f"a {key}")
+        also = f" beside a {beside}" if beside is not None else ""
+        raise DrivineError(f"{name}() takes {noun} from {range_[0]} to {range_[1]}{also}, not {written}.")
+    return written
+
+
+def _shown_literal(value: Any) -> str:
+    """The value a statement writes, as a message shows it: a text in quotes, `'3'`, else as written."""
+    return f"'{value}'" if isinstance(value, str) else _written(value)
+
+
+@dataclass(frozen=True)
+class _Written:
+    """A value a statement writes: see `_written_number`."""
+
+    value: Any
+
+
+def _written_number(value: Expression) -> _Written | None:
+    """
+    The value the expression is written as, where it is a literal or a negated whole number, `-1`, which is written as
+    much as `1` is: None for any other expression, a negated float among them, as drivine4j reads it.
+    """
+    if isinstance(value, Literal):
+        return _Written(value.value)
+    negated = value.operand if isinstance(value, Unary) and value.operator is UnaryOperator.NEGATE else None
+    if isinstance(negated, Literal) and _is_number(negated.value) and not isinstance(negated.value, float):
+        return _Written(-negated.value)
+    return None
+
+
+def _map_fields(kind: Temporal, name: str, keys: list[str]) -> None:
+    """
+    Refuses `keys`, the fields of a map that the function `name` makes a value of `kind` of, where it makes none of
+    them: a time of day has no date to give, as Neo4j has it, and a field the stores have no SQL for yet is refused as
+    not compiled yet.
+    """
+    dated = kind in (Temporal.DATE, Temporal.LOCAL_DATE_TIME, Temporal.DATE_TIME)
+    if kind.instant and not dated:
+        calendar = next((it for it in keys if it in CALENDAR_FIELDS), None)
+        if calendar is not None:
+            raise DrivineError(f"{name}() takes no field {calendar}.")
+    if kind is Temporal.DURATION:
+        known = DURATION_MAP_FIELDS
+    else:
+        known = INSTANT_MAP_FIELDS | CALENDAR_FIELDS if dated else INSTANT_MAP_FIELDS
+    unknown = next((it for it in keys if it not in known), None)
+    if unknown is not None:
+        unsupported(f"{name}() of a map with {unknown}")
+
+
+def _map_zone(entries: Sequence[tuple[str, Expression]]) -> None:
+    """
+    Refuses the `timezone` of `entries`, a temporal map's fields, where it is a zone by name, which no store's text
+    holds yet, rather than give null.
+    """
+    zone = next((value for key, value in entries if key == "timezone"), None)
+    if not isinstance(zone, Literal) or not isinstance(zone.value, str):
+        return
+    if _offset_text(zone.value) is None and not zone.value.startswith(("+", "-")) and _named_zone(zone.value):
+        unsupported(f"The time zone '{zone.value}'")
+
+
+CALENDAR_LEAST = {"year": 0, "week": 1, "dayOfWeek": 1, "ordinalDay": 1, "quarter": 1, "dayOfQuarter": 1}
+"""The least of the year and each field of a date by the calendar's other fields, which a field given as null is."""
+
+CALENDARS = (
+    ("a month", ("month", "day")),
+    ("a week", ("week", "dayOfWeek")),
+    ("an ordinal day", ("ordinalDay",)),
+    ("a quarter", ("quarter", "dayOfQuarter")),
+)
+"""The calendars a map's fields may give a date by, beside a year, and the fields of each."""
+
+YEARS = 999_999_999
+"""The greatest year and the least, less its sign, that Java's dates reach, as Neo4j's do."""
+
+EPOCH_DAYS = (-365_243_219_162, 365_241_780_471)
+"""The days from 1970-01-01 to Java's least date, -999999999-01-01, and to its greatest, +999999999-12-31."""
+
+
+def _calendar_date(name: str, entries: Sequence[tuple[str, Expression]]) -> tuple[int, int, int] | None:
+    """
+    The date, `(year, month, day)`, that `entries`, the fields of a map given the function `name`, give by the
+    calendar's other fields beside the year (see `Temporals.of_calendar`), where it writes the year and each of them as
+    a whole number or null: None where an expression gives any of them, for the store to work out. As Neo4j has them, a
+    field that is null is given as its least (the year 0, the first week, day or quarter), a week runs to 53 and a day
+    of the quarter to 92 in any year, carried into the next where it has fewer, and an ordinal day runs to the year's
+    last. Fails, as Neo4j does, on fields of two calendars (a month beside a week), a day of the week or of the quarter
+    without its week or quarter, a week or a quarter without a year, and a number written that is not whole or is past
+    its field's range, the year's among them (Java's, as Neo4j's: ±999,999,999). As drivine4j's.
+    """
+    keys = {key for key, _ in entries}
+    calendar = _calendar_of(name, keys)
+    numbers = _calendar_numbers(name, entries)
+    if numbers is None:
+        return None
+    year = numbers["year"]
+    if not -YEARS <= year <= YEARS:
+        raise DrivineError(
+            f"{name}() takes no year {year}: Invalid value for Year (valid values -{YEARS} - {YEARS}): {year}"
+        )
+
+    def field(key: str, label: str, last: int, of: str = "") -> int:
+        given = numbers.get(key, 1)
+        if not 1 <= given <= last:
+            raise DrivineError(f"{name}() takes {label} from 1 to {last}{of}, not {given}.")
+        return given
+
+    if calendar == "a week":
+        january4 = _days_from_civil(year, 1, 4)
+        monday = january4 - (_iso_day_of_week(january4) - 1)
+        days = monday + (field("week", "a week", 53) - 1) * 7 + field("dayOfWeek", "a day of the week", 7) - 1
+    elif calendar == "an ordinal day":
+        last = 366 if isleap(year) else 365
+        days = _days_from_civil(year, 1, 1) + field("ordinalDay", "an ordinal day", last, f" in {year}") - 1
+    else:
+        first = _days_from_civil(year, (field("quarter", "a quarter", 4) - 1) * 3 + 1, 1)
+        days = first + field("dayOfQuarter", "a day of the quarter", 92) - 1
+    least, greatest = EPOCH_DAYS
+    if not least <= days <= greatest:
+        raise DrivineError(
+            f"{name}() takes no year {year}: Invalid value for EpochDay (valid values {least} - {greatest}): {days}"
+        )
+    return _civil_from_days(days)
+
+
+def _calendar_of(name: str, keys: set[str]) -> str:
+    """
+    The calendar, beside the year, that `keys`, the fields of a map given `name`, give a date by: refused where they
+    are of two, where a day of the week or of the quarter is without its week or quarter, or where they have no year.
+    """
+    calendars = _calendars_of(name, keys)
+    if "dayOfWeek" in keys and "week" not in keys:
+        raise DrivineError(f"{name}() takes a day of the week beside a week.")
+    if "dayOfQuarter" in keys and "quarter" not in keys:
+        raise DrivineError(f"{name}() takes a day of the quarter beside a quarter.")
+    if "year" not in keys:
+        # Neo4j makes an ordinal day of no year one of the year 0, which no store's date reaches.
+        if "ordinalDay" in keys:
+            unsupported(f"{name}() of an ordinal day without a year")
+        raise DrivineError(f"{name}() takes a year beside {calendars[0]}.")
+    return calendars[0]
+
+
+def _calendars_of(name: str, keys: AbstractSet[str]) -> list[str]:
+    """
+    The calendars (see CALENDARS) that `keys`, the fields of a map given `name`, give a date by: a month, a week, an
+    ordinal day or a quarter. Fails where it is more than one, as Neo4j does.
+    """
+    calendars = [label for label, fields in CALENDARS if any(it in keys for it in fields)]
+    if len(calendars) > 1:
+        raise DrivineError(f"{name}() takes {calendars[0]} or {calendars[1]}, not both.")
+    return calendars
+
+
+def _over_keys(kind: Temporal, name: str, keys: AbstractSet[str]) -> str | None:
+    """
+    The calendar (see CALENDARS) that `keys`, the fields of a map that `name` makes a value of the kind of with a
+    `date`, a `time` or a `datetime`, give a date by, where they give one. Fails as Neo4j fails: on a field the kind
+    has none of, a `datetime` beside a `date` or a `time`, fields of two calendars, a date of its fields that is not
+    whole (see WHOLE_DATES) where no value gives the date, and a field of the time without the one above it (see
+    TIME_ABOVE) where no value gives the time.
+    """
+    dated = kind in (Temporal.DATE, Temporal.LOCAL_DATE_TIME, Temporal.DATE_TIME)
+    takes = _over_takes(kind, dated)
+    unknown = next((it for it in keys if it not in takes), None)
+    if unknown is not None:
+        raise DrivineError(f"{name}() takes no field {unknown}.")
+    if "datetime" in keys and ("date" in keys or "time" in keys):
+        raise DrivineError(f"{name}() takes a datetime, or a date and a time, not both.")
+    calendars = _calendars_of(name, keys)
+    calendar = calendars[0] if len(calendars) == 1 else None
+    if dated and "date" not in keys and "datetime" not in keys:
+        if calendar is None or not all(it in keys for it in WHOLE_DATES[calendar]):
+            raise DrivineError(
+                f"{name}() takes a date beside a time: a date, or a year with a month and a day, a week and a day of "
+                "the week, an ordinal day, or a quarter and a day of the quarter."
+            )
+    if kind is not Temporal.DATE and "time" not in keys and "datetime" not in keys:
+        for field, above in TIME_ABOVE:
+            if field in keys and above not in keys:
+                raise DrivineError(f"{name}() takes a {field} beside {FIELD_NOUNS.get(above, f'a {above}')}.")
+    return calendar
+
+
+def _over_takes(kind: Temporal, dated: bool) -> set[str]:
+    """
+    The fields of a map with a `date`, a `time` or a `datetime` that makes a value of the kind, which is `dated` where
+    it has a date: which of those it takes, the fields of its date and its time, and a zoned value's time zone.
+    """
+    selectors: tuple[str, ...] = ("date",) if kind is Temporal.DATE else SELECTORS if dated else ("time",)
+    return {
+        *selectors,
+        *(("year", "month", "day", *CALENDAR_FIELDS) if dated else ()),
+        *(TRUNCATION_TIME_FIELDS if kind is not Temporal.DATE else ()),
+        *(("timezone",) if kind.zoned else ()),
+    }
+
+
+def _over_range(key: str, keys: AbstractSet[str]) -> tuple[tuple[int, int] | None, str | None]:
+    """
+    The range of the field `key` of a map with the fields `keys` that is laid over another temporal value (see
+    OVER_RANGES), and the field beside which it runs only to the next one's: a microsecond or a nanosecond beside a
+    millisecond, a nanosecond beside a microsecond.
+    """
+    if key == "nanosecond" and "microsecond" in keys:
+        return (0, 999), "microsecond"
+    if key in ("microsecond", "nanosecond") and "millisecond" in keys:
+        return ((0, 999_999) if key == "nanosecond" else (0, 999)), "millisecond"
+    return OVER_RANGES.get(key), None
+
+
+def _calendar_numbers(name: str, entries: Sequence[tuple[str, Expression]]) -> dict[str, int] | None:
+    """
+    The year and the calendar's fields of `entries`, the fields of a map given `name`, where each is written as a whole
+    number or null, its least: None where an expression gives any. A number that is not whole is refused.
+    """
+    numbers: dict[str, int] = {}
+    for key, value in entries:
+        if key != "year" and key not in CALENDAR_FIELDS:
+            continue
+        written = _written_number(value)
+        if written is None:
+            return None
+        literal = written.value
+        if literal is None:
+            numbers[key] = CALENDAR_LEAST[key]
+        elif isinstance(literal, int) and not isinstance(literal, bool):
+            numbers[key] = literal
+        else:
+            shown = f"'{literal}'" if isinstance(literal, str) else _written_text(literal)
+            raise DrivineError(f"{name}() takes a whole number for {key}, not {shown}.")
+    return numbers
+
+
+def _written_text(value: Any) -> str:
+    """The value as Cypher writes it: `true` for a truth value."""
+    return str(value).lower() if isinstance(value, bool) else str(value)
+
+
+def _days_from_civil(year: int, month: int, day: int) -> int:
+    """The days from 1970-01-01 to the date `year`-`month`-`day` of the proleptic Gregorian calendar, at any year."""
+    y = year - 1 if month <= 2 else year
+    era = y // 400
+    year_of_era = y - era * 400
+    day_of_year = (153 * (month + (-3 if month > 2 else 9)) + 2) // 5 + day - 1
+    day_of_era = year_of_era * 365 + year_of_era // 4 - year_of_era // 100 + day_of_year
+    return era * 146097 + day_of_era - 719468
+
+
+def _civil_from_days(days: int) -> tuple[int, int, int]:
+    """The date, `(year, month, day)`, `days` after 1970-01-01, of the proleptic Gregorian calendar."""
+    z = days + 719468
+    era = z // 146097
+    day_of_era = z - era * 146097
+    year_of_era = (day_of_era - day_of_era // 1460 + day_of_era // 36524 - day_of_era // 146096) // 365
+    day_of_year = day_of_era - (365 * year_of_era + year_of_era // 4 - year_of_era // 100)
+    mp = (5 * day_of_year + 2) // 153
+    day = day_of_year - (153 * mp + 2) // 5 + 1
+    month = mp + 3 if mp < 10 else mp - 9
+    return year_of_era + era * 400 + (1 if month <= 2 else 0), month, day
+
+
+def _iso_day_of_week(days: int) -> int:
+    """The ISO day of the week, from 1 for Monday to 7, of the day `days` after 1970-01-01, a Thursday."""
+    return (days + 3) % 7 + 1
+
+
+def _truncation_zone(function: Function, value: Expression) -> str:
+    """
+    The offset a truncation's `timezone` field, the value, gives the function, as SQL text: see `_zone_text`.
+    """
+    if value == Literal(None):
+        raise DrivineError(f"{function.name}() takes a time zone, not null.")
+    if not isinstance(value, Literal) or not isinstance(value.value, str):
+        unsupported("A truncation to a time zone an expression gives")
+    return _zone_text(value.value)
+
+
+def _zone_text(zone: str) -> str:
+    """
+    The offset's SQL text the time zone `zone` written gives a value. Neo4j takes an offset written as `Z` or `+01:00`
+    alone, as Java's ZoneOffset does (up to 18 hours, and 0 is UTC's, `Z`), and a zone by name, which no store's text
+    holds yet, so it is refused as not compiled yet; any other text fails.
+    """
+    offset = _offset_text(zone)
+    if offset is not None:
+        return offset
+    if not zone.startswith(("+", "-")) and _named_zone(zone):
+        unsupported(f"The time zone '{zone}'")
+    raise DrivineError(f"'{zone}' is no time zone.")
+
+
+def _offset_text(zone: str) -> str | None:
+    """The SQL text of the offset the zone writes, `Z` or `+01:00`, as Java's ZoneOffset takes it: None where it is
+    none."""
+    if zone == "Z":
+        return "'Z'"
+    offset = re.fullmatch(r"[+-]([0-9]{2}):([0-9]{2})", zone)
+    if offset is None:
+        return None
+    hours, minutes = int(offset.group(1)), int(offset.group(2))
+    if minutes >= 60 or hours > 18 or (hours == 18 and minutes > 0):
+        return None
+    return "'Z'" if hours == 0 and minutes == 0 else f"'{zone}'"
+
+
+def _named_zone(zone: str) -> bool:
+    """Whether the text names a time zone, as `Europe/Stockholm` does."""
+    try:
+        ZoneInfo(zone)
+    except (ValueError, ZoneInfoNotFoundError):
+        return False
+    return True
+
+
+def _known_no_map(value: Json) -> bool:
+    """Whether the statement writes the value as a value of a kind other than a map (Json.known), which has no
+    properties."""
+    return value.known is not None and value.known != "MAP"
+
+
+def _property_of_kind(written: Expression) -> None:
+    """
+    Refuses `written`, the value a `SET` gives a property, where it is a map written, or a list written that holds one
+    or a list: no property, as Neo4j refuses it, and as Drivine's saves do.
+    """
+    if isinstance(written, MapLiteral) or (
+        isinstance(written, ListLiteral) and any(isinstance(it, (MapLiteral, ListLiteral)) for it in written.items)
+    ):
+        what = "a map" if isinstance(written, MapLiteral) else "a list of maps or lists"
+        raise DrivineError(
+            f"A property is a number, a text, a truth value, a temporal value or a list of them, not {what}, as in "
+            "Neo4j."
+        )
 
 
 def _cut(value: float) -> int:
@@ -6331,10 +8430,37 @@ def _columns_of(value: Value, alias: str, name: str | None = None, identities: b
 
 def _with_alias(value: Value, alias: str) -> Value:
     """The value with PENDING read as the alias."""
+    return _map_sql(value, lambda text: text.replace(PENDING, alias))
 
-    def a(text: str) -> str:
-        return text.replace(PENDING, alias)
 
+_PENDING_COLUMN = re.compile(rf"{PENDING}\.(\w+)")
+"""A column of the query PENDING stands for."""
+
+
+def _column_kinds(value: Value, name: str, identities: bool = True) -> list[tuple[str, bool]]:
+    """The columns `_columns` gives the value under the name, each named and whether it holds JSON, in the same
+    order."""
+    if isinstance(value, Json):
+        return [(name, True), *([(f"{name}_identity", True)] if value.identity is not None and identities else [])]
+    if isinstance(value, Entities):
+        return [(name, True)]
+    if isinstance(value, Bool):
+        return [(name, False)]
+    if isinstance(value, Node):
+        return [(f"{name}_nid", False), (f"{name}_labels", True), (f"{name}_props", True), (f"{name}_stamp", False)]
+    if isinstance(value, Relationship):
+        return [
+            (f"{name}_eid", False),
+            (f"{name}_src", False),
+            (f"{name}_dst", False),
+            (f"{name}_type", False),
+            (f"{name}_props", True),
+        ]
+    return [(f"{name}_nids", False), (f"{name}_eids", False)]
+
+
+def _map_sql(value: Value, a: Callable[[str], str]) -> Value:
+    """The value with each piece of its SQL transformed."""
     if isinstance(value, Json):
         return dataclasses.replace(
             value, sql=a(value.sql), identity=a(value.identity) if value.identity is not None else None

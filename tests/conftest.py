@@ -1,11 +1,14 @@
 import os
+import tempfile
+from pathlib import Path
 
 import pytest
 
 # The tests run on the plugin's defaults, the latest Neo4j, Memgraph and FalkorDB, which a user's tests get too, so that
 # an engine release that changes what Drivine reads or writes shows up here at once. The Cypher spec (tests/cypher) is
 # written for a current Neo4j, as drivine4j runs it. NEO4J_TEST_IMAGE, MEMGRAPH_TEST_IMAGE or FALKORDB_TEST_IMAGE runs
-# another. CI holds FalkorDB back with FALKORDB_TEST_IMAGE (.github/workflows/ci.yml), except on its nightly run.
+# another. CI holds FalkorDB back with FALKORDB_TEST_IMAGE (.github/workflows/ci.yml); its nightly run takes
+# ghcr.io/falkordb/falkordb:latest, as Docker Hub's latest can be an older line's backport.
 
 # The datasources the tests run on. Drivine's plugin starts a container for each and points these at it. The host is
 # a name that resolves nowhere, so that with the plugin off the tests fail rather than clear a database of yours. To
@@ -23,6 +26,9 @@ os.environ.setdefault("FALKORDB_DATABASE_HOST", "test-container.invalid")
 os.environ.setdefault("POSTGRES_DATABASE_TYPE", "POSTGRES")
 os.environ.setdefault("POSTGRES_DATABASE_HOST", "test-container.invalid")
 os.environ.setdefault("POSTGRES_DATABASE_NAME", "drivine")
+# SQLite needs no container: a file in a directory of this run's own.
+os.environ.setdefault("SQLITE_DATABASE_TYPE", "SQLITE")
+os.environ.setdefault("SQLITE_DATABASE_NAME", str(Path(tempfile.mkdtemp(prefix="drivine-sqlite-")) / "graph.db"))
 if os.environ.get("ORACLE_TESTS") == "true":
     os.environ.setdefault("ORACLE_DATABASE_TYPE", "ORACLE")
     os.environ.setdefault("ORACLE_DATABASE_HOST", "test-container.invalid")

@@ -10,11 +10,11 @@ from drivine.backend.fragment_group import FragmentGroup
 from drivine.backend.graph_statement import GraphStatement
 from drivine.backend.matched_node import MatchedNode
 from drivine.backend.postgres.found_stamp import FoundStamp, stamps_by_place
-from drivine.backend.postgres.postgres_graph import PostgresGraph
 from drivine.backend.postgres.postgres_save_builder import absent, present, stored_key, without_key
 from drivine.backend.postgres.postgres_write_statement import PostgresWriteStatement
 from drivine.backend.save_statement_builder import id_of, object_props
 from drivine.backend.sql.node_writes import NodeWrites
+from drivine.backend.sql.plan_graph import PlanGraph
 from drivine.backend.sql.sql_graph import sql_text
 from drivine.backend.sql.sql_json import storable, to_json
 from drivine.backend.sql.write_plan import WritePlan
@@ -34,12 +34,13 @@ _PARAMETER = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)")
 
 class PostgresWrites:
     """
-    The writes beside a save, each a plan for drivine4j's write function, so stamps are kept as a save keeps them:
-    patch and patch_all, a batch of fragments, and relationships written on their own. A patch's values, and the
-    condition it holds to, are bound by the manager when it runs the statement, so its plan is made then.
+    The writes beside a save, each a plan for drivine4j's write function (see PlanGraph: Postgres's, or SQLite's), so
+    stamps are kept as a save keeps them: patch and patch_all, a batch of fragments, and relationships written on their
+    own. A patch's values, and the condition it holds to, are bound by the manager when it runs the statement, so its
+    plan is made then.
     """
 
-    def __init__(self, graph: PostgresGraph) -> None:
+    def __init__(self, graph: PlanGraph) -> None:
         self.graph = graph
 
     def patch_one(self, model: FragmentModel, where: str | None = None) -> GraphStatement:
@@ -52,7 +53,14 @@ class PostgresWrites:
         def planned(bound: Mapping[str, Any]) -> tuple[WritePlan, str | None]:
             plan = WritePlan()
             values: dict[str, Any] = {**(bound.get("set") or {}), **(bound.get("vectors") or {})}
-            plan.patch(plan.shape(model.labels, key), stored_key(bound["id"]), "0", present(values), absent(values))
+            plan.patch(
+                plan.shape(model.labels, key),
+                stored_key(bound["id"]),
+                "0",
+                present(values),
+                absent(values),
+                model.lower_copied,
+            )
             return plan, self._meeting(where, bound) if where else None
 
         def reshaped(rows: list[str], bound: Mapping[str, Any]) -> list[Any]:
@@ -76,7 +84,7 @@ class PostgresWrites:
             shape = plan.shape(model.labels, key)
             for i, row in enumerate(bound["rows"]):
                 values: dict[str, Any] = {**(row.get("props") or {}), **(row.get("vectors") or {})}
-                plan.patch(shape, stored_key(row["id"]), str(i), present(values), absent(values))
+                plan.patch(shape, stored_key(row["id"]), str(i), present(values), absent(values), model.lower_copied)
             return plan, None
 
         def reshaped(rows: list[str], bound: Mapping[str, Any]) -> list[Any]:
@@ -110,7 +118,7 @@ class PostgresWrites:
                     id_,
                     stored_key(id_),
                     list(dict.fromkeys(group.model.labels)),
-                    _writes(props),
+                    _writes(props, group.model.lower_copied),
                     index,
                 )
 
@@ -168,16 +176,21 @@ class PostgresWrites:
         `where`. The function runs it on its own, where no value can be bound, so each value `where` names is written
         in.
         """
-        written = _PARAMETER.sub(lambda it: _literal(bound[it[1]]) if it[1] in bound else it[0], where)
+        written = _PARAMETER.sub(
+            lambda it: _literal(bound[it[1]], self.graph.booleans) if it[1] in bound else it[0], where
+        )
         return f"SELECT COUNT(*) FROM {self.graph.nodes} n WHERE n.nid = $1 AND ({written})"
 
 
-def _writes(props: Mapping[str, Any]) -> NodeWrites:
-    """A node step's writes of the properties: those that are not null written, and those that are removed."""
-    return NodeWrites(set=present(props), unset=absent(props))
+def _writes(props: Mapping[str, Any], lower: Sequence[str] = ()) -> NodeWrites:
+    """
+    A node step's writes of the properties: those that are not null written, and those that are removed, and the
+    properties whose lowercased copies it keeps.
+    """
+    return NodeWrites(set=present(props), unset=absent(props), lower=list(lower))
 
 
-def _literal(value: Any) -> str:
+def _literal(value: Any, booleans: tuple[str, str]) -> str:
     """
     A value written into a statement as a literal, as a driver would bind it: a number as itself, anything else as
     text, which Postgres reads as the type the statement wants there, as it reads a value bound without a type. A number
@@ -186,7 +199,7 @@ def _literal(value: Any) -> str:
     if value is None:
         return "NULL"
     if isinstance(value, bool):
-        return sql_text("true" if value else "false")
+        return booleans[0] if value else booleans[1]
     if isinstance(value, (int, float)):
         return f"({value})"
     if isinstance(value, (datetime, date, time)):

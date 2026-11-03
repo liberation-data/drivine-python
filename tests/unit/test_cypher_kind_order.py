@@ -15,8 +15,12 @@ RANK = (
 
 
 def test_oracle_sorts_a_value_of_open_kind_by_where_its_kind_comes_then_by_the_value() -> None:
-    sql = OracleCypherCompiler("g").compile("UNWIND [2, 'b', null] AS t RETURN t ORDER BY t DESC").sql
+    sql = OracleCypherCompiler("g").compile("UNWIND [2, 'b'] AS t RETURN t ORDER BY t DESC").sql
     assert sql.endswith(f"ORDER BY {RANK} DESC, p2.s1 DESC"), sql
+    # An item of a list that holds a null may be JSON's null, which ties with SQL's: the value is read as
+    # `grouped_null` has it (#314).
+    sql = OracleCypherCompiler("g").compile("UNWIND [2, 'b', null] AS t RETURN t ORDER BY t DESC").sql
+    assert sql.endswith(f"ORDER BY {RANK} DESC, NVL(p2.s1, JSON('null')) DESC"), sql
     assert RANK in OracleCypherCompiler("g").compile("MATCH (n:Doc) RETURN n.a ORDER BY n.a").sql
 
 

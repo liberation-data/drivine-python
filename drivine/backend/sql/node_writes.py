@@ -19,3 +19,8 @@ class NodeWrites:
     drop: list[str] = field(default_factory=lambda: [])
     """The labels to take from it."""
     owned: OwnedLabels | None = None
+    lower: list[str] = field(default_factory=lambda: [])
+    """
+    The properties whose lowercased copy the step writes, from what the node holds once the step's writes are done: see
+    lower_copies. The copies are no part of whether the step changed the node.
+    """

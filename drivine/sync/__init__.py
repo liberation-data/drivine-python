@@ -6,6 +6,7 @@ Drivine: a graph database client for Python. https://drivine.org
 
 from drivine.annotation.aggregate import Aggregate, Count
 from drivine.annotation.aggregate_function import AggregateFunction
+from drivine.annotation.case_insensitive import CaseInsensitive
 from drivine.annotation.direction import Direction
 from drivine.annotation.empty_when_absent import EmptyWhenAbsent
 from drivine.annotation.full_text_index import FullTextIndex
@@ -77,7 +78,7 @@ from drivine.manager.removed_targets import RemovedTargets
 from drivine.manager.save_options import SaveOptions
 from drivine.manager.scored import Scored
 from drivine.manager.stale_object_error import StaleObjectError
-from drivine.model import stamps
+from drivine.model import lower_copies, stamps
 from drivine.model.graph_view import GraphView
 from drivine.model.model_registry import ModelRegistry
 from drivine.model.node_fragment import NodeFragment
@@ -118,6 +119,7 @@ __all__ = [
     "above",
     "Aggregate",
     "AggregateFunction",
+    "CaseInsensitive",
     "all_of",
     "any_of",
     "at_least",
@@ -224,6 +226,7 @@ __all__ = [
     "sql_file",
     "sql_statement",
     "StaleObjectError",
+    "lower_copies",
     "stamps",
     "StatelessGraphObjectManager",
     "Statement",

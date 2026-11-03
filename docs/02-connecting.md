@@ -41,7 +41,7 @@ the graph engines. A raw `where` is SQL over the node's row, `n`: its `labels`, 
 name) and `stamp`, say `JSON_VALUE(n.props, '$.name') = $name`. A property of the node may be written as Cypher writes
 it, `n.name = $name` (or ``n.`a name` ``), and is read as that property; a property compared with `true` or `false` is
 compared with the text a JSON boolean is read as. Your own statements are SQL too, unless written as
-Cypher (see [Cypher on Postgres and Oracle](04-statements.md#cypher-on-postgres-and-oracle)). `matches` takes a regular expression in
+Cypher (see [Cypher on Postgres, Oracle and SQLite](04-statements.md#cypher-on-postgres-oracle-and-sqlite)). `matches` takes a regular expression in
 Oracle's POSIX dialect, matched against the whole value. A leading `(?i)` ignores case; what Java adds, such as
 `(?:…)`, a look-around or `\b`, is not read. A backreference names the group the expression numbers it by,
 `\1` to `\8`; `\9` is refused, as the group that anchors the expression would make it the tenth, which POSIX does not
@@ -71,7 +71,7 @@ statements are kept, so where the object manager does what you need, it is the f
 
 Beside the tables an Oracle graph is made with one function, `<graph>_nulls_equal`, by which a compiled Cypher
 statement compares two lists or maps that may hold a null (see
-[Cypher on Postgres and Oracle](04-statements.md#cypher-on-postgres-and-oracle)). drivine4j and Drivine for TypeScript make it byte for
+[Cypher on Postgres, Oracle and SQLite](04-statements.md#cypher-on-postgres-oracle-and-sqlite)). drivine4j and Drivine for TypeScript make it byte for
 byte alike. Making it takes `CREATE PROCEDURE`, which the `RESOURCE` role grants, as well as the `CREATE TABLE` the
 tables take. A store an earlier version made gains it the next time a pool first connects to the graph. Where the user
 that makes the graph may not make a function, the graph is made without it, and Drivine logs a warning once for the
@@ -120,7 +120,7 @@ constraints Drivine made; and `<graph>_write`, the function a save's steps are c
 applied whole or not at all.
 
 - A statement you write yourself is SQL, unless written as Cypher (see
-  [Cypher on Postgres and Oracle](04-statements.md#cypher-on-postgres-and-oracle)). Parameters are named `$name`, as in Cypher, and a
+  [Cypher on Postgres, Oracle and SQLite](04-statements.md#cypher-on-postgres-oracle-and-sqlite)). Parameters are named `$name`, as in Cypher, and a
   statement is bound only the ones it names. A row comes back as a dict of its columns, a `jsonb` column as Python
   values.
 - A raw `where`, for a load or a delete, is SQL over the root's row: its `props`, `labels` and `stamp`, say
@@ -131,7 +131,7 @@ applied whole or not at all.
 - Text is ordered by the database's collation, so a page of mixed-case text may not be in the order Neo4j gives
   (`a, b, B` rather than `B, a, b`). The range indexes are made in that collation, so an order and a seek are read
   through them. Compiled Cypher orders text by its code points instead
-  ([Cypher on Postgres and Oracle](04-statements.md#cypher-on-postgres-and-oracle)).
+  ([Cypher on Postgres, Oracle and SQLite](04-statements.md#cypher-on-postgres-oracle-and-sqlite)).
 - A save checks the stamp, as on the graph engines. A save turned away by a serialization failure (`40001`) or a
   deadlock (`40P01`) is run again.
 - Index the id of each class you save: a range index or a uniqueness constraint is a partial index over the label's
@@ -141,6 +141,65 @@ applied whole or not at all.
   approximate through it, and exact with no index made. A full-text index is a trigram index over the text a search
   reads, which narrows the search; `load_matching` scores the same with it and without it, and reads words, a
   `"phrase"`, `+must`, `-not` and a `prefix*`.
+
+### SQLite
+
+SQLite keeps a graph in a file, with no server: drivine4j's store, in the same tables as Postgres, so a file one library
+wrote, drivine4j, Drivine for TypeScript or this one, the others read and write as it is. It takes SQLite 3.45 or later
+through Python's own `sqlite3` module, so there is nothing to install; where Python's SQLite is older, install
+`pysqlite3-binary` and Drivine uses it. Models, the query DSL and the object manager are the same as on the other
+stores; the persistence manager runs plain SQL, with cursors and transactions, and Cypher you write is compiled to
+SQLite's SQL, as on Postgres and Oracle (`pip install "drivine[sqlite]"` adds the runtime its compiler takes): see
+[Cypher on Postgres, Oracle and SQLite](04-statements.md#cypher-on-postgres-oracle-and-sqlite). Compiled Cypher wants
+SQLite 3.53 or later, writing a float as text to 17 significant digits as 3.53 does by default: on an older one, or one
+built to write 15, a float may lose its last digits and a `CALL { … }` that groups by a variable it imports is refused
+before 3.53, and Drivine logs a warning once. Where Python's SQLite isn't such a one and `pysqlite3`'s is, Drivine uses
+`pysqlite3` for the store, plain SQL and the object manager too.
+
+```
+DATABASE_TYPE=SQLITE
+DATABASE_NAME=/var/lib/app/graph.db   # the file's path: there is no host, port, user or password
+DATABASE_DEFAULT_GRAPH_PATH=drivine   # names the graph's tables; this is the default
+```
+
+Or in code, `registry.builder().database_type(DatabaseType.SQLITE).database_name("graph.db").register("graph")`. The
+file is made if it isn't there, and the graph's tables on the first connection, as on Postgres. `:memory:` is refused:
+each pooled connection would open a database of its own. In the async API each connection's calls run on a thread of
+the connection's own, so one waiting for the file's lock holds up neither the event loop nor another connection.
+
+**How a graph is stored.** `<graph>_node (nid INTEGER PRIMARY KEY, labels TEXT, props TEXT, stamp TEXT)`,
+`<graph>_edge (eid INTEGER PRIMARY KEY, src, dst REFERENCES <graph>_node ON DELETE CASCADE, type, props TEXT)` and
+`<graph>_schema`, the indexes and constraints Drivine made. Labels and properties are JSON text, not SQLite's binary
+`jsonb`, and labels are written sorted, with nothing escaped that JSON does not require: a label is found by its text.
+The stamp is a column. Moments compare and order to the nanosecond, whatever their offset.
+
+- A save is the plan of steps Postgres's write function carries out, carried out by a function Drivine registers on
+  each connection, `drivine_write`, under a savepoint: applied whole or not at all, in a transaction or not. The other
+  functions a statement calls are registered too: `drivine_delete`, `drivine_epoch`, `drivine_lower` (Unicode's lower
+  case, where SQLite's lowers ASCII), `drivine_similarity`, `drivine_regexp_count` and `REGEXP`. A statement of yours
+  may call them; a connection you open yourself has none of them.
+- A statement Drivine writes that gives back documents opens with `/* drivine:json */`, and its text values are read
+  as JSON. One you write is read as it is: a row is a dict of its columns, and `labels` and `props` are text.
+- A raw `where` is SQL over the root's row, as on Postgres; a property written as Cypher writes it, `n.name`, is read
+  as that property, as text.
+- A range index or a uniqueness constraint is a partial index over the property as a statement reads it, for the
+  label's nodes. A vector or a full-text index is recorded and nothing is made for it: `load_nearest` and
+  `load_matching` measure every node of the label.
+- `matches` takes a regular expression in Java's dialect, as on drivine4j, matched against the whole value: a
+  `REGEXP` reads it as Java does, and refuses what Python can't read so, such as a script (`\p{IsLatin}`) or a
+  look-behind of more than one length.
+
+**What a transaction gives.** Each connection writes ahead to a log, enforces foreign keys and waits for a locked file
+for up to its busy timeout, 30 seconds by default.
+
+- There is one writer at a time. A transaction takes the file's write lock as it begins (`BEGIN IMMEDIATE`), so even a
+  transaction that only reads waits for the lock, for up to the busy timeout. One that holds it longer than 5 seconds
+  is logged as a warning when it ends, committed, rolled back or released.
+- Reads outside a transaction don't wait for a writer: each reads the file as it last was.
+- Saves and deletes outside a transaction are run again when SQLite turns them away as contended (`SQLITE_BUSY`).
+- Each statement Drivine writes applies whole or not at all.
+- A connection you open yourself, with `sqlite3.connect`, has none of this: no log, no foreign keys, no busy timeout
+  and none of Drivine's functions.
 
 Drivine reads `os.environ`, and doesn't load `.env` files itself: use python-dotenv, pydantic-settings, or your
 platform's way.

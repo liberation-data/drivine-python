@@ -46,7 +46,8 @@ class SchemaCatalog:
         """
         The items fragments declare with RangeIndex, Unique, VectorIndex and FullTextIndex, over their first label and
         their fields' stored names. A vector index's dimensions come from `dimensions` unless its marker gives them. A
-        uniqueness constraint names a violation's nodes by the fragment's NodeId, as it is stored.
+        uniqueness constraint names a violation's nodes by the fragment's NodeId, as it is stored. A range index or
+        uniqueness constraint that ignores case is over the lowercased copies its `CaseInsensitive` fields keep.
         """
         models = registry or ModelRegistry()
         items: list[SchemaSpec] = []
@@ -54,12 +55,26 @@ class SchemaCatalog:
             model = models.fragment(type_)
             label = model.labels[0]
             for it in model.schema:
+                # An item that ignores case is over the lowercased copies a CaseInsensitive field keeps, and a save
+                # keeps none of another field: it would hold the nodes there were when it was ensured, and none after.
+                uncopied = [p for p in it.properties if p not in model.lower_copied] if it.ignore_case else []
+                if uncopied:
+                    raise DrivineError(
+                        f"The {'uniqueness constraint' if it.kind == 'UNIQUE' else 'range index'} on "
+                        f"{type_.__name__}({', '.join(it.properties)}) ignores case, and "
+                        f"{', '.join(repr(p) for p in uncopied)} is not the property of a CaseInsensitive field, which "
+                        "a save keeps a lowercased copy of. Add CaseInsensitive() to the field."
+                    )
                 if it.kind == "UNIQUE":
-                    items.append(uniqueness_constraint(label, it.properties, node_id_property=model.node_id_property))
+                    items.append(
+                        uniqueness_constraint(
+                            label, it.properties, node_id_property=model.node_id_property, ignore_case=it.ignore_case
+                        )
+                    )
                 elif it.kind == "FULLTEXT":
                     items.append(full_text_index(label, it.properties))
                 elif it.kind == "RANGE":
-                    items.append(range_index(label, it.properties))
+                    items.append(range_index(label, it.properties, ignore_case=it.ignore_case))
                 else:
                     size = (
                         it.dimensions

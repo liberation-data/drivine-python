@@ -8,6 +8,7 @@ from typing import Annotated, Any
 from drivine import (
     Aggregate,
     AggregateFunction,
+    CaseInsensitive,
     Count,
     Direction,
     EmptyWhenAbsent,
@@ -170,3 +171,23 @@ class Badge(NodeFragment, labels=["Badge"]):
 class Flag(NodeFragment, labels=["Flag"]):
     uuid: Annotated[str, NodeId()]
     locked: bool
+
+
+class Account(NodeFragment, labels=["Account"]):
+    """
+    An account looked up by its email and its display name whatever their case: a save keeps a lowercased copy of each,
+    the display name's under the property it is stored as.
+    """
+
+    uuid: Annotated[str, NodeId()]
+    email: Annotated[str | None, CaseInsensitive()] = None
+    display_name: Annotated[str | None, CaseInsensitive(), GraphProperty("display_name")] = None
+    name: str | None = None
+    stamp: Annotated[str | None, NodeStamp()] = None
+
+
+class AccountFriends(GraphView):
+    """An account and those it knows: a save writes the copies of each, a lookup reads the root's alone."""
+
+    account: Annotated[Account, Root()]
+    friends: Annotated[list[Account], Relationship("KNOWS")] = []

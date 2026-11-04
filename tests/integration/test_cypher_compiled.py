@@ -2279,6 +2279,129 @@ async def test_a_list_comprehension_over_nodes_or_relationships_that_keeps_them_
     ) == [[True, True, ["Carrie"]]]
 
 
+async def test_a_relationship_of_either_direction_is_found_each_way_round_and_one_from_a_node_to_itself_once(
+    cypher_pm: PersistenceManager,
+):
+    # On Postgres and Oracle it reads the relationships both ways round and joins on equalities, where it joined with
+    # an OR (#390, liberation-data/drivine4j#570). The rows are Neo4j's, as drivine4j's CypherQueryContract has them.
+    await clear(cypher_pm)
+    await cypher_pm.query(
+        spec(
+            "CREATE (a:CyUn {k: 1}), (b:CyUn {k: 2}), (c:CyUn {k: 3}), "
+            "(a)-[:CY_UN {i: 1}]->(b), (b)-[:CY_UN {i: 2}]->(a), (a)-[:CY_UN {i: 3}]->(a), (b)-[:CY_UN {i: 4}]->(c)"
+        )
+    )
+    cases: list[tuple[str, list[Any]]] = [
+        (
+            "MATCH (n:CyUn)-[r:CY_UN]-(m) RETURN [r.i, n.k, m.k, type(r)] ORDER BY r.i, n.k",
+            [[1, 1, 2, "CY_UN"], [1, 2, 1, "CY_UN"], [2, 1, 2, "CY_UN"], [2, 2, 1, "CY_UN"]]
+            + [[3, 1, 1, "CY_UN"], [4, 2, 3, "CY_UN"], [4, 3, 2, "CY_UN"]],
+        ),
+        ("MATCH (:CyUn)-[:CY_UN]-() RETURN count(*)", [7]),
+        ("MATCH (a:CyUn {k: 1}), (b:CyUn {k: 2}) MATCH (a)-[r:CY_UN]-(b) RETURN r.i ORDER BY r.i", [1, 2]),
+        ("MATCH (a:CyUn {k: 1})-[r:CY_UN]-(a) RETURN r.i", [3]),
+        # Its stored direction still reads as stored: the one undirected step found, then matched directed.
+        (
+            "MATCH (:CyUn {k: 3})-[r:CY_UN]-(b) WITH r.i AS i MATCH (s)-[:CY_UN {i: i}]->(e) RETURN [i, s.k, e.k]",
+            [[4, 2, 3]],
+        ),
+        # A variable-length walk: each step either way, a relationship from a node to itself once.
+        ("MATCH (n:CyUn {k: 1})-[:CY_UN*1..2]-(m) RETURN m.k ORDER BY m.k", [1, 1, 1, 2, 2, 2, 2, 3, 3]),
+        ("MATCH (:CyUn)-[:CY_UN*1]-() RETURN count(*)", [7]),
+        ("MATCH (a:CyUn {k: 1})-[:CY_UN*1]-(a) RETURN count(*)", [1]),
+        (
+            "MATCH p = (:CyUn {k: 3})-[:CY_UN*1..2]-() RETURN [[x IN nodes(p) | x.k], [r IN relationships(p) | r.i]] "
+            "ORDER BY length(p), last(relationships(p)).i",
+            [[[3, 2], [4]], [[3, 2, 1], [4, 1]], [[3, 2, 1], [4, 2]]],
+        ),
+        # Walked from its far node, the only one pinned.
+        ("MATCH (m:CyUn)-[:CY_UN*1]-(:CyUn {k: 3}) RETURN m.k", [2]),
+        # A quantified path pattern's step, of one hop or two, no relationship twice in it.
+        ("MATCH (:CyUn {k: 1}) ((x)-[:CY_UN]-(y)){1} (m) RETURN m.k ORDER BY m.k", [1, 2, 2]),
+        ("MATCH (:CyUn {k: 3}) ((x)-[:CY_UN]-(y)-[:CY_UN]-(z)){1} (m) RETURN m.k ORDER BY m.k", [1, 1]),
+        # In a subquery, a pattern predicate and an OPTIONAL MATCH.
+        ("MATCH (n:CyUn) RETURN [n.k, COUNT { (n)-[:CY_UN]-() }] ORDER BY n.k", [[1, 3], [2, 3], [3, 1]]),
+        ("MATCH (n:CyUn) WHERE (n)-[:CY_UN]-(:CyUn {k: 3}) RETURN n.k", [2]),
+        (
+            "MATCH (n:CyUn) OPTIONAL MATCH (n)-[:CY_UN {i: 4}]-(m) RETURN [n.k, m.k] ORDER BY n.k",
+            [[1, None], [2, 3], [3, 2]],
+        ),
+    ]
+    for cypher, rows in cases:
+        assert (cypher, await cypher_pm.query(spec(cypher))) == (cypher, rows)
+
+
+async def test_a_relationship_from_a_node_to_itself_is_found_once_by_a_step_a_walk_a_count_and_a_merge_either_way(
+    cypher_pm: PersistenceManager,
+):
+    # Read both ways round on Postgres and Oracle, a relationship from a node to itself is a row of each half; the join
+    # keeps the one read as it is stored (#390). The rows are Neo4j's.
+    await clear(cypher_pm)
+    await cypher_pm.query(spec("CREATE (a:CyLoop {k: 1})-[:LOOP {i: 1}]->(a)"))
+    cases: list[tuple[str, list[Any]]] = [
+        ("MATCH (a:CyLoop)-[r:LOOP]-(b) RETURN [r.i, a.k, b.k]", [[1, 1, 1]]),
+        ("MATCH (a:CyLoop)-[r:LOOP]-(a) RETURN r.i", [1]),
+        ("MATCH (:CyLoop)-[:LOOP*1..3]-(m) RETURN m.k", [1]),
+        ("MATCH p = (:CyLoop)-[:LOOP*]-() RETURN [r IN relationships(p) | r.i]", [[1]]),
+        ("MATCH (n:CyLoop) RETURN COUNT { (n)-[:LOOP]-() }", [1]),
+        ("MATCH (a:CyLoop) MERGE (a)-[r:LOOP]-(a) RETURN r.i", [1]),
+        ("MATCH ()-[r:LOOP]->() RETURN count(r)", [1]),
+    ]
+    for cypher, rows in cases:
+        assert (cypher, await cypher_pm.query(spec(cypher))) == (cypher, rows)
+
+
+async def test_a_relationship_found_either_way_round_is_set_and_deleted_one_from_a_node_to_itself_once(
+    cypher_pm: PersistenceManager,
+):
+    # On Postgres and Oracle the write's MATCH reads the relationships both ways round (#390,
+    # liberation-data/drivine4j#570). The rows are Neo4j's, as drivine4j's CypherWriteContract has them.
+    await clear(cypher_pm)
+    await cypher_pm.query(
+        spec(
+            "CREATE (a:CyWrite {k: 1}), (b:CyWrite {k: 2}), "
+            "(a)-[:UN {i: 1}]->(b), (b)-[:UN {i: 2}]->(a), (a)-[:UN {i: 3}]->(a)"
+        )
+    )
+    assert await cypher_pm.query(
+        spec("MATCH (:CyWrite {k: 1})-[r:UN]-() SET r.seen = true RETURN r.i ORDER BY r.i")
+    ) == [1, 2, 3]
+    assert await cypher_pm.query(spec("MATCH (:CyWrite)-[r:UN]-() WHERE r.seen RETURN r.i ORDER BY r.i")) == [
+        1,
+        1,
+        2,
+        2,
+        3,
+    ]
+    await cypher_pm.query(spec("MATCH (:CyWrite {k: 2})-[r:UN]-(:CyWrite {k: 1}) DELETE r"))
+    assert await cypher_pm.query(spec("MATCH ()-[r:UN]->() RETURN [r.i, r.seen]")) == [[3, True]]
+
+
+async def test_a_merge_either_way_finds_one_stored_the_other_way_round_and_one_from_a_node_to_itself_once(
+    cypher_pm: PersistenceManager,
+):
+    # The MERGE's match reads the relationships both ways round on Postgres and Oracle (#390,
+    # liberation-data/drivine4j#570). The rows are Neo4j's. drivine4j's case also refuses a MERGE that would make a
+    # null property (liberation-data/drivine4j#543), which isn't ported here.
+    await clear(cypher_pm)
+    await cypher_pm.query(
+        spec("CREATE (a:CyWrite {k: 1}), (b:CyWrite {k: 2}), (b)-[:UN {i: 1}]->(a), (a)-[:UN {i: 2}]->(a)")
+    )
+    assert await cypher_pm.query(
+        spec(
+            "MATCH (a:CyWrite {k: 1}), (b:CyWrite {k: 2}) MERGE (a)-[r:UN {i: 1}]-(b) "
+            "ON MATCH SET r.seen = true RETURN r.i"
+        )
+    ) == [1]
+    assert await cypher_pm.query(
+        spec("MATCH (a:CyWrite {k: 1}) MERGE (a)-[r:UN]-(a) ON MATCH SET r.seen = true RETURN r.i")
+    ) == [2]
+    assert await cypher_pm.query(spec("MATCH ()-[r:UN]->() RETURN [r.i, r.seen] ORDER BY r.i")) == [
+        [1, True],
+        [2, True],
+    ]
+
+
 async def test_a_paths_nodes_or_relationships_added_together_are_a_list_of_them_and_of_no_path_null(
     cypher_pm: PersistenceManager,
 ):

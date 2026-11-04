@@ -6,7 +6,7 @@ from typing import Literal
 
 from drivine.annotation.direction import Direction
 from drivine.backend.cascade_beyond import CascadeBeyond
-from drivine.backend.sql.sql_graph import SqlGraph, sql_text
+from drivine.backend.sql.sql_graph import SqlGraph, self_loop_once, sql_text
 from drivine.model.relationship_model import RelationshipModel
 
 
@@ -23,7 +23,12 @@ class SqlCascade:
     beyond: list[CascadeBeyond] = field(default_factory=lambda: [])
 
 
-def kept_targets(graph: SqlGraph, followed: Sequence[RelationshipModel], union: Literal["UNION", "UNION ALL"]) -> str:
+def kept_targets(
+    graph: SqlGraph,
+    followed: Sequence[RelationshipModel],
+    union: Literal["UNION", "UNION ALL"],
+    both_ways: bool = False,
+) -> str:
     """
     The nodes of `cascade_targets` a `DELETE_ORPHAN` keeps, as the body of a recursive query named `cascade_kept`. A
     node is kept when a node outside the cascade (`cascade_all`, the roots and the targets) is related to it, or when
@@ -31,13 +36,43 @@ def kept_targets(graph: SqlGraph, followed: Sequence[RelationshipModel], union: 
     its session is still deleted. What is kept is read before anything is deleted, so a node's relationships to the
     others the cascade takes do not keep it. `union` joins the two: `UNION` where the store reads a recursive query so,
     which keeps each node once, and `UNION ALL` where it must.
+
+    Where it follows a relationship of either direction and the store asks (`both_ways`), each step reads the
+    relationships both ways round (`SqlGraph.both_ways`) and joins on an equality, where an OR across the two
+    directions read every relationship at each step: on Oracle 30 ms against under 10, and on SQLite 93 ms against 7,
+    from 20 nodes over 40,000 relationships. Postgres probes the OR by index (0.6 ms), and read both ways round there it
+    hashed the whole table at each step (34 ms), so it keeps the OR (#390, liberation-data/drivine#588).
     """
-    # The far end of the edge e from the kept node k.
-    far = "CASE WHEN e.src = k.nid THEN e.dst ELSE e.src END"
     steps: list[RelationshipModel] = []
     for rel in followed:
         if not any(it.type == rel.type and it.direction is rel.direction for it in steps):
             steps.append(rel)
+    outside = (
+        f"SELECT t.nid FROM cascade_targets t WHERE EXISTS (SELECT 1 FROM {graph.edges} e "
+        "WHERE (e.src = t.nid AND e.dst NOT IN (SELECT nid FROM cascade_all)) "
+        "OR (e.dst = t.nid AND e.src NOT IN (SELECT nid FROM cascade_all)))"
+    )
+    if both_ways and any(it.direction is Direction.UNDIRECTED for it in steps):
+        # Each relationship read from the kept node k's end: as stored going out, the other way round coming in.
+        def read(rel: RelationshipModel) -> str:
+            typed = f"e.type = {sql_text(rel.type)}"
+            if rel.direction is Direction.INCOMING:
+                return f"({typed} AND e.back = 1)"
+            if rel.direction is Direction.UNDIRECTED:
+                return f"({typed} AND {self_loop_once('e')})"
+            return f"({typed} AND e.back = 0)"
+
+        return "\n    ".join(
+            [
+                outside,
+                union,
+                f"SELECT e.b FROM cascade_kept k JOIN {graph.both_ways()} e ON e.a = k.nid AND "
+                f"({' OR '.join(read(it) for it in steps)}) WHERE e.b IN (SELECT nid FROM cascade_targets)",
+            ]
+        )
+
+    # The far end of the edge e from the kept node k.
+    far = "CASE WHEN e.src = k.nid THEN e.dst ELSE e.src END"
 
     def holds(rel: RelationshipModel) -> str:
         typed = f"e.type = {sql_text(rel.type)}"
@@ -49,9 +84,7 @@ def kept_targets(graph: SqlGraph, followed: Sequence[RelationshipModel], union: 
 
     return "\n    ".join(
         [
-            f"SELECT t.nid FROM cascade_targets t WHERE EXISTS (SELECT 1 FROM {graph.edges} e "
-            "WHERE (e.src = t.nid AND e.dst NOT IN (SELECT nid FROM cascade_all)) "
-            "OR (e.dst = t.nid AND e.src NOT IN (SELECT nid FROM cascade_all)))",
+            outside,
             union,
             f"SELECT {far} FROM cascade_kept k JOIN {graph.edges} e ON {' OR '.join(holds(it) for it in steps)} "
             f"WHERE {far} IN (SELECT nid FROM cascade_targets)",

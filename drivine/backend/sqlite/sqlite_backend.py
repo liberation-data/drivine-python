@@ -185,9 +185,11 @@ class SqliteBackend:
             )
             deleted = "SELECT nid FROM cascade_roots UNION SELECT nid FROM cascade_targets"
         if orphans:
+            # Read both ways round where it follows a relationship of either direction (#390).
+            kept = kept_targets(self.graph, cascaded.followed, "UNION", both_ways=True)
             targets += [
                 "cascade_all AS (SELECT nid FROM cascade_roots UNION SELECT nid FROM cascade_targets),",
-                f"cascade_kept (nid) AS (\n    {kept_targets(self.graph, cascaded.followed, 'UNION')}),",
+                f"cascade_kept (nid) AS (\n    {kept}),",
             ]
             deleted += " WHERE nid NOT IN (SELECT nid FROM cascade_kept)"
         # The roots are counted before anything is deleted: the left of the sum is worked out first.

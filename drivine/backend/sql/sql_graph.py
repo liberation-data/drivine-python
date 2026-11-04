@@ -37,6 +37,15 @@ class SqlGraph:
         self.catalog = f"{name}_schema"
         """What Drivine made of indexes and constraints."""
 
+    def both_ways(self) -> str:
+        """
+        The relationship rows read both ways round (`both_ways_of`), for a relationship of either direction from one
+        node, joined on `a` with an equality where an OR across the two directions left Postgres reading every
+        relationship of the type for a node's neighbours, and Oracle's and SQLite's recursive cascade reading every
+        relationship at each step (#390). It is read with `self_loop_once`.
+        """
+        return both_ways_of(self.edges)
+
     def vectors(self, label: str, property: str) -> str:
         """The table that holds the embeddings a vector index on the label's property is over."""
         return self.object_name("v", [label, property])
@@ -56,6 +65,30 @@ class SqlGraph:
         room = min(max(self._max_object_name - fixed, 0), 40)
         readable = "".join(re.sub(r"[^A-Za-z0-9]", "", it) for it in parts)[:room]
         return f"{self.name}_{kind}_{readable}_{hashed}"
+
+
+def both_ways_of(edges: str) -> str:
+    """
+    `SqlGraph.both_ways` of the relationship table `edges`, which compiled Cypher reads too: each row once with its
+    ends `a` and `b` as it is stored, `back` 0, and once the other way round, `back` 1. Its `src` and `dst` stay the
+    stored ones, so the relationship keeps the direction it was written in. A step then joins on `a` (and `b`) with
+    equalities, which a store can hash or index, where an OR across the two directions left Postgres comparing every
+    pair of nodes, and Oracle reading every relationship at each step of a walk. A step reads it with `self_loop_once`.
+    """
+    return (
+        f"(SELECT eid, src, dst, type, props, src AS a, dst AS b, 0 AS back FROM {edges}"
+        f" UNION ALL SELECT eid, src, dst, type, props, dst AS a, src AS b, 1 AS back FROM {edges})"
+    )
+
+
+def self_loop_once(edge: str) -> str:
+    """
+    That a row `edge` of `both_ways_of` is a relationship from a node to itself only once, read as it is stored. It is
+    a condition of the join, not a `WHERE` of the second half, for Postgres pushes a join's equality on `a` into the
+    halves, and reads each by its index, only where neither half has a `WHERE` of its own: with one, it read the whole
+    table twice at each step of a walk, ten times slower than the OR (liberation-data/drivine4j#570).
+    """
+    return f"({edge}.back = 0 OR {edge}.src <> {edge}.dst)"
 
 
 def sql_text(text: str) -> str:

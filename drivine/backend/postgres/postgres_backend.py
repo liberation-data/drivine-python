@@ -23,7 +23,7 @@ from drivine.backend.save_statement import SaveStatement
 from drivine.backend.sql.cypher_shorthand import CypherShorthand
 from drivine.backend.sql.sql_cascade import beyond_count, kept_targets
 from drivine.backend.sql.sql_catalog import CATALOG_KINDS, catalog_properties
-from drivine.backend.sql.sql_graph import sql_text
+from drivine.backend.sql.sql_graph import self_loop_once, sql_text
 from drivine.drivine_error import DrivineError
 from drivine.dsl.query import Query
 from drivine.dsl.rendered_query import RenderedQuery
@@ -294,16 +294,20 @@ class PostgresBackend:
             raise DrivineError(
                 f"{origin.model.type.__name__} has no NodeId field, so a node of it can't be referred to by id."
             )
+        edges = self.graph.edges
         if direction is Direction.INCOMING:
             join = "e.dst = a.nid AND x.nid = e.src"
         elif direction is Direction.UNDIRECTED:
-            join = "((e.src = a.nid AND x.nid = e.dst) OR (e.dst = a.nid AND x.nid = e.src))"
+            # Either way, from the relationships read both ways round and joined on an equality: with an OR across the
+            # two directions, Postgres read every relationship of the type, 136 ms at 40,000 against 0.2 (#390).
+            edges = self.graph.both_ways()
+            join = f"e.a = a.nid AND {self_loop_once('e')} AND x.nid = e.b"
         else:
             join = "e.src = a.nid AND x.nid = e.dst"
         labels = list(dict.fromkeys([*origin.model.labels, *origin.labels]))
         return PostgresStatement(
             f'SELECT {node_document("n")} AS "result" FROM {self.graph.nodes} n WHERE n.nid IN ('
-            f"SELECT x.nid FROM {self.graph.nodes} a JOIN {self.graph.edges} e ON e.type = CAST($x_type AS text) "
+            f"SELECT x.nid FROM {self.graph.nodes} a JOIN {edges} e ON e.type = CAST($x_type AS text) "
             f"JOIN {self.graph.nodes} x ON {join} WHERE {has_labels('a', labels)} AND "
             f"{text_of('a', origin.model.node_id_property)} = CAST($x_from AS text) AND "
             f"{has_labels('x', target.labels)})",

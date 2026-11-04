@@ -29,6 +29,9 @@ from drivine.backend.oracle.oracle_backend import OracleBackend
 from drivine.backend.oracle.oracle_graph import OracleGraph
 from drivine.backend.postgres.postgres_backend import PostgresBackend
 from drivine.backend.postgres.postgres_graph import PostgresGraph
+from drivine.backend.sql.sql_cascade import kept_targets
+from drivine.backend.sqlite.sqlite_backend import SqliteBackend
+from drivine.backend.sqlite.sqlite_graph import SqliteGraph
 
 
 class Doc(NodeFragment, labels=["Doc"]):
@@ -55,6 +58,15 @@ class Shelf(GraphView):
 class Pals(GraphView):
     doc: Annotated[Doc, Root()]
     pals: Annotated[list[Doc], Relationship("KNOWS", Direction.UNDIRECTED)] = []
+
+
+class Crew(GraphView):
+    """A view that follows one relationship out, one in and one either way."""
+
+    doc: Annotated[Doc, Root()]
+    notes: Annotated[list[Note], Relationship("HAS")] = []
+    of: Annotated[list[Note], Relationship("OF", Direction.INCOMING)] = []
+    pals: Annotated[list[Doc], Relationship("PAIRED", Direction.UNDIRECTED)] = []
 
 
 class Thread(GraphView):
@@ -182,6 +194,39 @@ def test_keeps_below_a_kept_node_the_far_end_of_each_step_the_cascade_follows_in
     pals = PostgresBackend(PostgresGraph()).delete(registry.view(Pals), None, CascadeType.DELETE_ORPHAN).text
     assert "ON (e.type = 'KNOWS' AND (e.src = k.nid OR e.dst = k.nid))" in pals
     assert pals.startswith("WITH RECURSIVE cascade_roots")
+
+
+def test_steps_either_way_round_from_the_both_ways_rows_where_the_store_asks_and_a_step_is_undirected():
+    # An OR across the two directions read every relationship at each step on Oracle and SQLite (#390). The rows are
+    # pinned by tests/integration/sql/test_sql_writes.py; this pins the shape.
+    graph = OracleGraph()
+    kept = kept_targets(graph, registry.view(Crew).relationships, "UNION ALL", both_ways=True)
+    step = kept.split("\n")[-1]
+    assert f"JOIN {graph.both_ways()} e ON e.a = k.nid AND (" in step
+    assert "(e.type = 'HAS' AND e.back = 0)" in step
+    assert "(e.type = 'OF' AND e.back = 1)" in step
+    assert "(e.type = 'PAIRED' AND (e.back = 0 OR e.src <> e.dst))" in step
+    assert "SELECT e.b FROM cascade_kept k" in step
+    assert not re.search(r"\be\.(src|dst) = k\.nid", step)
+    for backend in (OracleBackend(OracleGraph()), SqliteBackend(SqliteGraph())):
+        text = backend.delete(registry.view(Crew), None, CascadeType.DELETE_ORPHAN).text
+        assert "e ON e.a = k.nid AND ((e.type = 'HAS' AND e.back = 0) OR " in text
+        assert "WHERE e.b IN (SELECT nid FROM cascade_targets)" in text
+
+
+def test_keeps_the_or_where_the_store_does_not_ask_or_no_step_is_undirected():
+    followed = registry.view(Crew).relationships
+    graph = OracleGraph()
+    either = kept_targets(PostgresGraph(), followed, "UNION")
+    assert "(e.type = 'PAIRED' AND (e.src = k.nid OR e.dst = k.nid))" in either
+    assert "AS back" not in either
+    pals = PostgresBackend(PostgresGraph()).delete(registry.view(Crew), None, CascadeType.DELETE_ORPHAN).text
+    assert "AS back" not in pals
+    directed = kept_targets(graph, followed[:2], "UNION ALL", both_ways=True)
+    assert directed == kept_targets(graph, followed[:2], "UNION ALL")
+    assert "AS back" not in directed
+    for backend in (OracleBackend(OracleGraph()), SqliteBackend(SqliteGraph())):
+        assert "AS back" not in backend.delete(registry.view(Tree), None, CascadeType.DELETE_ORPHAN).text
 
 
 class _CountingStore:

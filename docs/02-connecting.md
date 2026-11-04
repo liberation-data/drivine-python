@@ -69,15 +69,19 @@ holds a kept statement's memory for as long as the driver keeps it, from about 4
 0.3 ms more for a short statement (Oracle reuses its plan; it doesn't parse it again from scratch). The object manager's
 statements are kept, so where the object manager does what you need, it is the faster way to Oracle.
 
-Beside the tables an Oracle graph is made with one function, `<graph>_nulls_equal`, by which a compiled Cypher
+Beside the tables an Oracle graph is made with three functions: `<graph>_nulls_equal`, by which a compiled Cypher
 statement compares two lists or maps that may hold a null (see
-[Cypher on Postgres, Oracle and SQLite](04-statements.md#cypher-on-postgres-oracle-and-sqlite)). drivine4j and Drivine for TypeScript make it byte for
-byte alike. Making it takes `CREATE PROCEDURE`, which the `RESOURCE` role grants, as well as the `CREATE TABLE` the
-tables take. A store an earlier version made gains it the next time a pool first connects to the graph. Where the user
-that makes the graph may not make a function, the graph is made without it, and Drivine logs a warning once for the
-graph when a statement would call it, and looks for it again a minute later. Until then a statement that writes, or the
-step of a `reduce`, compares two lists or maps that hold a null and differ as JSON as false, where Cypher may give null
-(`a = b`, of `[null] AS a, [1] AS b`), and a read declares the function itself.
+[Cypher on Postgres, Oracle and SQLite](04-statements.md#cypher-on-postgres-oracle-and-sqlite)), and `<graph>_era` and
+`<graph>_era_date`, by which it renumbers a year before 1 between Cypher's numbering and Oracle's as it reads and writes
+a date or a moment. drivine4j and Drivine for TypeScript make them byte for byte alike. Making them takes
+`CREATE PROCEDURE`, which the `RESOURCE` role grants, as well as the `CREATE TABLE` the tables take. A store an earlier
+version made gains those it lacks the next time a pool first connects to the graph. Where the user that makes the graph
+may not make a function, the graph is made without them, and Drivine logs a warning once for the graph when a statement
+would call one, and looks for it again a minute later. Until then, without `<graph>_nulls_equal`, a statement that
+writes, or the step of a `reduce`, compares two lists or maps that hold a null and differ as JSON as false, where Cypher
+may give null (`a = b`, of `[null] AS a, [1] AS b`), and a read declares the function itself. Without the era
+functions, a statement gives the same rows, renumbering a year inline, but Oracle takes longer to plan one of temporal
+arithmetic: seconds, and over a minute for a moment two `CALL`s deep.
 
 On Postgres, `DATABASE_NAME` is the database, and `DATABASE_DEFAULT_GRAPH_PATH` names the graph, `drivine` by default:
 see [Postgres](#postgres). On either, Cypher you write is compiled to SQL: see

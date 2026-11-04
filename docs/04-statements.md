@@ -58,7 +58,8 @@ people = await pm.query(spec.bind({"city": "Sydney"}))
   truncated, written and read back ([#326](https://github.com/liberation-data/drivine-python/issues/326)). A stored
   value whose year is 1000 or later is read as before; one of an earlier year is read by its era, so a statement that
   reads a stored date or moment compiles to SQL up to three and a half times as long (a filter on a stored date, 1,005
-  characters on Oracle and 703 on Postgres before, is 2,831 and 2,211), and in drivine4j, which compiles the same SQL,
+  characters on Oracle and 703 on Postgres before, is 1,747 and 2,211, and 2,831 on an Oracle store without the era
+  functions below), and in drivine4j, which compiles the same SQL,
   an aggregate of temporal arithmetic runs 8 to 10% slower (a `truncate` on Postgres, about 16%). Oracle counts days
   before 1582-10-15 by the Julian calendar, so the day of the week, the ISO week, the day of the year and a leap day
   of such a date are not Neo4j's ([#335](https://github.com/liberation-data/drivine-python/issues/335)). Two stored
@@ -126,6 +127,11 @@ people = await pm.query(spec.bind({"city": "Sydney"}))
   `reduce`, compares two such values that differ as JSON as false, so `a = [1]`, of `[null] AS a`, is false there,
   where Cypher's comparison is null. Lists and maps written out are compared item by item everywhere, so
   `[null] = [1]` is null.
+- On Oracle a year before 1, which Oracle numbers from -1 with no year 0, is renumbered as a date or a moment is read
+  and written by the graph's functions `<graph>_era` and `<graph>_era_date` (see [Connecting](02-connecting.md#connecting)),
+  in a statement that writes and the step of a `reduce` too. Where the store has no such functions, a statement
+  renumbers the year inline and gives the same rows, but Oracle takes longer to plan one of temporal arithmetic:
+  seconds, and over a minute for a moment two `CALL`s deep.
 - On Oracle a property that a `RETURN` or a `WITH` returns or passes on (`RETURN n.name`) is read through its text,
   which costs about 2.4 to 3.8 times a plain read: 100,000 rows of `RETURN n.name` take about 490 ms, against 150 ms.
   This works around an Oracle bug, seen on 23.26.3: a string past about 32 KB taken from JSON as JSON, returned or fed

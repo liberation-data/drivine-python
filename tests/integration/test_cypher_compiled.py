@@ -1436,6 +1436,26 @@ async def test_a_year_before_1_is_numbered_as_neo4j_numbers_it_made_worked_out_w
     ) == [["-0044-03-16", -44, "-0043-03-15T12:00:00+02:00", True]]
 
 
+async def test_a_year_before_1_is_numbered_as_neo4j_numbers_it_in_a_statement_that_writes_and_in_the_step_of_a_reduce(
+    cypher_pm: PersistenceManager,
+):
+    # liberation-data/drivine#572, drivine4j#584: on Oracle, a block's queries and a reduce's own function call the
+    # store's era functions too. drivine4j's CypherTemporalContract.
+    await clear(cypher_pm)
+    assert await cypher_pm.query(
+        spec(
+            "CREATE (n:CyTemporal {id: 'w', day: date('-0044-03-15') + duration('P1D')}) "
+            "RETURN [toString(n.day), n.day.year, toString(date('0000-12-31') + duration('P1D'))]"
+        )
+    ) == [["-0044-03-16", -44, "0001-01-01"]]
+    assert await cypher_pm.query(
+        spec(
+            "RETURN reduce(s = '', d IN [date('-0044-03-15'), date('0000-12-31'), date('0500-03-15')] | "
+            "s + toString(d + duration('P1D')) + ',')"
+        )
+    ) == ["-0044-03-16,0001-01-01,0500-03-16,"]
+
+
 async def test_a_stored_value_of_any_year_compares_and_gives_its_year_as_neo4j_does_beside_a_value_written_or_given(
     cypher_pm: PersistenceManager,
 ):

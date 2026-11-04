@@ -159,13 +159,23 @@ class OracleCypherCompiler(SqlCypherCompiler):
     meets what the node walked from meets of its own, and carries the node it started from.
     """
 
-    def __init__(self, graph: str, nulls_equal_stored: bool = True) -> None:
+    def __init__(self, graph: str, nulls_equal_stored: bool = True, era_stored: bool = True) -> None:
         """
         `nulls_equal_stored` says whether two values that may hold a null are compared by the function the store keeps
-        beside the graph's tables, `nulls_equal_name`: see `nulls_equal`.
+        beside the graph's tables, `nulls_equal_name`: see `nulls_equal`. `era_stored` says whether a text or a
+        timestamp whose year may be BC is renumbered by the functions the store keeps beside the graph's tables,
+        `era_name` and `era_date_name`: see `OracleTemporalSql.era`.
         """
         super().__init__(graph)
         self._nulls_equal_stored = nulls_equal_stored
+        self._stored_era = graph if era_stored else None
+        """The graph whose store keeps the era functions a statement calls, where it may call them."""
+        self._calls_stored_era = False
+        """
+        Whether the statement calls the store's era functions, which a store made by an earlier version, or by a user
+        who may not make a function, does not have: compiled again with `era_stored=False`, it calls neither, and
+        renumbers a year BC inline, as it gives the same rows but takes Oracle longer to plan.
+        """
         self._stored_nulls_equal = nulls_equal_name(graph)
         """The function the store keeps that compares two values that may hold a null: see `nulls_equal`."""
         self._graph_table = re.compile(rf"\b(?:{re.escape(self.nodes)}|{re.escape(self.edges)}) \w")
@@ -196,9 +206,16 @@ class OracleCypherCompiler(SqlCypherCompiler):
         """
 
     def compile_query(self, query: Query, parameters: Mapping[str, Any]) -> CompiledCypher:
-        """As SqlCypherCompiler's, saying whether the statement calls the store's function: see `nulls_equal`."""
+        """
+        As SqlCypherCompiler's, saying whether the statement calls the store's functions: see `nulls_equal` and
+        `OracleTemporalSql.era`.
+        """
         compiled = super().compile_query(query, parameters)
-        return dataclasses.replace(compiled, calls_stored_nulls_equal=self._calls_stored_nulls_equal)
+        return dataclasses.replace(
+            compiled,
+            calls_stored_nulls_equal=self._calls_stored_nulls_equal,
+            calls_stored_era=self._calls_stored_era,
+        )
 
     def literal_json(self, value: Any) -> str:
         if isinstance(value, float):
@@ -1378,7 +1395,11 @@ class OracleCypherCompiler(SqlCypherCompiler):
 
     @property
     def temporal_sql(self) -> TemporalSql:
-        return OracleTemporalSql(self.shared, lambda: self.procedural)
+        return OracleTemporalSql(self.shared, lambda: self.procedural, self._stored_era, self._calling_stored_era)
+
+    def _calling_stored_era(self) -> None:
+        """Says the statement calls the store's era functions: see `OracleTemporalSql.era`."""
+        self._calls_stored_era = True
 
     def bound_select(self, columns: str) -> str:
         """

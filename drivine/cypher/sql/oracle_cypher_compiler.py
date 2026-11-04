@@ -794,6 +794,18 @@ class OracleCypherCompiler(SqlCypherCompiler):
         """
         return f"({a} = {b} + 0 AND {b} = {a} + 0)"
 
+    def keyed_labels(self, labels: str, all_: Sequence[str]) -> str:
+        """
+        Each label by the labels' text (`holds_label`), the form for a node found some other way, which the index over
+        labels can't answer. With the first in the index's form (`has_labels`), Oracle (23.26) read that index again
+        for each row of the node the key is equal to, and filtered it on the key, rather than read the one row by the
+        primary key, whichever way round `same_key` writes the comparison: `MATCH (a:Big) MATCH (b:Big) WHERE a = b`
+        grew with the square of the label's nodes (#404, liberation-data/drivine4j#578). A hint naming the key's index
+        did as well, but names the node's alias in the query block that reads it, which a statement's subqueries and
+        `WITH`s move.
+        """
+        return " AND ".join(holds_label(labels, it) for it in all_)
+
     def key_value(self, json: str) -> str:
         """A number, as the key's `NUMBER`; anything else, or a number past one, null."""
         return f"JSON_VALUE({json}, '$' RETURNING NUMBER NULL ON ERROR)"

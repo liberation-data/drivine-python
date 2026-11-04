@@ -6229,3 +6229,69 @@ def test_a_node_optional_match_finds_none_compared_to_a_node_is_null_as_a_value_
     assert query(
         "MATCH (a:Person), (b:Person) RETURN [count(CASE WHEN a = b THEN 1 END), count(CASE WHEN NOT a = b THEN 1 END)]"
     ) == [[4, 12]]
+
+
+def test_a_node_with_a_label_set_equal_to_a_node_found_before_it_keeps_the_rows_cypher_keeps_in_each_form(
+    cypher_pm: PersistenceManager,
+):
+    # #404: not in the spec yet. On Oracle the later node's labels are tested by their text, for it to be read by its
+    # key. drivine4j's CypherQueryContract of liberation-data/drivine4j#578.
+    clear(cypher_pm)
+    cypher_pm.query(
+        spec(
+            "CREATE (a:CyKey:CyOther {k: 1}), (b:CyKey:CyOther {k: 2}), (c:CyKey {k: 3}), (d:CyOther {k: 4}), "
+            "(d)-[:CY_KEY]->(a), (d)-[:CY_KEY]->(c)"
+        )
+    )
+
+    def query(cypher: str, parameters: dict[str, Any] | None = None) -> list[Any]:
+        return cypher_pm.query(spec(cypher, parameters))
+
+    def count(cypher: str) -> int:
+        [counted] = query(cypher)
+        return int(counted)
+
+    m = "MATCH (a:CyKey) MATCH (b:CyKey)"
+    for test in ["a = b", "b = a", "id(b) = id(a)", "id(a) = id(b)", "a = b AND b.k > 0"]:
+        assert count(f"{m} WHERE {test} RETURN count(*)") == 3, test
+    assert count("MATCH (a:CyKey), (b:CyKey) WHERE a = b RETURN count(*)") == 3
+    assert query("MATCH (a:CyKey) WHERE a.k = 1 MATCH (b:CyKey) WHERE a = b RETURN b.k") == [1]
+    assert query("MATCH (a:CyKey {k: 1}) MATCH (b:CyKey) WHERE a = b RETURN b.k") == [1]
+    assert count(f"{m} WHERE a = b AND b.k > 1 RETURN count(*)") == 2
+    # A label the other node doesn't carry, one of two, and two.
+    assert count("MATCH (a:CyKey) MATCH (b:CyOther) WHERE a = b RETURN count(*)") == 2
+    assert count("MATCH (a:CyKey) MATCH (b:CyKey:CyOther) WHERE b = a RETURN count(*)") == 2
+    assert count("MATCH (a:CyKey:CyOther) MATCH (b:CyKey:CyOther) WHERE a = b RETURN count(*)") == 2
+    assert count("MATCH (a:CyKey) MATCH (b:CyNone) WHERE a = b RETURN count(*)") == 0
+    assert count("MATCH (x)-[:CY_KEY]->(a) MATCH (b:CyKey) WHERE a = b RETURN count(*)") == 2
+    assert count("MATCH (x)-[:CY_KEY]->(a) MATCH (b:CyOther) WHERE a = b RETURN count(*)") == 1
+    # The other node found by its properties or its id alone, before or after the node with the label.
+    assert query("MATCH (a {k: 1}) MATCH (b:CyKey) WHERE a = b RETURN b.k") == [1]
+    assert count("MATCH (b:CyOther) MATCH (a {k: 3}) WHERE a = b RETURN count(*)") == 0
+    assert query("MATCH (b:CyOther) MATCH (a {k: 4}) WHERE b = a RETURN b.k") == [4]
+    [one] = query("MATCH (n:CyKey {k: 1}) RETURN id(n)")
+    [four] = query("MATCH (n:CyOther {k: 4}) RETURN id(n)")
+    by_id = "MATCH (a) WHERE id(a) = $id MATCH (b:CyKey) WHERE a = b RETURN b.k"
+    assert query(by_id, {"id": one}) == [1]
+    assert query(by_id, {"id": four}) == []
+    assert query("MATCH (a), (b:CyKey) WHERE id(a) IN $ids AND id(b) = id(a) RETURN b.k", {"ids": [one, four]}) == [1]
+    assert query("MATCH (a:CyKey) RETURN [a.k, [(x)-[:CY_KEY]->(b:CyKey) WHERE b = a | x.k]] ORDER BY a.k") == [
+        [1, [4]],
+        [2, []],
+        [3, [4]],
+    ]
+    assert query("MATCH (a:CyKey) OPTIONAL MATCH (b:CyOther) WHERE a = b RETURN [a.k, b.k] ORDER BY a.k") == [
+        [1, 1],
+        [2, 2],
+        [3, None],
+    ]
+    assert count("MATCH (a:CyKey) WHERE EXISTS { MATCH (b:CyOther) WHERE a = b } RETURN count(*)") == 2
+    assert query("MATCH (a:CyKey) RETURN [a.k, COUNT { MATCH (b:CyOther) WHERE b = a }] ORDER BY a.k") == [
+        [1, 1],
+        [2, 1],
+        [3, 0],
+    ]
+    # Under NOT, beside an OR, or to a node found by nothing else: the test stands as it was.
+    assert count(f"{m} WHERE NOT a = b RETURN count(*)") == 6
+    assert count(f"{m} WHERE a = b OR b.k = 1 RETURN count(*)") == 5
+    assert count("MATCH (a) MATCH (b:CyKey) WHERE a = b RETURN count(*)") == 3

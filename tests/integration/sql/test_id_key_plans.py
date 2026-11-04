@@ -284,16 +284,32 @@ async def test_a_relationships_id_and_a_walk_from_a_nodes_read_by_their_keys(
     )
 
 
-async def test_a_node_equal_to_a_node_read_by_its_key_is_read_by_its_key_too_whichever_side_of_the_equals_it_is_on(
-    pm: PersistenceManager, ids: Ids, item: str
-):
-    # #396, drivine4j#576: Oracle's comparison of the two keys, `+ 0` on one side alone, read every node for that side.
+async def node_equal_to_keyed(pm: PersistenceManager, ids: Ids, label: str) -> None:
+    """That a node matched by `label`, equal to one matched by it and read by its key, is read by its key too,
+    whichever way round."""
     for test in ["b = a", "a = b", "id(b) = id(a)", "id(a) = id(b)"]:
-        statement = f"MATCH (a{item}) WHERE id(a) = $id MATCH (b{item}) WHERE {test} RETURN b.k"
+        statement = f"MATCH (a{label}) WHERE id(a) = $id MATCH (b{label}) WHERE {test} RETURN b.k"
         parameters = {"id": ids(5)}
         await assert_keyed(pm, statement, parameters, [5])
         explained = await plan(pm, compiled(pm, statement, parameters))
         assert not scans_any(pm, explained, "node"), f"{statement} reads every node for b:\n{explained}"
+
+
+async def test_a_node_equal_to_a_node_read_by_its_key_is_read_by_its_key_too_whichever_side_of_the_equals_it_is_on(
+    pm: PersistenceManager, ids: Ids, item: str
+):
+    # #396, drivine4j#576: Oracle's comparison of the two keys, `+ 0` on one side alone, read every node for that side.
+    await node_equal_to_keyed(pm, ids, item)
+
+
+async def test_a_labelled_node_equal_to_a_labelled_node_read_by_its_key_is_read_by_its_key_too_on_oracle(
+    pm: PersistenceManager, ids: Ids
+):
+    # #404, drivine4j#578: with a label on each, b's, tested so the index over labels can't answer it, has Oracle read
+    # b by its key, where it read that index for b once for a's row. The other stores match `:Item` above.
+    if pm.type is not DatabaseType.ORACLE:
+        pytest.skip("Oracle alone matches no label in the test above.")
+    await node_equal_to_keyed(pm, ids, ":Item")
 
 
 async def test_an_id_compared_across_a_relationship_of_either_direction_read_both_ways_round_reads_its_key(

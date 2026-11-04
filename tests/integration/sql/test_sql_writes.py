@@ -49,6 +49,22 @@ class Conversation(GraphView):
     owner: Annotated[Person | None, Relationship("OWNED_BY")] = None
 
 
+class Pairing(GraphView):
+    """People paired either way round with the root: a view whose cascade follows a relationship either way."""
+
+    person: Annotated[Person, Root()]
+    pairs: Annotated[list[Person], Relationship("PAIRED", Direction.UNDIRECTED)] = []
+
+
+class Team(GraphView):
+    """People a root leads, is mentored by and is paired with: a cascade's steps out, in and either way."""
+
+    person: Annotated[Person, Root()]
+    led: Annotated[list[Person], Relationship("LEADS")] = []
+    mentors: Annotated[list[Person], Relationship("MENTORS", Direction.INCOMING)] = []
+    pairs: Annotated[list[Person], Relationship("PAIRED", Direction.UNDIRECTED)] = []
+
+
 @pytest.fixture(autouse=True)
 async def cleared(pm: PersistenceManager) -> AsyncIterator[None]:
     seed = SqlSeed(pm, "SqlWrite")
@@ -170,6 +186,78 @@ async def test_relates_unrelates_and_loads_related_nodes_marking_both_ends(gom: 
     assert await gom.edges.unrelate(s1, node_ref(Message, "nobody"), "HAS_MESSAGE") == 0
     assert await gom.edges.unrelate_all(node_ref(Session, "nobody"), "HAS_MESSAGE") == 0
     assert await gom.edges.load_related(s1, "HAS_MESSAGE", Message) == []
+
+
+async def test_loads_the_nodes_related_either_way_round_one_related_to_itself_once(gom: StatelessGraphObjectManager):
+    # (#390)
+    await gom.save_all([Person(id=it) for it in ["p1", "p2", "p3", "p4"]])
+    for origin, to in [("p1", "p2"), ("p3", "p1"), ("p1", "p1"), ("p2", "p4")]:
+        await gom.edges.relate(node_ref(Person, origin), node_ref(Person, to), "KNOWS")
+
+    async def known(id: str) -> list[str]:
+        return sorted(
+            it.id for it in await gom.edges.load_related(node_ref(Person, id), "KNOWS", Person, Direction.UNDIRECTED)
+        )
+
+    assert await known("p1") == ["p1", "p2", "p3"]
+    assert await known("p2") == ["p1", "p4"]
+    assert await known("p4") == ["p2"]
+
+
+async def _relate(gom: StatelessGraphObjectManager, origin: str, to: str, type: str) -> bool:
+    return await gom.edges.relate(node_ref(Person, origin), node_ref(Person, to), type)
+
+
+async def _left(gom: StatelessGraphObjectManager, ids: list[str]) -> dict[str, bool]:
+    return {id: await gom.load(Person, id) is not None for id in ids}
+
+
+async def test_keeps_in_a_cascade_a_node_one_step_either_way_round_from_a_kept_one(gom: StatelessGraphObjectManager):
+    # (#390)
+    ids = ["root", "a", "b", "c", "outside"]
+    await gom.save_all([Person(id=it) for it in ids])
+    # The view reaches a, b and c from the root, b stored the other way round.
+    await _relate(gom, "root", "a", "PAIRED")
+    await _relate(gom, "b", "root", "PAIRED")
+    await _relate(gom, "root", "c", "PAIRED")
+    await _relate(gom, "c", "c", "PAIRED")
+    # a is kept by a node outside the cascade, and b by its pairing with a, stored the other way round from a.
+    await _relate(gom, "a", "outside", "KNOWS")
+    await _relate(gom, "b", "a", "PAIRED")
+    assert await gom.delete(Pairing, "root", cascade=CascadeType.DELETE_ORPHAN) == 1
+    assert await _left(gom, ids) == {"root": False, "a": True, "b": True, "c": False, "outside": True}
+
+
+async def test_keeps_in_a_cascade_that_steps_either_way_a_node_by_a_step_out_or_in_as_stored(
+    gom: StatelessGraphObjectManager,
+):
+    # (#390)
+    ids = ["root", "a", "b", "c", "d", "f", "g", "outside"]
+    await gom.save_all([Person(id=it) for it in ids])
+    # The view reaches a, b and c led by the root, d and f its mentors, and g paired with it.
+    for it in ["a", "b", "c"]:
+        await _relate(gom, "root", it, "LEADS")
+    await _relate(gom, "d", "root", "MENTORS")
+    await _relate(gom, "f", "root", "MENTORS")
+    await _relate(gom, "root", "g", "PAIRED")
+    # a is kept by a node outside the cascade. From a, b is led and d a mentor, so both are kept; c leads a and f is
+    # mentored by a, each stored the other way round from a step of the view, so neither is.
+    await _relate(gom, "a", "outside", "KNOWS")
+    await _relate(gom, "a", "b", "LEADS")
+    await _relate(gom, "d", "a", "MENTORS")
+    await _relate(gom, "c", "a", "LEADS")
+    await _relate(gom, "a", "f", "MENTORS")
+    assert await gom.delete(Team, "root", cascade=CascadeType.DELETE_ORPHAN) == 1
+    assert await _left(gom, ids) == {
+        "root": False,
+        "a": True,
+        "b": True,
+        "c": False,
+        "d": True,
+        "f": False,
+        "g": False,
+        "outside": True,
+    }
 
 
 async def test_cascades_a_delete_to_every_node_the_view_reaches_or_to_orphans(gom: StatelessGraphObjectManager):

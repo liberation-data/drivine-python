@@ -168,13 +168,15 @@ class OracleBackend:
         if not cascaded.reached:
             targets = "NULL;"
         elif cascade is CascadeType.DELETE_ORPHAN:
+            # Read both ways round where it follows a relationship of either direction (#390).
+            kept = kept_targets(self.graph, cascaded.followed, "UNION ALL", both_ways=True)
             targets = "\n".join(
                 [
                     f"WITH cascade_targets AS (SELECT DISTINCT t.nid FROM ({reached}) t "
                     "WHERE t.nid NOT IN (SELECT column_value FROM TABLE(v_roots))),",
                     "    cascade_all AS (SELECT column_value AS nid FROM TABLE(v_roots) UNION SELECT nid FROM "
                     "cascade_targets),",
-                    f"    cascade_kept (nid) AS (\n    {kept_targets(self.graph, cascaded.followed, 'UNION ALL')}",
+                    f"    cascade_kept (nid) AS (\n    {kept}",
                     "    ) CYCLE nid SET looped TO 'Y' DEFAULT 'N'",
                     "    SELECT nid BULK COLLECT INTO v_targets FROM cascade_targets WHERE nid NOT IN "
                     "(SELECT nid FROM cascade_kept);",

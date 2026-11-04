@@ -16,6 +16,7 @@ from functools import cached_property
 from typing import Any, NoReturn, TypeVar, cast
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from drivine.backend.sql.sql_graph import both_ways_of, self_loop_once
 from drivine.backend.sql.sql_graph import sql_text as literal
 from drivine.cypher.ast.clause import (
     Call,
@@ -1329,7 +1330,7 @@ class SqlCypherCompiler(ABC):
             return f"{edge}.dst = {at}", f"{edge}.src"
         # Either way, and a relationship from a node to itself once: read from `both_ways`, or with an OR.
         if self.undirected_both_ways:
-            return f"{edge}.a = {at} AND {self.self_loop_once(edge)}", f"{edge}.b"
+            return f"{edge}.a = {at} AND {self_loop_once(edge)}", f"{edge}.b"
         return (
             f"({edge}.src = {at} OR {edge}.dst = {at})",
             f"CASE WHEN {edge}.src = {at} THEN {edge}.dst ELSE {edge}.src END",
@@ -1351,27 +1352,10 @@ class SqlCypherCompiler(ABC):
     @property
     def both_ways(self) -> str:
         """
-        The relationship rows read both ways round, for a relationship of either direction: each row once with its ends
-        `a` and `b` as it is stored, `back` 0, and once the other way round, `back` 1. Its `src` and `dst` stay the
-        stored ones, so the relationship keeps the direction it was written in. A step then joins on `a` and `b` with
-        equalities, which a store can hash or index, where an OR across the two directions left Postgres comparing
-        every pair of nodes, and Oracle reading every relationship at each step of a walk. A step reads it with
-        `self_loop_once`.
+        The relationship rows read both ways round, for a relationship of either direction (`both_ways_of`, which the
+        loads and the cascade read too). A step reads it with `self_loop_once`.
         """
-        return (
-            f"(SELECT eid, src, dst, type, props, src AS a, dst AS b, 0 AS back FROM {self.edges}"
-            f" UNION ALL SELECT eid, src, dst, type, props, dst AS a, src AS b, 1 AS back FROM {self.edges})"
-        )
-
-    @staticmethod
-    def self_loop_once(edge: str) -> str:
-        """
-        That a row `edge` of `both_ways` is a relationship from a node to itself only once, read as it is stored. It is
-        a condition of the join, not a `WHERE` of the second half, for Postgres pushes a join's equality on `a` into the
-        halves, and reads each by its index, only where neither half has a `WHERE` of its own: with one, it read the
-        whole table twice at each step of a walk, ten times slower than the OR (liberation-data/drivine4j#570).
-        """
-        return f"({edge}.back = 0 OR {edge}.src <> {edge}.dst)"
+        return both_ways_of(self.edges)
 
     def steps(self, walk: Walk, at: str) -> tuple[list[str], list[str], list[str]]:
         """
@@ -2319,7 +2303,7 @@ class SqlCypherCompiler(ABC):
                 select.where.append(f"{value.dst} = {from_} AND {value.src} = {to}")
             elif self.undirected_both_ways:
                 # Either way, read from `both_ways`, and a relationship from a node to itself once.
-                select.where.append(f"{name}.a = {from_} AND {name}.b = {to} AND {self.self_loop_once(name)}")
+                select.where.append(f"{name}.a = {from_} AND {name}.b = {to} AND {self_loop_once(name)}")
             else:
                 # Either way, and a relationship from a node to itself once.
                 select.where.append(

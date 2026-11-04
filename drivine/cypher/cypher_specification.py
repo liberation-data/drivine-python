@@ -20,13 +20,14 @@ def cypher_compiled(
     store: Literal["POSTGRES", "ORACLE", "SQLITE"],
     graph: str,
     nulls_equal_stored: bool = True,
+    era_stored: bool = True,
 ) -> tuple[QuerySpecification[T], CompiledCypher | None]:
     """
     The specification, with a Cypher statement compiled to the store's SQL over the graph's tables (see
     SqlCypherCompiler), so a statement written for a graph engine runs here and gives the same rows; anything else as it
     is. Then the compiled statement, where it was compiled, whose `prelude` readies it, run first with no parameters
-    (see CompiledCypher). On Oracle `nulls_equal_stored` says whether it may call the function the graph is made with:
-    see `OracleCypherCompiler.nulls_equal`.
+    (see CompiledCypher). On Oracle `nulls_equal_stored` and `era_stored` say whether it may call the functions the
+    graph is made with: see `OracleCypherCompiler.nulls_equal` and `OracleTemporalSql.era`.
     """
     statement = spec.statement
     if statement is None or statement.language != "CYPHER":
@@ -46,7 +47,7 @@ def cypher_compiled(
         else:
             from drivine.cypher.sql.oracle_cypher_compiler import OracleCypherCompiler
 
-            compiled = OracleCypherCompiler(graph, nulls_equal_stored).compile(statement.text, parameters)
+            compiled = OracleCypherCompiler(graph, nulls_equal_stored, era_stored).compile(statement.text, parameters)
     except ModuleNotFoundError as error:
         if error.name != "antlr4":
             raise

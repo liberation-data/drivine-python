@@ -3,7 +3,15 @@ from __future__ import annotations
 import re
 from collections.abc import Sequence
 
-from drivine.backend.oracle.oracle_stored_functions import OracleStoredFunctions, nulls_equal_function, nulls_equal_name
+from drivine.backend.oracle.oracle_stored_functions import (
+    OracleStoredFunctions,
+    era_date_function,
+    era_date_name,
+    era_function,
+    era_name,
+    nulls_equal_function,
+    nulls_equal_name,
+)
 from drivine.backend.sql.sql_graph import DEFAULT_GRAPH, SqlGraph, sql_text
 from drivine.model import stamps
 
@@ -68,9 +76,36 @@ class OracleGraph(SqlGraph):
         return nulls_equal_name(self.name)
 
     @property
+    def era(self) -> str:
+        """
+        The function a compiled Cypher statement renumbers a year that may be BC by as it reads an ISO text (see
+        `OracleTemporalSql.era`), and `era_date` the one it renumbers it by as it writes one: each reads its text once,
+        where the SQL it stands for read it three or four times, which Oracle took far longer to plan
+        (liberation-data/drivine#572). drivine4j and Drivine for TypeScript make them byte for byte alike.
+        """
+        return era_name(self.name)
+
+    @property
+    def era_date(self) -> str:
+        """See `era`."""
+        return era_date_name(self.name)
+
+    @property
+    def _made(self) -> dict[str, str]:
+        """Each function the store keeps beside the graph's tables, by name, and what makes it: safe to run again."""
+        return {
+            name: f"CREATE OR REPLACE {function}"
+            for name, function in (
+                (self.nulls_equal, nulls_equal_function(self.nulls_equal)),
+                (self.era, era_function(self.era)),
+                (self.era_date, era_date_function(self.era_date)),
+            )
+        }
+
+    @property
     def functions(self) -> list[str]:
-        """What makes `nulls_equal`: safe to run again."""
-        return [f"CREATE OR REPLACE {nulls_equal_function(self.nulls_equal)}"]
+        """What makes `nulls_equal`, `era` and `era_date`: safe to run again."""
+        return list(self._made.values())
 
     @property
     def ensuring(self) -> str:
@@ -78,10 +113,10 @@ class OracleGraph(SqlGraph):
         The block that makes the store when it is not there and does nothing when it is: the property graph is made
         last, so its presence says the rest is. One another process made meanwhile (ORA-00955) is taken as made.
 
-        The `functions` are made after the tables, where they are not there or not valid, so a store an earlier version
-        made gains them. A user who may not make a function (ORA-01031: making one takes `CREATE PROCEDURE`, which the
-        `RESOURCE` role grants) still has the store made: a statement then compares as it would without them (see
-        OracleStoredFunctions).
+        Each of the `functions` is made after the tables, where it is not there or not valid, so a store an earlier
+        version made gains those it lacks. A user who may not make a function (ORA-01031: making one takes `CREATE
+        PROCEDURE`, which the `RESOURCE` role grants) still has the store made: a statement then calls none of those it
+        lacks (see OracleStoredFunctions).
 
         Two sessions that each find the store missing, as two pools or processes first connecting at once do, make it
         together: a statement of one waits on the lock the other's holds, rather than being turned away at once
@@ -93,10 +128,13 @@ class OracleGraph(SqlGraph):
             f"    BEGIN EXECUTE IMMEDIATE {sql_text(it)}; EXCEPTION WHEN e_exists THEN NULL; END;" for it in self.ddl
         )
         functions = "\n".join(
-            f"    BEGIN EXECUTE IMMEDIATE {sql_text(it)}; EXCEPTION WHEN e_denied THEN NULL; END;"
-            for it in self.functions
+            f"""    SELECT COUNT(*) INTO v_made FROM user_objects
+        WHERE object_type = 'FUNCTION' AND object_name = '{name.upper()}' AND status = 'VALID';
+    IF v_made = 0 THEN
+    BEGIN EXECUTE IMMEDIATE {sql_text(making)}; EXCEPTION WHEN e_denied THEN NULL; END;
+    END IF;"""
+            for name, making in self._made.items()
         )
-        function = self.nulls_equal.upper()
         return f"""DECLARE
     v_made NUMBER;
     e_exists EXCEPTION;
@@ -110,11 +148,7 @@ BEGIN
 {statements}
     EXECUTE IMMEDIATE 'ALTER SESSION SET DDL_LOCK_TIMEOUT = 0';
     END IF;
-    SELECT COUNT(*) INTO v_made FROM user_objects
-        WHERE object_type = 'FUNCTION' AND object_name = '{function}' AND status = 'VALID';
-    IF v_made = 0 THEN
 {functions}
-    END IF;
 EXCEPTION
     WHEN OTHERS THEN
         EXECUTE IMMEDIATE 'ALTER SESSION SET DDL_LOCK_TIMEOUT = 0';

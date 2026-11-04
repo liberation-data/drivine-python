@@ -14,10 +14,12 @@ class CompiledCypher:
 
     `calls_stored_nulls_equal` says whether the statement calls the function an Oracle graph is made with,
     `<graph>_nulls_equal`, which a store made by an earlier version, or by a user who may not make a function, does not
-    have: see `OracleCypherCompiler.nulls_equal`.
+    have: see `OracleCypherCompiler.nulls_equal`. `calls_stored_era` says the same of the functions it renumbers a year
+    that may be BC by, `<graph>_era` and `<graph>_era_date`: see `OracleTemporalSql.era`.
     """
 
     sql: str
     parameters: dict[str, Any]
     prelude: str | None = None
     calls_stored_nulls_equal: bool = False
+    calls_stored_era: bool = False

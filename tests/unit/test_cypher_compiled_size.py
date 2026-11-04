@@ -750,7 +750,9 @@ def test_a_truncation_with_fields_of_a_truncation_with_fields_writes_the_text_of
 ) -> None:
     # #326, drivine4j#469: the text a truncation makes of its fields is read twice to number its year as the store
     # does. Written out twice, four nested compiled to about 18,000 characters on Oracle and Postgres; bound once, to
-    # about 9,000.
+    # about 9,000. On Oracle the store's era function (liberation-data/drivine#572) reads the text once, so nothing
+    # binds it, and the statement is a little longer: about 12,100, which Oracle plans in seconds, where the 9,600
+    # written inline was not planned in ten minutes.
     def truncated(times: int) -> str:
         return (
             "RETURN "
@@ -761,7 +763,7 @@ def test_a_truncation_with_fields_of_a_truncation_with_fields_writes_the_text_of
         )
 
     two, four = (len(compiler("g").compile(truncated(it)).sql) for it in (2, 4))
-    assert four < 12_000, four
+    assert four < 13_000, four
     assert four < 3 * two, (two, four)
 
 

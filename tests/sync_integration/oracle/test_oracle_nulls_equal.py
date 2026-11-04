@@ -84,13 +84,15 @@ def answer(sql: str) -> Any:
 
 
 def dropping(graph: str) -> list[str]:
-    """What drops the graph `graph`'s store, its function among it."""
+    """What drops the graph `graph`'s store, its functions among it."""
     return [
         f"DROP PROPERTY GRAPH IF EXISTS {graph}",
         f"DROP TABLE IF EXISTS {graph}_edge PURGE",
         f"DROP TABLE IF EXISTS {graph}_node PURGE",
         f"DROP TABLE IF EXISTS {graph}_schema PURGE",
         f"DROP FUNCTION IF EXISTS {graph}_nulls_equal",
+        f"DROP FUNCTION IF EXISTS {graph}_era",
+        f"DROP FUNCTION IF EXISTS {graph}_era_date",
     ]
 
 
@@ -166,12 +168,22 @@ def test_a_user_who_may_not_make_a_function_has_the_graph_made_without_it_and_a_
     try:
         assert cypher(restricted, WRITE) == [[False, "null"]]
         assert cypher(restricted, READ) == [["null", "null"]]
+        # A year BC is renumbered inline, as before the store kept its era functions (liberation-data/drivine#572).
+        assert cypher(
+            restricted,
+            "RETURN [toString(date('0001-01-01') - duration('P1D')), toString(date('-0044-03-15') + duration('P1D')), "
+            "date('-0044-03-15').year]",
+        ) == [["0000-12-31", "-0044-03-16", -44]]
+        assert cypher(
+            restricted, "CREATE (n:CyTemporal {day: date('-0044-03-15') + duration('P1D')}) RETURN toString(n.day)"
+        ) == ["-0044-03-16"]
         connection = restricted.connect()
         try:
+            functions = ", ".join(f"'{graph.upper()}_{it}'" for it in ("NULLS_EQUAL", "ERA", "ERA_DATE"))
             made = connection.query(
                 QuerySpecification[Any](
                     'SELECT object_name AS "name" FROM user_objects '
-                    f"WHERE object_name IN ('{graph.upper()}_NODE', '{graph.upper()}_NULLS_EQUAL')"
+                    f"WHERE object_name IN ('{graph.upper()}_NODE', {functions})"
                 )
             )
         finally:

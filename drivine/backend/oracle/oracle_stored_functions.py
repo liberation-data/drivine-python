@@ -6,6 +6,8 @@ import time
 from collections.abc import Callable
 from typing import ClassVar
 
+from drivine.cypher.sql.temporal_sql import BC_BELOW
+
 logger = logging.getLogger("drivine.oracle")
 
 clock: Callable[[], float] = time.monotonic
@@ -93,6 +95,78 @@ def nulls_equal_function(name: str) -> str:
     )
 
 
+def era_name(graph: str) -> str:
+    """
+    The function the store keeps beside the graph `graph`'s tables that renumbers the year of an ISO text as Oracle
+    does: see `era_function`.
+    """
+    return f"{graph}_era"
+
+
+def era_date_name(graph: str) -> str:
+    """
+    The function the store keeps beside the graph `graph`'s tables that renumbers the year Oracle writes as ISO 8601
+    does: see `era_date_function`.
+    """
+    return f"{graph}_era_date"
+
+
+def era_function(name: str) -> str:
+    """
+    The function `name`, which gives the ISO 8601 text `t` of a date or a moment whose year may be BC as Oracle numbers
+    that year, with no year 0: the year `0000` (1 BC) as `-0001`, and `-0044` (45 BC) as `-0045`. Any other text, and
+    null, it gives as it is. A text whose first character's code is below `BC_BELOW` starts with `-` or `0`, as one with
+    a year BC does. See `OracleTemporalSql.era`, which calls it where the store keeps it: the text is written once,
+    where the test and the regular expression it stands for wrote it four times, and Oracle's hard parse of a statement
+    grows with each copy (liberation-data/drivine#572).
+
+    The store's copy is part of the store layout the three Drivine libraries share (see AGENTS.md), as
+    `nulls_equal_function`'s is: it is `CREATE OR REPLACE ` and this text with `name` as `era_name` gives it, the graph's
+    name as written and then `_era`, its lines joined by `\\n` with no newline after the last. drivine4j's
+    `OracleCypherCompiler.eraFunction` is the reference, line for line: changing a byte of it changes the layout for all
+    three, so it changes in all three together.
+    """
+    return "\n".join(
+        (
+            f"FUNCTION {name}(t VARCHAR2) RETURN VARCHAR2 DETERMINISTIC IS",
+            "BEGIN",
+            f"    IF ASCII(t) < {BC_BELOW} THEN",
+            "        RETURN REGEXP_REPLACE(t, '^(-[0-9]{4}|0000)', "
+            "TO_CHAR(TO_NUMBER(REGEXP_SUBSTR(t, '^-?[0-9]{4}')) - 1, 'FM0000'));",
+            "    END IF;",
+            "    RETURN t;",
+            "END;",
+        )
+    )
+
+
+def era_date_function(name: str) -> str:
+    """
+    The function `name`, which gives the text `t` that `LTRIM(TO_CHAR(…, 'SYYYY-MM-DD…'))` writes of a timestamp, its
+    year numbered as ISO 8601 numbers it where it is BC: Oracle's `-0001` (1 BC) as `0000`, and `-0045` (45 BC) as
+    `-0044`. Any other text, and null, it gives as it is. See `OracleTemporalSql.date`, which calls it where the store
+    keeps it: the timestamp is written once, where the test and the regular expression it stands for wrote it three
+    times.
+
+    The store's copy is part of the store layout the three Drivine libraries share (see AGENTS.md), as
+    `nulls_equal_function`'s is: it is `CREATE OR REPLACE ` and this text with `name` as `era_date_name` gives it, the
+    graph's name as written and then `_era_date`, its lines joined by `\\n` with no newline after the last. drivine4j's
+    `OracleCypherCompiler.eraDateFunction` is the reference, line for line: changing a byte of it changes the layout for
+    all three, so it changes in all three together.
+    """
+    return "\n".join(
+        (
+            f"FUNCTION {name}(t VARCHAR2) RETURN VARCHAR2 DETERMINISTIC IS",
+            "BEGIN",
+            "    IF SUBSTR(t, 1, 1) = '-' THEN",
+            "        RETURN TO_CHAR(TO_NUMBER(SUBSTR(t, 1, 5)) + 1, 'FM0000') || SUBSTR(t, 6);",
+            "    END IF;",
+            "    RETURN t;",
+            "END;",
+        )
+    )
+
+
 NO_FUNCTION = frozenset({904, 942, 1031, 6575})
 """
 The errors calling a function there is none of gives: ORA-00904 where there is none, or none the session may call
@@ -111,13 +185,14 @@ def is_missing(error: BaseException) -> bool:
 class OracleStoredFunctions:
     """
     Whether a session may call the functions a graph's store keeps beside its tables (see `OracleGraph.functions`). A
-    store made by an earlier version has none until the graph is ensured again, and a user who may not make a function
-    (`CREATE PROCEDURE`) has none at all: a Cypher statement is then compiled to call none, and says so once for each
-    graph. drivine4j's `OracleStoredFunctions`.
+    store made by an earlier version lacks those added since until the graph is ensured again, and a user who may not
+    make a function (`CREATE PROCEDURE`) has none at all: a Cypher statement is then compiled to call none of those it
+    lacks, and says so once for each graph and function. drivine4j's `OracleStoredFunctions`.
 
-    Asked only by a statement that would call one (see `OracleConnection`), which calls the function to find out. A
-    session that may call it is remembered for the database, its user and the graph, for as long as the process runs: a
-    function dropped after that is not noticed, and a statement that calls it fails until the process restarts. One
+    Asked only by a statement that would call one (see `OracleConnection`), which calls the function to find out:
+    `<graph>_nulls_equal` by `check`, and `<graph>_era` and `<graph>_era_date` together by `era_check`. A session that
+    may call it is remembered for the function, the database, its user and the graph, for as long as the process runs:
+    a function dropped after that is not noticed, and a statement that calls it fails until the process restarts. One
     that may not is remembered for ABSENT_FOR seconds, or until the graph is ensured in this process (see `ensured`), so
     a store without the function is not asked on every statement, and a graph ensured later still gains it.
 
@@ -128,27 +203,46 @@ class OracleStoredFunctions:
     """How long, in seconds, a session found to call no function is taken to call none before it is asked again."""
 
     _callable: ClassVar[set[str]] = set()
-    """The database, user and graph of each session found to call the function."""
+    """The function, and the database, user and graph, of each session found to call it."""
 
     _absent: ClassVar[dict[str, float]] = {}
-    """The database, user and graph of each session found to call none, and when (by `clock`) to ask again."""
+    """The function, and the database, user and graph, of each session found to call none, and when (by `clock`) to ask
+    again."""
 
     _warned: ClassVar[set[str]] = set()
-    """The database, user and graph of each session that was said to have no function."""
+    """The function, and the database, user and graph, of each session that was said to have none."""
 
     _lock: ClassVar[threading.Lock] = threading.Lock()
 
     @classmethod
     def check(cls, graph: str) -> str:
-        """The query that tells whether a session may call the graph `graph`'s function: it calls it."""
+        """The query that tells whether a session may call the graph `graph`'s `<graph>_nulls_equal`: it calls it."""
         return f"SELECT {nulls_equal_name(graph)}(JSON('[1]'), JSON('[1]')) FROM DUAL"
+
+    @classmethod
+    def era_check(cls, graph: str) -> str:
+        """
+        The query that tells whether a session may call both the functions the graph `graph` renumbers a year that may
+        be BC by, `<graph>_era` and `<graph>_era_date`: it calls them. They are asked of together, as a statement that
+        calls either is compiled to call neither where the session may not call one: the graph is made with both at
+        once, and a store that has neither gives the same rows, planned more slowly. They are asked of apart from
+        `check`'s, which a store made by a version before them has.
+        """
+        return f"SELECT {era_name(graph)}('0000-01-01'), {era_date_name(graph)}('-0001-01-01') FROM DUAL"
+
+    @classmethod
+    def key(cls, database: str, graph: str, era: bool = False) -> str:
+        """
+        What a session of the database and user `database` is remembered by for the graph `graph`'s `<graph>_nulls_equal`,
+        or where `era`, for its era functions: the function, then the database, the user and the graph, joined by `|`.
+        """
+        return f"{_era_names(graph) if era else nulls_equal_name(graph)}|{database}|{graph}"
 
     @classmethod
     def known(cls, key: str) -> bool | None:
         """
-        What is remembered of the session `key` (its database, its user and the graph, joined by `|`): true where it
-        may call the function, false where it was found to call none within ABSENT_FOR, and None where it must be
-        asked.
+        What is remembered of the session `key` (see `key`): true where it may call the function, false where it was
+        found to call none within ABSENT_FOR, and None where it must be asked.
         """
         with cls._lock:
             if key in cls._callable:
@@ -157,10 +251,10 @@ class OracleStoredFunctions:
             return False if until is not None and clock() < until else None
 
     @classmethod
-    def found(cls, key: str, graph: str, callable_: bool) -> bool:
+    def found(cls, key: str, graph: str, callable_: bool, era: bool = False) -> bool:
         """
-        Remembers what the session `key` was found to call, and warns once for it where it may call no function.
-        `callable_` is given back.
+        Remembers what the session `key` was found to call, and warns once for it where it may call no function: the
+        graph `graph`'s `<graph>_nulls_equal`, or where `era`, its era functions. `callable_` is given back.
         """
         with cls._lock:
             if callable_:
@@ -173,11 +267,10 @@ class OracleStoredFunctions:
         if first:
             logger.warning(
                 "The Oracle graph '%s' has no function %s, which the graph is made with where its user may make a "
-                "function (CREATE PROCEDURE, which the RESOURCE role grants). Until the graph is ensured by such a "
-                "user, a Cypher statement that writes, or the step of a reduce(), compares two lists or maps that hold "
-                "a null and differ as JSON as false, where Cypher may give null.",
+                "function (CREATE PROCEDURE, which the RESOURCE role grants). %s",
                 graph,
-                nulls_equal_name(graph),
+                _era_names(graph) if era else nulls_equal_name(graph),
+                _ERA_LOST if era else _NULLS_EQUAL_LOST,
             )
         return False
 
@@ -187,3 +280,21 @@ class OracleStoredFunctions:
         with cls._lock:
             for key in [it for it in cls._absent if it.endswith(f"|{graph}")]:
                 del cls._absent[key]
+
+
+def _era_names(graph: str) -> str:
+    """The era functions of the graph `graph`, as a warning names them, and as `OracleStoredFunctions.key` keys them."""
+    return f"{era_name(graph)} and {era_date_name(graph)}"
+
+
+_NULLS_EQUAL_LOST = (
+    "Until the graph is ensured by such a user, a Cypher statement that writes, or the step of a reduce(), compares two "
+    "lists or maps that hold a null and differ as JSON as false, where Cypher may give null."
+)
+"""What a statement loses where the session may not call `<graph>_nulls_equal`."""
+
+_ERA_LOST = (
+    "Until the graph is ensured by such a user, Oracle takes longer to plan a Cypher statement that reads or writes a "
+    "date or a moment whose year may be before 1000; it gives the same rows."
+)
+"""What a statement loses where the session may not call the era functions: time, and no rows."""

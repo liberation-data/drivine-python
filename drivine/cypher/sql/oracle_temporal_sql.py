@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+from drivine.backend.oracle.oracle_stored_functions import era_date_name, era_name
 from drivine.cypher.sql.temporal import Temporal
 from drivine.cypher.sql.temporal_sql import BC_BELOW, Shared, TemporalSql, years_of
 
@@ -32,10 +33,26 @@ class OracleTemporalSql(TemporalSql):
     day of the month, so months are added and counted from the first of the month.
     """
 
-    def __init__(self, shared: Shared, procedural: Callable[[], bool]) -> None:
+    def __init__(
+        self,
+        shared: Shared,
+        procedural: Callable[[], bool],
+        stored_era: str | None = None,
+        calls_stored: Callable[[], None] = lambda: None,
+    ) -> None:
+        """
+        `stored_era` is the graph whose store keeps the functions `era` and `date` call (see `era_function`), or None
+        where it may keep none: then each renumbers a year BC inline. `calls_stored` is called where `era` or `date`
+        calls one of the store's functions.
+        """
         super().__init__(shared)
         self._procedural = procedural
         """Whether the statement is a block, which reads the clock into NOW as it starts."""
+        self._stored_era = None if stored_era is None else era_name(stored_era)
+        """The store's function `era` calls, where it keeps one."""
+        self._stored_era_date = None if stored_era is None else era_date_name(stored_era)
+        """The store's function `date` calls, where it keeps one."""
+        self._calls_stored = calls_stored
 
     def local(self, text: str, kind: Temporal) -> str:
         if kind is Temporal.DATE:
@@ -61,8 +78,17 @@ class OracleTemporalSql(TemporalSql):
     def era(self, text: str) -> str:
         """
         Oracle numbers a year BC from -1, with no year 0, in ISO text as in its own: so 1 BC, the year `0000`, is
-        `-0001`, and 45 BC, the year `-0044`, is `-0045`. See `bc_only`.
+        `-0001`, and 45 BC, the year `-0044`, is `-0045`. See `bc_only`. Where the store keeps it, a function does that,
+        the text written once: the test and the regular expression wrote it four times, and Oracle's hard parse of a
+        statement grows with each copy, to over a minute for a subquery's temporal arithmetic
+        (liberation-data/drivine#572). A function a query declares, `WITH FUNCTION`, would add its own compile to every
+        such statement's parse, and runs in no block, nor a reduce's step.
         """
+        if self._stored_era is not None:
+            if self.reads_ad(text):
+                return text
+            self._calls_stored()
+            return f"{self._stored_era}({text})"
         return self.shared(
             [text],
             lambda t: self.bc_only(
@@ -85,7 +111,13 @@ class OracleTemporalSql(TemporalSql):
         return f"TO_NUMBER(REGEXP_SUBSTR({text}, '^-?[0-9]+'))"
 
     def date(self, timestamp: str, then: str = "") -> str:
-        """Where it may be BC (`bc_only`), `SYYYY` writes a year with its sign, as Oracle numbers it."""
+        """
+        Where it may be BC (`bc_only`), `SYYYY` writes a year with its sign, as Oracle numbers it. Where the store keeps
+        it, a function renumbers it, the timestamp written once (see `era`).
+        """
+        if self._stored_era_date is not None and not self.reads_ad(timestamp):
+            self._calls_stored()
+            return f"{self._stored_era_date}(LTRIM(TO_CHAR({timestamp}, 'SYYYY-MM-DD{then}')))"
         return self.bc_only(
             timestamp,
             f"{timestamp} < TIMESTAMP '0001-01-01 00:00:00'",

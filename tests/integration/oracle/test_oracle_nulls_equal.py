@@ -83,13 +83,15 @@ async def answer(sql: str) -> Any:
 
 
 def dropping(graph: str) -> list[str]:
-    """What drops the graph `graph`'s store, its function among it."""
+    """What drops the graph `graph`'s store, its functions among it."""
     return [
         f"DROP PROPERTY GRAPH IF EXISTS {graph}",
         f"DROP TABLE IF EXISTS {graph}_edge PURGE",
         f"DROP TABLE IF EXISTS {graph}_node PURGE",
         f"DROP TABLE IF EXISTS {graph}_schema PURGE",
         f"DROP FUNCTION IF EXISTS {graph}_nulls_equal",
+        f"DROP FUNCTION IF EXISTS {graph}_era",
+        f"DROP FUNCTION IF EXISTS {graph}_era_date",
     ]
 
 
@@ -165,12 +167,22 @@ async def test_a_user_who_may_not_make_a_function_has_the_graph_made_without_it_
     try:
         assert await cypher(restricted, WRITE) == [[False, "null"]]
         assert await cypher(restricted, READ) == [["null", "null"]]
+        # A year BC is renumbered inline, as before the store kept its era functions (liberation-data/drivine#572).
+        assert await cypher(
+            restricted,
+            "RETURN [toString(date('0001-01-01') - duration('P1D')), toString(date('-0044-03-15') + duration('P1D')), "
+            "date('-0044-03-15').year]",
+        ) == [["0000-12-31", "-0044-03-16", -44]]
+        assert await cypher(
+            restricted, "CREATE (n:CyTemporal {day: date('-0044-03-15') + duration('P1D')}) RETURN toString(n.day)"
+        ) == ["-0044-03-16"]
         connection = await restricted.connect()
         try:
+            functions = ", ".join(f"'{graph.upper()}_{it}'" for it in ("NULLS_EQUAL", "ERA", "ERA_DATE"))
             made = await connection.query(
                 QuerySpecification[Any](
                     'SELECT object_name AS "name" FROM user_objects '
-                    f"WHERE object_name IN ('{graph.upper()}_NODE', '{graph.upper()}_NULLS_EQUAL')"
+                    f"WHERE object_name IN ('{graph.upper()}_NODE', {functions})"
                 )
             )
         finally:
@@ -207,6 +219,7 @@ async def test_sessions_that_make_the_function_at_once_while_others_call_it_all_
     # harder case, not an easier one.
     await run([OracleGraph(graph).ensuring])
     f = OracleGraph(graph).nulls_equal
+    era, era_date = OracleGraph(graph).era, OracleGraph(graph).era_date
     ensuring = OracleGraph(graph).ensuring
     provider = provider_for(graph)
     pool = provider._pool_of()
@@ -234,10 +247,14 @@ async def test_sessions_that_make_the_function_at_once_while_others_call_it_all_
                 cursor.close()
 
         for _ in range(15):
-            await run([f"DROP FUNCTION {f}"])
+            # The era functions too (liberation-data/drivine#572), made by the same sessions at once.
+            await run([f"DROP FUNCTION {it}" for it in (f, era, era_date)])
             outcomes = await asyncio.gather(*(at_once(i, it) for i, it in enumerate(sessions)), return_exceptions=True)
             assert [it for it in outcomes if it is not None] == []
             assert await answer(f"SELECT TO_CHAR({f}(JSON('[1, null]'), JSON('[2, null]'))) FROM DUAL") == "0"
+            assert await answer(f"SELECT {era}('0000-01-01') || ',' || {era_date}('-0001-01-01') FROM DUAL") == (
+                "-0001-01-01,0000-01-01"
+            )
     finally:
         for session in sessions:
             await pool.release(session)

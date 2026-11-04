@@ -103,32 +103,49 @@ class OracleConnection(Connection):
     def _compiled(self, finalized: QuerySpecification[T]) -> QuerySpecification[T]:
         """
         The specification, a Cypher statement compiled for Oracle, calling the functions the graph's store keeps where
-        the statement needs one and the session may call it, and compiled again to call none where it may not: see
+        the statement needs one and the session may call it, and compiled again to call none it may not call: see
         OracleStoredFunctions. On an Oracle older than 23.9, which has no UUID() for randomUUID(), plain SQL runs, and
         Cypher is refused with why.
         """
         if self.cypher_refusal and finalized.statement is not None and finalized.statement.language == "CYPHER":
             raise DrivineError(self.cypher_refusal, finalized)
         sql, compiled = cypher_compiled(finalized, "ORACLE", self.graph)
-        if compiled is None or not compiled.calls_stored_nulls_equal or self._calls_nulls_equal():
+        if compiled is None:
             return sql
-        return cypher_compiled(finalized, "ORACLE", self.graph, nulls_equal_stored=False)[0]
+        # Each is asked of apart: a store an earlier version made may have the one and not the others.
+        nulls_equal = not compiled.calls_stored_nulls_equal or self._calls_nulls_equal()
+        era = not compiled.calls_stored_era or self._calls_era()
+        if nulls_equal and era:
+            return sql
+        return cypher_compiled(finalized, "ORACLE", self.graph, nulls_equal_stored=nulls_equal, era_stored=era)[0]
 
     def _calls_nulls_equal(self) -> bool:
         """
         Whether this session may call the graph's function `<graph>_nulls_equal`, as remembered, or as calling it
         finds. A query that fails rolls back only itself, so an open transaction is left as it was.
         """
+        return self._calls(False)
+
+    def _calls_era(self) -> bool:
+        """
+        Whether this session may call both the graph's functions `<graph>_era` and `<graph>_era_date`, as remembered,
+        or as calling them finds: see `OracleStoredFunctions.era_check`.
+        """
+        return self._calls(True)
+
+    def _calls(self, era: bool) -> bool:
+        """Whether this session may call the graph's era functions where `era`, else its `<graph>_nulls_equal`."""
         import oracledb
 
-        key = f"{self.database}|{self.graph}"
+        key = OracleStoredFunctions.key(self.database, self.graph, era)
         known = OracleStoredFunctions.known(key)
         if known is not None:
             return known
         self.connection.autocommit = not self._in_transaction
         cursor = self.connection.cursor()
         try:
-            cursor.execute(OracleStoredFunctions.check(self.graph))
+            check = OracleStoredFunctions.era_check if era else OracleStoredFunctions.check
+            cursor.execute(check(self.graph))
             cursor.fetchall()
             found = True
         except oracledb.DatabaseError as error:
@@ -137,7 +154,7 @@ class OracleConnection(Connection):
             found = False
         finally:
             cursor.close()
-        return OracleStoredFunctions.found(key, self.graph, found)
+        return OracleStoredFunctions.found(key, self.graph, found, era)
 
     def _bindable(self, parameters: dict[str, Any]) -> dict[str, Any]:
         """

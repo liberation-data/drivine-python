@@ -94,28 +94,34 @@ def test_the_function_is_drivine4js_text_byte_for_byte_as_create_or_replace_of_i
     assert nulls_equal_function("myGraph_nulls_equal") == drivine4j_nulls_equal("myGraph_nulls_equal")
     graph = OracleGraph("myGraph")
     assert graph.nulls_equal == "myGraph_nulls_equal"
-    assert graph.functions == [f"CREATE OR REPLACE {drivine4j_nulls_equal('myGraph_nulls_equal')}"]
+    assert graph.functions[0] == f"CREATE OR REPLACE {drivine4j_nulls_equal('myGraph_nulls_equal')}"
     assert graph.functions[0].endswith("END;")
 
 
-def test_the_function_is_made_after_the_tables_where_missing_or_not_valid_tolerant_of_a_user_who_may_not_make_one():
-    # drivine4j's OracleNamesTest of the block (#270): whether or not the tables were there, the function is made where
-    # it is missing or not valid, and a user who may not make one (ORA-01031) still has the store.
+def test_each_function_is_made_after_the_tables_where_missing_or_not_valid_tolerant_of_a_user_who_may_not_make_one():
+    # drivine4j's OracleNamesTest of the block (#270, drivine4j#584): whether or not the tables were there, each
+    # function is looked for, and made where it is missing or not valid, on its own, as a store an earlier version made
+    # may have one and not the others; and a user who may not make one (ORA-01031) still has the store.
     graph = OracleGraph("myGraph")
     ensuring = graph.ensuring
     for statement in graph.ddl:
         assert f"BEGIN EXECUTE IMMEDIATE {sql_text(statement)}; EXCEPTION WHEN e_exists THEN NULL; END;" in ensuring
-    checked = ensuring.index(
-        "SELECT COUNT(*) INTO v_made FROM user_objects\n"
-        "        WHERE object_type = 'FUNCTION' AND object_name = 'MYGRAPH_NULLS_EQUAL' AND status = 'VALID';"
-    )
     tables_end = ensuring.index("    END IF;")
-    assert checked > ensuring.rindex("EXCEPTION WHEN e_exists THEN NULL; END;") and checked > tables_end, ensuring
     assert "PRAGMA EXCEPTION_INIT(e_denied, -1031);" in ensuring
-    made = ensuring.index(
-        f"BEGIN EXECUTE IMMEDIATE {sql_text(graph.functions[0])}; EXCEPTION WHEN e_denied THEN NULL; END;"
-    )
-    assert made > checked
+    names = ["myGraph_nulls_equal", "myGraph_era", "myGraph_era_date"]
+    assert [it.removeprefix("CREATE OR REPLACE FUNCTION ").split("(")[0] for it in graph.functions] == names
+    after = max(ensuring.rindex("EXCEPTION WHEN e_exists THEN NULL; END;"), tables_end)
+    for name, statement in zip(names, graph.functions, strict=True):
+        assert statement.startswith("CREATE OR REPLACE FUNCTION "), statement
+        checked = ensuring.index(
+            "SELECT COUNT(*) INTO v_made FROM user_objects\n"
+            f"        WHERE object_type = 'FUNCTION' AND object_name = '{name.upper()}' AND status = 'VALID';"
+        )
+        made = ensuring.index(f"BEGIN EXECUTE IMMEDIATE {sql_text(statement)}; EXCEPTION WHEN e_denied THEN NULL; END;")
+        assert after < checked < made, ensuring
+        assert ensuring.index("    END IF;", made) < ensuring.find("SELECT COUNT(*)", made) or name == names[-1]
+        after = made
+    assert ensuring.count("FROM user_objects") == len(graph.functions)
     assert ensuring.count("BEGIN EXECUTE IMMEDIATE ") == len(graph.ddl) + len(graph.functions)
 
 

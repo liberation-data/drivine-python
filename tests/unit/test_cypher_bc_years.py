@@ -15,8 +15,6 @@ from drivine.cypher.sql.sql_cypher_compiler import SqlCypherCompiler
 from drivine.cypher.sql.temporal import Temporal
 from drivine.cypher.sql.temporals import canonical
 
-COMPILERS: dict[str, type[SqlCypherCompiler]] = {"postgres": PostgresCypherCompiler, "oracle": OracleCypherCompiler}
-
 
 @pytest.mark.parametrize(
     ("text", "kind", "written"),
@@ -70,16 +68,26 @@ def test_a_kind_of_no_date_has_no_pattern_of_a_year_from_1000_on() -> None:
     assert [it.ad_pattern for it in (Temporal.LOCAL_TIME, Temporal.TIME, Temporal.DURATION)] == [None, None, None]
 
 
-@pytest.mark.parametrize("compiler", COMPILERS.values(), ids=COMPILERS.keys())
+@pytest.mark.parametrize(
+    ("compiler", "era"),
+    [
+        (PostgresCypherCompiler("g"), "ascii("),
+        # On Oracle the store's function renumbers the era (liberation-data/drivine#572), and a store without it
+        # renumbers it inline.
+        (OracleCypherCompiler("g"), "g_era("),
+        (OracleCypherCompiler("g", era_stored=False), "ascii("),
+    ],
+    ids=["postgres", "oracle", "oracle-inline"],
+)
 def test_a_text_of_a_year_from_1000_on_is_compared_with_no_test_of_its_era_ahead_of_a_text_of_any_year(
-    compiler: type[SqlCypherCompiler],
+    compiler: SqlCypherCompiler, era: str
 ) -> None:
     # The store gives the same rows without the first WHEN, so only the SQL shows it is there: an ordinary date then
     # costs no more than its kind's test.
-    sql = compiler("g").compile("MATCH (n:C) WHERE n.day < date('0001-01-01') RETURN n.id").sql
+    sql = compiler.compile("MATCH (n:C) WHERE n.day < date('0001-01-01') RETURN n.id").sql
     where = sql[sql.index("CASE WHEN", sql.index("WHERE")) :]
     ad, any_year = (where.find(f"'{it}'") for it in (Temporal.DATE.ad_pattern, Temporal.DATE.pattern))
     assert -1 < ad < any_year, where
-    # The era is tested for only after the kind's own test.
-    assert "ascii(" not in where[:any_year].lower(), where
-    assert "ascii(" in where[any_year:].lower(), where
+    # The era is tested for, or renumbered, only after the kind's own test.
+    assert era not in where[:any_year].lower(), where
+    assert era in where[any_year:].lower(), where

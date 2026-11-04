@@ -55,7 +55,7 @@ def connect() -> oracledb.Connection:
 
 @pytest.fixture(scope="module", autouse=True)
 def graph() -> Iterator[None]:
-    """The tables of `GRAPH`, which the statement that writes writes to, and the function `ensuring` makes beside them,
+    """The tables of `GRAPH`, which the statement that writes writes to, and the functions `ensuring` makes beside them,
     made first and dropped after, made in part or not."""
     try:
         with connect() as connection, connection.cursor() as cursor:
@@ -69,6 +69,8 @@ def graph() -> Iterator[None]:
                 f"DROP TABLE IF EXISTS {GRAPH}_node PURGE",
                 f"DROP TABLE IF EXISTS {GRAPH}_schema PURGE",
                 f"DROP FUNCTION IF EXISTS {OracleGraph(GRAPH).nulls_equal}",
+                f"DROP FUNCTION IF EXISTS {OracleGraph(GRAPH).era}",
+                f"DROP FUNCTION IF EXISTS {OracleGraph(GRAPH).era_date}",
             ):
                 cursor.execute(statement)
 

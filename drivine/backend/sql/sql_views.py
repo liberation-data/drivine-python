@@ -274,6 +274,18 @@ class SqlViews(ABC):
             fn = f"{aggregate.function.value}({number})"
         return f"(SELECT {fn} {step.from_})"
 
+    def _steps(self, type: str, direction: Direction) -> str:
+        """
+        The relationships of the type as a subquery of rows `eid`, `a` and `b`, each a step from `a` to `b` in the
+        direction, an undirected relationship a row each way round: what `reached` walks.
+        """
+        typed = f"FROM {self.graph.edges} WHERE type = {sql_text(type)}"
+        if direction is Direction.UNDIRECTED:
+            return f"(SELECT eid, src AS a, dst AS b {typed} UNION ALL SELECT eid, dst, src {typed})"
+        if direction is Direction.INCOMING:
+            return f"(SELECT eid, dst AS a, src AS b {typed})"
+        return f"(SELECT eid, src AS a, dst AS b {typed})"
+
     # ----- The dialect -----
 
     @abstractmethod

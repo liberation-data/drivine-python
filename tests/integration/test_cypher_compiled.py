@@ -6248,6 +6248,11 @@ async def test_a_node_optional_match_finds_none_compared_to_a_node_is_null_as_a_
     assert await query(
         f"{q} RETURN [x = q, q = x, x <> q, NOT x = q, x = x, x IN [q], (x = q) IS NULL, coalesce(x = q, true)]"
     ) == [[None, None, None, None, None, None, True, True]]
+    # A list or a map that holds the node is compared item by item, entry by entry, through the same comparison.
+    assert await query(
+        f"{q} RETURN [[x] = [q], {{n: x}} = {{n: q}}, [x, q] = [x, q], [q] = [q], {{n: q}} = {{n: q}}, [q] <> [x]]"
+    ) == [[None, None, None, True, True, None]]
+    assert await query(f"{q} WITH q, x WHERE [x] = [q] OR {{n: x}} = {{n: q}} RETURN q.name") == []
     assert await query(f"{q} WITH q, x WHERE x = q OR NOT x = q RETURN q.name") == []
     assert await query(f"{q} WITH q, x WHERE (x = q) IS NULL RETURN q.name") == ["Carrie"]
     assert await query(

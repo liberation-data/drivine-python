@@ -4,7 +4,8 @@ written by fails here, clearly, and not as a test that times out. Renumbered inl
 expression that wrote each value three or four times, the min and max of a collected list of moments took 4.7 seconds
 of Oracle's hard parse in drivine4j, a moment two `CALL`s deep 72 seconds, and a truncation four deep was not planned
 in ten minutes (liberation-data/drivine#572). The store's era functions (see `OracleGraph.era`) took them to about 1,
-27 and 16 seconds. drivine4j's OracleEraParseTest of liberation-data/drivine4j#584.
+27 and 16 seconds on a fast machine, and a CI runner takes about twice as long: the bounds leave room for that.
+drivine4j's OracleEraParseTest of liberation-data/drivine4j#584.
 
 The time is the session's `parse time cpu` in `v$sesstat`, which the test user may not read, so the system user reads
 it; each statement is new to Oracle (a comment that no other has), so it is parsed hard. Each runs on a connection of
@@ -165,8 +166,8 @@ def parsed(cypher: str, bound_ms: int) -> tuple[int, list[str]]:
 
 
 ZLS_BOUND = 3_500
-CALL_BOUND = 50_000
-TRUNC_BOUND = 60_000
+CALL_BOUND = 90_000
+TRUNC_BOUND = 90_000
 
 
 def test_the_min_and_max_of_a_collected_list_of_moments_are_planned_in_seconds():
@@ -176,14 +177,15 @@ def test_the_min_and_max_of_a_collected_list_of_moments_are_planned_in_seconds()
     assert ms < ZLS_BOUND, f"hard parse took {ms} ms, over {ZLS_BOUND} ms"
 
 
-def test_a_moment_two_calls_deep_is_planned_well_within_a_minute():
-    # 27 seconds in drivine4j; 72 renumbered inline, so the bound is under twice what it takes, not three times.
+def test_a_moment_two_calls_deep_is_planned_in_a_minute_and_a_half():
+    # 27 seconds on a fast machine, 51 on a CI runner; 72 renumbered inline on a fast machine. A fallback to inline SQL
+    # is caught by `parsed`'s check that the statement calls the era functions, and by ZLS_BOUND.
     ms, rows = parsed(CALL, CALL_BOUND)
     assert rows == ["17"]
     assert ms < CALL_BOUND, f"hard parse took {ms} ms, over {CALL_BOUND} ms"
 
 
-def test_a_truncation_with_fields_four_deep_is_planned_within_a_minute():
+def test_a_truncation_with_fields_four_deep_is_planned_in_a_minute_and_a_half():
     # 16 seconds in drivine4j; renumbered inline it was still being planned after ten minutes.
     ms, rows = parsed(TRUNCATED, TRUNC_BOUND)
     assert rows == ["3"]

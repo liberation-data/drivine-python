@@ -232,6 +232,20 @@ class PostgresCypherCompiler(SqlCypherCompiler):
             ),
         )
 
+    def key_value(self, json: str) -> str:
+        """
+        A whole number as the `bigint` the key is: a key compared with a `numeric` is cast to one, and read by no index.
+        A number that isn't whole, or is past a `bigint`, is no key. Each test is a `CASE` of its own, as SQL takes an
+        `AND`'s sides in no order, and a text cast to a number fails.
+        """
+        return self.shared1(
+            json,
+            lambda x: (
+                f"(CASE WHEN jsonb_typeof({x}) = 'number' THEN CASE WHEN ({x})::numeric = trunc(({x})::numeric) "
+                f"AND abs(({x})::numeric) <= 9223372036854775807 THEN ({x})::numeric::bigint END END)"
+            ),
+        )
+
     def elements(self, json: str, alias: str) -> str:
         return f"jsonb_array_elements({json}) WITH ORDINALITY {alias} (item, item_no)"
 

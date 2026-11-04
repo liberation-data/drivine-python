@@ -6015,3 +6015,167 @@ def test_a_calls_union_all_whose_first_part_gives_a_list_and_a_later_one_a_numbe
     ]
     for cypher, rows in unordered_:
         assert (cypher, unordered(cypher_pm.query(spec(cypher)))) == (cypher, unordered(rows))
+
+
+def test_an_id_compared_with_a_float_a_text_null_a_list_or_an_item_keeps_the_rows_cypher_keeps(
+    cypher_pm: PersistenceManager,
+):
+    # Not in the spec yet: a node's id is the store's own. A SQL store tests the key beside the comparison, where the
+    # row must pass it, so it reads the row by its primary key (#393, drivine4j#575); the rows are the comparison's,
+    # under NOT and OR too. drivine4j's CypherQueryContract of liberation-data/drivine4j#577.
+    seeded(cypher_pm)
+
+    def rows(cypher: str, **parameters: Any) -> list[Any]:
+        return cypher_pm.query(spec(cypher, parameters))
+
+    ids = {name: id_ for name, id_ in rows("MATCH (p:Person) RETURN [p.name, id(p)]")}
+    keanu, carrie, laurence = ids["Keanu"], ids["Carrie"], ids["Laurence"]
+    [role] = rows("MATCH (:Person {name: 'Laurence'})-[r:ACTED_IN]->() RETURN id(r)")
+    mixed = [float(keanu), "x", None, carrie, [laurence], {"id": laurence}, laurence + 0.5]
+    names = "RETURN p.name ORDER BY p.name"
+    assert rows(f"MATCH (p:Person) WHERE id(p) = $id {names}", id=float(keanu)) == ["Keanu"]
+    assert rows(f"MATCH (p:Person) WHERE $id = id(p) AND p.born > 0 {names}", id=keanu) == ["Keanu"]
+    for id_ in (str(keanu), None, [keanu], keanu + 0.5):
+        assert (id_, rows(f"MATCH (p:Person) WHERE id(p) = $id {names}", id=id_)) == (id_, [])
+    assert rows(f"MATCH (p:Person) WHERE id(p) IN $ids {names}", ids=mixed) == ["Carrie", "Keanu"]
+    assert rows(f"MATCH (p:Person) WHERE id(p) IN [$a, null, 'x', $b] {names}", a=float(keanu), b=carrie) == [
+        "Carrie",
+        "Keanu",
+    ]
+    assert rows(f"UNWIND $ids AS i MATCH (p:Person) WHERE id(p) = i {names}", ids=mixed) == ["Carrie", "Keanu"]
+    assert rows(f"MATCH (p:Person) WHERE NOT id(p) = $id {names}", id=float(keanu)) == [
+        "Carrie",
+        "Hugo",
+        "Laurence",
+    ]
+    # Null for every other person, as the list holds a null: NOT keeps none.
+    assert rows(f"MATCH (p:Person) WHERE NOT id(p) IN $ids {names}", ids=mixed) == []
+    assert rows(f"MATCH (p:Person) WHERE NOT id(p) IN $ids {names}", ids=[keanu, carrie, "x"]) == [
+        "Hugo",
+        "Laurence",
+    ]
+    assert rows(f"MATCH (p:Person) WHERE id(p) = $id OR p.name = 'Carrie' {names}", id=keanu) == [
+        "Carrie",
+        "Keanu",
+    ]
+    assert rows(f"MATCH (p:Person) WHERE id(p) = $id OR id(p) IN $ids {names}", id="x", ids=mixed) == [
+        "Carrie",
+        "Keanu",
+    ]
+    assert rows("MATCH (p:Person)-[r:ACTED_IN]->(m) WHERE id(r) = $id RETURN m.title", id=float(role)) == ["The Matrix"]
+    assert rows("MATCH (p:Person)-[:ACTED_IN]->(m) WHERE id(p) = $id RETURN m.title ORDER BY m.title", id=keanu) == [
+        "Johnny Mnemonic",
+        "The Matrix",
+        "The Matrix Reloaded",
+    ]
+    knows = "MATCH (p:Person {name: 'Keanu'})-[:KNOWS]->(q) MATCH (c:Person)"
+    assert rows(f"{knows} WHERE id(c) = id(q) RETURN c.name") == ["Carrie"]
+    assert rows(f"{knows} WHERE id(q) = id(c) RETURN c.name") == ["Carrie"]
+    assert rows(
+        "MATCH (:Person)-[r:ACTED_IN]->() MATCH (p:Person)-[s:ACTED_IN]->(m) WHERE id(r) = $id AND id(s) = id(r) "
+        "RETURN m.title",
+        id=role,
+    ) == ["The Matrix"]
+    # Written in the statement, as a whole number, a float or one with an exponent.
+    for written in (f"{keanu}", f"{keanu}.0", f"{keanu}e0", f"{keanu * 10}e-1"):
+        assert (written, rows(f"MATCH (p:Person) WHERE id(p) = {written} {names}")) == (written, ["Keanu"])
+    assert rows(f"MATCH (p:Person) WHERE id(p) IN [{keanu}e0, {carrie}, 'x'] {names}") == ["Carrie", "Keanu"]
+    # As a value, the comparison is Cypher's: true, false or null.
+    assert rows(
+        "MATCH (p:Person) RETURN [p.name, id(p) = $id, id(p) IN $ids] ORDER BY p.name", id=float(keanu), ids=mixed
+    ) == [["Carrie", False, True], ["Hugo", False, None], ["Keanu", True, True], ["Laurence", False, None]]
+
+
+def test_an_id_compared_where_a_where_nests_or_with_a_value_worked_out_keeps_the_rows_cypher_keeps(
+    cypher_pm: PersistenceManager,
+):
+    # Not in the spec yet: beside #393's test of the key, the comparison is still the one that keeps a row.
+    # drivine4j's CypherQueryContract of liberation-data/drivine4j#577.
+    seeded(cypher_pm)
+
+    def rows(cypher: str, **parameters: Any) -> list[Any]:
+        return cypher_pm.query(spec(cypher, parameters))
+
+    [keanu] = rows("MATCH (p:Person {name: 'Keanu'}) RETURN id(p)")
+    with_null = [keanu, None]
+    names = "RETURN p.name ORDER BY p.name"
+    # OPTIONAL MATCH keeps the row, with a null, where the key is no node's.
+    assert rows(
+        "MATCH (p:Person) OPTIONAL MATCH (q:Person) WHERE id(q) = $id AND q.name <> p.name "
+        "RETURN [p.name, q.name] ORDER BY p.name",
+        id=keanu,
+    ) == [["Carrie", "Keanu"], ["Hugo", "Keanu"], ["Keanu", None], ["Laurence", "Keanu"]]
+    assert rows(f"MATCH (a:Person {{name: 'Keanu'}}) MATCH (p:Person) WHERE id(p) = id(a) + 0 {names}") == ["Keanu"]
+    assert rows(f"WITH $id AS x MATCH (p:Person) WHERE id(p) = toInteger(x) {names}", id=str(keanu)) == ["Keanu"]
+    assert rows("MATCH (p:Person) WITH min(id(p)) AS lo MATCH (q:Person) WHERE id(q) = lo RETURN count(q)") == [1]
+    assert rows(f"MATCH (p:Person) WITH p, count(*) AS c WHERE id(p) = $id AND c = 1 {names}", id=keanu) == ["Keanu"]
+    # A list predicate's WHERE is read as a value: none() is null, and keeps no row, where the comparison is null.
+    assert rows(f"MATCH (p:Person) WHERE none(x IN $ids WHERE id(p) = x) {names}", ids=with_null) == []
+    assert rows(f"MATCH (p:Person) WHERE any(x IN $ids WHERE id(p) = x) {names}", ids=with_null) == ["Keanu"]
+    assert rows("MATCH (p:Person) RETURN size([x IN $ids WHERE id(p) = x]) ORDER BY p.name DESC", ids=with_null) == [
+        0,
+        1,
+        0,
+        0,
+    ]
+    assert rows(
+        f"MATCH (p:Person) WHERE NOT EXISTS {{ MATCH (q:Person) WHERE id(q) = id(p) AND id(q) IN $ids }} {names}",
+        ids=[keanu],
+    ) == ["Carrie", "Hugo", "Laurence"]
+    assert rows(
+        f"MATCH (p:Person) WHERE CASE WHEN id(p) IN $ids THEN true ELSE p.name = 'Hugo' END {names}", ids=with_null
+    ) == ["Hugo", "Keanu"]
+    # A subquery of the row's own on the other side, alone or in the list: Keanu's count is 1, and 0 is no node's id.
+    knows_carrie = "COUNT { (p)-[:KNOWS]->(:Person {name: 'Carrie'}) } * $id"
+    assert rows(f"MATCH (p:Person) WHERE id(p) = {knows_carrie} {names}", id=keanu) == ["Keanu"]
+    assert rows(f"MATCH (p:Person) WHERE id(p) IN [{knows_carrie}, null] {names}", id=keanu) == ["Keanu"]
+    assert rows(f"MATCH (p:Person) WHERE id(p) IN [{knows_carrie}, 'x'] {names}", id=keanu) == ["Keanu"]
+    # Each row once, however often the list holds its id.
+    assert rows(f"MATCH (p:Person) WHERE id(p) IN [$a, $a, $a] {names}", a=keanu) == ["Keanu"]
+    assert rows(f"MATCH (p:Person) WHERE id(p) IN $ids {names}", ids=[keanu, keanu, float(keanu)]) == ["Keanu"]
+    for id_ in (-1, -float(keanu + 1), 2**63 - 1, 1e30, True):
+        assert (id_, rows(f"MATCH (p:Person) WHERE id(p) = $id {names}", id=id_)) == (id_, [])
+        assert (id_, rows(f"MATCH (p:Person) WHERE id(p) IN $ids {names}", ids=[id_])) == (id_, [])
+
+
+def test_an_id_compared_across_a_relationship_of_either_direction_keeps_the_rows_cypher_keeps(
+    cypher_pm: PersistenceManager,
+):
+    # Not in the spec yet: #393's test of the key beside an id read from #390's relationships both ways round, one from
+    # a node to itself once. drivine4j's CypherQueryContract of liberation-data/drivine4j#577.
+    clear(cypher_pm)
+    cypher_pm.query(
+        spec(
+            "CREATE (a:CyUn {k: 1}), (b:CyUn {k: 2}), (c:CyUn {k: 3}), "
+            "(a)-[:CY_UN {i: 1}]->(b), (b)-[:CY_UN {i: 2}]->(a), (a)-[:CY_UN {i: 3}]->(a), (b)-[:CY_UN {i: 4}]->(c)"
+        )
+    )
+
+    def rows(cypher: str, **parameters: Any) -> list[Any]:
+        return cypher_pm.query(spec(cypher, parameters))
+
+    node = {k: id_ for k, id_ in rows("MATCH (n:CyUn) RETURN [n.k, id(n)]")}
+    edge = {i: id_ for i, id_ in rows("MATCH ()-[r:CY_UN]->() RETURN [r.i, id(r)]")}
+    step = "MATCH (n:CyUn)-[r:CY_UN]-(m)"
+    assert rows(f"{step} WHERE id(n) = $id RETURN [r.i, m.k] ORDER BY r.i", id=float(node[1])) == [
+        [1, 2],
+        [2, 2],
+        [3, 1],
+    ]
+    assert rows(f"{step} WHERE id(m) IN $ids RETURN [r.i, n.k]", ids=[node[3], "x", None]) == [[4, 2]]
+    assert rows(f"{step} WHERE id(r) = $id RETURN [n.k, m.k] ORDER BY n.k", id=edge[1]) == [[1, 2], [2, 1]]
+    assert rows(f"{step} WHERE id(r) = $id RETURN [n.k, m.k]", id=edge[3]) == [[1, 1]]
+    assert rows(f"{step} WHERE id(n) = id(m) RETURN r.i") == [3]
+    assert rows(f"{step} WHERE id(m) = id(n) AND id(n) = $id RETURN r.i", id=node[1]) == [3]
+    assert rows(
+        "MATCH (:CyUn {k: 2})-[r:CY_UN]-(m) MATCH (x:CyUn) WHERE id(x) = id(m) RETURN [r.i, x.k] ORDER BY r.i"
+    ) == [[1, 1], [2, 1], [4, 3]]
+    assert rows(
+        "MATCH (:CyUn)-[r:CY_UN]-() MATCH ()-[s:CY_UN]-() WHERE id(r) = $id AND id(s) = id(r) RETURN count(*)",
+        id=edge[1],
+    ) == [4]
+    assert rows("MATCH (n:CyUn)-[:CY_UN*1..2]-(m) WHERE id(n) = $id RETURN m.k ORDER BY m.k", id=node[3]) == [
+        1,
+        1,
+        2,
+    ]

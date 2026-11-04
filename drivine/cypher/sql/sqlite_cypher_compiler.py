@@ -204,6 +204,11 @@ class SqliteCypherCompiler(SqlCypherCompiler):
         text = property_text(read[1], read[2])
         return f"{text} = (CASE json_type({value}) WHEN 'text' THEN {value} ->> '$' ELSE {value} END)"
 
+    def key_value(self, json: str) -> str:
+        """SQLite compares an `INTEGER PRIMARY KEY` with a float by its value, so `5.0` reads the row whose key is
+        `5`."""
+        return self.shared1(json, lambda x: f"(CASE WHEN json_type({x}) IN ('integer', 'real') THEN {x} ->> '$' END)")
+
     def elements(self, json: str, alias: str) -> str:
         return f"json_each({json}) AS {alias}"
 

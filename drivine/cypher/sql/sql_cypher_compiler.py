@@ -1307,7 +1307,8 @@ class SqlCypherCompiler(ABC):
     def leaves(self, edge: str, direction: Direction, at: str) -> tuple[str, str]:
         """
         The condition that the relationship row `edge` leaves the node whose id is `at` in `direction`, and the id of
-        the node it reaches.
+        the node it reaches. `edge` is a row of `edges_for(direction)`: of either direction, where
+        `undirected_both_ways`, a row of `both_ways`, joined on its `a` and `b`.
         """
         if direction is Direction.OUTGOING:
             return f"{edge}.src = {at}", f"{edge}.dst"

@@ -2308,6 +2308,17 @@ def test_a_relationship_of_either_direction_is_found_each_way_round_and_one_from
         ),
         # Walked from its far node, the only one pinned.
         ("MATCH (m:CyUn)-[:CY_UN*1]-(:CyUn {k: 3}) RETURN m.k", [2]),
+        # A shortest path either way, and all of them, each relationship of it either way round.
+        (
+            "MATCH (a:CyUn {k: 3}), (b:CyUn {k: 1}) MATCH p = shortestPath((a)-[:CY_UN*]-(b)) "
+            "RETURN [x IN nodes(p) | x.k]",
+            [[3, 2, 1]],
+        ),
+        (
+            "MATCH (a:CyUn {k: 1}), (b:CyUn {k: 3}) MATCH p = allShortestPaths((a)-[:CY_UN*]-(b)) "
+            "RETURN [r IN relationships(p) | r.i] ORDER BY head(relationships(p)).i",
+            [[1, 4], [2, 4]],
+        ),
         # A quantified path pattern's step, of one hop or two, no relationship twice in it.
         ("MATCH (:CyUn {k: 1}) ((x)-[:CY_UN]-(y)){1} (m) RETURN m.k ORDER BY m.k", [1, 2, 2]),
         ("MATCH (:CyUn {k: 3}) ((x)-[:CY_UN]-(y)-[:CY_UN]-(z)){1} (m) RETURN m.k ORDER BY m.k", [1, 1]),

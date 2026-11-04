@@ -20,7 +20,7 @@ from drivine.backend.sql.sql_views import SqlViews, by_id
 class OracleViews(SqlViews):
     """
     Writes a view on Oracle (see SqlViews): each relationship's nodes aggregated with JSON_ARRAYAGG, and a relationship
-    to a depth followed with CONNECT BY.
+    to a depth followed by a join for each relationship along the way.
     """
 
     empty_object = "JSON('{}')"
@@ -41,21 +41,25 @@ class OracleViews(SqlViews):
         return related_subquery(*hints)
 
     def reached(self, type: str, direction: Direction, from_: str, depth: int) -> str:
-        edges = self.graph.edges
-        typed = sql_text(type)
-        if direction is Direction.UNDIRECTED:
-            pairs = (
-                f"(SELECT src AS a, dst AS b FROM {edges} WHERE type = {typed} UNION ALL "
-                f"SELECT dst, src FROM {edges} WHERE type = {typed})"
-            )
-        elif direction is Direction.INCOMING:
-            pairs = f"(SELECT dst AS a, src AS b FROM {edges} WHERE type = {typed})"
-        else:
-            pairs = f"(SELECT src AS a, dst AS b FROM {edges} WHERE type = {typed})"
-        return (
-            f"SELECT b AS nid FROM {pairs} START WITH a = {from_}.nid "
-            f"CONNECT BY NOCYCLE PRIOR b = a AND LEVEL <= {depth}"
-        )
+        """
+        Each way from the node row `from_`, as far as `depth` relationships, taking no relationship twice in a walk, as
+        Cypher takes a relationship once in a path: a node reached by several ways is a row for each. CONNECT BY can't
+        carry the relationships taken, and a recursive WITH can't see the outer row on Oracle (ORA-00904), so the walk
+        is unrolled to its depth, a branch for each length with each pair of its relationships told apart, as drivine4j
+        does (#394).
+        """
+        edges = self._steps(type, direction)
+        branches: list[str] = []
+        for k in range(1, depth + 1):
+            branch = f"SELECT h{k}.b AS nid FROM {edges} h1"
+            for i in range(2, k + 1):
+                branch += f" JOIN {edges} h{i} ON h{i}.a = h{i - 1}.b"
+            branch += f" WHERE h1.a = {from_}.nid"
+            for i in range(1, k):
+                for j in range(i + 1, k + 1):
+                    branch += f" AND h{i}.eid <> h{j}.eid"
+            branches.append(branch)
+        return " UNION ALL ".join(branches)
 
     def nodes_of(self, ids: str, x: str) -> NodesOf:
         """

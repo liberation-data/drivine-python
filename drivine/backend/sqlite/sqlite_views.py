@@ -50,17 +50,7 @@ class SqliteViews(SqlViews):
         arrays, so the relationships taken are the text of their ids, each between commas, which a step looks in.
         """
         walk = self.next_alias("w")
-        edges = self.graph.edges
-        typed = sql_text(type)
-        if direction is Direction.UNDIRECTED:
-            pairs = (
-                f"(SELECT eid, src AS a, dst AS b FROM {edges} WHERE type = {typed} UNION ALL "
-                f"SELECT eid, dst, src FROM {edges} WHERE type = {typed})"
-            )
-        elif direction is Direction.INCOMING:
-            pairs = f"(SELECT eid, dst AS a, src AS b FROM {edges} WHERE type = {typed})"
-        else:
-            pairs = f"(SELECT eid, src AS a, dst AS b FROM {edges} WHERE type = {typed})"
+        pairs = self._steps(type, direction)
         return (
             f"WITH RECURSIVE {walk} (nid, depth, eids) AS ("
             f"SELECT e.b, 1, ',' || e.eid || ',' FROM {pairs} e WHERE e.a = {from_}.nid "

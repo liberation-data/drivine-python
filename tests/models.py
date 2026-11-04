@@ -71,6 +71,36 @@ class LocationAncestors(GraphView):
     within: Annotated[list[Location], Relationship("HAS_LOCATION", Direction.INCOMING, max_depth=5)] = []
 
 
+class Place(NodeFragment, labels=["Place"]):
+    uuid: Annotated[str, NodeId()]
+
+
+class PlaceReach(GraphView):
+    """The places two relationships away either way round, each taken once in a walk, as Cypher walks a path (#394)."""
+
+    place: Annotated[Place, Root()]
+    reach: Annotated[list[Place], Relationship("NEXT_TO", Direction.UNDIRECTED, max_depth=2)] = []
+
+
+class PlaceAround(GraphView):
+    """Each place next to it, with the places two relationships away from that one: a nested view's list over hops."""
+
+    place: Annotated[Place, Root()]
+    around: Annotated[list[PlaceReach], Relationship("NEXT_TO", Direction.UNDIRECTED)] = []
+
+
+class Stop(NodeFragment, labels=["Stop"]):
+    uuid: Annotated[str, NodeId()]
+
+
+class StopReach(GraphView):
+    """The stops three relationships ahead and two behind along a directed relationship, which a ring comes back on."""
+
+    stop: Annotated[Stop, Root()]
+    ahead: Annotated[list[Stop], Relationship("THEN", Direction.OUTGOING, max_depth=3)] = []
+    behind: Annotated[list[Stop], Relationship("THEN", Direction.INCOMING, max_depth=2)] = []
+
+
 class Movie(NodeFragment, labels=["Movie"]):
     uuid: Annotated[str, NodeId()]
     title: str

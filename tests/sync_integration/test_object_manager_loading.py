@@ -13,6 +13,7 @@ from drivine.sync import (
     StatelessGraphObjectManager,
     count,
     key,
+    refs,
 )
 from tests.models import (
     ActorStats,
@@ -28,7 +29,10 @@ from tests.models import (
     Organization,
     Person,
     PersonCareer,
+    PlaceAround,
+    PlaceReach,
     Puppy,
+    StopReach,
 )
 
 # Seeded in Cypher, which Postgres and Oracle compile to their SQL.
@@ -42,6 +46,28 @@ def gom(pm: PersistenceManager) -> StatelessGraphObjectManager:
 
 def run(pm: PersistenceManager, statement: str, **bindings: object) -> None:
     pm.execute(QuerySpecification(statement).bind(bindings))
+
+
+@pytest.fixture
+def next_to(pm: PersistenceManager) -> None:
+    """p1–p2, s1–s1, s2–s2 and s2–s3, each a NEXT_TO relationship, and two between q1 and q2."""
+    run(
+        pm,
+        "CREATE (p1:Place {uuid: 'p1'})-[:NEXT_TO]->(:Place {uuid: 'p2'}), "
+        "(s1:Place {uuid: 's1'})-[:NEXT_TO]->(s1), "
+        "(s2:Place {uuid: 's2'})-[:NEXT_TO]->(s2), (s2)-[:NEXT_TO]->(:Place {uuid: 's3'}), "
+        "(q1:Place {uuid: 'q1'})-[:NEXT_TO]->(q2:Place {uuid: 'q2'}), (q1)-[:NEXT_TO]->(q2)",
+    )
+
+
+@pytest.fixture
+def ring(pm: PersistenceManager) -> None:
+    """A ring r1 → r2 → r3 → r1 of THEN relationships, and r3 → r4 off it."""
+    run(
+        pm,
+        "CREATE (r1:Stop {uuid: 'r1'})-[:THEN]->(r2:Stop {uuid: 'r2'})-[:THEN]->(r3:Stop {uuid: 'r3'}), "
+        "(r3)-[:THEN]->(r1), (r3)-[:THEN]->(:Stop {uuid: 'r4'})",
+    )
 
 
 class TestFragments:
@@ -175,6 +201,61 @@ class TestViews:
         sydney = gom.load(LocationAncestors, "l4")
         assert sydney is not None
         assert sorted(it.name for it in sydney.within) == ["Australia", "NSW", "Oceania", "World"]
+
+    def test_walks_an_undirected_relationship_over_hops_taking_each_once(self, pm, gom, next_to):
+        """A walk doesn't go back over the relationship it took, and a self-loop is one relationship (#394)."""
+        reaches = {it.place.uuid: sorted(p.uuid for p in it.reach) for it in gom.load_all(PlaceReach)}
+        assert reaches == {
+            "p1": ["p2"],
+            "p2": ["p1"],
+            "s1": ["s1"],
+            "s2": ["s2", "s3"],
+            "s3": ["s2"],
+            # Back over the other of the two relationships: one not yet taken.
+            "q1": ["q1", "q2"],
+            "q2": ["q1", "q2"],
+        }
+
+    def test_walks_a_list_over_hops_in_a_view_nested_in_another(self, pm, gom, next_to):
+        """A nested view's list over hops takes each relationship once in its walk too (#394)."""
+        around = {
+            it.place.uuid: {near.place.uuid: sorted(p.uuid for p in near.reach) for near in it.around}
+            for it in gom.load_all(PlaceAround)
+        }
+        assert around == {
+            "p1": {"p2": ["p1"]},
+            "p2": {"p1": ["p2"]},
+            "s1": {"s1": ["s1"]},
+            "s2": {"s2": ["s2", "s3"], "s3": ["s2"]},
+            "s3": {"s2": ["s2", "s3"]},
+            "q1": {"q2": ["q1", "q2"]},
+            "q2": {"q1": ["q1", "q2"]},
+        }
+
+    def test_walks_a_directed_relationship_each_way_round_a_ring(self, pm, gom, ring):
+        """A directed walk comes back to its root around a ring, and goes no further than its depth (#394)."""
+        reaches = {
+            it.stop.uuid: (sorted(s.uuid for s in it.ahead), sorted(s.uuid for s in it.behind))
+            for it in gom.load_all(StopReach)
+        }
+        assert reaches == {
+            "r1": (["r1", "r2", "r3", "r4"], ["r2", "r3"]),
+            "r2": (["r1", "r2", "r3", "r4"], ["r1", "r3"]),
+            "r3": (["r1", "r2", "r3", "r4"], ["r1", "r2"]),
+            "r4": ([], ["r2", "r3"]),
+        }
+
+    def test_filters_on_an_undirected_relationship_over_hops_taking_each_once(self, pm, gom, next_to):
+        """A query-DSL condition on the list walks it as a load does (#394)."""
+        q = refs(PlaceReach)
+
+        def reaching(uuid: str) -> list[str]:
+            return sorted(it.place.uuid for it in gom.load_all(PlaceReach, where=q.reach.uuid.eq(uuid)))
+
+        assert reaching("p1") == ["p2"]
+        assert reaching("s3") == ["s2"]
+        assert reaching("s1") == ["s1"]
+        assert reaching("q1") == ["q1", "q2"]
 
     def test_paths_aggregates_and_requirements(self, pm, gom):
         run(

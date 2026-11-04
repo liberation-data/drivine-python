@@ -35,7 +35,7 @@ from drivine.sync import (
     transaction,
 )
 from tests.cypher.cypher_spec import load
-from tests.sync_integration.conftest import ORACLE, POSTGRES, SQL_STORES, SQLITE
+from tests.sync_integration.conftest import ORACLE, POSTGRES, SQL_STORES, SQLITE, end_oracle_sessions
 
 UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
 """A random version 4 UUID, in lower case, as Neo4j's `randomUUID()` gives one."""
@@ -4749,6 +4749,18 @@ def _long_item(i: int) -> tuple[str, Any]:
             return f"{{k: {i}}}", {"k": i}
 
 
+@pytest.fixture
+def oracle_sessions_ended_after(cypher_pm: PersistenceManager, registry: DatabaseRegistry) -> Generator[None]:
+    """
+    On Oracle, the sessions a test ran on, ended after it. A session that builds a long literal keeps up to 500 MB of
+    PGA after (#241), and beside the suite's other sessions that passes Oracle Free's 2 GB (#402).
+    """
+    yield
+    if cypher_pm.type is DatabaseType.ORACLE:
+        end_oracle_sessions(registry)
+
+
+@pytest.mark.usefixtures("oracle_sessions_ended_after")
 def test_a_list_literal_of_more_than_100_items_keeps_its_items_returned_tested_with_in_unwound_and_comprehended(
     cypher_pm: PersistenceManager,
 ):
@@ -4783,6 +4795,7 @@ def test_a_list_literal_of_more_than_100_items_keeps_its_items_returned_tested_w
         assert cypher_pm.query(spec(f"RETURN {listed} = {listed}")) == [None], f"{n} items"
 
 
+@pytest.mark.usefixtures("oracle_sessions_ended_after")
 def test_a_value_of_each_kind_tested_with_in_against_a_long_list_literal_of_several_kinds_a_null_among_them(
     cypher_pm: PersistenceManager,
 ):
@@ -4837,6 +4850,7 @@ def test_a_value_of_each_kind_tested_with_in_against_a_long_list_literal_of_seve
     assert cypher_pm.query(spec(held)) == [[None, None, False], [True, True, False], [None, None, None]]
 
 
+@pytest.mark.usefixtures("oracle_sessions_ended_after")
 def test_a_long_list_or_map_literal_without_a_null_equals_the_same_value_given_as_a_parameter_or_collected(
     cypher_pm: PersistenceManager,
 ):
@@ -4877,6 +4891,7 @@ def test_a_long_list_or_map_literal_without_a_null_equals_the_same_value_given_a
         assert cypher_pm.query(spec(f"RETURN [{listed}, {{m: {mapped}}}] = $p", {"p": nested})) == [True], f"{n} nested"
 
 
+@pytest.mark.usefixtures("oracle_sessions_ended_after")
 def test_a_map_literal_of_more_than_50_entries_keeps_its_entries_in_order_returned_read_and_projected(
     cypher_pm: PersistenceManager,
 ):
@@ -4898,6 +4913,7 @@ def test_a_map_literal_of_more_than_50_entries_keeps_its_entries_in_order_return
         assert cypher_pm.query(spec(projected)) == [{"a": 1, **expected}], f"{n} entries"
 
 
+@pytest.mark.usefixtures("oracle_sessions_ended_after")
 def test_a_map_literal_of_121_entries_holding_a_list_of_250_items_is_written_by_create_merge_set_and_unwind(
     cypher_pm: PersistenceManager,
 ):

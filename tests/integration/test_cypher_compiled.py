@@ -33,7 +33,7 @@ from drivine.cypher.sql.sql_cypher_compiler import PRECISION_OUT_OF_RANGE
 from drivine.model import stamps
 from drivine.query.statement import cypher_statement
 from tests.cypher.cypher_spec import load
-from tests.integration.conftest import ORACLE, POSTGRES, SQL_STORES, SQLITE
+from tests.integration.conftest import ORACLE, POSTGRES, SQL_STORES, SQLITE, end_oracle_sessions
 
 UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
 """A random version 4 UUID, in lower case, as Neo4j's `randomUUID()` gives one."""
@@ -4773,6 +4773,20 @@ def _long_item(i: int) -> tuple[str, Any]:
             return f"{{k: {i}}}", {"k": i}
 
 
+@pytest.fixture
+async def oracle_sessions_ended_after(
+    cypher_pm: PersistenceManager, registry: DatabaseRegistry
+) -> AsyncGenerator[None]:
+    """
+    On Oracle, the sessions a test ran on, ended after it. A session that builds a long literal keeps up to 500 MB of
+    PGA after (#241), and beside the suite's other sessions that passes Oracle Free's 2 GB (#402).
+    """
+    yield
+    if cypher_pm.type is DatabaseType.ORACLE:
+        await end_oracle_sessions(registry)
+
+
+@pytest.mark.usefixtures("oracle_sessions_ended_after")
 async def test_a_list_literal_of_more_than_100_items_keeps_its_items_returned_tested_with_in_unwound_and_comprehended(
     cypher_pm: PersistenceManager,
 ):
@@ -4807,6 +4821,7 @@ async def test_a_list_literal_of_more_than_100_items_keeps_its_items_returned_te
         assert await cypher_pm.query(spec(f"RETURN {listed} = {listed}")) == [None], f"{n} items"
 
 
+@pytest.mark.usefixtures("oracle_sessions_ended_after")
 async def test_a_value_of_each_kind_tested_with_in_against_a_long_list_literal_of_several_kinds_a_null_among_them(
     cypher_pm: PersistenceManager,
 ):
@@ -4861,6 +4876,7 @@ async def test_a_value_of_each_kind_tested_with_in_against_a_long_list_literal_o
     assert await cypher_pm.query(spec(held)) == [[None, None, False], [True, True, False], [None, None, None]]
 
 
+@pytest.mark.usefixtures("oracle_sessions_ended_after")
 async def test_a_long_list_or_map_literal_without_a_null_equals_the_same_value_given_as_a_parameter_or_collected(
     cypher_pm: PersistenceManager,
 ):
@@ -4903,6 +4919,7 @@ async def test_a_long_list_or_map_literal_without_a_null_equals_the_same_value_g
         )
 
 
+@pytest.mark.usefixtures("oracle_sessions_ended_after")
 async def test_a_map_literal_of_more_than_50_entries_keeps_its_entries_in_order_returned_read_and_projected(
     cypher_pm: PersistenceManager,
 ):
@@ -4924,6 +4941,7 @@ async def test_a_map_literal_of_more_than_50_entries_keeps_its_entries_in_order_
         assert await cypher_pm.query(spec(projected)) == [{"a": 1, **expected}], f"{n} entries"
 
 
+@pytest.mark.usefixtures("oracle_sessions_ended_after")
 async def test_a_map_literal_of_121_entries_holding_a_list_of_250_items_is_written_by_create_merge_set_and_unwind(
     cypher_pm: PersistenceManager,
 ):

@@ -79,6 +79,27 @@ def factory(registry: DatabaseRegistry) -> PersistenceManagerFactory:
     return PersistenceManagerFactory(registry)
 
 
+async def end_oracle_sessions(registry: DatabaseRegistry) -> None:
+    """
+    Ends the pool of each Oracle provider the registry holds, the tests' own among them, so that its sessions end and
+    give back the PGA each kept: an Oracle session keeps what it grew, and Oracle Free holds 2 GB for all of them
+    (#402). A provider's next connection opens a new pool, and makes the graph's tables again where they aren't there.
+    """
+    for provider in registry.providers:
+        if provider.type is DatabaseType.ORACLE:
+            await provider.end()
+
+
+@pytest.fixture(scope="module", autouse=ORACLE)
+async def oracle_sessions_ended(registry: DatabaseRegistry) -> AsyncIterator[None]:
+    """
+    The Oracle sessions a module's tests opened, ended after it: in the registry's pools, which grow to their size when
+    tests run managers at once, and in the providers tests register (#402).
+    """
+    yield
+    await end_oracle_sessions(registry)
+
+
 @pytest.fixture(params=ENGINES)
 async def pm(request: pytest.FixtureRequest, factory: PersistenceManagerFactory) -> AsyncIterator[PersistenceManager]:
     manager = factory.get(request.param)

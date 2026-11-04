@@ -1307,17 +1307,58 @@ class SqlCypherCompiler(ABC):
     def leaves(self, edge: str, direction: Direction, at: str) -> tuple[str, str]:
         """
         The condition that the relationship row `edge` leaves the node whose id is `at` in `direction`, and the id of
-        the node it reaches.
+        the node it reaches. `edge` is a row of `edges_for(direction)`: of either direction, where
+        `undirected_both_ways`, a row of `both_ways`, joined on its `a` and `b`.
         """
         if direction is Direction.OUTGOING:
             return f"{edge}.src = {at}", f"{edge}.dst"
         if direction is Direction.INCOMING:
             return f"{edge}.dst = {at}", f"{edge}.src"
-        # Either way, and a relationship from a node to itself once.
+        # Either way, and a relationship from a node to itself once: read from `both_ways`, or with an OR.
+        if self.undirected_both_ways:
+            return f"{edge}.a = {at} AND {self.self_loop_once(edge)}", f"{edge}.b"
         return (
             f"({edge}.src = {at} OR {edge}.dst = {at})",
             f"CASE WHEN {edge}.src = {at} THEN {edge}.dst ELSE {edge}.src END",
         )
+
+    undirected_both_ways = True
+    """
+    Whether a relationship of either direction is read from `both_ways` and joined on equalities, or from the
+    relationship table with an OR across its two directions. Postgres and Oracle read it both ways round (#390,
+    liberation-data/drivine4j#570). SQLite plans the OR itself, probing the index on each end, and keeps it: see its
+    compiler.
+    """
+
+    def edges_for(self, direction: Direction) -> str:
+        """The rows a relationship row of `direction` is read from: `both_ways` for either way where
+        `undirected_both_ways`, else the relationship table."""
+        return self.both_ways if direction is Direction.EITHER and self.undirected_both_ways else self.edges
+
+    @property
+    def both_ways(self) -> str:
+        """
+        The relationship rows read both ways round, for a relationship of either direction: each row once with its ends
+        `a` and `b` as it is stored, `back` 0, and once the other way round, `back` 1. Its `src` and `dst` stay the
+        stored ones, so the relationship keeps the direction it was written in. A step then joins on `a` and `b` with
+        equalities, which a store can hash or index, where an OR across the two directions left Postgres comparing
+        every pair of nodes, and Oracle reading every relationship at each step of a walk. A step reads it with
+        `self_loop_once`.
+        """
+        return (
+            f"(SELECT eid, src, dst, type, props, src AS a, dst AS b, 0 AS back FROM {self.edges}"
+            f" UNION ALL SELECT eid, src, dst, type, props, dst AS a, src AS b, 1 AS back FROM {self.edges})"
+        )
+
+    @staticmethod
+    def self_loop_once(edge: str) -> str:
+        """
+        That a row `edge` of `both_ways` is a relationship from a node to itself only once, read as it is stored. It is
+        a condition of the join, not a `WHERE` of the second half, for Postgres pushes a join's equality on `a` into the
+        halves, and reads each by its index, only where neither half has a `WHERE` of its own: with one, it read the
+        whole table twice at each step of a walk, ten times slower than the OR (liberation-data/drivine4j#570).
+        """
+        return f"({edge}.back = 0 OR {edge}.src <> {edge}.dst)"
 
     def steps(self, walk: Walk, at: str) -> tuple[list[str], list[str], list[str]]:
         """
@@ -1332,7 +1373,7 @@ class SqlCypherCompiler(ABC):
             joins.append(f"JOIN {self.nodes} {first} ON {first}.nid = {at}")
         for i, hop in enumerate(walk.hops):
             join, far = self.leaves(hop.edge, hop.direction, reached[-1] if reached else at)
-            joins.append(f"JOIN {self.edges} {hop.edge} ON {join}")
+            joins.append(f"JOIN {self.edges_for(hop.direction)} {hop.edge} ON {join}")
             reached.append(far)
             node = walk.nodes[i + 1]
             if node is not None:
@@ -2244,7 +2285,7 @@ class SqlCypherCompiler(ABC):
             if relationship.variable is not None and relationship.variable in select.scope:
                 unsupported("A relationship variable bound before its pattern")
             name = self._alias("e")
-            select.source(f"{self.edges} {name}")
+            select.source(f"{self.edges_for(relationship.direction)} {name}")
             value = _relationship(name)
             if relationship.variable is not None:
                 select.bind(relationship.variable, value)
@@ -2254,6 +2295,9 @@ class SqlCypherCompiler(ABC):
                 select.where.append(f"{value.src} = {from_} AND {value.dst} = {to}")
             elif relationship.direction is Direction.INCOMING:
                 select.where.append(f"{value.dst} = {from_} AND {value.src} = {to}")
+            elif self.undirected_both_ways:
+                # Either way, read from `both_ways`, and a relationship from a node to itself once.
+                select.where.append(f"{name}.a = {from_} AND {name}.b = {to} AND {self.self_loop_once(name)}")
             else:
                 # Either way, and a relationship from a node to itself once.
                 select.where.append(

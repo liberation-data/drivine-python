@@ -43,12 +43,28 @@ row's alias is `e` and a number; Oracle's walk has a `src` column of its own, th
 SELF_LOOP_ONCE = re.compile(r"\(e\d+\.back = 0 OR e\d+\.src <> e\d+\.dst\)")
 
 
+UNDIRECTED_ELSEWHERE = [
+    "MATCH (n) RETURN COUNT { (n)-[:KNOWS]-() }",
+    "MATCH (n) WHERE (n)-[:KNOWS]-({k: 3}) RETURN n",
+    "MATCH (n) RETURN [(n)-[:KNOWS]-(m) | m.k]",
+    "MATCH (n) OPTIONAL MATCH (n)-[r {i: 4}]-(m) RETURN m",
+    "MATCH (a {k: 1}), (b {k: 2}) MATCH p = allShortestPaths((a)-[*]-(b)) RETURN nodes(p)",
+    "MATCH (a {k: 1})-[r:KNOWS]-() SET r.seen = true RETURN r",
+    "MATCH (a {k: 1}), (b {k: 2}) MERGE (a)-[r:KNOWS {i: 1}]-(b) RETURN r",
+]
+"""
+A relationship of either direction in a subquery, an OPTIONAL MATCH, all shortest paths, and a write's MATCH or MERGE,
+which Postgres compiles into its procedure, the statement's prelude.
+"""
+
+
 def compiled(compiler: type[SqlCypherCompiler], cypher: str) -> str:
-    return compiler(GRAPH).compile(cypher, {}).sql
+    statement = compiler(GRAPH).compile(cypher, {})
+    return f"{statement.prelude or ''}\n{statement.sql}"
 
 
 @pytest.mark.parametrize("compiler", BOTH_WAYS, ids=lambda it: it.__name__)
-@pytest.mark.parametrize("cypher", UNDIRECTED)
+@pytest.mark.parametrize("cypher", UNDIRECTED + UNDIRECTED_ELSEWHERE)
 def test_a_relationship_of_either_direction_joins_on_the_ends_read_both_ways_round_with_no_or_across_them(
     compiler: type[SqlCypherCompiler], cypher: str
 ) -> None:
@@ -61,7 +77,7 @@ def test_a_relationship_of_either_direction_joins_on_the_ends_read_both_ways_rou
     assert END_COMPARED.search(sql) is None, sql
 
 
-@pytest.mark.parametrize("cypher", UNDIRECTED)
+@pytest.mark.parametrize("cypher", UNDIRECTED + UNDIRECTED_ELSEWHERE)
 def test_on_sqlite_a_relationship_of_either_direction_still_joins_with_an_or_read_from_the_relationship_table(
     cypher: str,
 ) -> None:

@@ -35,7 +35,7 @@ from drivine.sync import (
     transaction,
 )
 from tests.cypher.cypher_spec import load
-from tests.sync_integration.conftest import ORACLE, POSTGRES, SQL_STORES, SQLITE
+from tests.sync_integration.conftest import ORACLE, POSTGRES, SQL_STORES, SQLITE, end_oracle_sessions
 
 UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
 """A random version 4 UUID, in lower case, as Neo4j's `randomUUID()` gives one."""
@@ -4769,6 +4769,18 @@ def _long_item(i: int) -> tuple[str, Any]:
             return f"{{k: {i}}}", {"k": i}
 
 
+@pytest.fixture
+def oracle_sessions_ended_after(cypher_pm: PersistenceManager, registry: DatabaseRegistry) -> Generator[None]:
+    """
+    On Oracle, the sessions a test ran on, ended after it. A session that builds a long literal keeps up to 500 MB of
+    PGA after (#241), and beside the suite's other sessions that passes Oracle Free's 2 GB (#402).
+    """
+    yield
+    if cypher_pm.type is DatabaseType.ORACLE:
+        end_oracle_sessions(registry)
+
+
+@pytest.mark.usefixtures("oracle_sessions_ended_after")
 def test_a_list_literal_of_more_than_100_items_keeps_its_items_returned_tested_with_in_unwound_and_comprehended(
     cypher_pm: PersistenceManager,
 ):
@@ -4803,6 +4815,7 @@ def test_a_list_literal_of_more_than_100_items_keeps_its_items_returned_tested_w
         assert cypher_pm.query(spec(f"RETURN {listed} = {listed}")) == [None], f"{n} items"
 
 
+@pytest.mark.usefixtures("oracle_sessions_ended_after")
 def test_a_value_of_each_kind_tested_with_in_against_a_long_list_literal_of_several_kinds_a_null_among_them(
     cypher_pm: PersistenceManager,
 ):
@@ -4857,6 +4870,7 @@ def test_a_value_of_each_kind_tested_with_in_against_a_long_list_literal_of_seve
     assert cypher_pm.query(spec(held)) == [[None, None, False], [True, True, False], [None, None, None]]
 
 
+@pytest.mark.usefixtures("oracle_sessions_ended_after")
 def test_a_long_list_or_map_literal_without_a_null_equals_the_same_value_given_as_a_parameter_or_collected(
     cypher_pm: PersistenceManager,
 ):
@@ -4897,6 +4911,7 @@ def test_a_long_list_or_map_literal_without_a_null_equals_the_same_value_given_a
         assert cypher_pm.query(spec(f"RETURN [{listed}, {{m: {mapped}}}] = $p", {"p": nested})) == [True], f"{n} nested"
 
 
+@pytest.mark.usefixtures("oracle_sessions_ended_after")
 def test_a_map_literal_of_more_than_50_entries_keeps_its_entries_in_order_returned_read_and_projected(
     cypher_pm: PersistenceManager,
 ):
@@ -4918,6 +4933,7 @@ def test_a_map_literal_of_more_than_50_entries_keeps_its_entries_in_order_return
         assert cypher_pm.query(spec(projected)) == [{"a": 1, **expected}], f"{n} entries"
 
 
+@pytest.mark.usefixtures("oracle_sessions_ended_after")
 def test_a_map_literal_of_121_entries_holding_a_list_of_250_items_is_written_by_create_merge_set_and_unwind(
     cypher_pm: PersistenceManager,
 ):
@@ -6249,3 +6265,69 @@ def test_a_node_optional_match_finds_none_compared_to_a_node_is_null_as_a_value_
     assert query(
         "MATCH (a:Person), (b:Person) RETURN [count(CASE WHEN a = b THEN 1 END), count(CASE WHEN NOT a = b THEN 1 END)]"
     ) == [[4, 12]]
+
+
+def test_a_node_with_a_label_set_equal_to_a_node_found_before_it_keeps_the_rows_cypher_keeps_in_each_form(
+    cypher_pm: PersistenceManager,
+):
+    # #404: not in the spec yet. On Oracle the later node's labels are tested by their text, for it to be read by its
+    # key. drivine4j's CypherQueryContract of liberation-data/drivine4j#578.
+    clear(cypher_pm)
+    cypher_pm.query(
+        spec(
+            "CREATE (a:CyKey:CyOther {k: 1}), (b:CyKey:CyOther {k: 2}), (c:CyKey {k: 3}), (d:CyOther {k: 4}), "
+            "(d)-[:CY_KEY]->(a), (d)-[:CY_KEY]->(c)"
+        )
+    )
+
+    def query(cypher: str, parameters: dict[str, Any] | None = None) -> list[Any]:
+        return cypher_pm.query(spec(cypher, parameters))
+
+    def count(cypher: str) -> int:
+        [counted] = query(cypher)
+        return int(counted)
+
+    m = "MATCH (a:CyKey) MATCH (b:CyKey)"
+    for test in ["a = b", "b = a", "id(b) = id(a)", "id(a) = id(b)", "a = b AND b.k > 0"]:
+        assert count(f"{m} WHERE {test} RETURN count(*)") == 3, test
+    assert count("MATCH (a:CyKey), (b:CyKey) WHERE a = b RETURN count(*)") == 3
+    assert query("MATCH (a:CyKey) WHERE a.k = 1 MATCH (b:CyKey) WHERE a = b RETURN b.k") == [1]
+    assert query("MATCH (a:CyKey {k: 1}) MATCH (b:CyKey) WHERE a = b RETURN b.k") == [1]
+    assert count(f"{m} WHERE a = b AND b.k > 1 RETURN count(*)") == 2
+    # A label the other node doesn't carry, one of two, and two.
+    assert count("MATCH (a:CyKey) MATCH (b:CyOther) WHERE a = b RETURN count(*)") == 2
+    assert count("MATCH (a:CyKey) MATCH (b:CyKey:CyOther) WHERE b = a RETURN count(*)") == 2
+    assert count("MATCH (a:CyKey:CyOther) MATCH (b:CyKey:CyOther) WHERE a = b RETURN count(*)") == 2
+    assert count("MATCH (a:CyKey) MATCH (b:CyNone) WHERE a = b RETURN count(*)") == 0
+    assert count("MATCH (x)-[:CY_KEY]->(a) MATCH (b:CyKey) WHERE a = b RETURN count(*)") == 2
+    assert count("MATCH (x)-[:CY_KEY]->(a) MATCH (b:CyOther) WHERE a = b RETURN count(*)") == 1
+    # The other node found by its properties or its id alone, before or after the node with the label.
+    assert query("MATCH (a {k: 1}) MATCH (b:CyKey) WHERE a = b RETURN b.k") == [1]
+    assert count("MATCH (b:CyOther) MATCH (a {k: 3}) WHERE a = b RETURN count(*)") == 0
+    assert query("MATCH (b:CyOther) MATCH (a {k: 4}) WHERE b = a RETURN b.k") == [4]
+    [one] = query("MATCH (n:CyKey {k: 1}) RETURN id(n)")
+    [four] = query("MATCH (n:CyOther {k: 4}) RETURN id(n)")
+    by_id = "MATCH (a) WHERE id(a) = $id MATCH (b:CyKey) WHERE a = b RETURN b.k"
+    assert query(by_id, {"id": one}) == [1]
+    assert query(by_id, {"id": four}) == []
+    assert query("MATCH (a), (b:CyKey) WHERE id(a) IN $ids AND id(b) = id(a) RETURN b.k", {"ids": [one, four]}) == [1]
+    assert query("MATCH (a:CyKey) RETURN [a.k, [(x)-[:CY_KEY]->(b:CyKey) WHERE b = a | x.k]] ORDER BY a.k") == [
+        [1, [4]],
+        [2, []],
+        [3, [4]],
+    ]
+    assert query("MATCH (a:CyKey) OPTIONAL MATCH (b:CyOther) WHERE a = b RETURN [a.k, b.k] ORDER BY a.k") == [
+        [1, 1],
+        [2, 2],
+        [3, None],
+    ]
+    assert count("MATCH (a:CyKey) WHERE EXISTS { MATCH (b:CyOther) WHERE a = b } RETURN count(*)") == 2
+    assert query("MATCH (a:CyKey) RETURN [a.k, COUNT { MATCH (b:CyOther) WHERE b = a }] ORDER BY a.k") == [
+        [1, 1],
+        [2, 1],
+        [3, 0],
+    ]
+    # Under NOT, beside an OR, or to a node found by nothing else: the test stands as it was.
+    assert count(f"{m} WHERE NOT a = b RETURN count(*)") == 6
+    assert count(f"{m} WHERE a = b OR b.k = 1 RETURN count(*)") == 5
+    assert count("MATCH (a) MATCH (b:CyKey) WHERE a = b RETURN count(*)") == 3

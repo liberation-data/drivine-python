@@ -365,6 +365,27 @@ class _Kind(Enum):
     PATH = "PATH"
 
 
+@dataclass(frozen=True)
+class _LabelTest:
+    """A test of a node's labels among a part's conditions: the entry of its `where` at `at`, that the labels `labels`
+    hold each of `all_`."""
+
+    at: int
+    labels: str
+    all_: tuple[str, ...]
+
+
+@dataclass
+class _ComparedKeys:
+    """
+    The keys a condition compares where a row must pass the comparison (`_conjoining`): `pairs` of keys it sets equal,
+    and `anchors`, keys it compares with a value. See `_read_by_key`.
+    """
+
+    pairs: list[tuple[str, str]] = dataclasses.field(default_factory=lambda: [])
+    anchors: list[str] = dataclasses.field(default_factory=lambda: [])
+
+
 class _Select:
     """The rows a part of a statement reads: its sources and joins, its conditions, and the variables it binds."""
 
@@ -380,6 +401,9 @@ class _Select:
         self.walks = False
         """Whether a variable-length walk is among its sources, or among those of a `WITH` it reads: a term it sorts by
         is then bound in no subquery (see `_project`)."""
+        self._label_tests: dict[str, list[_LabelTest]] = {}
+        """The tests among its `where` of the labels of each node, by the node's key, in the order they were added: see
+        `relabel`."""
 
     @property
     def scope(self) -> dict[str, Value]:
@@ -388,6 +412,28 @@ class _Select:
 
     def bind(self, variable: str, value: Value) -> None:
         self.bound[variable] = value
+
+    def label_test(self, node: Node, all_: Sequence[str], test: str) -> None:
+        """The test, of the node's labels holding each of `all_`, among its conditions, kept where `relabel` finds
+        it."""
+        self._label_tests.setdefault(node.nid, []).append(_LabelTest(len(self.where), node.labels, tuple(all_)))
+        self.where.append(test)
+
+    def binds_node(self, nid: str) -> bool:
+        """Whether the node whose key is `nid` is bound here, not in a part around it."""
+        return any(isinstance(it, Node) and it.nid == nid for it in self.bound.values())
+
+    def labelled(self, nid: str) -> int | None:
+        """Where the node whose key is `nid`, bound here, is first tested for its labels among its conditions; None
+        where it is not."""
+        tests = self._label_tests.get(nid)
+        return tests[0].at if tests and self.binds_node(nid) else None
+
+    def relabel(self, nid: str, test: Callable[[str, Sequence[str]], str]) -> None:
+        """Each test of the labels of the node whose key is `nid` written again, as `test` gives it for its labels and
+        those it tests."""
+        for it in self._label_tests.get(nid, []):
+            self.where[it.at] = test(it.labels, it.all_)
 
     def source(self, text: str) -> None:
         self.sources.append(f"FROM {text}" if not self.sources else self._joined(text))
@@ -896,6 +942,16 @@ class SqlCypherCompiler(ABC):
         in a form it can't rewrite: see Oracle's.
         """
         return f"{a} = {b}"
+
+    def keyed_labels(self, labels: str, all_: Sequence[str]) -> str:
+        """
+        Whether the labels, a JSON list, hold each of `all_`, for a node read by its key: one whose key a condition
+        every row must pass sets equal to the key of a node found some other way (see `_read_by_key`). As `has_labels`
+        tests them, where the store reads that node by its key anyway. A store whose planner reads the index over
+        labels for each row of the other node instead, and filters it on the key, tests them in a form the index can't
+        answer: see Oracle's.
+        """
+        return self.has_labels(labels, all_)
 
     @abstractmethod
     def elements(self, json: str, alias: str) -> str:
@@ -1624,6 +1680,14 @@ class SqlCypherCompiler(ABC):
         self._conjoined = False
         """Whether the expression `_value_of` has begun is one a row must pass to be kept, as `_conjoining` said as it
         began."""
+        self._compared_keys = _ComparedKeys()
+        """The `_ComparedKeys` of the condition being compiled: see `_conditioned`."""
+        self._anchored: set[str] = set()
+        """
+        The keys of the nodes found by more than a key equal to another's: by a label, properties, a relationship they
+        end, or their key compared with a value (`_id_equality`, `_keyed_in`), each in the part that binds the node
+        (`_anchor`). Each key is a column of its own query, so this holds them for the whole statement.
+        """
         self._made_anew: set[str] = set()
         """
         The variables made here for a randomUUID() made first, for each row: no variable of the statement's, though one
@@ -1793,8 +1857,52 @@ class SqlCypherCompiler(ABC):
         """
         made = self._anew_before(select, [where], whole=True, anew=anew)
         rows, (read,) = made if made is not None else (select, [where])
-        rows.where.append(self._condition(read, rows.scope))
+        self._filter(rows, read)
         return rows
+
+    def _filter(self, select: _Select, where: Expression) -> None:
+        """The condition `where` among those the select's rows meet, and each node it sets equal to another read by its
+        key: see `_read_by_key`."""
+        sql, compared = self._conditioned(where, select.scope)
+        select.where.append(sql)
+        self._anchored.update(it for it in compared.anchors if select.binds_node(it))
+        self._read_by_key(select, compared.pairs)
+
+    def _anchor(self, select: _Select, nid: str) -> None:
+        """The node whose key is `nid` found by more than its key, where the select binds it: see `_anchored`."""
+        if select.binds_node(nid):
+            self._anchored.add(nid)
+
+    def _read_by_key(self, select: _Select, pairs: Sequence[tuple[str, str]]) -> None:
+        """
+        Each node of `pairs`, keys a condition the select's rows must pass sets equal (`a = b`, `id(a) = id(b)`),
+        tested for its labels as `keyed_labels` tests a node read by its key, where it is the later of the two the
+        select binds and tests for labels, or the one of them it does where the other is `_anchored`. On Oracle (23.26)
+        the test of a label the index over labels answers had `MATCH (a:Big) MATCH (b:Big) WHERE a = b` read that index
+        for each row of `a`, and filter it on the key, rather than read `b` by its primary key, growing with the square
+        of the label's nodes (#404, liberation-data/drivine4j#578). The earlier node keeps its test, so the index still
+        finds it; a node equal to one found by nothing else keeps its test too, as there the index is the only way in:
+        `MATCH (a) MATCH (b:Rare) WHERE a = b` would read every node for `b`. Either test keeps the same rows: only the
+        plan changes.
+
+        The test is written again in place, as it is added with its pattern, before the `WHERE` that compares the keys
+        is read; `_Select.label_test` keeps where it stands. A comparison under `NOT`, beside an `OR`, or read as a
+        value is no key the row is found by, and leaves the test as it is (`_conjoining`).
+        """
+        for x, y in pairs:
+            if x == y:
+                continue
+            at_x, at_y = select.labelled(x), select.labelled(y)
+            if at_x is not None and at_y is not None:
+                keyed: str | None = x if at_x > at_y else y
+            elif at_x is not None:
+                keyed = x if y in self._anchored else None
+            elif at_y is not None:
+                keyed = y if x in self._anchored else None
+            else:
+                keyed = None
+            if keyed is not None:
+                select.relabel(keyed, self.keyed_labels)
 
     def _seeded_rows(self, select: _Select) -> tuple[_Select, str]:
         """
@@ -2254,9 +2362,11 @@ class SqlCypherCompiler(ABC):
             else:
                 raise DrivineError(f"{node.variable} is not a node, and is used as one in a pattern.")
             if node.labels:
-                select.where.append(self.has_labels(value.labels, node.labels))
+                select.label_test(value, node.labels, self.has_labels(value.labels, node.labels))
             if node.properties is not None:
                 select.where.append(self._properties_match(value.props, node.properties, select.scope))
+            if node.labels or node.properties is not None:
+                self._anchor(select, value.nid)
             bound.append(value)
         for i, relationship in enumerate(pattern.relationships):
             if relationship.group is not None:
@@ -2300,6 +2410,8 @@ class SqlCypherCompiler(ABC):
                 select.bind(relationship.variable, value)
             from_ = bound[i].nid
             to = bound[i + 1].nid
+            self._anchor(select, from_)
+            self._anchor(select, to)
             if relationship.direction is Direction.OUTGOING:
                 select.where.append(f"{value.src} = {from_} AND {value.dst} = {to}")
             elif relationship.direction is Direction.INCOMING:
@@ -2348,7 +2460,7 @@ class SqlCypherCompiler(ABC):
         )
         self._pattern(inner, named, hops)
         if where is not None:
-            inner.where.append(self._condition(where, inner.scope))
+            self._filter(inner, where)
         scope = select.scope
         found = [
             (variable, value, self._alias("v"))
@@ -3845,24 +3957,28 @@ class SqlCypherCompiler(ABC):
         return self._binds_in(work)
 
     def _binds_in(self, work: Callable[[], object]) -> bool:
-        """Whether `shared` binds a value in what the work compiles, the names it takes and the functions it declares
-        given back."""
+        """Whether `shared` binds a value in what the work compiles, the names it takes, the functions it declares and
+        the nodes it notes as `_anchored` given back: a name taken again later may be another node's, found by nothing
+        but its key."""
         counter, shares, bindings, functions = self._counter, self._shares, self._shared_bindings, len(self._functions)
+        anchored = set(self._anchored)
         try:
             work()
             return self._shared_bindings > bindings
         finally:
             self._counter, self._shares, self._shared_bindings = counter, shares, bindings
             del self._functions[functions:]
+            self._anchored.intersection_update(anchored)
 
     def _probed(self, work: Callable[[], str]) -> str:
         """
         What the work gives, its SQL only searched for a subquery of the statement's own: see `_probing`. The names it
-        takes and the functions it declares are given back, as `_binds_in` gives them back: a `reduce`'s step written
-        so would declare a function that reads no value it names.
+        takes, the functions it declares and the nodes it notes as `_anchored` are given back, as `_binds_in` gives them
+        back: a `reduce`'s step written so would declare a function that reads no value it names.
         """
         was = self._probing
         counter, shares, bindings, functions = self._counter, self._shares, self._shared_bindings, len(self._functions)
+        anchored = set(self._anchored)
         self._probing = True
         try:
             return work()
@@ -3870,6 +3986,7 @@ class SqlCypherCompiler(ABC):
             self._probing = was
             self._counter, self._shares, self._shared_bindings = counter, shares, bindings
             del self._functions[functions:]
+            self._anchored.intersection_update(anchored)
 
     def _aggregates_first(
         self, select: _Select, projection: Projection, items: list[ProjectionItem]
@@ -4217,13 +4334,21 @@ class SqlCypherCompiler(ABC):
         reads (one of its conditions joined by `AND` or `OR`) may be false where Cypher's is null, as neither keeps a
         row.
         """
+        return self._conditioned(where, scope)[0]
+
+    def _conditioned(self, where: Expression, scope: Scope) -> tuple[str, _ComparedKeys]:
+        """`_condition`, with the `_ComparedKeys` it compares where the row must pass the comparison: its own, not a
+        subquery's within it."""
+        outer = self._compared_keys
+        compared = self._compared_keys = _ComparedKeys()
         self._filtering = True
         self._conjoining = True
         try:
-            return self.bool(self._expression(where, scope))
+            return self.bool(self._expression(where, scope)), compared
         finally:
             self._filtering = False
             self._conjoining = False
+            self._compared_keys = outer
 
     def _expression(self, expression: Expression, scope: Scope) -> Value:
         """
@@ -4721,7 +4846,7 @@ class SqlCypherCompiler(ABC):
         inner = self._select(scope)
         self._patterns(inner, [expression.pattern])
         if expression.where is not None:
-            inner.where.append(self._condition(expression.where, inner.scope))
+            self._filter(inner, expression.where)
         projected = self._expression(expression.projection, inner.scope)
         # A body that reads no variable of the pattern's own, `[(p)-->() | p.name]`, is worked out for each of the
         # pattern's rows in a derived table, and gathered from there: an aggregate that reads only the row's columns is
@@ -4895,7 +5020,7 @@ class SqlCypherCompiler(ABC):
         inner = self._select(scope)
         self._patterns(inner, patterns)
         if where is not None:
-            inner.where.append(self._condition(where, inner.scope))
+            self._filter(inner, where)
         return Bool("EXISTS (" + " ".join(["SELECT 1", *inner.from_(), *_present(inner.where_clause())]) + ")")
 
     def _item(self, expression: Expression, select: _Select) -> Value:
@@ -5381,6 +5506,9 @@ class SqlCypherCompiler(ABC):
             if operator is BinaryOperator.NOT_EQUALS:
                 return Bool(f"NOT ({equal})")
             keyed = self._id_equality(binary, left_value, right_value, scope) if conjunct else None
+            # A node equal to a node, where the row must pass that, may be read by its key: see `_read_by_key`.
+            if conjunct and isinstance(left_value, Node) and isinstance(right_value, Node):
+                self._compared_keys.pairs.append((left_value.nid, right_value.nid))
             return Bool(f"({keyed} AND {equal})" if keyed is not None else equal)
         if operator in _COMPARED:
             # Values of two kinds are not ordered, as in Cypher: the comparison is null. Two lists are, item by item.
@@ -5592,16 +5720,19 @@ class SqlCypherCompiler(ABC):
         """
         The key test to stand beside the binary, an equality of `left` and `right` where one side is an id (`_id_key`):
         the two keys the same (`same_key`), where both are, or the key and the number the other side is (`key_value`).
-        None where neither side is an id, or the other is no JSON value, which is no number.
+        None where neither side is an id, or the other is no JSON value, which is no number. Each is noted in
+        `_compared_keys`, for `_read_by_key`.
         """
         a, b = self._id_key(binary.left, scope), self._id_key(binary.right, scope)
 
         def keyed(key: str, other: Value) -> str | None:
             if not isinstance(other, Json) or not _plain_json(other):
                 return None
+            self._compared_keys.anchors.append(key)
             return f"{key} = {self.key_value(self.comparable(other))}"
 
         if a is not None and b is not None:
+            self._compared_keys.pairs.append((a, b))
             return self.same_key(a, b)
         if a is not None:
             return keyed(a, right)
@@ -5619,6 +5750,7 @@ class SqlCypherCompiler(ABC):
         """
         if not isinstance(listed, Json) or not _plain_json(listed):
             return within
+        self._compared_keys.anchors.append(key)
         i = self._alias("k")
         items = self._elements_of(listed, self.comparable(listed), i)
         return f"({key} IN (SELECT {self.key_value(self.item(i))} FROM {items}) AND {within})"

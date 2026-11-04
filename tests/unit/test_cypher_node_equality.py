@@ -196,6 +196,13 @@ def test_on_oracle_each_node_after_the_first_of_a_chain_set_equal_is_read_by_its
             "count(EXISTS { MATCH (p:Big) }) AS c",
             4,
         ),
+        # The same of an aggregate's argument holding a CASE, compiled first to search its SQL for a subquery
+        # (`_probed`).
+        (
+            "MATCH (z) RETURN count(CASE WHEN EXISTS { MATCH (p:Big) } OR "
+            "EXISTS { MATCH (u) MATCH (v:Big) WHERE u = v } THEN 1 END)",
+            2,
+        ),
         # A node equal to itself is the only node there is.
         ("MATCH (a:Big) WHERE a = a RETURN count(*)", 1),
     ],

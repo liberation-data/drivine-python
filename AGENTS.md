@@ -22,6 +22,13 @@ These are read by all three libraries. Change them here only together with the o
 - **The Cypher spec:** what each Cypher statement gives on each store, compiled to SQL or not, lives in [drivine-cypher-spec](https://github.com/liberation-data/drivine-cypher-spec). `scripts/sync_cypher_spec.py <tag>` copies a tagged version into `tests/cypher`, unchanged, and records the tag in `tests/cypher/VERSION`; the other two libraries copy the same tag. `scripts/check_cypher_spec.py`, which CI runs, fails when a copy differs from that tag, and warns when the spec has a later one. A change to what the compiler gives or refuses goes to the spec first.
 - **The Cypher grammar:** `drivine/cypher/grammar/Cypher.g4` is drivine4j's `src/main/antlr/org/drivine/cypher/grammar/Cypher.g4`, byte for byte, as drivine4j extends openCypher's. A change to what the compiler reads is made there first; `scripts/cypher_grammar.py` writes the parser from it here.
 
+## Releases go out as trains
+
+The three libraries are released together, as a train recorded in
+[liberation-data/drivine-release](https://github.com/liberation-data/drivine-release); see RELEASING.md. Don't run
+"Prepare release" in one repository on its own. Start a train from drivine-release, which opens the release PRs in all
+three, once the fixes the train is to carry are in all three. A person merges the release PRs, and merging publishes.
+
 ## Pull requests
 
 - Base each pull request on `main`, not on another open pull request's branch. Branches aren't deleted on merge here, so a stacked pull request merges into its parent's old branch and its change never reaches `main`.

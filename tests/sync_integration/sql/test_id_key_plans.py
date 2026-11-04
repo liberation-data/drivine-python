@@ -14,11 +14,11 @@ from typing import Any, Literal
 
 import pytest
 
-from drivine.backend.sql.sql_graph import sql_text
 from drivine.cypher.cypher_specification import cypher_compiled
 from drivine.cypher.sql.compiled_cypher import CompiledCypher
 from drivine.query.statement import cypher_statement
 from drivine.sync import DatabaseType, PersistenceManager, PersistenceManagerFactory, QuerySpecification, transaction
+from tests.sync_integration.oracle.oracle_seed import oracle_plan
 
 GRAPH = "drivine"
 NODES = 5000
@@ -127,16 +127,7 @@ def plan(pm: PersistenceManager, compiled: CompiledCypher) -> str:
             pm.execute(QuerySpecification("SET LOCAL enable_mergejoin = off"))
             return lines(pm.query(QuerySpecification[Any](f"EXPLAIN {compiled.sql}").bind(compiled.parameters)))
     # Oracle: its values written in as literals, explained and read in one block, so on one session.
-    sql = compiled.sql
-    for name, value in sorted(compiled.parameters.items(), key=lambda it: -len(it[0])):
-        sql = sql.replace(f"${name}", "NULL" if value is None else sql_text(str(value)))
-    block = (
-        "DECLARE\n    v_plan SYS_REFCURSOR;\nBEGIN\n"
-        f"    EXECUTE IMMEDIATE {sql_text(f'EXPLAIN PLAN FOR {sql}')};\n"
-        "    OPEN v_plan FOR SELECT plan_table_output FROM TABLE(DBMS_XPLAN.DISPLAY(format => 'BASIC +PREDICATE'));\n"
-        "    DBMS_SQL.RETURN_RESULT(v_plan);\nEND;"
-    )
-    return lines(pm.query(QuerySpecification[Any](block)))
+    return oracle_plan(pm, compiled.sql, compiled.parameters, "BASIC +PREDICATE")
 
 
 def reads_by_key(pm: PersistenceManager, plan: str, table: str) -> bool:
@@ -183,9 +174,18 @@ def scans(pm: PersistenceManager, plan: str, table: str) -> bool:
             for line, after in zip(lines_, following, strict=True)
         )
     # Oracle: a scan of the table, or of an index, that reads no row by its key: each row is compared with each id.
-    full = rf"TABLE ACCESS (STORAGE )?FULL\s*\|\s*{GRAPH.upper()}_{table.upper()}\b"
-    scanned = re.search(full, plan) is not None or re.search(r"INDEX (FULL|FAST FULL|RANGE) SCAN", plan) is not None
+    scanned = scans_any(pm, plan, table) or re.search(r"INDEX (FULL|FAST FULL|RANGE) SCAN", plan) is not None
     return scanned and not reads_by_key(pm, plan, table)
+
+
+def scans_any(pm: PersistenceManager, plan: str, table: str) -> bool:
+    """
+    Whether the plan reads every row of the table for some node, though it reads another by its key. On SQLite and
+    Postgres, `scans` says so of each row source; on Oracle, a scan of the table beside a read by the key or not.
+    """
+    if pm.type is not DatabaseType.ORACLE:
+        return scans(pm, plan, table)
+    return re.search(rf"TABLE ACCESS (STORAGE )?FULL\s*\|\s*{GRAPH.upper()}_{table.upper()}\b", plan) is not None
 
 
 def assert_keyed(
@@ -276,6 +276,18 @@ def test_a_relationships_id_and_a_walk_from_a_nodes_read_by_their_keys(pm: Persi
     )
     assert_keyed(pm, f"MATCH (a{item})-[r]->(b) WHERE id(a) = $id RETURN b.k", {"id": ids(5)}, [6])
     assert_keyed(pm, f"MATCH (a{item}) WHERE id(a) = $id MATCH (b) WHERE id(b) = id(a) RETURN b.k", {"id": ids(5)}, [5])
+
+
+def test_a_node_equal_to_a_node_read_by_its_key_is_read_by_its_key_too_whichever_side_of_the_equals_it_is_on(
+    pm: PersistenceManager, ids: Ids, item: str
+):
+    # #396, drivine4j#576: Oracle's comparison of the two keys, `+ 0` on one side alone, read every node for that side.
+    for test in ["b = a", "a = b", "id(b) = id(a)", "id(a) = id(b)"]:
+        statement = f"MATCH (a{item}) WHERE id(a) = $id MATCH (b{item}) WHERE {test} RETURN b.k"
+        parameters = {"id": ids(5)}
+        assert_keyed(pm, statement, parameters, [5])
+        explained = plan(pm, compiled(pm, statement, parameters))
+        assert not scans_any(pm, explained, "node"), f"{statement} reads every node for b:\n{explained}"
 
 
 def test_an_id_compared_across_a_relationship_of_either_direction_read_both_ways_round_reads_its_key(

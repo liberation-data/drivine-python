@@ -8,12 +8,30 @@ from typing import Any
 
 import pytest
 
+from drivine.backend.sql.sql_graph import sql_text
 from drivine.sync import PersistenceManager, QuerySpecification
 
 ON_ORACLE = pytest.mark.skipif(
     os.environ.get("ORACLE_DATABASE_TYPE") != "ORACLE", reason="Oracle runs only with ORACLE_TESTS=true."
 )
 """Skips a suite unless Oracle is configured."""
+
+
+def oracle_plan(pm: PersistenceManager, sql: str, parameters: dict[str, Any], format: str) -> str:
+    """
+    The plan Oracle makes for `sql` on `pm`, its parameters written in as literals so that the plan is the one for
+    them, shown in the format `DBMS_XPLAN.DISPLAY` takes. Explained and read in one block, so on one session.
+    """
+    for name, value in sorted(parameters.items(), key=lambda it: -len(it[0])):
+        sql = sql.replace(f"${name}", "NULL" if value is None else sql_text(str(value)))
+    block = (
+        "DECLARE\n    v_plan SYS_REFCURSOR;\nBEGIN\n"
+        f"    EXECUTE IMMEDIATE {sql_text(f'EXPLAIN PLAN FOR {sql}')};\n"
+        f"    OPEN v_plan FOR SELECT plan_table_output FROM TABLE(DBMS_XPLAN.DISPLAY(format => '{format}'));\n"
+        "    DBMS_SQL.RETURN_RESULT(v_plan);\nEND;"
+    )
+    rows = pm.query(QuerySpecification[Any](block))
+    return "\n".join(str(it if not isinstance(it, dict) else next(iter(it.values()))) for it in rows)
 
 
 class OracleSeed:

@@ -890,8 +890,11 @@ class SqlCypherCompiler(ABC):
         """
 
     def same_key(self, a: str, b: str) -> str:
-        """Whether the key columns `a` and `b`, of two rows, hold the same key, as a test of the key beside
-        `id(a) = id(b)`: see Oracle's."""
+        """
+        Whether the key columns `a` and `b`, of two rows, hold the same key: a node equal to a node, and a test of the
+        key beside `id(a) = id(b)`. A store whose planner rewrites a join on key = key into a wrong answer compares them
+        in a form it can't rewrite: see Oracle's.
+        """
         return f"{a} = {b}"
 
     @abstractmethod
@@ -5640,7 +5643,9 @@ class SqlCypherCompiler(ABC):
         if isinstance(temporal, Bool):
             return temporal.sql
         if isinstance(left, Node) and isinstance(right, Node):
-            return f"{left.nid} = {right.nid}"
+            # Through the store's key comparison: on Oracle, a plain `nid = nid` lets it drop the later node's join
+            # (#396).
+            return self.same_key(left.nid, right.nid)
         if isinstance(left, Relationship) and isinstance(right, Relationship):
             return f"{left.eid} = {right.eid}"
         # A map or a list that holds a node or a relationship is equal where what it holds is, by identity.

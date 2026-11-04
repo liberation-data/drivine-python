@@ -197,6 +197,13 @@ people = await pm.query(spec.bind({"city": "Sydney"}))
   that reads the row, in the select list of a lateral view that begins a subquery's `FROM`, was worked out once for
   the statement and not for each row, so `WHERE 'b' IN keys(n)` found nothing
   ([#272](https://github.com/liberation-data/drivine-python/issues/272)).
+- On Oracle a node compared with a node (`c = q`, `c <> q`, `c IN [q]`), or an id with an id (`id(c) = id(q)`),
+  compares their keys with `+ 0` on one side and again the other way round, `(n4.nid = n2.nid + 0 AND n2.nid = n4.nid
+  + 0)`, so either node is still read by its key. This works around Oracle rewrites, seen on 23.26.3, of a key equal to
+  a key: Oracle dropped the later node's join and tested its label in a form that misses a node with more than one
+  label, or read the other node by the key of a node it had dropped, and gave no rows
+  ([#393](https://github.com/liberation-data/drivine-python/issues/393),
+  [#396](https://github.com/liberation-data/drivine-python/issues/396)).
 - What each statement gives is the [Cypher spec](https://github.com/liberation-data/drivine-cypher-spec), which the
   three Drivine libraries run alike.
 

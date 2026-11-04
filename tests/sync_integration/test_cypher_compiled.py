@@ -6179,3 +6179,53 @@ def test_an_id_compared_across_a_relationship_of_either_direction_keeps_the_rows
         1,
         2,
     ]
+
+
+def test_a_node_with_a_label_compared_to_one_matched_before_it_other_than_by_equals_keeps_the_rows_cypher_keeps(
+    cypher_pm: PersistenceManager,
+):
+    # #396: not in the spec yet, the forms beside "A node equal to one matched before it" that compare the two nodes'
+    # keys too, through the store's comparison of two keys, which on Oracle keeps the later node's join. drivine4j's
+    # CypherQueryContract of liberation-data/drivine4j#576.
+    seeded(cypher_pm)
+
+    def query(cypher: str) -> list[Any]:
+        return cypher_pm.query(spec(cypher))
+
+    q = "MATCH (p {name: 'Keanu'})-[:KNOWS]->(q)"
+    assert query(f"{q} MATCH (c:Person) WHERE c <> q RETURN c.name ORDER BY c.name") == [
+        "Hugo",
+        "Keanu",
+        "Laurence",
+    ]
+    for test in ["NOT c <> q", "c IN [q]", "[c] = [q]", "{x: c} = {x: q}", "CASE c WHEN q THEN true ELSE false END"]:
+        assert query(f"{q} MATCH (c:Person) WHERE {test} RETURN c.name") == ["Carrie"], test
+    assert query(f"{q} OPTIONAL MATCH (c:Person) WHERE c = q RETURN c.name") == ["Carrie"]
+    assert query(f"{q} WHERE EXISTS {{ MATCH (c:Person) WHERE c = q }} RETURN q.name") == ["Carrie"]
+    assert query(f"{q} RETURN COUNT {{ MATCH (c:Person) WHERE c = q }}") == [1]
+
+
+def test_a_node_optional_match_finds_none_compared_to_a_node_is_null_as_a_value_and_as_a_test(
+    cypher_pm: PersistenceManager,
+):
+    # #396: beside "A node equal to one matched before it", Oracle's key comparison, both ways round, is null where
+    # either key is. drivine4j's CypherQueryContract of liberation-data/drivine4j#576.
+    seeded(cypher_pm)
+
+    def query(cypher: str) -> list[Any]:
+        return cypher_pm.query(spec(cypher))
+
+    q = "MATCH (q:Person {name: 'Carrie'}) OPTIONAL MATCH (x:Nope)"
+    assert query(
+        f"{q} RETURN [x = q, q = x, x <> q, NOT x = q, x = x, x IN [q], (x = q) IS NULL, coalesce(x = q, true)]"
+    ) == [[None, None, None, None, None, None, True, True]]
+    # A list or a map that holds the node is compared item by item, entry by entry, through the same comparison.
+    assert query(
+        f"{q} RETURN [[x] = [q], {{n: x}} = {{n: q}}, [x, q] = [x, q], [q] = [q], {{n: q}} = {{n: q}}, [q] <> [x]]"
+    ) == [[None, None, None, True, True, None]]
+    assert query(f"{q} WITH q, x WHERE [x] = [q] OR {{n: x}} = {{n: q}} RETURN q.name") == []
+    assert query(f"{q} WITH q, x WHERE x = q OR NOT x = q RETURN q.name") == []
+    assert query(f"{q} WITH q, x WHERE (x = q) IS NULL RETURN q.name") == ["Carrie"]
+    assert query(
+        "MATCH (a:Person), (b:Person) RETURN [count(CASE WHEN a = b THEN 1 END), count(CASE WHEN NOT a = b THEN 1 END)]"
+    ) == [[4, 12]]

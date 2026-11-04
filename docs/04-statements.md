@@ -204,6 +204,14 @@ people = await pm.query(spec.bind({"city": "Sydney"}))
   label, or read the other node by the key of a node it had dropped, and gave no rows
   ([#393](https://github.com/liberation-data/drivine-python/issues/393),
   [#396](https://github.com/liberation-data/drivine-python/issues/396)).
+- On Oracle, a compiled node with a label whose key a `WHERE` sets equal to another node's (`a = b`, `id(b) = id(a)`,
+  as a condition the row must pass, not under `NOT` or beside an `OR`) tests its labels by their text, which the index
+  over labels can't answer, where the other node is found by a label, properties, a relationship or its id: Oracle
+  then reads it by its primary key. With the index's form, Oracle 23.26 read that index again for each row of the
+  other node, so `MATCH (a:Big) MATCH (b:Big) WHERE a = b` took 1.5 s over 4,000 nodes, growing with their square
+  ([#404](https://github.com/liberation-data/drivine-python/issues/404)). The earlier of two such nodes keeps the
+  index's form, and so does a node equal to one found by nothing else (`MATCH (a) MATCH (b:Rare) WHERE a = b`), where
+  the index is the way in.
 - What each statement gives is the [Cypher spec](https://github.com/liberation-data/drivine-cypher-spec), which the
   three Drivine libraries run alike.
 

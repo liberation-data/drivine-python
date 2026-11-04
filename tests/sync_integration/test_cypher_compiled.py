@@ -2292,6 +2292,12 @@ def test_a_relationship_of_either_direction_is_found_each_way_round_and_one_from
         ("MATCH (:CyUn)-[:CY_UN]-() RETURN count(*)", [7]),
         ("MATCH (a:CyUn {k: 1}), (b:CyUn {k: 2}) MATCH (a)-[r:CY_UN]-(b) RETURN r.i ORDER BY r.i", [1, 2]),
         ("MATCH (a:CyUn {k: 1})-[r:CY_UN]-(a) RETURN r.i", [3]),
+        # Two steps take no relationship twice, though each half of it has the relationship's id.
+        ("MATCH (:CyUn {k: 3})-[:CY_UN]-(b)-[:CY_UN]-(c) RETURN c.k ORDER BY c.k", [1, 1]),
+        (
+            "MATCH (a:CyUn {k: 1})-[r1:CY_UN]-(b)-[r2:CY_UN]-(a) RETURN [r1.i, r2.i] ORDER BY r1.i",
+            [[1, 2], [2, 1]],
+        ),
         # Its stored direction still reads as stored: the one undirected step found, then matched directed.
         (
             "MATCH (:CyUn {k: 3})-[r:CY_UN]-(b) WITH r.i AS i MATCH (s)-[:CY_UN {i: i}]->(e) RETURN [i, s.k, e.k]",

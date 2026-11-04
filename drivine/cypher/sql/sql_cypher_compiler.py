@@ -881,6 +881,19 @@ class SqlCypherCompiler(ABC):
         return None
 
     @abstractmethod
+    def key_value(self, json: str) -> str:
+        """
+        The JSON value as a node's or a relationship's key column compares with it: the number it is, a whole one where
+        the store's key holds no other, or null where it is no number. A test of the key that stands beside an id's
+        comparison reads it, so the store reads the row by its primary key (see `_id_key`).
+        """
+
+    def same_key(self, a: str, b: str) -> str:
+        """Whether the key columns `a` and `b`, of two rows, hold the same key, as a test of the key beside
+        `id(a) = id(b)`: see Oracle's."""
+        return f"{a} = {b}"
+
+    @abstractmethod
     def elements(self, json: str, alias: str) -> str:
         """The items of the JSON list as rows named `alias`, with columns `item` and `item_no`, counted from 1."""
 
@@ -1615,6 +1628,15 @@ class SqlCypherCompiler(ABC):
         self._filtered = False
         """Whether the expression `_value_of` has begun is read by a `WHERE` for its truth alone, as `_filtering` said
         as it began."""
+        self._conjoining = False
+        """
+        Whether the expression being compiled is one a row must pass to be kept: the `WHERE` `_condition` itself, or one
+        of its conditions joined by `AND` alone. A test beside such a one, true wherever it is, may stand by it
+        (`_id_key`).
+        """
+        self._conjoined = False
+        """Whether the expression `_value_of` has begun is one a row must pass to be kept, as `_conjoining` said as it
+        began."""
         self._made_anew: set[str] = set()
         """
         The variables made here for a randomUUID() made first, for each row: no variable of the statement's, though one
@@ -4209,10 +4231,12 @@ class SqlCypherCompiler(ABC):
         row.
         """
         self._filtering = True
+        self._conjoining = True
         try:
             return self.bool(self._expression(where, scope))
         finally:
             self._filtering = False
+            self._conjoining = False
 
     def _expression(self, expression: Expression, scope: Scope) -> Value:
         """
@@ -4220,16 +4244,21 @@ class SqlCypherCompiler(ABC):
         null in a list or a map, and with its Json.known kind where the statement writes it as a value of one.
         """
         outer = self._filtering
+        conjunct = self._conjoining
         # Only a condition joined by AND or OR is read for its truth alone: NOT, a CASE or a function reads null apart
         # from false.
         self._filtering = (
             outer and isinstance(expression, Binary) and expression.operator in (BinaryOperator.AND, BinaryOperator.OR)
         )
         self._filtered = outer
+        # And only one joined by AND must itself be true for the row to be kept: beside an OR, another may keep it.
+        self._conjoining = conjunct and isinstance(expression, Binary) and expression.operator is BinaryOperator.AND
+        self._conjoined = conjunct
         try:
             value = self._value_of(expression, scope)
         finally:
             self._filtering = outer
+            self._conjoining = conjunct
         if isinstance(value, Json) and value.known is None:
             known = self._known_kind(expression, scope)
             if known is not None:
@@ -5319,12 +5348,25 @@ class SqlCypherCompiler(ABC):
 
     def _binary(self, binary: Binary, scope: Scope) -> Value:
         filter_ = self._filtered
+        conjunct = self._conjoined
         operator = binary.operator
         self._in_of_kind(binary, scope)
+        # An id in a list written or given, where the row must pass that, is tested by its key beside: see `_id_key`. A
+        # list read from the store or worked out may be no list, whose items no store's elements of it would read as
+        # Cypher does.
+        key_in = (
+            self._id_key(binary.left, scope)
+            if conjunct and operator is BinaryOperator.IN and self._written_list(binary.right)
+            else None
+        )
         if operator in (BinaryOperator.EQUALS, BinaryOperator.NOT_EQUALS, BinaryOperator.IN):
             itemwise = self._itemwise(binary, scope)
             if itemwise is not None:
-                return Bool(f"(NOT {itemwise})" if operator is BinaryOperator.NOT_EQUALS else itemwise)
+                if operator is BinaryOperator.NOT_EQUALS:
+                    return Bool(f"(NOT {itemwise})")
+                if key_in is not None:
+                    return Bool(self._keyed_in(key_in, self._expression(binary.right, scope), itemwise))
+                return Bool(itemwise)
         if operator in (BinaryOperator.AND, BinaryOperator.OR, BinaryOperator.XOR):
             for it in (binary.left, binary.right):
                 self._require_condition(it, scope, operator.value)
@@ -5349,7 +5391,10 @@ class SqlCypherCompiler(ABC):
             equal = (
                 None if plain else self._given_itemwise(binary.left, left_value, binary.right, right_value)
             ) or self._equality(left_value, right_value, binary.right, plain, self._stored(binary.left, scope))
-            return Bool(equal if operator is BinaryOperator.EQUALS else f"NOT ({equal})")
+            if operator is BinaryOperator.NOT_EQUALS:
+                return Bool(f"NOT ({equal})")
+            keyed = self._id_equality(binary, left_value, right_value, scope) if conjunct else None
+            return Bool(f"({keyed} AND {equal})" if keyed is not None else equal)
         if operator in _COMPARED:
             # Values of two kinds are not ordered, as in Cypher: the comparison is null. Two lists are, item by item.
             sql = _COMPARED[operator]
@@ -5423,7 +5468,8 @@ class SqlCypherCompiler(ABC):
         if operator is BinaryOperator.POWER:
             return Json(self.scalar(self.float_(f"power({self.number(a)}, {self.number(b)})")))
         if operator is BinaryOperator.IN:
-            return Bool(self._membership(binary, left_value, right_value, scope, filter_))
+            within = self._membership(binary, left_value, right_value, scope, filter_)
+            return Bool(self._keyed_in(key_in, right_value, within) if key_in is not None else within)
         if operator is BinaryOperator.STARTS_WITH:
             return Bool(self.texts([a, b], lambda texts: self.shared(texts, lambda it: self.starts_with(it[0], it[1]))))
         if operator is BinaryOperator.MATCHES:
@@ -5526,6 +5572,69 @@ class SqlCypherCompiler(ABC):
             return self.comparable(Json(f"(SELECT {items} FROM {self.temporal_elements(listed, e)})", ordered=True))
 
         return self.shared1(json, lambda x: f"CASE WHEN {self.type_of(x)} = 'array' THEN {over(x, depth)} END")
+
+    @staticmethod
+    def _id_key(expression: Expression, scope: Scope) -> str | None:
+        """
+        The key column the expression reads, where it is the id of a node or a relationship in the scope, `id(n)` or
+        `elementId(n)`: its `nid` or `eid`. The id is JSON, and compared as JSON gives Cypher's answer for a float, a
+        text, a list or null, but no store's primary key answers that comparison, so `WHERE id(n) = $id` read every
+        node, and an `UNWIND` of ids every node for each (#393, drivine4j#575). Where the row must pass the comparison
+        (`_conjoining`), a test of the key stands beside it: true wherever the comparison is, as an id is equal only to
+        the number it is, so the two keep the rows the comparison keeps, and the store reads them by the key.
+        """
+        if not isinstance(expression, Function) or expression.distinct:
+            return None
+        if expression.name.lower() not in ("id", "elementid") or len(expression.arguments) != 1:
+            return None
+        [argument] = expression.arguments
+        subject = scope.get(argument.name) if isinstance(argument, Variable) else None
+        if isinstance(subject, Node):
+            return subject.nid
+        if isinstance(subject, Relationship):
+            return subject.eid
+        return None
+
+    def _written_list(self, expression: Expression) -> bool:
+        """Whether the expression is a list the statement writes, or a parameter bound to one: see `_keyed_in`."""
+        if isinstance(expression, ListLiteral):
+            return True
+        return isinstance(expression, Parameter) and isinstance(self._parameters.tree(expression.name), list)
+
+    def _id_equality(self, binary: Binary, left: Value, right: Value, scope: Scope) -> str | None:
+        """
+        The key test to stand beside the binary, an equality of `left` and `right` where one side is an id (`_id_key`):
+        the two keys the same (`same_key`), where both are, or the key and the number the other side is (`key_value`).
+        None where neither side is an id, or the other is no JSON value, which is no number.
+        """
+        a, b = self._id_key(binary.left, scope), self._id_key(binary.right, scope)
+
+        def keyed(key: str, other: Value) -> str | None:
+            if not isinstance(other, Json) or not _plain_json(other):
+                return None
+            return f"{key} = {self.key_value(self.comparable(other))}"
+
+        if a is not None and b is not None:
+            return self.same_key(a, b)
+        if a is not None:
+            return keyed(a, right)
+        if b is not None:
+            return keyed(b, left)
+        return None
+
+    def _keyed_in(self, key: str, listed: Value, within: str) -> str:
+        """
+        `within`, an id's `IN` the list `listed`, with the test beside it that its key is the number an item is
+        (`key_value`): true wherever `within` is. An item that is no number has a null key, so where none is the id the
+        test is null, not false, as `within` is where the list holds a null: the two together keep the rows `within`
+        keeps. A list of nodes, of temporal values or of values that hold a node is compared otherwise, and has no such
+        test.
+        """
+        if not isinstance(listed, Json) or not _plain_json(listed):
+            return within
+        i = self._alias("k")
+        items = self._elements_of(listed, self.comparable(listed), i)
+        return f"({key} IN (SELECT {self.key_value(self.item(i))} FROM {items}) AND {within})"
 
     def _equality(
         self,

@@ -203,6 +203,12 @@ class OracleCypherCompiler(SqlCypherCompiler):
         WHERE p.born > 1962) = true` was null for each person (the spec's "Quantifiers of null"), and right with the
         hint, or with the property taken out as JSON first.
         """
+        self._keyed: set[str] = set()
+        """
+        Each test of a node's labels `keyed_labels` wrote. Kept as text, and looked for in the query `planned` is
+        given, so a trial compile that writes one and is thrown away, or a step of a procedure that holds none, is
+        planned as before.
+        """
 
     def compile_query(self, query: Query, parameters: Mapping[str, Any]) -> CompiledCypher:
         """
@@ -845,8 +851,13 @@ class OracleCypherCompiler(SqlCypherCompiler):
         grew with the square of the label's nodes (#404, liberation-data/drivine4j#578). A hint naming the key's index
         did as well, but names the node's alias in the query block that reads it, which a statement's subqueries and
         `WITH`s move.
+
+        Each test so written is noted (`_keyed`), and a query that holds one is planned without statistics feedback
+        (see `planned`).
         """
-        return " AND ".join(holds_label(labels, it) for it in all_)
+        test = " AND ".join(holds_label(labels, it) for it in all_)
+        self._keyed.add(test)
+        return test
 
     def key_value(self, json: str) -> str:
         """A number, as the key's `NUMBER`; anything else, or a number past one, null."""
@@ -1459,13 +1470,27 @@ class OracleCypherCompiler(SqlCypherCompiler):
         hint is the statement's, whichever query of it holds it, so the outermost one holds it. A query of one table
         reads as it did, none lost a test, but where a comparison reads a property by its own path (see
         `_reads_compared`).
+
+        A query that tests a node's labels as `keyed_labels` writes them, to read it by its key, is planned without
+        statistics feedback (`OPT_PARAM('_optimizer_use_feedback' 'false')`, `NO_FEEDBACK`). Oracle (23.26) estimates
+        one row from the index over labels, and plans the keyed read on a cursor's first run; the run's feedback then
+        corrects that one row to the label's count, and Oracle plans the next two runs again, reading every node in the
+        label's text form and the index once for each, before it went back to the keyed plan for the fourth run and
+        after: `MATCH (a:Big) MATCH (b:Big) WHERE a = b` took 7 ms, then 1,482 ms and 1,526 ms, then 7 ms over 4,000
+        nodes, so each new cursor paid the cost #404 took away twice (#415, liberation-data/drivine4j#585). The hint
+        leaves the first run's plan as it was. It is the statement's, so the outermost query holds it.
         """
-        if len(self._graph_table.findall(query)) < 2 and not self._reads_compared:
+        transform = self._reads_compared or len(self._graph_table.findall(query)) >= 2
+        feedback = any(it in query for it in self._keyed)
+        hints = " ".join(
+            it for it, wanted in ((_NO_JSON_TABLE_TRANSFORM, transform), (NO_FEEDBACK, feedback)) if wanted
+        )
+        if not hints:
             return query
         hinted = _HINTED.match(query)
         if hinted:
-            return f"SELECT /*+ {hinted.group(1)} {_NO_JSON_TABLE_TRANSFORM} */{query[hinted.end() :]}"
-        return re.sub(r"^SELECT ", f"SELECT /*+ {_NO_JSON_TABLE_TRANSFORM} */ ", query, count=1)
+            return f"SELECT /*+ {hinted.group(1)} {hints} */{query[hinted.end() :]}"
+        return re.sub(r"^SELECT ", f"SELECT /*+ {hints} */ ", query, count=1)
 
     def lateral(self, query: str, name: str, optional: bool, columns: Sequence[tuple[str, bool]]) -> str:
         """
@@ -1799,6 +1824,9 @@ _SHORT_TEXT = 4000
 
 _NO_JSON_TABLE_TRANSFORM = "NO_JSON_TABLE_TRANSFORM"
 """The hint that turns Oracle's JSON table transformation off: see `OracleCypherCompiler.planned`."""
+
+NO_FEEDBACK = "OPT_PARAM('_optimizer_use_feedback' 'false')"
+"""The hint that plans a statement without statistics feedback: see `OracleCypherCompiler.planned`."""
 
 _INDEXED_LABEL = re.compile(r"""JSON_EXISTS\(([\w.]+\.labels), '\$\[\*\]\?\(@ == "((?:[^"\\]|\\.)*)"\)'\)""", re.DOTALL)
 """

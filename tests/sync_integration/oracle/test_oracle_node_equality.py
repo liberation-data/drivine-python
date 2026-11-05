@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 
-from drivine.cypher.sql.oracle_cypher_compiler import OracleCypherCompiler
+from drivine.cypher.sql.oracle_cypher_compiler import NO_FEEDBACK, OracleCypherCompiler
 from drivine.query.statement import cypher_statement
 from drivine.sync import PersistenceManager, PersistenceManagerFactory, QuerySpecification
 from tests.sync_integration.oracle.oracle_seed import ON_ORACLE, oracle_plan
@@ -75,3 +75,21 @@ def test_a_node_with_two_labels_equal_to_a_node_matched_before_it_is_still_joine
     factory: PersistenceManagerFactory, statement: str, expected: list[Any]
 ):
     assert_joined(factory.get("oracle"), statement, expected)
+
+
+def test_a_node_read_by_its_key_in_a_statement_that_writes_is_found_and_written(
+    factory: PersistenceManagerFactory,
+):
+    # A statement that writes is a procedure, and Oracle takes the step that reads c by its key with its hint (#415,
+    # liberation-data/drivine4j#585).
+    pm = factory.get("oracle")
+    statement = "MATCH (p {name: 'Keanu'})-[:KNOWS]->(q) MATCH (c:Person) WHERE c = q SET c.seen = true RETURN c.name"
+    sql = OracleCypherCompiler(GRAPH).compile(statement, {}).sql
+    assert NO_FEEDBACK in sql, sql
+    try:
+        assert pm.query(QuerySpecification[Any](cypher_statement(statement))) == ["Carrie"], statement
+        assert pm.query(
+            QuerySpecification[Any](cypher_statement("MATCH (c:Person) WHERE c.seen = true RETURN c.name"))
+        ) == ["Carrie"]
+    finally:
+        pm.query(QuerySpecification[Any](cypher_statement("MATCH (c:Person) REMOVE c.seen")))

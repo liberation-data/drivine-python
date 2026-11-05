@@ -9,20 +9,38 @@ value or deletes what it made, over nodes just made, which Postgres planned to h
 (17 s over 20,000 rows). Each is timed as tests/integration/sql/test_compiled_write_loop_time.py times a write, from an
 empty graph vacuumed, that NODES makes the nodes of where it reads them. drivine4j's
 CompiledWriteKeyedReadTimePostgresTest, ported.
+
+The writes run on a graph of their own, GRAPH, as drivine4j's and Drivine for TypeScript's do, through a pool that is
+closed after each test. A VACUUM of 20,000 dead relationships vacuums their indexes in parallel, and the session that
+ran it keeps some 1.2 MB of /dev/shm until it ends; with that held, a later parallel build of a vector index, which asks
+for nearly all of a container's 64 MB, failed for want of space.
 """
 
+import dataclasses
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 
 import pytest
 
 from drivine.query.statement import cypher_statement
-from drivine.sync import PersistenceManager, QuerySpecification
+from drivine.sync import (
+    ConnectionProperties,
+    DatabaseRegistry,
+    PersistenceManager,
+    PersistenceManagerFactory,
+    QuerySpecification,
+)
 from tests.sync_integration.postgres.conftest import ON_POSTGRES
 from tests.sync_integration.sql.test_compiled_write_loop_time import LARGE, SMALL, slow
 
 pytestmark = ON_POSTGRES
+
+GRAPH = "cy_keyed"
+"""The graph the writes are timed on: tables of their own, apart from those the other tests read."""
+
+NAME = f"postgres_{GRAPH}"
 
 
 @dataclass(frozen=True)
@@ -76,6 +94,24 @@ NODES = "UNWIND range(1, $n) AS i CREATE (:CyLoop {i: i})"
 """The nodes a write that reads them is given."""
 
 
+@pytest.fixture
+def keyed(registry: DatabaseRegistry, factory: PersistenceManagerFactory) -> Iterator[PersistenceManager]:
+    """A manager of GRAPH, its rows deleted and its pool closed after the test, however it ends."""
+    if registry.registered(NAME) is None:
+        properties = dataclasses.replace(ConnectionProperties.from_env("postgres"), default_graph_path=GRAPH)
+        registry.builder().with_properties(properties).register(NAME)
+    pm = factory.get(NAME)
+    try:
+        yield pm
+    finally:
+        try:
+            pm.execute(QuerySpecification(f"DELETE FROM {GRAPH}_node"))
+        finally:
+            provider = registry.registered(NAME)
+            assert provider is not None
+            provider.end()
+
+
 def query(pm: PersistenceManager, cypher: str, n: int) -> list[Any]:
     return pm.query(QuerySpecification[Any](cypher_statement(cypher)).bind({"n": n}))
 
@@ -83,10 +119,10 @@ def query(pm: PersistenceManager, cypher: str, n: int) -> list[Any]:
 def timed(pm: PersistenceManager, write: Write, n: int) -> int:
     """The milliseconds the write took over `n` rows, from an empty graph vacuumed."""
     # A node's relationships go with it: the relationship table cascades.
-    pm.execute(QuerySpecification("DELETE FROM drivine_node"))
+    pm.execute(QuerySpecification(f"DELETE FROM {GRAPH}_node"))
     # Statistics that say the tables are empty: autocommitted, as VACUUM runs outside a transaction.
-    pm.execute(QuerySpecification("VACUUM ANALYZE drivine_edge"))
-    pm.execute(QuerySpecification("VACUUM ANALYZE drivine_node"))
+    pm.execute(QuerySpecification(f"VACUUM ANALYZE {GRAPH}_edge"))
+    pm.execute(QuerySpecification(f"VACUUM ANALYZE {GRAPH}_node"))
     if write.cypher.startswith("MATCH"):
         query(pm, NODES, n)
     start = time.perf_counter()
@@ -98,12 +134,9 @@ def timed(pm: PersistenceManager, write: Write, n: int) -> int:
 
 @pytest.mark.parametrize("write", WRITES, ids=[it.name for it in WRITES])
 def test_a_write_whose_loop_reads_a_table_for_each_row_takes_about_ten_times_as_long_over_ten_times_the_rows(
-    pm: PersistenceManager, write: Write
+    keyed: PersistenceManager, write: Write
 ):
-    try:
-        small, large = timed(pm, write, SMALL), timed(pm, write, LARGE)
-    finally:
-        pm.execute(QuerySpecification("DELETE FROM drivine_node"))
+    small, large = timed(keyed, write, SMALL), timed(keyed, write, LARGE)
     report = f"{write.name} {small} ms over {SMALL} rows, {large} ms over {LARGE}"
     print(f"CompiledWriteKeyedReadTime POSTGRES: {report}")
     assert not slow(small, large), report

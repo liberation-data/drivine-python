@@ -17,7 +17,10 @@ class Bm25Dialect:
     """How a store writes what `bm25_ranked` asks of it."""
 
     count: Callable[[str, str], str]
-    """How often a term occurs in a text, the term bound as a parameter."""
+    """
+    How often a term occurs in a text, the term bound as a parameter: each time, where it is written again at once too,
+    so not taking the character after one (drivine4j#607).
+    """
     holds: Callable[[str, str], str]
     """Whether a term occurs in a text at all, the term bound as a parameter: cheaper than `count` where it can tell."""
     ln: Callable[[str], str]

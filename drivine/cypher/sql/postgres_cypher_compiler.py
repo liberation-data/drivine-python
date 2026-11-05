@@ -8,6 +8,7 @@ from collections.abc import Callable, Sequence
 from decimal import Decimal
 from typing import Any, cast
 
+from drivine.cypher.sql import procedure_step as steps
 from drivine.cypher.sql.compiled_cypher import CompiledCypher
 from drivine.cypher.sql.parameters import OBJECT, cypher_json, json_text, jsonable
 from drivine.cypher.sql.postgres_temporal_sql import PostgresTemporalSql
@@ -60,6 +61,15 @@ _SCIENTIFIC = "9.9999999999999999EEEE"
 
 _PROPERTY = re.compile(r"^\(([\w.]+) -> ('(?:[^']|'')*')\)$")
 """A property as `property_of` reads it from a column: `(n1.props -> 'name')`."""
+
+_JOIN_METHODS = ("enable_seqscan", "enable_hashjoin", "enable_mergejoin")
+"""The planner's settings a loop's statements for each row are planned with off: see `_planned_as_nested_loops`."""
+
+_PLANNER = "cy_planner"
+"""The procedure's variable that holds _JOIN_METHODS as they were before a loop planned with them off."""
+
+_JSON_LIST = "jsonb_array_elements("
+"""How a query reads the rows of a JSON list: see `_planned_as_nested_loops`."""
 
 _CODE_POINT_PREFIX = 500
 """
@@ -688,6 +698,19 @@ class PostgresCypherCompiler(SqlCypherCompiler):
         with itself. It is made by a statement of its own, the prelude: psycopg sends a statement with parameters as one
         command.
         """
+        nested_loops = any(self._planned_as_nested_loops(it) for it in program)
+        body: list[str] = []
+        for step in program:
+            if not self._planned_as_nested_loops(step):
+                body += self.statements([step])
+                continue
+            saved = ", ".join(f"current_setting('{it}')" for it in _JOIN_METHODS)
+            off = ", ".join(f"set_config('{it}', 'off', true)" for it in _JOIN_METHODS)
+            restored = ", ".join(
+                f"set_config('{it}', {_PLANNER}[{i}], true)" for i, it in enumerate(_JOIN_METHODS, start=1)
+            )
+            body += [f"{_PLANNER} := ARRAY[{saved}];", f"PERFORM {off};", *self.statements([step])]
+            body.append(f"PERFORM {restored};")
         kept = self.kept_lists(program)
         declared = [
             "#variable_conflict use_column",
@@ -706,7 +729,9 @@ class PostgresCypherCompiler(SqlCypherCompiler):
         for depth in range(1, NESTING + 1):
             declared += [f"    {SAVED}{depth} jsonb;", f"    {GATHERED}{depth} jsonb;", f"    {CALLER}{depth} jsonb;"]
         declared += [f"    {it} jsonb[];" for it in kept if it != OUT]
-        text = "\n".join([*declared, "BEGIN", indent("\n".join(self.statements(program))), "END"])
+        if nested_loops:
+            declared.append(f"    {_PLANNER} text[];")
+        text = "\n".join([*declared, "BEGIN", indent("\n".join(body)), "END"])
         digest = hashlib.sha256(text.encode()).hexdigest()
         function = f"pg_temp.drivine_cypher_{digest[:24]}"
         # The body is quoted with dollars, by a tag no text in it holds: a text of `$cy$` would end it. The first of
@@ -719,6 +744,50 @@ class PostgresCypherCompiler(SqlCypherCompiler):
         return CompiledCypher(
             f"SELECT cy.result FROM {function}(CAST(${OBJECT} AS jsonb)) AS cy (result)", parameters, prelude
         )
+
+    def _planned_as_nested_loops(self, step: ProcedureStep) -> bool:
+        """
+        Whether `step`, a step of the procedure outside any loop, is a loop whose statements for each row are planned as
+        nested loops over the tables' indexes: with _JOIN_METHODS off while it runs, and as they were after it (#420,
+        liberation-data/drivine4j#609). Postgres plans a statement the loop runs for each row on its first runs, and may
+        keep that plan for all the rows after. Two of the loop's reads were planned to scan a whole table, so each row
+        read all of it, and the loop took time in step with the square of its rows:
+
+        - A read of a table by its key, where the loop adds to the table: a `MERGE` reading its pattern, a `SET` of what
+          the loop made, in an `ON CREATE`, a `CALL { … }` or a `FOREACH`. A table vacuumed while empty, as autovacuum
+          leaves one, has statistics that say it holds nothing, and its plan from the first rows, a scan of the few rows
+          there, was kept as the loop filled the table. `MATCH (n) MERGE (n)-[:R]->(n)` took 28.6 s over 20,000 nodes,
+          and 0.4 s on a table never vacuumed, which Postgres takes to have ten pages.
+        - A read of the rows of a `CALL { … }` for one row, which `jsonb_array_elements` gives, joined to a table:
+          Postgres takes such a list to hold 100 rows, and below some 20,000 nodes plans to hash a scan of the whole
+          table. A `MATCH (n) CALL (n) { SET n.y = n.i RETURN n.i AS j } RETURN count(j)` took 17 s over 20,000 nodes
+          just made, and 0.6 s over the same nodes once a `SET` of each had grown the table past that.
+
+        So planned, each read is by an index, and the loops take 0.4 s to 0.7 s over 20,000 rows. A loop with neither
+        read is planned as it was, and its procedure is the same text: `MATCH (n) SET n.x = 1` reads its nodes by their
+        keys from a table it adds nothing to. A loop outside all others reads only the procedure's own rows, no table,
+        so the settings change the plans of the statements it runs for each row alone. There is no exception block to
+        put them back where the loop fails: set with `set_config(…, true)`, they are the transaction's, so the failure
+        aborts the transaction, or the savepoint it is rolled back to, and Postgres's rollback undoes the settings with
+        it.
+
+        A read for each row that no index answers is no faster for it: one that counted 20,000 nodes for each of 2,000
+        rows took 1.2 s to 2.0 s either way, and one that joined 20,000 relationships to their nodes for each row 1.7
+        times as long.
+        """
+        if not isinstance(step, steps.Loop):
+            return False
+        statements = _sql_of(step.body)
+        tables = (self.nodes, self.edges)
+
+        def inserts(statement: str, table: str) -> bool:
+            return statement.startswith(f"INSERT INTO {table} ")
+
+        def reads(statement: str, table: str) -> bool:
+            return not inserts(statement, table) and re.search(rf"\b{re.escape(table)}\b", statement) is not None
+
+        grown = [table for table in tables if any(inserts(it, table) for it in statements)]
+        return any(reads(it, table) and (table in grown or _JSON_LIST in it) for it in statements for table in tables)
 
     def return_rows(self, query: str) -> list[str]:
         return [f"RETURN QUERY SELECT CAST(cy_q.result AS json) FROM (\n{indent(query)}\n) cy_q;"]
@@ -835,3 +904,20 @@ def _written(value: Any) -> str:
     if isinstance(value, list):
         return "[" + ",".join(_written(it) for it in cast(list[Any], value)) + "]"
     return json_text(value)
+
+
+def _sql_of(program: Sequence[ProcedureStep]) -> list[str]:
+    """The SQL of each step of `program`, and of the steps in its loops and conditions."""
+    sql: list[str] = []
+    for step in program:
+        if isinstance(step, steps.Select):
+            sql.append(f"SELECT {step.expression}{step.from_}")
+        elif isinstance(step, steps.Loop):
+            sql += [step.query, *_sql_of(step.body)]
+        elif isinstance(step, steps.If):
+            sql += [step.condition, *_sql_of(step.body)]
+        elif isinstance(step, steps.Execute):
+            sql.append(step.statement)
+        elif isinstance(step, steps.Return):
+            sql.append(step.query)
+    return sql

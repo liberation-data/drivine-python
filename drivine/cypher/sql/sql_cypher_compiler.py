@@ -404,6 +404,10 @@ class _Select:
         self.walks = False
         """Whether a variable-length walk is among its sources, or among those of a `WITH` it reads: a term it sorts by
         is then bound in no subquery (see `_project`)."""
+        self.after_grouping = False
+        """Whether it reads the rows of a `WITH` that groups them, as one that aggregates or is `DISTINCT` does, or of a
+        `WITH` that reads those, or is the lateral query of an `OPTIONAL MATCH` or a shortest path read beside such
+        rows: a node a pattern finds here is then tested for its labels as `grouped_labels` tests them."""
         self._label_tests: dict[str, list[_LabelTest]] = {}
         """The tests among its `where` of the labels of each node, by the node's key, in the order they were added: see
         `relabel`."""
@@ -973,6 +977,14 @@ class SqlCypherCompiler(ABC):
         tests them, where the store reads that node by its key anyway. A store whose planner reads the index over
         labels for each row of the other node instead, and filters it on the key, tests them in a form the index can't
         answer: see Oracle's.
+        """
+        return self.has_labels(labels, all_)
+
+    def grouped_labels(self, labels: str, all_: Sequence[str]) -> str:
+        """
+        Whether the labels, a JSON list, hold each of `all_`, for a node a `MATCH` finds after a `WITH` that groups its
+        rows (see `_Select.after_grouping`): one read beside the grouped rows, which the query can't merge into its own.
+        As `has_labels` tests them. A store whose planner fails on that shape tests them otherwise: see Oracle's.
         """
         return self.has_labels(labels, all_)
 
@@ -1745,6 +1757,12 @@ class SqlCypherCompiler(ABC):
         end, or their key compared with a value (`_id_equality`, `_keyed_in`), each in the part that binds the node
         (`_anchor`). Each key is a column of its own query, so this holds them for the whole statement.
         """
+        self._grouped: set[str] = set()
+        """
+        The keys of the nodes a pattern found after a `WITH` that groups its rows (`_Select.after_grouping`): a label a
+        condition tests of one is tested as its pattern's are, by `grouped_labels`. A node the `WITH` passed on is not
+        among them.
+        """
         self._made_anew: set[str] = set()
         """
         The variables made here for a randomUUID() made first, for each row: no variable of the statement's, though one
@@ -1894,6 +1912,11 @@ class SqlCypherCompiler(ABC):
         name = self._alias("w")
         next_ = self._select(outer or {})
         next_.walks = select.walks
+        next_.after_grouping = (
+            select.after_grouping
+            or with_.projection.distinct
+            or any(contains(it.expression, is_aggregate) for it in with_.projection.items)
+        )
         # A value made anew for each row is one value however often the clauses after read it: see `once`. Kept apart
         # from the query that reads it, where that query must not have it merged in: see `_cases_first`.
         anew = any(holds_anew(it.expression) for it in with_.projection.items)
@@ -2044,6 +2067,7 @@ class SqlCypherCompiler(ABC):
         With `seed`, the variable of a UUID made first for each row, each randomUUID() of `where` is read beside it.
         """
         inner = self._select(row.scope)
+        inner.after_grouping = row.after_grouping
         self._patterns(inner, patterns, met_by_paths)
         if where is not None:
             if seed is None:
@@ -2416,10 +2440,13 @@ class SqlCypherCompiler(ABC):
                 value = _node(name)
                 if node.variable is not None:
                     select.bind(node.variable, value)
+                if select.after_grouping:
+                    self._grouped.add(value.nid)
             else:
                 raise DrivineError(f"{node.variable} is not a node, and is used as one in a pattern.")
             if node.labels:
-                select.label_test(value, node.labels, self.has_labels(value.labels, node.labels))
+                labels = self.grouped_labels if select.after_grouping else self.has_labels
+                select.label_test(value, node.labels, labels(value.labels, node.labels))
             if node.properties is not None:
                 select.where.append(self._properties_match(value.props, node.properties, select.scope))
             if node.labels or node.properties is not None:
@@ -2506,6 +2533,7 @@ class SqlCypherCompiler(ABC):
         if relationship is None or relationship.range is None or relationship.group is not None:
             unsupported("A shortest path of anything but one variable-length relationship")
         inner = self._select(select.scope)
+        inner.after_grouping = select.after_grouping
         hops: list[_Hop] = []
         # Its ends named, to find the shortest between each two of them where they were not bound before it.
         first, last = pattern.nodes[0], pattern.nodes[-1]
@@ -4512,7 +4540,8 @@ class SqlCypherCompiler(ABC):
         if isinstance(expression, HasLabels):
             subject = self._expression(expression.subject, scope)
             if isinstance(subject, Node):
-                return Bool(f"({self.has_labels(subject.labels, expression.labels)})")
+                labels = self.grouped_labels if subject.nid in self._grouped else self.has_labels
+                return Bool(f"({labels(subject.labels, expression.labels)})")
             raise DrivineError("A label is tested of a node.")
         if isinstance(expression, ListLiteral):
             return self._list(expression, scope)

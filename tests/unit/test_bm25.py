@@ -11,7 +11,7 @@ from drivine.backend.matching_search import MatchingSearch
 from drivine.backend.oracle.oracle_backend import OracleBackend
 from drivine.backend.oracle.oracle_graph import OracleGraph
 from drivine.backend.sql.bm25 import Bm25Dialect, bm25_ranked, bm25_score
-from drivine.backend.sql.text_query import TextQuery
+from drivine.backend.sql.text_query import TextQuery, is_prefix
 
 
 class Shelf(NodeFragment, labels=["Shelf"]):
@@ -60,6 +60,17 @@ def test_filters_nothing_after_the_window_when_no_term_is_required_or_excluded()
     sql = bm25_ranked("CANDIDATES", "LABEL", TextQuery.parse("graph"), dialect)
     assert " w WHERE" not in sql
     assert ") w) b WHERE b.score > 0" in sql
+
+
+def test_scores_a_prefix_term_by_k1_plus_1_for_each_node_that_holds_it_as_lucenes_prefix_query_the_rest_by_bm25():
+    query = TextQuery.parse("kiw* melon")
+    assert [is_prefix(it) for it in query.scored] == [True, False]
+    sql = bm25_ranked("CANDIDATES", "LABEL", query, dialect)
+    assert (
+        "REAL(CASE WHEN w.tf1 > 0 THEN 2.2 ELSE 0 END + LN(1 + (w.n - w.df2 + 0.5) / (w.df2 + 0.5)) * w.tf2 * 2.2 / "
+        "(w.tf2 + 1.2 * (0.25 + 0.75 * w.len / NULLIF(w.avglen, 0)))) AS score"
+    ) in sql
+    assert "w.df1 + 0.5" not in sql
 
 
 def test_scores_as_lucene_does_with_k1_1_2_and_b_0_75_drivine4js_figures():

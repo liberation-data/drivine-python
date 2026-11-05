@@ -89,6 +89,31 @@ def test_a_pattern_in_parentheses_with_no_quantifier_is_the_pattern_and_a_shorte
     assert shortest.relationships == (RelationshipPattern(None, ("R",), Direction.OUTGOING, Range(None, None), None),)
 
 
+@pytest.mark.parametrize(
+    ("empty", "without"),
+    [
+        ("MATCH (a {}) RETURN a", "MATCH (a) RETURN a"),
+        ("MATCH (a:X {})-[r:R {}]->(b {}) RETURN r", "MATCH (a:X)-[r:R]->(b) RETURN r"),
+        ("MATCH (a)-[:R*1..2 {}]->(b) RETURN b", "MATCH (a)-[:R*1..2]->(b) RETURN b"),
+        ("MATCH (a) WHERE EXISTS { (a)-[:R {}]->({}) } RETURN a", "MATCH (a) WHERE EXISTS { (a)-[:R]->() } RETURN a"),
+        ("MERGE (a:X {}) CREATE (a)-[:R {}]->(:Y {})", "MERGE (a:X) CREATE (a)-[:R]->(:Y)"),
+    ],
+)
+def test_an_empty_map_of_properties_in_a_pattern_reads_as_none_as_every_node_and_relationship_meets_it(
+    empty: str, without: str
+):
+    # Read as a map, it compiled to no test at all, an empty WHERE or a dangling AND on the SQL stores (drivine4j#583).
+    assert read_cypher(empty) == read_cypher(without)
+    assert hash(read_cypher(empty)) == hash(read_cypher(without))
+
+
+def test_a_map_of_properties_with_a_key_and_a_parameters_map_are_still_read_as_they_are():
+    match = read_cypher("MATCH (a {k: 1}), (b $p) RETURN a").clauses[0]
+    assert isinstance(match, Match)
+    first, second = (it.nodes[0].properties for it in match.patterns)
+    assert isinstance(first, MapLiteral) and isinstance(second, Parameter), (first, second)
+
+
 def test_a_chain_of_comparisons_reads_as_their_conjunction_and_precedence_is_the_grammars():
     assert returned("RETURN 1 < x <= 5") == Binary(
         BinaryOperator.AND,

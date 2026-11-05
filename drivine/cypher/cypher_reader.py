@@ -448,6 +448,7 @@ class _Reader:
             self.name(variable) if variable is not None else None,
             self.labels(labels) if labels is not None else (),
             self.properties(properties) if properties is not None else None,
+            mapped=properties is not None,
         )
 
     def relationship(self, context: Context) -> RelationshipPattern:
@@ -493,9 +494,17 @@ class _Reader:
             return Range(None, bounds[0])
         return Range(bounds[0], None)
 
-    def properties(self, context: Context) -> Expression:
+    def properties(self, context: Context) -> Expression | None:
+        """
+        A pattern's properties: a map of them, or a parameter's map. An empty map is read as none, as every node and
+        relationship meets it, so a store compiles `(a {})` as it compiles `(a)`, and not to a test with nothing in it
+        (drivine4j#583).
+        """
         map_ = context.oC_MapLiteral()
-        return self.map(map_) if map_ is not None else self.parameter(context.oC_Parameter())
+        if map_ is None:
+            return self.parameter(context.oC_Parameter())
+        properties = self.map(map_)
+        return properties if properties.entries else None
 
     # ----- Expressions -----
 

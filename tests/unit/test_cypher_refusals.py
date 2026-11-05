@@ -589,6 +589,119 @@ def test_a_variable_used_as_two_kinds_or_made_where_it_is_bound_already_is_refus
 
 
 @pytest.mark.parametrize("compiler", COMPILERS.values(), ids=COMPILERS.keys())
+@pytest.mark.parametrize(
+    "cypher",
+    [
+        "MATCH (a) CREATE (a {})-[:R]->(b)",
+        "MATCH (a) MERGE (a {})-[:R]->(b)",
+        "MATCH (a) FOREACH (x IN [1] | CREATE (a {})-[:R]->(b))",
+    ],
+)
+def test_a_create_or_merge_of_a_node_bound_already_with_an_empty_map_of_properties_is_refused_as_neo4j_refuses_it(
+    compiler: type[SqlCypherCompiler], cypher: str
+) -> None:
+    # drivine4j#583 reads {} as no properties, but Neo4j (2026.10) still refuses it here: "Can't create node `a` with
+    # labels or properties here."
+    with pytest.raises(DrivineError) as refused:
+        compiler("g").compile(cypher)
+    assert (
+        str(refused.value) == "a is bound already, so a CREATE or MERGE makes no node of it with labels or properties."
+    )
+    compiler("g").compile("MATCH (a) CREATE (a)-[:R {}]->(b {})")
+
+
+def _new_in_pattern(variable: str) -> str:
+    return (
+        f"{variable} is not defined: a pattern used as an expression binds no new variable, as in Neo4j. Bind it in a "
+        "MATCH, or test the pattern with EXISTS { … }."
+    )
+
+
+@pytest.mark.parametrize("compiler", COMPILERS.values(), ids=COMPILERS.keys())
+@pytest.mark.parametrize(
+    ("cypher", "variable"),
+    [
+        ("MATCH (n) WHERE (n)-[r]->(a) RETURN n", "r"),
+        ("MATCH (n) WHERE (n)-[r]->() RETURN n", "r"),
+        ("MATCH (n) WHERE ()-[r]->() RETURN n", "r"),
+        ("MATCH (n) WHERE (n)<-[r {}]-(a) RETURN n", "r"),
+        ("MATCH (n) WHERE (n)-[r {}]-(a) RETURN n", "r"),
+        ("MATCH (n) WHERE (n)-[r:REL*0..2]->(a {num: 5}) RETURN n", "r"),
+        ("MATCH (n) WHERE (n)-->(a) RETURN n", "a"),
+        ("MATCH (n) WHERE NOT (n)-[:R]->(:C)<-[s:R]-(n) RETURN n", "s"),
+        # Checked on Neo4j: within a pattern comprehension's or a COUNT { }'s WHERE, past a WITH that drops it, and in a
+        # CALL that imports it not; and in size(), before size() of a pattern is.
+        ("MATCH (n) RETURN [(n)-->(b) WHERE (b)-->(c) | b]", "c"),
+        ("MATCH (n) WHERE COUNT { (n)-->(m) WHERE (m)-->(z) } > 0 RETURN n", "z"),
+        ("MATCH (n)-->(m) WITH n MATCH (x) WHERE (x)-->(m) RETURN x", "m"),
+        ("MATCH (n) CALL () { MATCH (m) WHERE (n)-->(m) RETURN m } RETURN m", "n"),
+        ("MATCH (n) RETURN size((n)-[r]->())", "r"),
+    ],
+)
+def test_a_pattern_used_as_an_expression_that_names_a_variable_not_bound_is_refused_as_neo4j_refuses_it(
+    compiler: type[SqlCypherCompiler], cypher: str, variable: str
+) -> None:
+    # Neo4j (2026.x): 42N29 "Pattern expressions are not allowed to introduce new variables: `r`." The TCK's
+    # Pattern1 [10].
+    with pytest.raises(DrivineError) as refused:
+        compiler("g").compile(cypher)
+    assert str(refused.value) == _new_in_pattern(variable)
+
+
+@pytest.mark.parametrize("compiler", COMPILERS.values(), ids=COMPILERS.keys())
+@pytest.mark.parametrize(
+    "cypher",
+    [
+        # Neo4j takes these: each variable of the pattern is bound, or the pattern names none, or binds its own.
+        "MATCH (n), (m) WHERE (n)-->(m) RETURN n",
+        "MATCH (n) WHERE (n)-->(:L) RETURN n",
+        "MATCH (n) WHERE (n)-[:R]->() RETURN n",
+        "MATCH (n) WHERE ()-->() RETURN n",
+        "MATCH (n) WITH n WHERE (n)-->() RETURN n",
+        "MATCH (n) RETURN [(n)-->(b) WHERE (b)-->() | b]",
+        "MATCH (n) WHERE EXISTS { (n)-->(a) WHERE (a)-->() } RETURN n",
+        "MATCH (n) WHERE COUNT { (n)-->(m) WHERE (m)-->(n) } > 0 RETURN n",
+        "MATCH (n) OPTIONAL MATCH (n)-->(m) WHERE (m)-->(n) RETURN n",
+        "MATCH (n) WITH collect(n) AS l MATCH (m) WHERE any(x IN l WHERE (m)-->(x)) RETURN m",
+        "MATCH (n) WITH collect(n) AS l RETURN [x IN l WHERE (x)-->() | x]",
+        "MATCH (n) UNWIND [n] AS x MATCH (m) WHERE (m)-->(x) RETURN m",
+        "MATCH (n) CALL (n) { MATCH (m) WHERE (n)-->(m) RETURN m } RETURN m",
+        "MATCH (n) CALL { WITH n MATCH (m) WHERE (n)-->(m) RETURN m } RETURN m",
+        "MATCH (n) RETURN CASE WHEN (n)-->() THEN 1 ELSE 0 END, (n)-->() AS has ORDER BY (n)-->()",
+    ],
+)
+def test_a_pattern_used_as_an_expression_whose_variables_are_bound_or_its_own_is_compiled(
+    compiler: type[SqlCypherCompiler], cypher: str
+) -> None:
+    compiler("g").compile(cypher)
+
+
+@pytest.mark.parametrize("compiler", COMPILERS.values(), ids=COMPILERS.keys())
+@pytest.mark.parametrize(
+    "cypher",
+    [
+        "MATCH (a) RETURN size((a)-->())",
+        "MATCH (a), (b), (c) RETURN size(()--())",
+        "MATCH (a), (b), (c) RETURN size((a)<--(a {}))",
+        "MATCH (a), (b), (c) RETURN size((a)-[:REL]->(:C)<-[:REL]-(a {num: 5}))",
+        "MATCH (a), (b), (c) RETURN size(()-[:REL*0..2]->()<-[:REL]-(:A {num: 5}))",
+    ],
+)
+def test_size_of_a_pattern_is_refused_as_neo4j_refuses_it_for_count(
+    compiler: type[SqlCypherCompiler], cypher: str
+) -> None:
+    # Neo4j (2026.x): 42I52 "... It can no longer be used inside the function size(), an alternative is to replace
+    # size() with COUNT {}." The TCK's List6 [6].
+    with pytest.raises(DrivineError) as refused:
+        compiler("g").compile(cypher)
+    assert (
+        str(refused.value)
+        == "size() takes a list or a text, not a pattern, as in Neo4j: COUNT { … } counts a pattern's matches."
+    )
+    compiler("g").compile("MATCH (a) RETURN COUNT { (a)-->() }")
+
+
+@pytest.mark.parametrize("compiler", COMPILERS.values(), ids=COMPILERS.keys())
 @pytest.mark.parametrize("unit", ["fortnight", "__class__", "keys"])
 def test_a_truncation_to_a_unit_it_has_no_sql_for_names_each_unit_it_takes(
     compiler: type[SqlCypherCompiler], unit: str

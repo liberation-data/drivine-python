@@ -174,6 +174,8 @@ def test_on_oracle_each_node_after_the_first_of_a_chain_set_equal_is_read_by_its
         # Found by nothing but the key: the index over labels is the way in, to b, and the earlier node is read by
         # its key.
         ("MATCH (a) MATCH (b:Big) WHERE a = b RETURN count(*)", 1),
+        # An empty map of properties finds a node by nothing, as no map does (drivine4j#583).
+        ("MATCH (a {}) MATCH (b:Big) WHERE a = b RETURN count(*)", 1),
         ("MATCH (a) WHERE EXISTS { MATCH (b:Big) WHERE a = b } RETURN count(*)", 1),
         # Nor does a subquery find the node around it, by its id or a relationship it ends there: it reads a's rows.
         ("MATCH (a) WHERE EXISTS { MATCH (b:Big) WHERE id(a) = 5 AND a = b } RETURN count(*)", 1),

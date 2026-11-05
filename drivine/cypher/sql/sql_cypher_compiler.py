@@ -3217,7 +3217,7 @@ class SqlCypherCompiler(ABC):
         for node in pattern.nodes:
             kind = self._kinds.get(node.variable) if node.variable is not None else None
             if kind is _Kind.NODE and node.variable is not None:
-                if node.labels or node.properties is not None:
+                if node.labels or node.mapped:
                     raise DrivineError(
                         f"{node.variable} is bound already, so a CREATE or MERGE makes no node of it with labels or "
                         "properties."

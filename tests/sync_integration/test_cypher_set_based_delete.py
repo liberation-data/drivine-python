@@ -147,7 +147,8 @@ def test_a_plain_delete_of_a_node_with_relationships_fails_with_what_to_do_on_a_
     if graph.type is DatabaseType.NEO4J:
         expected = r"still has relationships"
     else:
-        expected = r"^A node is deleted that still has relationships: delete them first, or DETACH DELETE it\."
+        # Oracle's error opens with its code, ORA-20000, as a raised error does there.
+        expected = r"A node is deleted that still has relationships: delete them first, or DETACH DELETE it\."
     with pytest.raises(Exception, match=expected):  # noqa: PT011 - Neo4j's error is its driver's
         query(graph, "MATCH (n:CyDelete {k: 2}) DELETE n")
     assert ks(graph) == [1, 2, 3, 4]

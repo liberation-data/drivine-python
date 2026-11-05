@@ -12,6 +12,7 @@ import re
 import pytest
 
 from drivine import DrivineError
+from drivine.backend.oracle.oracle_graph import holds_label
 from drivine.cypher.sql.oracle_cypher_compiler import OracleCypherCompiler
 from drivine.cypher.sql.postgres_cypher_compiler import PostgresCypherCompiler
 from drivine.cypher.sql.sql_cypher_compiler import SqlCypherCompiler
@@ -86,14 +87,13 @@ def test_a_delete_of_nodes_without_detach_gathers_its_rows_once_so_its_test_read
     assert (len(GATHERED.findall(sql)), len(re.findall(r"DELETE FROM g_node\b", sql)), LOOP.search(sql)) == (1, 1, None)
 
 
-def test_on_oracle_a_delete_that_reads_its_match_reads_the_key_with_plus_0_and_plans_no_adaptive_plan() -> None:
+def test_on_oracle_a_delete_that_reads_its_match_reads_the_key_with_plus_0_which_oracle_does_not_unnest() -> None:
     assert re.search(
-        r"DELETE FROM g_node WHERE nid IN \(SELECT /\*\+ NO_ADAPTIVE_PLAN \*/ n\d+\.nid \+ 0 AS id",
+        r"DELETE FROM g_node WHERE nid IN \(SELECT n\d+\.nid \+ 0 AS id",
         compiled("oracle", "MATCH (g:Gone) DETACH DELETE g"),
     )
     assert re.search(
-        r"DELETE FROM g_edge WHERE eid IN "
-        r"\(SELECT /\*\+ NO_JSON_TABLE_TRANSFORM NO_ADAPTIVE_PLAN \*/ e\d+\.eid \+ 0 AS id",
+        r"DELETE FROM g_edge WHERE eid IN \(SELECT (/\*\+ [^*]*\*/ )?e\d+\.eid \+ 0 AS id",
         compiled("oracle", "MATCH ()-[r:R]->() DELETE r"),
     )
     for store in ("postgres", "sqlite"):
@@ -101,6 +101,58 @@ def test_on_oracle_a_delete_that_reads_its_match_reads_the_key_with_plus_0_and_p
             r"DELETE FROM g_node WHERE nid IN \(SELECT n\d+\.nid AS id",
             compiled(store, "MATCH (g:Gone) DETACH DELETE g"),
         )
+
+
+def subquery(cypher: str) -> str:
+    """The query Oracle's compiled DELETE reads the ids it deletes from."""
+    return compiled("oracle", cypher).split("DELETE FROM ", 1)[1].split(" IN (SELECT ", 1)[1]
+
+
+INDEXED = re.compile(r"JSON_EXISTS\([\w.]+\.labels")
+"""A test of a node's labels the index over labels answers, as `has_label` writes it on Oracle."""
+
+
+@pytest.mark.parametrize(
+    "cypher",
+    [
+        "MATCH (a:X) OPTIONAL MATCH (a)-[r:R]->(:X {k: 2}) DELETE r",
+        "MATCH (a:X) OPTIONAL MATCH (a)-[:R]->(m:X {k: 3}) DETACH DELETE m",
+        "MATCH (g:Gone:Also) DETACH DELETE g",
+    ],
+)
+def test_on_oracle_a_delete_that_reads_its_match_tests_labels_by_their_text_in_a_laterals_query_too(
+    cypher: str,
+) -> None:
+    # Planned with the index over labels, Oracle crashed the session (ORA-07445 in qjsnmvFindOpt) after rolled-back
+    # deletes of the label (liberation-data/drivine#612, liberation-data/drivine4j#595). NO_ADAPTIVE_PLAN didn't help.
+    read = subquery(cypher)
+    assert not INDEXED.search(read), read
+    assert re.search(r"INSTR\(',' \|\| LTRIM\(RTRIM\(JSON_SERIALIZE\(n\d+\.labels\)", read), read
+    assert "NO_ADAPTIVE_PLAN" not in read
+
+
+def test_on_oracle_a_delete_of_an_optional_matchs_relationship_tests_both_nodes_labels_by_their_text() -> None:
+    read = subquery("MATCH (a:X) OPTIONAL MATCH (a)-[r:R]->(:X {k: 2}) DELETE r")
+    assert len(re.findall(r"JSON_SERIALIZE\(n\d+\.labels\)", read)) == 2
+
+
+@pytest.mark.parametrize("label", ["it's \"x\\", "a \\\nb é"])
+def test_on_oracle_a_delete_that_reads_its_match_looks_for_a_label_sql_and_json_quote_as_itself(label: str) -> None:
+    # A label that SQL and JSON quote, or with a space, a backslash before a line break, or past ASCII.
+    read = subquery(f"MATCH (g:`{label}`) DETACH DELETE g")
+    alias = re.search(r"JSON_SERIALIZE\((n\d+\.labels)\)", read)
+    assert alias, read
+    assert holds_label(alias.group(1), label) in read, read
+
+
+def test_on_oracle_a_string_of_a_delete_that_reads_as_the_indexed_label_test_is_a_string_still() -> None:
+    read = subquery('MATCH (g:Gone) WHERE g.s = "JSON_EXISTS(n1.labels, \'$[*]?(@ == \\"Y\\")\')" DETACH DELETE g')
+    assert len(re.findall(r"JSON_EXISTS\(n1\.labels", read)) == 1, read
+    assert holds_label("n1.labels", "Y") not in read, read
+
+
+def test_on_oracle_a_read_that_deletes_nothing_keeps_the_label_test_the_index_answers() -> None:
+    assert INDEXED.search(compiled("oracle", "MATCH (g:Gone) RETURN g.k"))
 
 
 @pytest.mark.parametrize("store", COMPILERS)

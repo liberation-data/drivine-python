@@ -183,10 +183,13 @@ def test_a_delete_in_a_transaction_that_rolls_back_is_undone_and_read_within_it_
     assert seen == [[1, 2], [4]]
     assert ks(graph) == [1, 2, 3, 4]
     assert rs(graph) == [1, 2, 3, 4]
-    # Planned again after the rollback, Oracle crashed the session on this delete without NO_ADAPTIVE_PLAN
-    # (liberation-data/drivine#612).
+    # Planned again after the rollback, Oracle crashed the session on these deletes where their subquery read the index
+    # over labels (liberation-data/drivine#612, liberation-data/drivine4j#595).
     query(graph, "MATCH (a:CyDelete) OPTIONAL MATCH (a)-[r:R]->(:CyDelete {k: 2}) DELETE r")
     assert rs(graph) == [2, 3, 4]
+    query(graph, "MATCH (a:CyDelete) OPTIONAL MATCH (a)-[:R]->(m:CyDelete {k: 3}) DETACH DELETE m")
+    assert ks(graph) == [1, 2, 4]
+    assert rs(graph) == [4]
 
 
 def test_a_delete_of_an_optional_matchs_variable_deletes_where_it_is_not_null_and_a_match_of_no_rows_nothing(

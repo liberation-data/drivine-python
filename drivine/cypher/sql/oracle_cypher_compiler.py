@@ -821,18 +821,20 @@ class OracleCypherCompiler(SqlCypherCompiler):
 
     def deleted_ids(self, query: str) -> str:
         """
-        With no plan that adapts (`NO_ADAPTIVE_PLAN`), as a walk's steps: Oracle (23.26) crashed the session (ORA-07445
-        in `qjsnmvFindOpt`, the multivalue index over labels, ORA-03113 to the client) planning `DELETE FROM <edges>
-        WHERE eid IN (SELECT … FROM <nodes> n1 LEFT JOIN LATERAL (…) …)` of `MATCH (a:X) OPTIONAL MATCH
-        (a)-[r:R]->(:X {k: 2}) DELETE r` again, where a transaction that deleted and read nodes of the label had rolled
-        back (#410, liberation-data/drivine#612). So hinted, or with `NO_UNNEST`, or without the label index, it ran
-        clean.
+        Each test of a node's labels the index over labels would answer (`has_label`) written by the labels' text
+        instead (`holds_label`), in each query of the subquery, a `LATERAL`'s too. Oracle (23.26) crashed the session
+        (ORA-07445 `[qjsnmvFindOpt()+16] [SIGSEGV]`, in the multivalue index over labels; ORA-03113 to the client)
+        planning `DELETE FROM <edges> WHERE eid IN (SELECT … FROM <nodes> n1 LEFT JOIN LATERAL (… <nodes> n2 …) …)`
+        of `MATCH (a:X) OPTIONAL MATCH (a)-[r:R]->(:X {k: 2}) DELETE r`, and the `DETACH DELETE m` of `OPTIONAL MATCH
+        (a)-[:R]->(m:X {k: 3})` alike, where transactions that deleted and read nodes of the label had rolled back
+        (#410, liberation-data/drivine#612, liberation-data/drivine4j#595). Off the index it ran clean; with
+        `NO_ADAPTIVE_PLAN` (already the session's) or `NO_INDEX` on the outer node alone it crashed as often. The
+        subquery then reads the outer node's table whole, once, and the lateral's node by its key.
         """
-        planned = super().deleted_ids(query)
-        hinted = _HINTED.match(planned)
-        if hinted:
-            return f"SELECT /*+ {hinted.group(1)} {_NO_ADAPTIVE_PLAN} */{planned[hinted.end() :]}"
-        return re.sub(r"^SELECT ", f"SELECT /*+ {_NO_ADAPTIVE_PLAN} */ ", planned, count=1)
+        return _INDEXED_LABEL.sub(
+            lambda m: holds_label(m.group(1), _UNESCAPE.sub(r"\1", m.group(2).replace("''", "'"))),
+            super().deleted_ids(query),
+        )
 
     def keyed_labels(self, labels: str, all_: Sequence[str]) -> str:
         """
@@ -1798,8 +1800,14 @@ _SHORT_TEXT = 4000
 _NO_JSON_TABLE_TRANSFORM = "NO_JSON_TABLE_TRANSFORM"
 """The hint that turns Oracle's JSON table transformation off: see `OracleCypherCompiler.planned`."""
 
-_NO_ADAPTIVE_PLAN = "NO_ADAPTIVE_PLAN"
-"""The hint that keeps Oracle from adapting a plan as it runs: see `OracleCypherCompiler.deleted_ids`."""
+_INDEXED_LABEL = re.compile(r"""JSON_EXISTS\(([\w.]+\.labels), '\$\[\*\]\?\(@ == "((?:[^"\\]|\\.)*)"\)'\)""", re.DOTALL)
+"""
+A test of a column of labels, `n1.labels`, as `has_label` writes it, `JSON_EXISTS(n1.labels, '$[*]?(@ == "X")')`, and
+the label, written as JSON writes a string and then as SQL quotes one: see `OracleCypherCompiler.deleted_ids`.
+"""
+
+_UNESCAPE = re.compile(r"\\(.)", re.DOTALL)
+"""A character JSON escapes in a string, and its backslash: see `OracleCypherCompiler.deleted_ids`."""
 
 _HINTED = re.compile(r"SELECT /\*\+ (.*?) \*/")
 """A query that opens with hints, and those hints: Oracle reads the first hint comment of a query alone."""

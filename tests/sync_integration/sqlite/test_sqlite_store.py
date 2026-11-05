@@ -135,7 +135,12 @@ def test_a_full_text_search_scores_whole_words_ignores_case_as_unicode_does_and_
         ]
     )
     hits = gom.load_matching(Note, "école -fermée", top_k=10)
-    assert [(it.value.id, it.score) for it in hits] == [("n1", 1.0), ("n2", 0.5)]
+    # Scored by BM25 (drivine4j#604), k1 1.2 and b 0.75, against the best: n1 holds the word twice in 21 characters, n2
+    # once in 9, the average 48 / 4. Both hold it, so its rarity cancels: 2.2 / (1 + 1.2 * (0.25 + 0.75 * 9 / 12)) over
+    # 4.4 / (2 + 1.2 * (0.25 + 0.75 * 21 / 12)).
+    assert [it.value.id for it in hits] == ["n1", "n2"]
+    assert hits[0].score == pytest.approx(1.0, abs=1e-9)
+    assert hits[1].score == pytest.approx(0.981012658227848, abs=1e-9)
 
 
 def test_a_vector_search_measures_every_node_of_the_label_and_holds_to_its_threshold(gom):

@@ -6,11 +6,13 @@ from typing import Any
 from drivine.backend.graph_statement import GraphStatement
 from drivine.backend.matching_search import MatchingSearch
 from drivine.backend.nearest_search import NearestSearch
+from drivine.backend.sql.bm25 import Bm25Dialect, bm25_ranked
 from drivine.backend.sql.sql_graph import sql_text
 from drivine.backend.sql.text_query import TextQuery
 from drivine.backend.sqlite.sqlite_graph import (
     JSON_ROWS,
     LOWER,
+    MATH,
     REGEXP_COUNT,
     SIMILARITY,
     SqliteGraph,
@@ -37,8 +39,8 @@ class SqliteSearch:
 
     A vector search scores each node of the label that holds an embedding of the vector's size, by the function Drivine
     registers (see sqlite_functions), on Neo4j's scale: (1 + cos) / 2 for cosine, 1 / (1 + d²) for euclidean. A
-    full-text query is the core of Lucene's syntax (see TextQuery), scored by how often its terms occur as whole words,
-    as Postgres and Oracle score one, then scaled by the best hit.
+    full-text query is the core of Lucene's syntax (see TextQuery), each term counted as a whole word as on Postgres and
+    Oracle, scored by BM25 as Neo4j's index scores it (see bm25_ranked), then scaled by the best hit.
     """
 
     def __init__(self, graph: SqliteGraph) -> None:
@@ -64,19 +66,21 @@ class SqliteSearch:
             bindings[name] = value
             return f"CAST(${name} AS TEXT)"
 
-        def count(pattern: str) -> str:
-            return f"{REGEXP_COUNT}(x.text, {bind(pattern)})"
-
-        occurrences = " + ".join(count(it) for it in query.scored)
-        conditions = [*(f"{count(it)} > 0" for it in query.required), *(f"{count(it)} = 0" for it in query.excluded)]
-        filtered = f" WHERE {' AND '.join(conditions)}" if conditions else ""
         # Narrowed by the root's every label before the scale, so the best of it is a hit the search can return.
         root = target.root if isinstance(target, GraphViewModel) else target
         labels = [search.label, *(it for it in root.labels if it != search.label)]
-        candidates = (
-            "SELECT h.nid, CAST(h.hit_count AS REAL) / MAX(h.hit_count) OVER () AS score FROM ("
-            f"SELECT x.nid, {occurrences} AS hit_count FROM (SELECT c.nid, {searched_text('c', search.properties)} "
-            f"AS text FROM {self.graph.nodes} c WHERE {has_labels('c', labels)}) x{filtered}) h WHERE h.hit_count > 0"
+        length = f"length({joined_text('c', search.properties)})"
+        labelled = f"{self.graph.nodes} c WHERE {has_labels('c', labels)}"
+        candidates = bm25_ranked(
+            f"SELECT c.nid, {searched_text('c', search.properties)} AS text, {length} AS len FROM {labelled}",
+            f"SELECT {length} AS len FROM {labelled}",
+            query,
+            Bm25Dialect(
+                count=lambda text, term: f"{REGEXP_COUNT}({text}, {bind(term)})",
+                holds=lambda text, term: f"{REGEXP_COUNT}({text}, {bind(term)}) > 0",
+                ln=lambda value: f"{MATH}('log', {value})",
+                real=lambda value: f"CAST({value} AS REAL)",
+            ),
         )
         return self._scored(target, candidates, search.where, search.threshold, search.limit, search.depth, bindings)
 
@@ -130,5 +134,9 @@ def searched_text(alias: str, properties: Sequence[str]) -> str:
     The text a full-text search reads of the row `alias`: its properties, each as text, a space between them, in lower
     case, by the function Drivine registers: SQLite's own `lower` lowers only ASCII.
     """
-    texts = " || ' ' || ".join(f"COALESCE({text_of(alias, it)}, '')" for it in properties)
-    return f"{LOWER}({texts})"
+    return f"{LOWER}({joined_text(alias, properties)})"
+
+
+def joined_text(alias: str, properties: Sequence[str]) -> str:
+    """`searched_text` before it is lowered: what a full-text search measures a text's length by (drivine4j#604)."""
+    return " || ' ' || ".join(f"COALESCE({text_of(alias, it)}, '')" for it in properties)

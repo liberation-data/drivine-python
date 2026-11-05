@@ -11,6 +11,7 @@ import pytest
 
 from drivine.backend.sql.sql_graph import sql_text
 from drivine.sync import ConnectionProperties, PersistenceManager, QuerySpecification
+from drivine.testing.drivine_test_containers import TEST_CONTAINER_PASSWORD
 
 ON_ORACLE = pytest.mark.skipif(
     os.environ.get("ORACLE_DATABASE_TYPE") != "ORACLE", reason="Oracle runs only with ORACLE_TESTS=true."
@@ -38,12 +39,14 @@ def oracle_plan(pm: PersistenceManager, sql: str, parameters: dict[str, Any], fo
 def oracle_last_plan(sid: str, format: str) -> str:
     """
     The plan of the statement the session `sid` ran last, as the child cursor that ran it holds it, shown in the
-    format `DBMS_XPLAN.DISPLAY_CURSOR` takes. Read as `system`, as the test user reads no `V$` view: a plan Oracle made
-    again on a later run, from what an earlier run found (statistics feedback), is a child of its own. The test
-    container's system user has the test user's password. drivine4j's `OracleTestDatabase.lastPlan`.
+    format `DBMS_XPLAN.DISPLAY_CURSOR` takes: a plan Oracle made again on a later run, from what an earlier run found
+    (statistics feedback), is a child of its own. Read as the container's system user, as the test user reads no `V$`
+    view. drivine4j's `OracleTestDatabase.lastPlan`.
     """
     it = ConnectionProperties.from_env("oracle")
-    admin = oracledb.connect(user="system", password=it.password, dsn=f"{it.host}:{it.port or 1521}/{it.database_name}")
+    admin = oracledb.connect(
+        user="system", password=TEST_CONTAINER_PASSWORD, dsn=f"{it.host}:{it.port or 1521}/{it.database_name}"
+    )
     try:
         cursor = admin.cursor()
         try:

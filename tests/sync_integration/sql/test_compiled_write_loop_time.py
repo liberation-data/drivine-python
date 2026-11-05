@@ -10,11 +10,11 @@ which is slower at both, passes alike. drivine4j's `CompiledWriteLoopTimeTest`, 
 `CypherWriteLoopTime.spec.ts`. The tests run one at a time, so no other test's load is in the timings.
 
 On Postgres the MERGE is timed with the edge table vacuumed while empty, as autovacuum leaves it late in a full run:
-its per-row read is then a Seq Scan, so it is quadratic (#420). A vacuum doesn't always leave statistics that say
-empty (one run took 2.4 s over 20,000 rows, not 27 s), so the case is an xfail allowed to pass until #420 is fixed.
-The CALL…RETURN joins its one-row list to the node table for each row, and Postgres, which takes the list for 100
-rows, may scan every node for it instead (liberation-data/drivine4j#609): 36.8 s over 20,000 rows in one CI run. It
-too is an xfail allowed to pass, until #420 is fixed.
+its per-row read was then planned as a Seq Scan, kept as the loop filled the table, so it was quadratic: 27 s over
+20,000 rows (#420, liberation-data/drivine4j#609). The CALL…RETURN joins its one-row list to the node table for each
+row, and Postgres, which takes the list for 100 rows, scanned every node for it instead: 36.8 s over 20,000 rows in one
+CI run. Each loop is now planned with seq scans and hash and merge joins off (see
+PostgresCypherCompiler._planned_as_nested_loops), and both pass as the other writes do.
 """
 
 import time
@@ -75,7 +75,10 @@ TIMES: dict[str, tuple[list[int], list[int]]] = {}
 
 
 def vacuumed_empty(pm: PersistenceManager, write: Write) -> bool:
-    """Whether the write is timed with the edge table vacuumed while empty, in which state it is quadratic (#420)."""
+    """
+    Whether the write is timed with the edge table vacuumed while empty, in which state its per-row read was quadratic
+    until #420.
+    """
     return pm.type == DatabaseType.POSTGRES and write.name == "MERGE"
 
 
@@ -102,16 +105,15 @@ def timed(pm: PersistenceManager, n: int) -> list[int]:
     return times
 
 
+def slow(small: int, large: int) -> bool:
+    """Whether a write that took `small` ms over SMALL rows and `large` over LARGE grew faster than its rows."""
+    return large > max(RATIO * small, FLOOR_MS)
+
+
 @pytest.mark.parametrize("write", WRITES, ids=[it.name for it in WRITES])
 def test_a_write_over_ten_times_the_rows_takes_about_ten_times_as_long_not_a_hundred(
-    pm: PersistenceManager, store: str, write: Write, request: pytest.FixtureRequest
+    pm: PersistenceManager, store: str, write: Write
 ):
-    if vacuumed_empty(pm, write):
-        reason = "#420: with the edge table vacuumed empty, a compiled MERGE's per-row read is a Seq Scan on Postgres."
-        request.applymarker(pytest.mark.xfail(strict=False, reason=reason))
-    if pm.type == DatabaseType.POSTGRES and write.name == "CALL…RETURN":
-        reason = "#420: a CALL's one-row list joined to the node table may be planned as a Seq Scan on Postgres."
-        request.applymarker(pytest.mark.xfail(strict=False, reason=reason))
     if store not in TIMES:
         try:
             TIMES[store] = (timed(pm, SMALL), timed(pm, LARGE))
@@ -123,4 +125,4 @@ def test_a_write_over_ten_times_the_rows_takes_about_ten_times_as_long_not_a_hun
     )
     print(f"CompiledWriteLoopTime {pm.type.name}: {report}")
     i = WRITES.index(write)
-    assert large[i] <= max(RATIO * small[i], FLOOR_MS), report
+    assert not slow(small[i], large[i]), report

@@ -8,6 +8,7 @@ from drivine.backend.matching_search import MatchingSearch
 from drivine.backend.nearest_search import NearestSearch
 from drivine.backend.postgres.postgres_graph import PostgresGraph, has_labels, json_value, node_document, text_of
 from drivine.backend.postgres.postgres_views import PostgresViews
+from drivine.backend.sql.bm25 import Bm25Dialect, bm25_ranked
 from drivine.backend.sql.text_query import TextQuery
 from drivine.drivine_error import DrivineError
 from drivine.model.graph_view_model import GraphViewModel
@@ -23,9 +24,9 @@ class PostgresSearch:
     A vector search is pgvector's: exact over every node of the label that holds an embedding of the vector's size, or
     approximate through the label's HNSW index, which holds the embeddings of its size (see the Postgres schema
     grammar). It scores on Neo4j's scale: (1 + cos) / 2 for cosine, 1 / (1 + d²) for euclidean. A full-text query is
-    the core of Lucene's syntax (see TextQuery), scored by how often its terms occur as whole words, as Oracle scores
-    one without Oracle Text, then scaled by the best hit; the trigram index of a full-text index narrows it first to the
-    nodes whose text holds a scoring term's words, which changes no score.
+    the core of Lucene's syntax (see TextQuery), each term counted as a whole word as Oracle counts one without Oracle
+    Text, scored by BM25 as Neo4j's index scores it (see bm25_ranked), then scaled by the best hit; the trigram index of
+    a full-text index narrows it first to the nodes whose text holds a scoring term's words, which changes no score.
     """
 
     def __init__(self, graph: PostgresGraph) -> None:
@@ -83,19 +84,21 @@ class PostgresSearch:
             else []
         )
 
-        def count(pattern: str) -> str:
-            return f"(SELECT count(*) FROM regexp_matches(x.text, {bind(pattern)}, 'g'))"
-
-        occurrences = " + ".join(count(it) for it in query.scored)
-        conditions = [*(f"{count(it)} > 0" for it in query.required), *(f"{count(it)} = 0" for it in query.excluded)]
-        filtered = f" WHERE {' AND '.join(conditions)}" if conditions else ""
         # Narrowed by the root's every label before the scale, so the best of it is a hit the search can return.
         root = target.root if isinstance(target, GraphViewModel) else target
         labels = [search.label, *(it for it in root.labels if it != search.label)]
-        candidates = (
-            "SELECT h.nid, CAST(h.hit_count AS double precision) / MAX(h.hit_count) OVER () AS score FROM ("
-            f"SELECT x.nid, {occurrences} AS hit_count FROM (SELECT c.nid, {text} AS text FROM {self.graph.nodes} c "
-            f"WHERE {' AND '.join([has_labels('c', labels), *narrowed])}) x{filtered}) h WHERE h.hit_count > 0"
+        length = f"length({joined_text('c', search.properties)})"
+        candidates = bm25_ranked(
+            f"SELECT c.nid, {text} AS text, {length} AS len FROM {self.graph.nodes} c "
+            f"WHERE {' AND '.join([has_labels('c', labels), *narrowed])}",
+            f"SELECT {length} AS len FROM {self.graph.nodes} c WHERE {has_labels('c', labels)}",
+            query,
+            Bm25Dialect(
+                count=lambda text, term: f"(SELECT count(*) FROM regexp_matches({text}, {bind(term)}, 'g'))",
+                holds=lambda text, term: f"{text} ~ {bind(term)}",
+                ln=lambda value: f"ln({value})",
+                real=lambda value: f"CAST({value} AS double precision)",
+            ),
         )
         return self._scored(target, candidates, search.where, search.threshold, search.limit, search.depth, bindings)
 
@@ -157,8 +160,12 @@ def searched_text(alias: str, properties: Sequence[str]) -> str:
     case. The expression of a full-text index too (with an empty alias), so a statement that reads it so is answered by
     the index.
     """
-    texts = " || ' ' || ".join(f"COALESCE({text_of(alias, it)}, '')" for it in properties)
-    return f"lower({texts})"
+    return f"lower({joined_text(alias, properties)})"
+
+
+def joined_text(alias: str, properties: Sequence[str]) -> str:
+    """`searched_text` before it is lowered: what a full-text search measures a text's length by (drivine4j#604)."""
+    return " || ' ' || ".join(f"COALESCE({text_of(alias, it)}, '')" for it in properties)
 
 
 def _vector(dimensions: int | None = None) -> str:

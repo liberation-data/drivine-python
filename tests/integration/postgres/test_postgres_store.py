@@ -283,7 +283,8 @@ async def test_searches_by_vector_and_by_text_alike_with_an_index_and_without_on
     exact = await nearest()
     assert exact == ["d1", "d2"]
     scored = await matching("graph -relational")
-    assert [id_ for id_, _ in scored] == ["d1", "d5"]
+    # Scored by BM25 (drivine4j#604): each holds the word once, and d5's text is the shorter.
+    assert [id_ for id_, _ in scored] == ["d5", "d1"]
     assert scored[0][1] == 1
     assert sorted(id_ for id_, _ in await matching("graph*")) == ["d1", "d3", "d5"]
     await gom.indexes.ensure(vector_index("Doc", "embedding", 3))

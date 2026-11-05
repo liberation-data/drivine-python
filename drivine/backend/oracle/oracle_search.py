@@ -8,6 +8,7 @@ from drivine.backend.matching_search import MatchingSearch
 from drivine.backend.nearest_search import NearestSearch
 from drivine.backend.oracle.oracle_graph import OracleGraph, has_labels, json_key, node_document
 from drivine.backend.oracle.oracle_views import OracleViews
+from drivine.backend.sql.bm25 import Bm25Dialect, bm25_ranked
 from drivine.backend.sql.text_query import TextQuery
 from drivine.drivine_error import DrivineError
 from drivine.model.graph_view_model import GraphViewModel
@@ -25,7 +26,8 @@ class OracleSearch:
     vector's size only, and without one measures only the embeddings of that size: Oracle refuses to measure two sizes
     against each other. It scores on Neo4j's scale ((1 + cos) / 2 for cosine, 1 / (1 + d²) for euclidean): approximate
     through the index, exact without. A full-text query is the core of Lucene's syntax (see TextQuery): Oracle Text
-    scores through the index; without one, how often each term occurs as whole words. Either is scaled by the best hit.
+    scores through the index; without one, each term is counted as a whole word and the counts scored by BM25, as
+    Neo4j's index scores them (see bm25_ranked). Either is scaled by the best hit.
     """
 
     def __init__(self, graph: OracleGraph) -> None:
@@ -95,22 +97,25 @@ class OracleSearch:
             return self._scored(
                 target, candidates, search.where, search.threshold, search.limit, search.depth, bindings
             )
-        # Every node of the label: how often the query's terms occur as whole words in its lower-cased text, each term
-        # bound on its own (one bound list named twice gave wrong counts on 23.26, drivine4j found).
-        text = " || ' ' || ".join(
-            f"LOWER(NVL(JSON_VALUE(c.props, '${json_key(it)}' RETURNING CLOB), ''))" for it in search.properties
+        # Without Oracle Text: each term counted as a whole word in the lower-cased text, scored by BM25 (see
+        # bm25_ranked), each term bound on its own (one bound list named twice gave wrong counts on 23.26, drivine4j
+        # found).
+        values = [f"NVL(JSON_VALUE(c.props, '${json_key(it)}' RETURNING CLOB), '')" for it in search.properties]
+        text = " || ' ' || ".join(f"LOWER({it})" for it in values)
+        joined = " || ' ' || ".join(values)
+        length = f"NVL(LENGTH({joined}), 0)"
+        labelled = f"{self.graph.nodes} c WHERE {has_labels('c', labels)}"
+        candidates = bm25_ranked(
+            f"SELECT c.nid, {text} AS text, {length} AS len FROM {labelled}",
+            f"SELECT {length} AS len FROM {labelled}",
+            query,
+            Bm25Dialect(
+                count=lambda text, term: f"REGEXP_COUNT({text}, {bind(term)})",
+                holds=lambda text, term: f"REGEXP_LIKE({text}, {bind(term)})",
+                ln=lambda value: f"LN({value})",
+                real=lambda value: value,
+            ),
         )
-
-        def count(pattern: str) -> str:
-            return f"REGEXP_COUNT(x.text, {bind(pattern)})"
-
-        occurrences = " + ".join(count(it) for it in query.scored)
-        conditions = [*(f"{count(it)} > 0" for it in query.required), *(f"{count(it)} = 0" for it in query.excluded)]
-        candidates = f"""SELECT nid, hit_count / MAX(hit_count) OVER () AS score FROM (
-    SELECT x.nid, {occurrences} AS hit_count
-    FROM (SELECT c.nid, {text} AS text FROM {self.graph.nodes} c WHERE {has_labels("c", labels)}) x
-    {f"WHERE {' AND '.join(conditions)}" if conditions else ""}
-) WHERE hit_count > 0"""
         return self._scored(target, candidates, search.where, search.threshold, search.limit, search.depth, bindings)
 
     def _scored(

@@ -101,7 +101,8 @@ people = await pm.query(spec.bind({"city": "Sydney"}))
   `MATCH (n) WHERE (n)-[r]->() RETURN n` fails with `r is not defined: a pattern used as an expression binds no new
   variable, as in Neo4j. …`, where `EXISTS { (n)-[r]->() }` may bind one. So is `size()` of a pattern,
   `size((a)-->())`: `COUNT { … }` counts its matches. An empty map of properties, `(a {})` or `[r {}]`, is met by every
-  node and relationship, and compiles as the pattern without it.
+  node and relationship, and compiles as the pattern without it, but a `CREATE` or `MERGE` still makes no node bound
+  already with it, `MATCH (a) CREATE (a {})-[:R]->(b)`, as Neo4j refuses it.
 - `truncate` takes each unit Neo4j does, from `millennium` to `microsecond`, and a map of fields to set on the value
   cut short (`date.truncate('month', d, {day: 2})`), but not yet a nanosecond, a week's or a quarter's field, or a
   named zone.

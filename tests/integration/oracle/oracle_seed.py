@@ -4,9 +4,10 @@ import json
 import os
 from typing import Any
 
+import oracledb
 import pytest
 
-from drivine import PersistenceManager, QuerySpecification
+from drivine import ConnectionProperties, PersistenceManager, QuerySpecification
 from drivine.backend.sql.sql_graph import sql_text
 
 ON_ORACLE = pytest.mark.skipif(
@@ -30,6 +31,36 @@ async def oracle_plan(pm: PersistenceManager, sql: str, parameters: dict[str, An
     )
     rows = await pm.query(QuerySpecification[Any](block))
     return "\n".join(str(it if not isinstance(it, dict) else next(iter(it.values()))) for it in rows)
+
+
+async def oracle_last_plan(sid: str, format: str) -> str:
+    """
+    The plan of the statement the session `sid` ran last, as the child cursor that ran it holds it, shown in the
+    format `DBMS_XPLAN.DISPLAY_CURSOR` takes. Read as `system`, as the test user reads no `V$` view: a plan Oracle made
+    again on a later run, from what an earlier run found (statistics feedback), is a child of its own. The test
+    container's system user has the test user's password. drivine4j's `OracleTestDatabase.lastPlan`.
+    """
+    it = ConnectionProperties.from_env("oracle")
+    admin = await oracledb.connect_async(
+        user="system", password=it.password, dsn=f"{it.host}:{it.port or 1521}/{it.database_name}"
+    )
+    try:
+        cursor = admin.cursor()
+        try:
+            await cursor.execute("SELECT prev_sql_id, prev_child_number FROM v$session WHERE sid = :sid", sid=int(sid))
+            session = await cursor.fetchone()
+            assert session is not None, f"No session {sid}."
+            await cursor.execute(
+                "SELECT plan_table_output FROM TABLE(DBMS_XPLAN.DISPLAY_CURSOR(:sql_id, :child, :format))",
+                sql_id=session[0],
+                child=session[1],
+                format=format,
+            )
+            return "\n".join(str(row[0]) for row in await cursor.fetchall())
+        finally:
+            cursor.close()
+    finally:
+        await admin.close()
 
 
 class OracleSeed:

@@ -8,19 +8,22 @@ tests/unit/test_cypher_node_equality.py pins the SQL.
 """
 
 import re
+import time
 from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
 
-from drivine import PersistenceManager, PersistenceManagerFactory, QuerySpecification
-from drivine.cypher.sql.oracle_cypher_compiler import OracleCypherCompiler
+from drivine import DatabaseRegistry, PersistenceManager, PersistenceManagerFactory, QuerySpecification
+from drivine.cypher.sql.oracle_cypher_compiler import NO_FEEDBACK, OracleCypherCompiler
 from drivine.query.statement import cypher_statement
-from tests.integration.oracle.oracle_seed import ON_ORACLE, oracle_plan
+from tests.integration.oracle.oracle_seed import ON_ORACLE, oracle_last_plan, oracle_plan
 
 GRAPH = "drivine"
 NODES = 3000
 SMALL = 750
+RUNS = 5
+"""Runs of one cursor: statistics feedback planned the second and third again, and the fourth as the first."""
 
 
 def k(i: int) -> int | None:
@@ -67,13 +70,18 @@ async def seeded(factory: PersistenceManagerFactory) -> AsyncIterator[None]:
 pytestmark = [ON_ORACLE, pytest.mark.usefixtures("seeded")]
 
 
+def later_compared(sql: str) -> str:
+    """The alias of the later of the two nodes `sql` compares by their keys, as Oracle names it in a plan."""
+    compared = re.search(r"\b(n(\d+))\.nid = (n(\d+))\.nid \+ 0", sql)
+    assert compared is not None, f"No node equal to a node in:\n{sql}"
+    return max([(compared[1], int(compared[2])), (compared[3], int(compared[4]))], key=lambda it: it[1])[0].upper()
+
+
 async def assert_read_by_key(pm: PersistenceManager, statement: str, expected: int) -> None:
     """That the statement counts `expected`, and that Oracle reads `b`, the later of the two nodes compared, by its
     primary key, and keeps its join."""
     compiled = OracleCypherCompiler(GRAPH).compile(statement, {})
-    compared = re.search(r"\b(n(\d+))\.nid = (n(\d+))\.nid \+ 0", compiled.sql)
-    assert compared is not None, f"No node equal to a node in:\n{compiled.sql}"
-    b = max([(compared[1], int(compared[2])), (compared[3], int(compared[4]))], key=lambda it: it[1])[0].upper()
+    b = later_compared(compiled.sql)
     plan = await oracle_plan(pm, compiled.sql, compiled.parameters, "BASIC +PREDICATE +OUTLINE")
     assert "INDEX UNIQUE SCAN" in plan and re.search(rf'access\("{b}"\."NID"=', plan), (
         f"{statement} does not read b by its key:\n{plan}"
@@ -101,3 +109,50 @@ async def test_a_node_with_a_label_equal_to_a_node_found_by_its_label_properties
     factory: PersistenceManagerFactory, statement: str, expected: int
 ):
     await assert_read_by_key(factory.get("oracle"), statement, expected)
+
+
+async def test_a_node_read_by_its_key_is_read_so_on_every_run_of_a_new_cursor_not_planned_again_from_its_first_run(
+    registry: DatabaseRegistry, factory: PersistenceManagerFactory
+):
+    """
+    #415, liberation-data/drivine4j#585: statistics feedback planned the statement again from its first run's counts:
+    the index over labels is estimated at one row, and the run found 3,000. The second and third runs of a new cursor
+    read every node for `b` and the index once for each, as before #404, and the fourth went back to reading b by its
+    key. So each run of one cursor, on one session, is checked by the plan of the child cursor that ran it.
+    """
+    pm = factory.get("oracle")
+    provider = registry.connection_provider("oracle")
+    assert provider is not None
+    connection = await provider.connect()
+    try:
+        [sid] = await connection.query(QuerySpecification[Any]("SELECT SYS_CONTEXT('USERENV', 'SID') AS sid FROM DUAL"))
+        sid = str(sid if not isinstance(sid, dict) else next(iter(sid.values())))
+        for statement, expected in [
+            ("MATCH (a:Big) MATCH (b:Big) WHERE a = b RETURN count(*)", NODES),
+            ("MATCH (a:Big) MATCH (b:Big) WHERE id(b) = id(a) RETURN count(*)", NODES),
+            ("MATCH (a:Big:Other) MATCH (b:Big:Other) WHERE a = b RETURN count(*)", NODES),
+            ("MATCH (x:Small)-[:R]->(a:Big) MATCH (b:Big) WHERE a = b RETURN count(*)", NODES // 2),
+        ]:
+            sql = OracleCypherCompiler(GRAPH).compile(statement, {}).sql
+            assert NO_FEEDBACK in sql, sql
+            b = later_compared(sql)
+            # A new cursor: statistics gathered again invalidate the one an earlier test, or statement, ran.
+            await pm.execute(
+                QuerySpecification(
+                    f"BEGIN DBMS_STATS.GATHER_TABLE_STATS(USER, '{GRAPH.upper()}_NODE', no_invalidate => FALSE); END;"
+                )
+            )
+            for run in range(1, RUNS + 1):
+                started = time.perf_counter()
+                count = [int(it) for it in await connection.query(QuerySpecification[Any](cypher_statement(statement)))]
+                ms = (time.perf_counter() - started) * 1000
+                plan = await oracle_last_plan(sid, "BASIC +PREDICATE +NOTE")
+                print(f"{statement}, run {run}: {ms:.1f} ms\n{plan}\n")
+                where = f"{statement}, run {run} of one cursor:\n{plan}"
+                assert "INDEX UNIQUE SCAN" in plan and re.search(rf'access\("{b}"\."NID"=', plan), (
+                    f"Does not read b by its key: {where}"
+                )
+                assert "statistics feedback used" not in plan, f"Planned again from statistics feedback: {where}"
+                assert count == [expected], statement
+    finally:
+        await connection.release()

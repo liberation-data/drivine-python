@@ -221,9 +221,12 @@ people = await pm.query(spec.bind({"city": "Sydney"}))
   over labels can't answer, where the other node is found by a label, properties, a relationship or its id: Oracle
   then reads it by its primary key. With the index's form, Oracle 23.26 read that index again for each row of the
   other node, so `MATCH (a:Big) MATCH (b:Big) WHERE a = b` took 1.5 s over 4,000 nodes, growing with their square
-  ([#404](https://github.com/liberation-data/drivine-python/issues/404)). The earlier of two such nodes keeps the
-  index's form, and so does a node equal to one found by nothing else (`MATCH (a) MATCH (b:Rare) WHERE a = b`), where
-  the index is the way in.
+  ([#404](https://github.com/liberation-data/drivine-python/issues/404)). A query that holds such a test carries the
+  hint `OPT_PARAM('_optimizer_use_feedback' 'false')`: Oracle 23.26's statistics feedback otherwise planned the second
+  and third runs of a new cursor again from what the first run found, and read the node the slow way, 1.5 s each over
+  4,000 nodes ([#415](https://github.com/liberation-data/drivine-python/issues/415)). The earlier of two such nodes
+  keeps the index's form, and so does a node equal to one found by nothing else
+  (`MATCH (a) MATCH (b:Rare) WHERE a = b`), where the index is the way in.
 - What each statement gives is the [Cypher spec](https://github.com/liberation-data/drivine-cypher-spec), which the
   three Drivine libraries run alike.
 

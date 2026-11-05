@@ -12,7 +12,7 @@ import pytest
 
 from drivine.backend.oracle.oracle_graph import holds_label as oracle_holds_label
 from drivine.backend.sqlite.sqlite_graph import holds_label as sqlite_holds_label
-from drivine.cypher.sql.oracle_cypher_compiler import OracleCypherCompiler
+from drivine.cypher.sql.oracle_cypher_compiler import NO_FEEDBACK, OracleCypherCompiler
 from drivine.cypher.sql.postgres_cypher_compiler import PostgresCypherCompiler
 from drivine.cypher.sql.sql_cypher_compiler import SqlCypherCompiler
 from drivine.cypher.sql.sqlite_cypher_compiler import SqliteCypherCompiler
@@ -102,6 +102,14 @@ def assert_keyed_labels(statement: str, labels: tuple[str, ...] = ("Big",), earl
     assert f"JSON_EXISTS({b}.labels, " not in sql, where
     for label in labels:
         assert oracle_holds_label(f"{b}.labels", label) in sql, where
+    assert_planned_without_feedback(sql, where)
+
+
+def assert_planned_without_feedback(sql: str, where: str | None = None) -> None:
+    """That `sql` is planned without statistics feedback: once, in the hints of its outermost query (#415,
+    liberation-data/drivine4j#585)."""
+    assert sql.count(NO_FEEDBACK) == 1, where or sql
+    assert re.match(rf"SELECT /\*\+ [^*]*{re.escape(NO_FEEDBACK)}[^*]* \*/", sql), where or sql
 
 
 def assert_scanned_labels(statement: str, labelled: int = 2) -> None:
@@ -111,6 +119,7 @@ def assert_scanned_labels(statement: str, labelled: int = 2) -> None:
     where = f"{statement}\n{sql}"
     assert len(re.findall(r"""JSON_EXISTS\(\w+\.labels, '\$\[\*]\?\(@ == "Big"\)'\)""", sql)) == labelled, where
     assert not any(oracle_holds_label(f"{it}.labels", "Big") in sql for it in re.findall(r"\bn\d+\b", sql)), where
+    assert "_optimizer_use_feedback" not in sql, where
 
 
 @pytest.mark.parametrize(
@@ -221,3 +230,56 @@ def test_on_postgres_and_sqlite_a_node_set_equal_to_a_node_tests_its_labels_as_a
     assert "n1.labels @> '[\"Big\"]'" in postgres and "n2.labels @> '[\"Big\"]'" in postgres, postgres
     sqlite = sql_of(SqliteCypherCompiler, statement)
     assert sqlite_holds_label("n1.labels", "Big") in sqlite and sqlite_holds_label("n2.labels", "Big") in sqlite, sqlite
+    for it in (postgres, sqlite):
+        assert "_optimizer_use_feedback" not in it, it
+
+
+# #415, liberation-data/drivine4j#585: a query that holds a test `keyed_labels` wrote is planned without statistics
+# feedback, which otherwise planned a new cursor's second and third runs again from what the first run found, and read
+# the node the slow way. The runs' plans are pinned by tests/integration/oracle/test_oracle_keyed_label_plan.py.
+
+
+def test_on_oracle_a_test_of_the_labels_as_keyed_labels_writes_it_is_hinted_beside_the_json_table_transformations() -> (
+    None
+):
+    both = oracle("MATCH (a:Big) MATCH (b:Big) WHERE a = b RETURN count(*)")
+    assert both.startswith(f"SELECT /*+ NO_JSON_TABLE_TRANSFORM {NO_FEEDBACK} */ "), both
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "MATCH (n:Small) RETURN count(*) AS c UNION ALL MATCH (a:Big) MATCH (b:Big) WHERE a = b RETURN count(*) AS c",
+        "MATCH (n:Small) RETURN count(*) AS c UNION MATCH (a:Big) MATCH (b:Big) WHERE a = b RETURN count(*) AS c",
+        "MATCH (a:Big) WHERE EXISTS { MATCH (b:Big) WHERE a = b } RETURN count(*)",
+    ],
+)
+def test_on_oracle_a_node_read_by_its_key_in_a_union_or_exists_hints_the_outermost_query_once(statement: str) -> None:
+    sql = oracle(statement)
+    where = f"{statement}\n{sql}"
+    assert "INSTR(" in sql, where
+    assert_planned_without_feedback(sql, where)
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        # A label in the labels' text form that keyed_labels didn't write, as a node's second label is tested.
+        "MATCH (n:Big) RETURN count(*)",
+        "MATCH (n:Big:Other) RETURN count(*)",
+        "MATCH (a:Big) MATCH (b:Big) RETURN count(*)",
+        "MATCH (x:Small)-[:R]->(a:Big) RETURN count(*)",
+        "MATCH (n:Big) WHERE id(n) = $id RETURN n",
+        "UNWIND $ids AS i MATCH (n:Item) WHERE id(n) = i RETURN count(*)",
+    ],
+)
+def test_on_oracle_a_query_that_reads_no_node_by_its_key_this_way_keeps_statistics_feedback(statement: str) -> None:
+    sql = oracle(statement, {"id": 5, "ids": [1, 2]})
+    assert "_optimizer_use_feedback" not in sql, f"{statement}\n{sql}"
+
+
+def test_on_oracle_the_step_of_a_write_that_reads_a_node_by_its_key_is_hinted_once() -> None:
+    # A statement that writes is a procedure: the query of its step that reads b by its key holds the hint, once.
+    write = oracle("MATCH (a:Big) MATCH (b:Big) WHERE a = b SET b.seen = true")
+    assert write.count(NO_FEEDBACK) == 1, write
+    assert re.search(rf"SELECT /\*\+ [^*]*{re.escape(NO_FEEDBACK)}", write), write

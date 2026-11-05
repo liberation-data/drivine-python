@@ -104,6 +104,10 @@ found = await gom.load_matching(Chunk, "graph AND database", top_k=10, threshold
   1 - distance (memgraph/memgraph#5199). Earlier releases read the similarity, so a vector more than 90 degrees from
   the query scored as its mirror image does: a cosine of -0.6 as 0.8, not 0.2. Those scores, and the hits a cosine
   `threshold` keeps, change; positive cosines and euclidean scores don't.
+- **Full-text scores on Postgres, SQLite and Oracle without Oracle Text changed after 0.3.2.** A hit scored by how
+  often the query's terms occur in it. It now scores by BM25, as Neo4j's index scores it (see
+  [Postgres](02-connecting.md#postgres)): a rare term outweighs a common one, and a short text outranks a long one that
+  holds a term as often. The hits can come in another order, and a `threshold` can keep others.
 - **Filters apply after the search:** `threshold`, `where`, and a view's required relationships. So a search can return
   fewer than `top_k`; `search_k` asks the index for more, and `top_k` trims after the filter.
 - **A full-text search is bounded where the index yields.** A matching score is scaled over every hit the index

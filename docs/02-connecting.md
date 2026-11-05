@@ -144,7 +144,9 @@ applied whole or not at all.
 - A vector index is a pgvector HNSW index over the embeddings of the label's nodes of its size; `load_nearest` is
   approximate through it, and exact with no index made. A full-text index is a trigram index over the text a search
   reads, which narrows the search; `load_matching` scores the same with it and without it, and reads words, a
-  `"phrase"`, `+must`, `-not` and a `prefix*`.
+  `"phrase"`, `+must`, `-not` and a `prefix*`. It scores by BM25, as Lucene and so Neo4j's full-text index do (`k1`
+  1.2, `b` 0.75): a term weighs as it is rare among the label's nodes, and a text's counts against its length, in
+  characters, beside the label's average. Oracle without Oracle Text scores the same way.
 
 ### SQLite
 
@@ -188,7 +190,7 @@ The stamp is a column. Moments compare and order to the nanosecond, whatever the
   as that property, as text.
 - A range index or a uniqueness constraint is a partial index over the property as a statement reads it, for the
   label's nodes. A vector or a full-text index is recorded and nothing is made for it: `load_nearest` and
-  `load_matching` measure every node of the label.
+  `load_matching` measure every node of the label, and `load_matching` scores by BM25, as Postgres does.
 - `matches` takes a regular expression in Java's dialect, as on drivine4j, matched against the whole value: a
   `REGEXP` reads it as Java does, and refuses what Python can't read so, such as a script (`\p{IsLatin}`) or a
   look-behind of more than one length.

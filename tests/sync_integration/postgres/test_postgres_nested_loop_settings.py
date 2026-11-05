@@ -22,9 +22,13 @@ MERGE = "MATCH (n:CyLoop) MERGE (n)-[:CY_SELF]->(n)"
 
 
 def settings_after(
-    registry: DatabaseRegistry, setup: str, cypher: str, nodes: bool = False, fails: bool = False
+    registry: DatabaseRegistry, setup: str, cypher: str, nodes: bool = False, fails: str | None = None
 ) -> list[str]:
-    """The settings after `cypher`, compiled, ran in a transaction that ran `setup` first, then rolled back."""
+    """The settings after `cypher`, compiled, ran in a transaction that ran `setup` first, then rolled back.
+
+    `fails` is a part of the error the call must raise, so that a failure before the loop turns the settings off
+    doesn't pass for one inside it.
+    """
     compiled = PostgresCypherCompiler(GRAPH).compile(cypher)
     prelude = compiled.prelude or ""
     assert "set_config('enable_seqscan', 'off', true)" in prelude, prelude
@@ -42,13 +46,16 @@ def settings_after(
             raw.execute(f"""INSERT INTO {GRAPH}_node (labels, props) VALUES ('["CyLoop"]', '{{"i": 1}}')""")
         raw.execute(prelude)
         raw.execute("SAVEPOINT cy_planner_test")
-        failed = False
+        error: str | None = None
         try:
             raw.execute(f"SELECT count(*) FROM {function.group()}('{{}}'::jsonb)")
-        except Exception:
-            failed = True
-        assert failed == fails, f"{cypher} failed: {failed}"
-        if failed:
+        except Exception as e:
+            error = str(e)
+        if fails is None:
+            assert error is None, f"{cypher} failed: {error}"
+        else:
+            assert error is not None and fails in error, f"{cypher} failed with: {error}"
+        if error is not None:
             raw.execute("ROLLBACK TO SAVEPOINT cy_planner_test")
         cursor = raw.execute(
             "SELECT current_setting('enable_seqscan') AS a, current_setting('enable_hashjoin') AS b, "
@@ -79,5 +86,6 @@ def test_a_procedure_that_fails_in_its_loop_leaves_the_settings_as_they_were_onc
     # Divided by zero in the loop, for its one row. drivine4j's test merges a null property, `{w: n.missing}`, which
     # this compiler writes as no property rather than refusing.
     failing = "MATCH (n:CyLoop) MERGE (n)-[:CY_SELF {w: n.i / 0}]->(n)"
-    settings = settings_after(registry, "SET LOCAL enable_hashjoin = off", failing, nodes=True, fails=True)
+    setup = "SET LOCAL enable_hashjoin = off"
+    settings = settings_after(registry, setup, failing, nodes=True, fails="division by zero")
     assert settings == ["on", "off", "on"]

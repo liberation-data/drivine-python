@@ -224,6 +224,19 @@ people = await pm.query(spec.bind({"city": "Sydney"}))
   ([#404](https://github.com/liberation-data/drivine-python/issues/404)). The earlier of two such nodes keeps the
   index's form, and so does a node equal to one found by nothing else (`MATCH (a) MATCH (b:Rare) WHERE a = b`), where
   the index is the way in.
+- On Oracle, a compiled `DELETE` that reads the ids it deletes from its match
+  (`DELETE FROM … WHERE nid IN (SELECT n1.nid + 0 …)`) reads the key with `+ 0`. This works around an Oracle rewrite
+  of the same family, seen on 23.26: Oracle unnested `nid IN (SELECT n1.nid FROM <nodes> n1 WHERE <label test>)` into
+  the table itself and found no rows, so `MATCH (g:Gone) DETACH DELETE g` deleted nothing
+  ([#410](https://github.com/liberation-data/drivine-python/issues/410),
+  [drivine4j#587](https://github.com/liberation-data/drivine4j/issues/587)). That subquery also tests each node's
+  labels by their text, which the index over labels can't answer, in a `LATERAL`'s query too: planned with the index,
+  Oracle crashed the session (ORA-03113, with ORA-07445 `[qjsnmvFindOpt()+16]` in the alert log) on
+  `MATCH (a:X) OPTIONAL MATCH (a)-[r:R]->(:X {k: 2}) DELETE r`, and on the `DETACH DELETE` of an optional match's
+  node, after transactions that deleted and read nodes of the label had rolled back. The hint `NO_ADAPTIVE_PLAN` did
+  not prevent it. The subquery then reads the node table whole, once
+  ([drivine#612](https://github.com/liberation-data/drivine/issues/612),
+  [drivine4j#595](https://github.com/liberation-data/drivine4j/issues/595)).
 - What each statement gives is the [Cypher spec](https://github.com/liberation-data/drivine-cypher-spec), which the
   three Drivine libraries run alike.
 

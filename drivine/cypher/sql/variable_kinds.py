@@ -264,7 +264,7 @@ def _made(pattern: Pattern, scope: Scope, made: set[str], merging: bool, foreach
         if bound is None:
             scope[variable] = "NODE"
             continue
-        if not foreach and (node.labels or node.properties is not None):
+        if not foreach and (node.labels or node.mapped):
             raise DrivineError(
                 f"{variable} is bound already, so a CREATE or MERGE makes no node of it with labels or properties."
             )
@@ -342,6 +342,7 @@ def _expression(value: Expression, scope: Scope) -> None:
         _matched(value.pattern, inner, True)
         _each([value.where, value.projection], inner)
     elif isinstance(value, PatternPredicate):
+        _predicated(value.pattern, scope)
         _matched(value.pattern, dict(scope), True)
     elif isinstance(value, Exists):
         inner = dict(scope)
@@ -353,9 +354,36 @@ def _expression(value: Expression, scope: Scope) -> None:
     # A literal, a parameter, a variable and count(*) hold no other expression.
 
 
+def _predicated(pattern: Pattern, scope: Scope) -> None:
+    """
+    A pattern used as an expression, `WHERE (n)-[r]->(a)`, that names a variable not bound in `scope`: Neo4j refuses it
+    (its 42N29), as such a pattern only tests for a match, and binds nothing.
+    """
+    names = [
+        name
+        for i, node in enumerate(pattern.nodes)
+        for name in (node.variable, pattern.relationships[i].variable if i < len(pattern.relationships) else None)
+        if name is not None
+    ]
+    new = next((it for it in names if scope.get(it) is None), None)
+    if new is not None:
+        raise DrivineError(
+            f"{new} is not defined: a pattern used as an expression binds no new variable, as in Neo4j. Bind it in a "
+            "MATCH, or test the pattern with EXISTS { … }."
+        )
+
+
 def _function_of(function: Function, scope: Scope) -> None:
-    """A function of a variable whose kind it does not take, as Neo4j refuses it: `size()` of a path."""
+    """
+    A function of a variable whose kind it does not take, as Neo4j refuses it: `size()` of a path, and `size()` of a
+    pattern, `size((a)-->())` (Neo4j's 42I52). Read after its arguments, so a pattern there that names a new variable is
+    refused for that first, as Neo4j does.
+    """
     argument = function.arguments[0] if len(function.arguments) == 1 else None
     kind = scope.get(argument.name) if isinstance(argument, Variable) else None
     if function.name.lower() == "size" and kind == "PATH":
         raise DrivineError("size() takes a list or a text, not a path, as in Neo4j: length() takes a path.")
+    if function.name.lower() == "size" and isinstance(argument, PatternPredicate):
+        raise DrivineError(
+            "size() takes a list or a text, not a pattern, as in Neo4j: COUNT { … } counts a pattern's matches."
+        )

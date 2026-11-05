@@ -348,6 +348,47 @@ def test_a_cypher_statement_takes_named_parameters_on_a_sql_store(cypher_pm: Per
         cypher_pm.query(positional)
 
 
+def test_an_empty_map_of_properties_in_a_pattern_matches_as_the_pattern_without_it(
+    cypher_pm: PersistenceManager,
+):
+    # Not in the spec yet: {} is met by every node and relationship, so the SQL stores compile it as no properties
+    # (drivine4j#583). Read as a map, it made an empty WHERE or a dangling AND.
+    clear(cypher_pm)
+    cypher_pm.query(spec("CREATE (a:CyEm {k: 1})-[:CY_EM {w: 1}]->(b:CyEm {k: 2})-[:CY_EM]->(c {k: 3})"))
+    for empty, without in [
+        ("MATCH (a {}) RETURN a.k ORDER BY a.k", "MATCH (a) RETURN a.k ORDER BY a.k"),
+        ("MATCH (a:CyEm {}) RETURN a.k ORDER BY a.k", "MATCH (a:CyEm) RETURN a.k ORDER BY a.k"),
+        (
+            "MATCH (a)-[r:CY_EM {}]->(b {}) RETURN [a.k, b.k] ORDER BY a.k",
+            "MATCH (a)-[r:CY_EM]->(b) RETURN [a.k, b.k] ORDER BY a.k",
+        ),
+        (
+            "MATCH (a {k: 1})-[:CY_EM*1..2 {}]->(b) RETURN b.k ORDER BY b.k",
+            "MATCH (a {k: 1})-[:CY_EM*1..2]->(b) RETURN b.k ORDER BY b.k",
+        ),
+        (
+            "MATCH (a {k: 1})-[:CY_EM*1..2]->(b {}) RETURN b.k ORDER BY b.k",
+            "MATCH (a {k: 1})-[:CY_EM*1..2]->(b) RETURN b.k ORDER BY b.k",
+        ),
+        (
+            "MATCH (a {k: 1}) ((x {})-[:CY_EM {}]->(y)){1,2} (b) RETURN b.k ORDER BY b.k",
+            "MATCH (a {k: 1}) ((x)-[:CY_EM]->(y)){1,2} (b) RETURN b.k ORDER BY b.k",
+        ),
+        (
+            "MATCH (a:CyEm) WHERE EXISTS { (a)-[:CY_EM {}]->({}) } RETURN a.k ORDER BY a.k",
+            "MATCH (a:CyEm) WHERE EXISTS { (a)-[:CY_EM]->() } RETURN a.k ORDER BY a.k",
+        ),
+    ]:
+        rows = cypher_pm.query(spec(without))
+        assert rows, without
+        assert cypher_pm.query(spec(empty)) == rows, empty
+    # Written, {} sets nothing and MERGE finds what is there.
+    cypher_pm.query(spec("MERGE (n:CyEm {}) RETURN count(n)"))
+    assert cypher_pm.query(spec("MATCH (n:CyEm) RETURN count(n)")) == [2]
+    cypher_pm.query(spec("CREATE (:CyEmNew {})"))
+    assert cypher_pm.query(spec("MATCH (n:CyEmNew) RETURN keys(n)")) == [[]]
+
+
 @pytest.mark.parametrize(
     "store", [it for it in SQL_STORES if {"postgres": POSTGRES, "oracle": ORACLE, "sqlite": SQLITE}.get(it)]
 )

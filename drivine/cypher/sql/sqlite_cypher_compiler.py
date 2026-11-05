@@ -15,7 +15,6 @@ from drivine.cypher.sql.procedure_step import ProcedureStep
 from drivine.cypher.sql.sql_cypher_compiler import (
     CALLER,
     COUNT,
-    DOOMED,
     FOUND,
     GATHERED,
     ID,
@@ -43,7 +42,7 @@ from drivine.cypher.sql.value import Json, Node
 from drivine.model import stamps
 
 _VARIABLES = frozenset(
-    {PARAMS, ROWS, OUT, ROW, VALUE, ID, COUNT, FOUND, DOOMED}
+    {PARAMS, ROWS, OUT, ROW, VALUE, ID, COUNT, FOUND}
     | {f"{it}{depth}" for it in (SAVED, GATHERED, CALLER) for depth in range(1, NESTING + 1)}
 )
 """The variables of a procedure, which a step's SQL reads as numbered parameters: see SqliteCypherCompiler.procedure."""

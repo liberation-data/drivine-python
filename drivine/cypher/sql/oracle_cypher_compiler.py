@@ -18,7 +18,6 @@ from drivine.cypher.sql.sql_cypher_compiler import (
     CALLER,
     COUNT,
     DEGREES_TO_RADIANS,
-    DOOMED,
     FOUND,
     GATHERED,
     ID,
@@ -810,6 +809,30 @@ class OracleCypherCompiler(SqlCypherCompiler):
         for `b`.
         """
         return f"({a} = {b} + 0 AND {b} = {a} + 0)"
+
+    def in_key(self, key: str) -> str:
+        """
+        The key with `+ 0`, as `same_key` has it: Oracle (23.26) unnests `nid IN (SELECT n1.nid FROM <nodes> n1 WHERE
+        <label test>)` into the table itself, the label test answered by the multivalue index, and finds no row, so
+        `MATCH (g:Gone) DETACH DELETE g` deleted nothing, and a `COUNT(*)` of the same found none (#410,
+        liberation-data/drivine4j#587). The key of an expression is not rewritten so.
+        """
+        return f"{key} + 0"
+
+    def deleted_ids(self, query: str) -> str:
+        """
+        With no plan that adapts (`NO_ADAPTIVE_PLAN`), as a walk's steps: Oracle (23.26) crashed the session (ORA-07445
+        in `qjsnmvFindOpt`, the multivalue index over labels, ORA-03113 to the client) planning `DELETE FROM <edges>
+        WHERE eid IN (SELECT … FROM <nodes> n1 LEFT JOIN LATERAL (…) …)` of `MATCH (a:X) OPTIONAL MATCH
+        (a)-[r:R]->(:X {k: 2}) DELETE r` again, where a transaction that deleted and read nodes of the label had rolled
+        back (#410, liberation-data/drivine#612). So hinted, or with `NO_UNNEST`, or without the label index, it ran
+        clean.
+        """
+        planned = super().deleted_ids(query)
+        hinted = _HINTED.match(planned)
+        if hinted:
+            return f"SELECT /*+ {hinted.group(1)} {_NO_ADAPTIVE_PLAN} */{planned[hinted.end() :]}"
+        return re.sub(r"^SELECT ", f"SELECT /*+ {_NO_ADAPTIVE_PLAN} */ ", planned, count=1)
 
     def keyed_labels(self, labels: str, all_: Sequence[str]) -> str:
         """
@@ -1647,7 +1670,6 @@ class OracleCypherCompiler(SqlCypherCompiler):
             f"    {ID} NUMBER;",
             f"    {COUNT} NUMBER;",
             f"    {FOUND} BOOLEAN;",
-            f"    {DOOMED} JSON;",
             f"    {CURSOR} SYS_REFCURSOR;",
             f"    {NOW} TIMESTAMP;",
         ]
@@ -1775,6 +1797,9 @@ _SHORT_TEXT = 4000
 
 _NO_JSON_TABLE_TRANSFORM = "NO_JSON_TABLE_TRANSFORM"
 """The hint that turns Oracle's JSON table transformation off: see `OracleCypherCompiler.planned`."""
+
+_NO_ADAPTIVE_PLAN = "NO_ADAPTIVE_PLAN"
+"""The hint that keeps Oracle from adapting a plan as it runs: see `OracleCypherCompiler.deleted_ids`."""
 
 _HINTED = re.compile(r"SELECT /\*\+ (.*?) \*/")
 """A query that opens with hints, and those hints: Oracle reads the first hint comment of a query alone."""

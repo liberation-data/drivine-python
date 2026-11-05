@@ -15,7 +15,6 @@ from drivine.cypher.sql.procedure_step import ProcedureStep
 from drivine.cypher.sql.sql_cypher_compiler import (
     CALLER,
     COUNT,
-    DOOMED,
     FOUND,
     GATHERED,
     ID,
@@ -699,7 +698,6 @@ class PostgresCypherCompiler(SqlCypherCompiler):
             f"    {ID} bigint;",
             f"    {COUNT} bigint;",
             f"    {FOUND} boolean;",
-            f"    {DOOMED} jsonb;",
             f"    {RECORD} record;",
             f"    {MATCHED} record;",
         ]

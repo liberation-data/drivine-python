@@ -165,9 +165,6 @@ The row a `CALL { … }` that writes and returns is written for, followed by its
 gives is that row with what it returns, whatever the call bound to the row's names inside it.
 """
 
-DOOMED = "cy_doomed"
-"""The nodes a `DELETE` deletes once its rows are done, a JSON list of ids."""
-
 RECORD = "cy_record"
 """The record of a write's loop over the rows: its `item` is a row."""
 
@@ -942,6 +939,20 @@ class SqlCypherCompiler(ABC):
         in a form it can't rewrite: see Oracle's.
         """
         return f"{a} = {b}"
+
+    def in_key(self, key: str) -> str:
+        """
+        The key column `key` as a subquery gives it to an `IN` over the same table's key, `nid IN (SELECT n1.nid …)`: a
+        store whose planner rewrites that into a wrong answer gives it in a form it can't rewrite: see Oracle's.
+        """
+        return key
+
+    def deleted_ids(self, query: str) -> str:
+        """
+        The query a `DELETE` reads the ids it deletes from, `query`, a subquery of the match itself in the `DELETE`'s
+        `IN`, as `planned` gives it: a store whose planner fails on such a subquery is told more: see Oracle's.
+        """
+        return self.planned(query)
 
     def keyed_labels(self, labels: str, all_: Sequence[str]) -> str:
         """
@@ -2782,10 +2793,11 @@ class SqlCypherCompiler(ABC):
         """The steps of the procedure the query is: its reads, a loop over its rows for each write, and what it
         returns."""
         select = self._select({})
-        for clause in _creates(query.clauses):
+        clauses = _creates(query.clauses)
+        for i, clause in enumerate(clauses):
             if isinstance(clause, Return):
                 self._step(steps.Return(self._project(select, clause.projection, final=True).sql))
-            else:
+            elif not (isinstance(clause, Delete) and i == len(clauses) - 1 and self._delete_matched(select, clause)):
                 select = self._next(select, clause)
         return _single(self._blocks)
 
@@ -2987,11 +2999,14 @@ class SqlCypherCompiler(ABC):
         self._step(steps.Select(variable, value(select.scope), "".join(f"\n{it}" for it in self._from(select))))
 
     def _write(self, clause: Clause) -> None:
-        """One write: made for each row of ROWS in turn, and the rows it leaves put back there."""
+        """
+        One write: made for each row of ROWS in turn, and the rows it leaves put back there; a `DELETE` over all of
+        them at once, see `_delete`.
+        """
+        if isinstance(clause, Delete):
+            self._delete(clause)
+            return
         self._assign(OUT, self.literal_json([]))
-        deleting = isinstance(clause, Delete) and not clause.detach
-        if deleting:
-            self._assign(DOOMED, self.literal_json([]))
         r = self._alias("r")
 
         def each() -> None:
@@ -3010,9 +3025,6 @@ class SqlCypherCompiler(ABC):
                 for item in clause.items:
                     self._remove(item)
                 self._keep()
-            elif isinstance(clause, Delete):
-                self._delete(clause)
-                self._keep()
             else:
                 raise DrivineError(f"{type(clause).__name__} reads")
 
@@ -3022,23 +3034,6 @@ class SqlCypherCompiler(ABC):
             each,
         )
         self._let(ROWS, OUT)
-        if deleting:
-            # A node is deleted when the clause has deleted the relationships it deletes: one it does not delete must
-            # not be there.
-            d = self._alias("d")
-            doomed = f"SELECT {self.id_of(self.item(d), None)} FROM {self.elements(DOOMED, d)}"
-            self._step(
-                steps.Select(COUNT, "count(*)", f" FROM {self.edges} WHERE src IN ({doomed}) OR dst IN ({doomed})")
-            )
-            self._branch(
-                f"{COUNT} > 0",
-                lambda: self._step(
-                    steps.Raise(
-                        "A node is deleted that still has relationships: delete them first, or DETACH DELETE it."
-                    )
-                ),
-            )
-            self._execute(f"DELETE FROM {self.nodes} WHERE nid IN ({doomed})")
 
     def _call_writing(self, call: Call) -> None:
         """
@@ -3418,23 +3413,81 @@ class SqlCypherCompiler(ABC):
 
     def _delete(self, delete: Delete) -> None:
         """
-        A `DELETE` for the row in ROW: its relationships first, then its nodes, each with its relationships where it is
-        `DETACH`; without, a node is gathered in DOOMED and deleted once the rows are done.
+        A `DELETE` over all the rows in ROWS at once, which it leaves as they are (#410, liberation-data/drivine4j#587):
+        one statement for each table, the ids of every row's relationships, then of its nodes, each with its
+        relationships where it is `DETACH`, as the edge table's foreign keys cascade. A node or a relationship on many
+        rows, or named twice, is deleted once. Nothing the clause writes is read before it is done, so it deletes what a
+        statement for each row in turn would.
         """
-        targets: list[tuple[str, tuple[str, str, str]]] = []
+        targets: list[tuple[str, str]] = []
         for expression in delete.expressions:
             if not isinstance(expression, Variable):
                 unsupported("A DELETE of anything but a variable")
-            targets.append((expression.name, self._target(expression.name, "DELETE")))
-        for _, (table, _, row) in targets:
-            if table == self.edges:
-                self._execute(f"DELETE FROM {self.edges} WHERE eid = {row}")
-        for _, (table, _, row) in targets:
-            if table == self.nodes:
-                if delete.detach:
-                    self._execute(f"DELETE FROM {self.nodes} WHERE nid = {row}")
-                else:
-                    self._assign(DOOMED, self.appended(DOOMED, self.scalar(row)))
+            targets.append((expression.name, self._target(expression.name, "DELETE")[0]))
+
+        def ids(table: str) -> str | None:
+            variables = list(dict.fromkeys(variable for variable, it in targets if it == table))
+            queries: list[str] = []
+            for variable in variables:
+                r = self._alias("r")
+                queries.append(f"SELECT {self.id_of(self.item(r), self._key(variable))} FROM {self.elements(ROWS, r)}")
+            return " UNION ALL ".join(queries) or None
+
+        self._delete_ids(ids(self.edges), ids(self.nodes), delete.detach)
+
+    def _delete_ids(self, relationships: str | None, nodes: str | None, detach: bool) -> None:
+        """
+        The relationships whose ids the query `relationships` gives deleted, then the nodes whose ids `nodes` gives:
+        with their relationships where `detach`; without, the statement fails where one has a relationship still.
+        """
+        if relationships is not None:
+            self._execute(f"DELETE FROM {self.edges} WHERE eid IN ({relationships})")
+        if nodes is None:
+            return
+        if not detach:
+            self._step(
+                steps.Select(COUNT, "count(*)", f" FROM {self.edges} WHERE src IN ({nodes}) OR dst IN ({nodes})")
+            )
+            self._branch(
+                f"{COUNT} > 0",
+                lambda: self._step(
+                    steps.Raise(
+                        "A node is deleted that still has relationships: delete them first, or DETACH DELETE it."
+                    )
+                ),
+            )
+        self._execute(f"DELETE FROM {self.nodes} WHERE nid IN ({nodes})")
+
+    def _delete_matched(self, select: _Select, delete: Delete) -> bool:
+        """
+        A `DELETE` that ends the statement written as one statement that reads the ids it deletes from the select
+        itself, so the rows of its match, which nothing after it reads, are not gathered into ROWS first (#410,
+        liberation-data/drivine4j#587): that list held an id for each of 1.1M nodes in `MATCH (n) DETACH DELETE n`. Only
+        where the statement reads its match once, and that is all it would read: the clause deletes one variable, a
+        node with `DETACH` or a relationship, and every variable the select binds is a node or a relationship, so
+        gathering the rows works out no value it would not. A plain `DELETE` of nodes reads them twice, to test them for
+        relationships and to delete them, and one of relationships and nodes would read the match again once the
+        relationships are gone, so they are gathered as before. False where it is not written so, and then nothing is.
+        """
+        scope = select.scope
+        if not all(isinstance(it, (Node, Relationship)) for it in scope.values()):
+            return False
+        variables: set[str] = set()
+        for expression in delete.expressions:
+            if not isinstance(expression, Variable):
+                return False
+            variables.add(expression.name)
+        if len(variables) != 1:
+            return False
+        read = "".join(f"\n{it}" for it in [*self._from(select), *_present(select.where_clause())])
+        target = scope.get(next(iter(variables)))
+        if isinstance(target, Node) and delete.detach:
+            self._delete_ids(None, self.deleted_ids(f"SELECT {self.in_key(target.nid)} AS id{read}"), detach=True)
+            return True
+        if isinstance(target, Relationship):
+            self._delete_ids(self.deleted_ids(f"SELECT {self.in_key(target.eid)} AS id{read}"), None, delete.detach)
+            return True
+        return False
 
     # ----- Projection -----
 

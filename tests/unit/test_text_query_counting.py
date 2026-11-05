@@ -120,6 +120,11 @@ def test_a_phrase_of_distinct_words_whose_last_does_not_start_its_first_counts_a
     assert by_oracle(query, text) == by_lookahead(query, text)
 
 
+def test_a_phrase_whose_first_word_starts_a_later_one_counts_by_how_often_it_occurs() -> None:
+    both('"kiwi kiwis"', "kiwi kiwi kiwis kiwis kiwi kiwisx kiwi kiwis", 2)
+    both('"ki kiwi bird"', "ki ki kiwi bird ki kiwi birds ki kiwi bird ki kiwi bird", 3)
+
+
 def test_oracle_counts_a_term_holding_a_number_that_is_not_a_digit_by_its_one_expression() -> None:
     # "²" is a word's to the query, not to [[:alnum:]]: "b²b" in "b²b²bx" begins inside the first.
     assert counted(term("b²b")) == (term("b²b"), None)

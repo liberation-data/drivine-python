@@ -7,6 +7,7 @@ from typing import Annotated
 import pytest
 
 from drivine import FullTextIndex, ModelRegistry, NodeFragment, NodeId
+from drivine.backend.graph_statement import GraphStatement
 from drivine.backend.matching_search import MatchingSearch
 from drivine.backend.oracle.oracle_backend import OracleBackend
 from drivine.backend.oracle.oracle_graph import OracleGraph
@@ -97,3 +98,33 @@ def test_binds_each_term_on_its_own_on_oracle_once_for_its_count_and_once_more_f
         "REGEXP_COUNT(s.text, $_term6) - REGEXP_COUNT(s.text, $_term7) AS x1"
     ) in sql
     assert "WHERE (REGEXP_LIKE(s.text, $_term8) OR REGEXP_LIKE(s.text, $_term9))" in sql
+
+
+def _oracle_matching(text: str) -> GraphStatement:
+    return OracleBackend(OracleGraph()).matching(
+        ModelRegistry().fragment(Shelf), MatchingSearch("Shelf", ("title",), 10, text=text)
+    )
+
+
+def test_counts_a_phrase_that_repeats_a_word_on_oracle_in_the_text_with_each_character_between_words_twice() -> None:
+    # Two counts would take different occurrences where one begins inside another: "la la" in "la la land"
+    # (drivine4j#607).
+    statement = _oracle_matching('"la la"')
+    assert (
+        "SELECT s.nid, s.len, REGEXP_COUNT(REGEXP_REPLACE(s.text, '([^[:alnum:]_])', '\\1\\1'), $_term0) AS tf1 FROM"
+    ) in squashed(statement.text)
+    assert statement.bindings["_term0"] == "(^|[^[:alnum:]_])la[^[:alnum:]_]+la($|[^[:alnum:]_])"
+
+
+@pytest.mark.parametrize(
+    ("text", "bound"),
+    [("kiw*", "(^|[^[:alnum:]_])kiw"), ("b²b", "(^|[^[:alnum:]_])b²b($|[^[:alnum:]_])")],
+)
+def test_counts_a_prefix_term_or_one_holding_a_number_not_a_digit_on_oracle_by_its_one_expression(
+    text: str, bound: str
+) -> None:
+    # A prefix term takes no character after it, and "²" begins an occurrence that two counts would lose
+    # (drivine4j#607).
+    statement = _oracle_matching(text)
+    assert "SELECT s.nid, s.len, REGEXP_COUNT(s.text, $_term0) AS tf1 FROM" in squashed(statement.text)
+    assert statement.bindings["_term0"] == bound

@@ -66,10 +66,30 @@ class Execute:
 
 
 @dataclass(frozen=True)
+class Kept:
+    """
+    `list_` made an empty list of the rows a write keeps, in the store's own kind of list, which `Keep` adds a row to in
+    a time that does not grow with the list: read as a JSON list at the end, by `SqlCypherCompiler.kept_rows`. A row
+    appended to a JSON list copied the list, so a loop over many rows grew with their square (#419,
+    liberation-data/drivine4j#588).
+    """
+
+    list_: str
+
+
+@dataclass(frozen=True)
+class Keep:
+    """The JSON `item` kept after the rows of `list_`, a list `Kept` made."""
+
+    list_: str
+    item: str
+
+
+@dataclass(frozen=True)
 class Return:
     """The rows of `query`, whose one column is `result`, returned as the statement's rows."""
 
     query: str
 
 
-ProcedureStep = Select | Let | Loop | If | Raise | Execute | Return
+ProcedureStep = Select | Let | Loop | If | Raise | Execute | Kept | Keep | Return

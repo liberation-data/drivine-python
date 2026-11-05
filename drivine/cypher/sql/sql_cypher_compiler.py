@@ -130,7 +130,7 @@ ROWS = "cy_rows"
 """The rows, a JSON list of maps, each variable a row holds at its key."""
 
 OUT = "cy_out"
-"""The rows a write leaves, as it makes them."""
+"""The rows a write leaves, as it makes them: a list of the store's that keeps them, see procedure_step.Kept."""
 
 ROW = "cy_row"
 """The row a write is making, a JSON map."""
@@ -155,14 +155,20 @@ where it returns nothing. Followed by its depth, from 1 to NESTING.
 
 GATHERED = "cy_gathered"
 """
-The rows a `CALL { … }` that writes and returns gives, or the rows and items a `FOREACH` writes for, each one alone,
-followed by its depth, from 1 to NESTING.
+The rows and items a `FOREACH` writes for, each one alone, followed by its depth, from 1 to NESTING: those a
+`CALL { … }` gives are RETURNED.
 """
 
 CALLER = "cy_caller"
 """
 The row a `CALL { … }` that writes and returns is written for, followed by its depth, from 1 to NESTING: each row it
 gives is that row with what it returns, whatever the call bound to the row's names inside it.
+"""
+
+RETURNED = "cy_returned"
+"""
+The rows a `CALL { … }` that writes and returns gives, kept as a write keeps its rows (see procedure_step.Kept),
+followed by its depth, from 1 to NESTING.
 """
 
 RECORD = "cy_record"
@@ -523,6 +529,12 @@ class SqlCypherCompiler(ABC):
         self.edges = f"{graph}_edge"
         self.procedural = False
         """Whether the statement is a procedure, which declares no function of its own a query of it may call."""
+        self.row_alone = 0
+        """
+        How deep the procedure is in loops that write a `FOREACH` or a `CALL { … }` for each row alone: ROWS then holds
+        that row, or the few a write of it left. A store whose planner can't tell how many rows ROWS holds is told
+        there: see Oracle's `elements`.
+        """
         self._functions: list[str] = []
         """The functions a query of the statement calls, which it declares before it: see `declare`."""
         self._shares = 0
@@ -1592,9 +1604,39 @@ class SqlCypherCompiler(ABC):
                 lines.append(line(self.raise_(step.message)))
             elif isinstance(step, steps.Execute):
                 lines.append(line(f"{step.statement}{f' INTO {step.into}' if step.into is not None else ''};"))
+            elif isinstance(step, steps.Kept):
+                lines.append(line(f"{step.list_} := {self.empty_kept()};"))
+            elif isinstance(step, steps.Keep):
+                lines.append(line(self.keep(step.list_, step.item)))
             else:
                 lines += [line(it) for it in self.return_rows(self.planned(step.query))]
         return lines
+
+    def kept_lists(self, program: Sequence[ProcedureStep]) -> list[str]:
+        """
+        The lists the program keeps rows in, made by a `Kept` step, in the order they are first made: each is declared,
+        of the store's type for them, where it is one.
+        """
+        lists: list[str] = []
+        for step in program:
+            found = (
+                [step.list_]
+                if isinstance(step, steps.Kept)
+                else self.kept_lists(step.body)
+                if isinstance(step, steps.Loop | steps.If)
+                else []
+            )
+            lists += [it for it in found if it not in lists]
+        return lists
+
+    def empty_kept(self) -> str:
+        """A list of rows a write keeps, empty, in a procedural language: see procedure_step.Kept."""
+        raise NotImplementedError("This store writes its procedure in no procedural language.")
+
+    def keep(self, list_: str, item: str) -> str:
+        """The statement of a procedural language that keeps the JSON item after the rows of the list: see
+        procedure_step.Keep."""
+        raise NotImplementedError("This store writes its procedure in no procedural language.")
 
     def return_rows(self, query: str) -> list[str]:
         """The statements of a procedural language that return the rows of the query, whose one column is `result`:
@@ -1622,6 +1664,10 @@ class SqlCypherCompiler(ABC):
     @abstractmethod
     def appended(self, list_: str, item: str) -> str:
         """The JSON list with the JSON item after its items."""
+
+    @abstractmethod
+    def kept_rows(self, list_: str) -> str:
+        """The rows kept in the list, a list a `Kept` step made, as a JSON list."""
 
     @abstractmethod
     def strip_nulls(self, json: str) -> str:
@@ -3006,7 +3052,7 @@ class SqlCypherCompiler(ABC):
         if isinstance(clause, Delete):
             self._delete(clause)
             return
-        self._assign(OUT, self.literal_json([]))
+        self._step(steps.Kept(OUT))
         r = self._alias("r")
 
         def each() -> None:
@@ -3033,7 +3079,7 @@ class SqlCypherCompiler(ABC):
             f"SELECT {named(self.item(r), 'item')} FROM {self.elements(ROWS, r)} ORDER BY {self.item_no(r)}",
             each,
         )
-        self._let(ROWS, OUT)
+        self._let(ROWS, self.kept_rows(OUT))
 
     def _call_writing(self, call: Call) -> None:
         """
@@ -3056,7 +3102,7 @@ class SqlCypherCompiler(ABC):
             _redeclared([it.name for it in returned.projection.items], self._kinds)
         self._nesting += 1
         kept = f"{SAVED}{self._nesting}"
-        gathered = f"{GATHERED}{self._nesting}"
+        gathered = f"{RETURNED}{self._nesting}"
         caller = f"{CALLER}{self._nesting}"
         before = dict(self._kinds)
         carried_before = dict(self._carried)
@@ -3064,7 +3110,7 @@ class SqlCypherCompiler(ABC):
         returned_carried: dict[str, Json] = {}
         self._let(kept, ROWS)
         if returned is not None:
-            self._assign(gathered, self.literal_json([]))
+            self._step(steps.Kept(gathered))
         # Only what the call imports is seen in it: any other name in it is a new variable, as in Cypher (#294).
         imported = imports(call, call.query.clauses, before)
         clauses = _imported(call.query.clauses, imported)
@@ -3103,7 +3149,7 @@ class SqlCypherCompiler(ABC):
                 gave = {key: kind for key, kind in self._kinds.items() if key not in before}
                 returned_kinds.update(gave)
                 returned_carried.update({key: value for key, value in self._carried.items() if key in gave})
-                g, a, b = self._alias("g"), self._alias("g"), self._alias("g")
+                b = self._alias("g")
                 row = self.comparable(
                     Json(
                         self.json_object(
@@ -3115,21 +3161,20 @@ class SqlCypherCompiler(ABC):
                         ordered=True,
                     )
                 )
-                both = (
-                    f"SELECT 1 AS part, {named(self.item_no(a), 'item_no')}, {named(self.item(a), 'item')} "
-                    f"FROM {self.elements(gathered, a)} UNION ALL "
-                    f"SELECT 2 AS part, {named(self.item_no(b), 'item_no')}, {row} AS item "
-                    f"FROM {self.elements(ROWS, b)}"
+                # Each kept in turn, as a write keeps its rows: gathered again with those before, each row copied them
+                # all (#419, liberation-data/drivine4j#588).
+                self._loop(
+                    RECORD,
+                    f"SELECT {row} AS item FROM {self.elements(ROWS, b)} ORDER BY {self.item_no(b)}",
+                    lambda: self._step(steps.Keep(gathered, f"{RECORD}.item")),
                 )
-                listed = self.comparable(Json(self.aggregate_list(f"{g}.item", f"{g}.part, {g}.item_no"), ordered=True))
-                self._step(steps.Select(gathered, listed, f" FROM ({both}) {g}"))
 
         self._each_row(kept, each)
         if returned is None:
             self._let(ROWS, kept)
             self._restore(before, carried_before)
         else:
-            self._let(ROWS, gathered)
+            self._let(ROWS, self.kept_rows(gathered))
             self._restore({**before, **returned_kinds}, {**carried_before, **returned_carried})
         self._unread = None
         self._nesting -= 1
@@ -3144,7 +3189,12 @@ class SqlCypherCompiler(ABC):
         def each() -> None:
             self._assign(ROWS, self.appended(self.literal_json([]), f"{RECORD}.item"))
             self._unread = None
-            body()
+            # ROWS holds the one row: see `row_alone`.
+            self.row_alone += 1
+            try:
+                body()
+            finally:
+                self.row_alone -= 1
 
         self._loop(
             RECORD,
@@ -3196,7 +3246,7 @@ class SqlCypherCompiler(ABC):
 
     def _keep(self) -> None:
         """The row in ROW kept, as a row of what the write leaves."""
-        self._assign(OUT, self.appended(OUT, ROW))
+        self._step(steps.Keep(OUT, ROW))
 
     def _create(self, pattern: Pattern, merging: bool) -> None:
         """

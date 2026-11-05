@@ -24,6 +24,7 @@ from drivine.cypher.sql.sql_cypher_compiler import (
     OUT,
     PARAMS,
     RECORD,
+    RETURNED,
     ROW,
     ROWS,
     SAVED,
@@ -43,7 +44,7 @@ from drivine.model import stamps
 
 _VARIABLES = frozenset(
     {PARAMS, ROWS, OUT, ROW, VALUE, ID, COUNT, FOUND}
-    | {f"{it}{depth}" for it in (SAVED, GATHERED, CALLER) for depth in range(1, NESTING + 1)}
+    | {f"{it}{depth}" for it in (SAVED, GATHERED, CALLER, RETURNED) for depth in range(1, NESTING + 1)}
 )
 """The variables of a procedure, which a step's SQL reads as numbered parameters: see SqliteCypherCompiler.procedure."""
 
@@ -694,6 +695,11 @@ class SqliteCypherCompiler(SqlCypherCompiler):
     def appended(self, list_: str, item: str) -> str:
         return f"json_insert({list_}, '$[#]', json({item}))"
 
+    def kept_rows(self, list_: str) -> str:
+        """The function keeps the rows in a list of its own, and binds it as the JSON list it is where a step reads it:
+        see `drivine_cypher`."""
+        return list_
+
     def strip_nulls(self, json: str) -> str:
         """A merge patch onto an empty map leaves out each entry whose value is null."""
         return f"json_patch('{{}}', {json})"
@@ -767,6 +773,10 @@ def _step(step: ProcedureStep) -> dict[str, Any]:
         return {"op": "raise", "message": step.message}
     if isinstance(step, steps.Execute):
         return {**_step_sql("execute", step.statement), "variable": step.into}
+    if isinstance(step, steps.Kept):
+        return {"op": "kept", "variable": step.list_}
+    if isinstance(step, steps.Keep):
+        return {**_step_sql("keep", f"SELECT {step.item}"), "variable": step.list_}
     return _step_sql("return", step.query)
 
 

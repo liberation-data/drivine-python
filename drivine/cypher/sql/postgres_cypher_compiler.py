@@ -688,11 +688,13 @@ class PostgresCypherCompiler(SqlCypherCompiler):
         with itself. It is made by a statement of its own, the prelude: psycopg sends a statement with parameters as one
         command.
         """
+        kept = self.kept_lists(program)
         declared = [
             "#variable_conflict use_column",
             "DECLARE",
             f"    {ROWS} jsonb;",
-            f"    {OUT} jsonb;",
+            # An array, which array_append extends in place: see `keep`.
+            f"    {OUT} {'jsonb[]' if OUT in kept else 'jsonb'};",
             f"    {ROW} jsonb;",
             f"    {VALUE} jsonb;",
             f"    {ID} bigint;",
@@ -703,6 +705,7 @@ class PostgresCypherCompiler(SqlCypherCompiler):
         ]
         for depth in range(1, NESTING + 1):
             declared += [f"    {SAVED}{depth} jsonb;", f"    {GATHERED}{depth} jsonb;", f"    {CALLER}{depth} jsonb;"]
+        declared += [f"    {it} jsonb[];" for it in kept if it != OUT]
         text = "\n".join([*declared, "BEGIN", indent("\n".join(self.statements(program))), "END"])
         digest = hashlib.sha256(text.encode()).hexdigest()
         function = f"pg_temp.drivine_cypher_{digest[:24]}"
@@ -750,6 +753,20 @@ class PostgresCypherCompiler(SqlCypherCompiler):
 
     def appended(self, list_: str, item: str) -> str:
         return f"({list_} || jsonb_build_array({item}))"
+
+    def empty_kept(self) -> str:
+        return "'{}'"
+
+    def keep(self, list_: str, item: str) -> str:
+        """
+        PL/pgSQL extends a local array in place where it is assigned `array_append` of itself, so each row is a step
+        that does not grow with the rows kept: `||` on a `jsonb` list copied the list for each (#419,
+        liberation-data/drivine4j#588). Not by `SELECT … INTO`, which is a query, and passes the array as a copy.
+        """
+        return f"{list_} := array_append({list_}, CAST({item} AS jsonb));"
+
+    def kept_rows(self, list_: str) -> str:
+        return f"to_jsonb({list_})"
 
     def strip_nulls(self, json: str) -> str:
         return f"jsonb_strip_nulls(CAST({json} AS jsonb))"

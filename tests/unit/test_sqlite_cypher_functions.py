@@ -648,6 +648,35 @@ class TestCypher:
         )
         assert graph.one(f'drivine_cypher(\'{program}\', \'{{"names":["a","b","c"]}}\')') == '["b",6]'
 
+    def test_keeps_rows_in_a_list_a_step_reads_as_json_and_fails_to_keep_one_in_a_list_not_made(self, graph: Database):
+        # A row kept is the text, or the number, its step gave: a real one as Java writes a double, a null as null.
+        keep = {
+            "op": "keep",
+            "sql": "SELECT json_object('k', ?1)",
+            "variables": ["cy_record.item"],
+            "variable": "cy_out",
+        }
+        program = self.steps(
+            {"op": "kept", "variable": "cy_out"},
+            {
+                "op": "loop",
+                "sql": "SELECT value FROM json_each('[1, 2]')",
+                "variables": [],
+                "record": "cy_record.item",
+                "body": [keep],
+            },
+            {"op": "keep", "sql": "SELECT 1e20", "variables": [], "variable": "cy_out"},
+            {"op": "keep", "sql": "SELECT NULL", "variables": [], "variable": "cy_out"},
+            {"op": "select", "sql": "SELECT ?1", "variables": ["cy_out"], "variable": "cy_rows"},
+            {"op": "return", "sql": "SELECT json_array_length(?1)", "variables": ["cy_rows"]},
+            {"op": "return", "sql": "SELECT ?1", "variables": ["cy_out"]},
+        )
+        assert graph.one(f"drivine_cypher('{program}', '{{}}')") == '[4,[{"k":1},{"k":2},1.0E20,null]]'
+        unmade = graph.fails(
+            f"SELECT drivine_cypher('{self.steps({'op': 'keep', 'sql': 'SELECT 1', 'variable': 'cy_out'})}', '{{}}')"
+        )
+        assert str(unmade) == "drivine_cypher keeps no rows in cy_out."
+
     def test_reads_a_condition_as_kotlins_to_int_and_a_variable_not_set_as_null(self, graph: Database):
         program = self.steps(
             {"op": "if", "sql": "SELECT 1.7", "variables": [], "body": [{"op": "return", "sql": "SELECT 'yes'"}]},

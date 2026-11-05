@@ -209,6 +209,11 @@ class OracleCypherCompiler(SqlCypherCompiler):
         given, so a trial compile that writes one and is thrown away, or a step of a procedure that holds none, is
         planned as before.
         """
+        self._one_row: list[str] = []
+        """
+        The aliases of the `JSON_TABLE`s that read ROWS where a `FOREACH` or a `CALL { … }` is written for each row
+        alone (`row_alone`): kept as text, as `_keyed` are, and looked for in the query `planned` is given.
+        """
 
     def compile_query(self, query: Query, parameters: Mapping[str, Any]) -> CompiledCypher:
         """
@@ -867,8 +872,13 @@ class OracleCypherCompiler(SqlCypherCompiler):
         """
         A list that holds a subquery is read from a lateral view first, `_list_view`: a subquery in `JSON_TABLE`'s
         argument reads no table beside it in the `FROM`.
+
+        The rows of a `FOREACH` or a `CALL { … }` written for each row alone (`row_alone`) are noted (`_one_row`), and
+        the query that reads them is planned for one row: see `_one_row_planned`.
         """
         items = f"COLUMNS (item_no FOR ORDINALITY, item JSON PATH '$')) {alias}"
+        if json == ROWS and self.row_alone > 0 and alias not in self._one_row:
+            self._one_row.append(alias)
         if "SELECT" not in json.upper():
             return f"JSON_TABLE({json}, '$[*]' {items}"
         return f"{self._list_view(json, alias, '')} {alias}_l CROSS JOIN JSON_TABLE({alias}_l.list, '$[*]' {items}"
@@ -1479,18 +1489,52 @@ class OracleCypherCompiler(SqlCypherCompiler):
         after: `MATCH (a:Big) MATCH (b:Big) WHERE a = b` took 7 ms, then 1,482 ms and 1,526 ms, then 7 ms over 4,000
         nodes, so each new cursor paid the cost #404 took away twice (#415, liberation-data/drivine4j#585). The hint
         leaves the first run's plan as it was. It is the statement's, so the outermost query holds it.
+
+        A query of a procedure that reads the rows of a `FOREACH` or a `CALL { … }` written for each row alone is
+        planned for one row of them first: see `_one_row_planned`.
         """
-        transform = self._reads_compared or len(self._graph_table.findall(query)) >= 2
-        feedback = any(it in query for it in self._keyed)
+        estimated = self._one_row_planned(query)
+        transform = self._reads_compared or len(self._graph_table.findall(estimated)) >= 2
+        feedback = any(it in estimated for it in self._keyed)
         hints = " ".join(
             it for it, wanted in ((_NO_JSON_TABLE_TRANSFORM, transform), (NO_FEEDBACK, feedback)) if wanted
         )
         if not hints:
-            return query
-        hinted = _HINTED.match(query)
+            return estimated
+        hinted = _HINTED.match(estimated)
         if hinted:
-            return f"SELECT /*+ {hinted.group(1)} {hints} */{query[hinted.end() :]}"
-        return re.sub(r"^SELECT ", f"SELECT /*+ {hints} */ ", query, count=1)
+            return f"SELECT /*+ {hinted.group(1)} {hints} */{estimated[hinted.end() :]}"
+        return re.sub(r"^SELECT ", f"SELECT /*+ {hints} */ ", estimated, count=1)
+
+    def _one_row_planned(self, query: str) -> str:
+        """
+        The query with each query of it that reads the rows of a `FOREACH` or a `CALL { … }` written for each row
+        alone (`_one_row`) told they are one row (`CARDINALITY(r 1)`), in its own query's hint, where Oracle reads it:
+        one in the statement's outermost query left the plan as it was. Oracle estimates 8,168 rows for a `JSON_TABLE`
+        over a variable, and joined the node table to them by a hash join over all its nodes, so a `CALL (n) { SET …
+        RETURN n.i AS j }` read every node for each row (191 buffers a row over 10,000 nodes, 38 over 2,000), and took
+        20 s over 10,000 rows where it took 1 s over 2,000 (#419, liberation-data/drivine4j#588). Told of one row,
+        Oracle reads each node by its key: 3 buffers a row, at any size.
+        """
+        text = query
+        for alias in self._one_row:
+            read = re.search(
+                rf"FROM JSON_TABLE\({re.escape(ROWS)}, '\$\[\*\]' COLUMNS \(item_no FOR ORDINALITY, "
+                rf"item JSON PATH '\$'\)\) {re.escape(alias)}\b",
+                text,
+            )
+            # An alias names one source of the statement, so one query reads it.
+            select = _owning_select(text, read.start()) if read else None
+            if select is None:
+                continue
+            hint = f"CARDINALITY({alias} 1)"
+            after = select + len("SELECT ")
+            if text.startswith("/*+ ", after):
+                end = text.index(" */", after)
+                text = f"{text[:end]} {hint}{text[end:]}"
+            else:
+                text = f"{text[:after]}/*+ {hint} */ {text[after:]}"
+        return text
 
     def lateral(self, query: str, name: str, optional: bool, columns: Sequence[tuple[str, bool]]) -> str:
         """
@@ -1686,12 +1730,14 @@ class OracleCypherCompiler(SqlCypherCompiler):
 
     def procedure(self, program: Sequence[ProcedureStep], parameters: dict[str, Any]) -> CompiledCypher:
         """An anonymous block, which returns its rows as an implicit result."""
+        kept = self.kept_lists(program)
         declared = [
             "DECLARE",
             # Text, read as JSON where each parameter is read: see `property_of`.
             f"    {PARAMS} CLOB := ${OBJECT};",
             f"    {ROWS} JSON;",
-            f"    {OUT} JSON;",
+            # A list in memory, which a row is appended to in place: see `keep`.
+            f"    {OUT} {'JSON_ARRAY_T' if OUT in kept else 'JSON'};",
             f"    {ROW} JSON;",
             f"    {VALUE} JSON;",
             f"    {ID} NUMBER;",
@@ -1702,6 +1748,7 @@ class OracleCypherCompiler(SqlCypherCompiler):
         ]
         for depth in range(1, NESTING + 1):
             declared += [f"    {SAVED}{depth} JSON;", f"    {GATHERED}{depth} JSON;", f"    {CALLER}{depth} JSON;"]
+        declared += [f"    {it} JSON_ARRAY_T;" for it in kept if it != OUT]
         # The clock is read once, by a query: see OracleTemporalSql.now.
         clock = f"SELECT {CLOCK} INTO {NOW} FROM DUAL;"
         return CompiledCypher(
@@ -1768,6 +1815,19 @@ class OracleCypherCompiler(SqlCypherCompiler):
     def appended(self, list_: str, item: str) -> str:
         return f"JSON_TRANSFORM({list_}, APPEND '$' = {item})"
 
+    def empty_kept(self) -> str:
+        return "JSON_ARRAY_T()"
+
+    def keep(self, list_: str, item: str) -> str:
+        """
+        A `JSON_ARRAY_T` is a list held in memory, which `append` adds to in place: `JSON_TRANSFORM`'s `APPEND` on a
+        `JSON` list made the list anew for each row (#419, liberation-data/drivine4j#588).
+        """
+        return f"{list_}.append({item});"
+
+    def kept_rows(self, list_: str) -> str:
+        return f"{list_}.to_json"
+
     def strip_nulls(self, json: str) -> str:
         return f"JSON_MERGEPATCH(JSON('{{}}'), {json} RETURNING JSON)"
 
@@ -1776,6 +1836,38 @@ class OracleCypherCompiler(SqlCypherCompiler):
 
     def without_label(self, labels: str, label: str) -> str:
         return f"JSON_TRANSFORM({labels}, REMOVE {literal(f'$[*]?(@ == {_quoted(label)})')})"
+
+
+def _owning_select(query: str, from_: int) -> int | None:
+    """
+    Where the `SELECT` whose `FROM` is at `from_` in the query begins: read back from there, past the brackets of its
+    select list and the quotes of its texts; None where a bracket opens before it. See
+    `OracleCypherCompiler._one_row_planned`.
+    """
+    depth = 0
+    at = from_ - 1
+    while at >= 0:
+        c = query[at]
+        if c == "'":
+            opened = query.rfind("'", 0, at)
+            if opened < 0:
+                return None
+            at = opened
+        elif c == ")":
+            depth += 1
+        elif c == "(":
+            if depth == 0:
+                return None
+            depth -= 1
+        elif depth == 0 and query.startswith("SELECT ", at) and (at == 0 or not _is_word(query[at - 1])):
+            return at
+        at -= 1
+    return None
+
+
+def _is_word(c: str) -> bool:
+    """Whether the character is one of a name: a letter, a digit or `_`."""
+    return c.isalnum() or c == "_"
 
 
 def _scientific(text: str) -> str:

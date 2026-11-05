@@ -4,17 +4,21 @@
 the statement runs on, in its transaction, and gives back the rows it returns as a JSON list. drivine4j's
 `SqliteCypherFunction`.
 
-`steps` is `{"steps": [...]}`, each step a map of its `op`, `select`, `loop`, `if`, `raise`, `execute` or `return`;
+`steps` is `{"steps": [...]}`, each step a map of its `op`, `select`, `loop`, `if`, `raise`, `execute`, `kept`, `keep`
+or `return`;
 its `sql`, in which each variable of the procedure it reads is a numbered parameter, `?1`; and `variables`, the names
 bound to those parameters in turn: the parameters' object (`cy_params`), the rows carried from clause to clause, the
 id a write made, a loop record's item (`cy_record.item`). A `select` sets its `variable` to the first column of the
 first row its query gives; a `loop` sets its `record` to the first column of each row of its query, read whole before
 its `body` writes anything, and runs the body for each; an `if` runs its `body` where its query gives 1; a `raise`
 fails the procedure with its `message`; an `execute` runs its statement, and sets its `variable`, where it has one, to
-what the statement gives; a `return` adds the first column of each row its query gives to the rows returned.
+what the statement gives; a `kept` sets its `variable` to an empty list of the rows a write keeps, and a `keep` adds
+the first column of the first row its query gives to that list; a `return` adds the first column of each row its query
+gives to the rows returned.
 
 A variable holds the first column of a row as SQLite gives it, a whole number, a real one, or text (JSON's, where the
-query gives JSON), and is bound again as it is: a number stays one. A variable not set is null. The steps run within a
+query gives JSON), and is bound again as it is: a number stays one, and a list a `kept` made is bound as the JSON list
+of its rows. A variable not set is null. The steps run within a
 savepoint of their own: a procedure that fails is rolled back to where it began, so the statement is applied whole or
 not at all.
 """
@@ -55,6 +59,17 @@ def run(connection: sqlite3.Connection, steps: Any, parameters: Any) -> str:
                 pass
         raise
     return "[" + ",".join(_row_text(it) for it in procedure.rows) + "]"
+
+
+class _Kept(list[Any]):
+    """
+    The rows a write keeps, each the JSON text, or the number, a step gave: a step that reads them is given them as a
+    JSON list (see `_Procedure._values`). Each `json_insert` of a row into the list as text read and wrote the whole
+    list again (#419, liberation-data/drivine4j#588).
+    """
+
+    def json(self) -> str:
+        return "[" + ",".join(_row_text(it) for it in self) + "]"
 
 
 def _row_text(value: Any) -> str:
@@ -106,6 +121,10 @@ class _Procedure:
                     self.variables[str(into)] = self._first(step)
                 else:
                     self.connection.execute(step["sql"], self._values(step)).close()
+            elif op == "kept":
+                self.variables[str(step["variable"])] = _Kept()
+            elif op == "keep":
+                self._kept(str(step["variable"])).append(self._first(step))
             elif op == "return":
                 self.rows.extend(self._query(step))
             else:
@@ -123,6 +142,17 @@ class _Procedure:
         found = self._query(step)
         return found[0] if found else None
 
+    def _kept(self, variable: str) -> _Kept:
+        """The rows kept in the variable, a list a `kept` step made."""
+        kept = self.variables.get(variable)
+        if not isinstance(kept, _Kept):
+            raise DrivineError(f"drivine_cypher keeps no rows in {variable}.")
+        return kept
+
     def _values(self, step: dict[str, Any]) -> list[Any]:
-        """The values of the variables the step reads, in the order its parameters are numbered."""
-        return [self.variables.get(str(it)) for it in cast(list[Any], step.get("variables") or [])]
+        """
+        The values of the variables the step reads, in the order its parameters are numbered: the rows a write keeps as
+        a JSON list.
+        """
+        values = (self.variables.get(str(it)) for it in cast(list[Any], step.get("variables") or []))
+        return [it.json() if isinstance(it, _Kept) else it for it in values]

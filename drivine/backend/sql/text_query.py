@@ -17,6 +17,12 @@ _SPACES = " \t\n\u000b\u000c\r"
 _BOUNDARY_BEFORE = "(^|[^[:alnum:]_])"
 _BOUNDARY_AFTER = "($|[^[:alnum:]_])"
 
+
+def is_prefix(pattern: str) -> bool:
+    """Whether a term's expression is a prefix term's: one whose last word is the start of a word, `kiw*`."""
+    return not pattern.endswith(_BOUNDARY_AFTER)
+
+
 _OPERATORS: dict[str, Literal["MUST", "NOT", "OR"]] = {
     "AND": "MUST",
     "&&": "MUST",

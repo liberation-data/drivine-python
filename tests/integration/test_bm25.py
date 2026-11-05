@@ -6,6 +6,7 @@ measures, and are left out.
 """
 
 import json
+import math
 from pathlib import Path
 from typing import Annotated
 
@@ -22,6 +23,7 @@ from drivine import (
     StatelessGraphObjectManager,
     full_text_index,
 )
+from drivine.backend.sql.bm25 import K1, PREFIX, B
 
 
 class Bm25Article(NodeFragment, labels=["Bm25Article"]):
@@ -65,7 +67,27 @@ PAPERS = [
     Bm25Paper(id="other", title="nothing", body="to see"),
 ]
 
-SPECS = [full_text_index("Bm25Article", "body"), full_text_index("Bm25Paper", ["title", "body"])]
+
+class Bm25Fruit(NodeFragment, labels=["Bm25Fruit"]):
+    """drivine4j#612's texts, measured on Neo4j: a prefix that "rare" alone holds beside "melon"."""
+
+    id: Annotated[str, NodeId()]
+    body: Annotated[str | None, FullTextIndex()] = None
+
+
+FRUITS = {
+    "one": "kiwi",
+    "three": "kiwi kiwis kiwifruit",
+    "long": "a kiwi among a great many other words that make this text far longer than any of the others",
+    "rare": "kiwano melon",
+    "other": "nothing here",
+}
+
+SPECS = [
+    full_text_index("Bm25Article", "body"),
+    full_text_index("Bm25Paper", ["title", "body"]),
+    full_text_index("Bm25Fruit", "body"),
+]
 
 
 async def clear(pm: PersistenceManager, *labels: str) -> None:
@@ -88,8 +110,8 @@ async def gom(cypher_pm: PersistenceManager) -> StatelessGraphObjectManager:
     gom = StatelessGraphObjectManager(cypher_pm)
     for spec in SPECS:
         await gom.indexes.drop(spec)
-    await clear(cypher_pm, "Bm25Article", "Bm25Paper")
-    await gom.save_all([*ARTICLES, *PAPERS])
+    await clear(cypher_pm, "Bm25Article", "Bm25Paper", "Bm25Fruit")
+    await gom.save_all([*ARTICLES, *PAPERS, *(Bm25Fruit(id=id_, body=body) for id_, body in FRUITS.items())])
     if cypher_pm.type == DatabaseType.NEO4J:
         for spec in SPECS:
             await gom.indexes.ensure(spec)
@@ -128,6 +150,48 @@ class TestBm25:
         assert hits["often"] == pytest.approx(1, abs=1e-9)
         # Ten times the count, as long again as the other's text: not ten times the score.
         assert hits["once"] > 0.4
+
+    async def test_a_prefix_term_scores_every_node_that_holds_it_alike_as_lucenes_prefix_query_does(
+        self, gom: StatelessGraphObjectManager
+    ) -> None:
+        # Lucene scores a prefix query by a constant, not by how often or how rare (drivine4j#612).
+        hits = await search(gom, "kiw*")
+        assert {id_ for id_, _ in hits} == {"once", "often"}
+        assert all(score == pytest.approx(1, abs=1e-9) for _, score in hits)
+
+    async def test_a_prefix_term_beside_a_word_adds_the_same_to_each_node_that_holds_it(
+        self, gom: StatelessGraphObjectManager
+    ) -> None:
+        hits = await search(gom, "kiw* bird")
+        assert [id_ for id_, _ in hits] == ["once", "often"]
+        assert hits[1][1] < hits[0][1]
+
+    async def test_a_prefix_term_beside_a_rare_word_weighs_as_lucenes_constant_beside_its_bm25_as_neo4j_measured(
+        self, gom: StatelessGraphObjectManager
+    ) -> None:
+        async def fruit(query: str) -> dict[str, float]:
+            return {it.value.id: it.score for it in await gom.load_matching(Bm25Fruit, query, top_k=50)}
+
+        # On Neo4j, every hit of a prefix alone scored 1 (drivine4j#612).
+        prefix, whole = await fruit("kiw*"), await fruit("kiwi*")
+        assert set(prefix) == {"one", "three", "long", "rare"}
+        assert set(whole) == {"one", "three", "long"}
+        assert all(score == pytest.approx(1, abs=1e-6) for score in [*prefix.values(), *whole.values()])
+        # "melon" is in "rare" alone: its BM25 beside the prefix's constant, with the lengths the store measures: in
+        # tokens on Lucene, in characters on the SQL stores.
+        neo4j = gom.persistence_manager.type == DatabaseType.NEO4J
+        lengths = {id_: len(body.split(" ")) if neo4j else len(body) for id_, body in FRUITS.items()}
+        average = sum(lengths.values()) / len(lengths)
+        idf = math.log(1 + (len(FRUITS) - 1 + 0.5) / (1 + 0.5))
+        melon = idf * (K1 + 1) / (1 + K1 * (1 - B + B * lengths["rare"] / average))
+        expected = PREFIX / (PREFIX + melon)
+        for query in ["kiw* melon", "+kiw* melon"]:
+            hits = await fruit(query)
+            assert set(hits) == {"one", "three", "long", "rare"}, query
+            assert hits["rare"] == pytest.approx(1, abs=1e-6), query
+            assert all(hits[it] == pytest.approx(expected, abs=1e-4) for it in ("one", "three", "long")), query
+        # Neo4j gave 0.5409; the SQL stores, measuring length in characters, about 0.549.
+        assert expected == pytest.approx(0.5409, abs=0.01)
 
     async def test_a_common_term_still_finds_its_nodes_and_required_and_excluded_terms_keep_their_meaning(
         self, gom: StatelessGraphObjectManager

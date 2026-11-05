@@ -18,7 +18,6 @@ from drivine.cypher.sql.sql_cypher_compiler import (
     CALLER,
     COUNT,
     DEGREES_TO_RADIANS,
-    DOOMED,
     FOUND,
     GATHERED,
     ID,
@@ -816,6 +815,32 @@ class OracleCypherCompiler(SqlCypherCompiler):
         for `b`.
         """
         return f"({a} = {b} + 0 AND {b} = {a} + 0)"
+
+    def in_key(self, key: str) -> str:
+        """
+        The key with `+ 0`, as `same_key` has it: Oracle (23.26) unnests `nid IN (SELECT n1.nid FROM <nodes> n1 WHERE
+        <label test>)` into the table itself, the label test answered by the multivalue index, and finds no row, so
+        `MATCH (g:Gone) DETACH DELETE g` deleted nothing, and a `COUNT(*)` of the same found none (#410,
+        liberation-data/drivine4j#587). The key of an expression is not rewritten so.
+        """
+        return f"{key} + 0"
+
+    def deleted_ids(self, query: str) -> str:
+        """
+        Each test of a node's labels the index over labels would answer (`has_label`) written by the labels' text
+        instead (`holds_label`), in each query of the subquery, a `LATERAL`'s too. Oracle (23.26) crashed the session
+        (ORA-07445 `[qjsnmvFindOpt()+16] [SIGSEGV]`, in the multivalue index over labels; ORA-03113 to the client)
+        planning `DELETE FROM <edges> WHERE eid IN (SELECT … FROM <nodes> n1 LEFT JOIN LATERAL (… <nodes> n2 …) …)`
+        of `MATCH (a:X) OPTIONAL MATCH (a)-[r:R]->(:X {k: 2}) DELETE r`, and the `DETACH DELETE m` of `OPTIONAL MATCH
+        (a)-[:R]->(m:X {k: 3})` alike, where transactions that deleted and read nodes of the label had rolled back
+        (#410, liberation-data/drivine#612, liberation-data/drivine4j#595). Off the index it ran clean; with
+        `NO_ADAPTIVE_PLAN` (already the session's) or `NO_INDEX` on the outer node alone it crashed as often. The
+        subquery then reads the outer node's table whole, once, and the lateral's node by its key.
+        """
+        return _INDEXED_LABEL.sub(
+            lambda m: holds_label(m.group(1), _UNESCAPE.sub(r"\1", m.group(2).replace("''", "'"))),
+            super().deleted_ids(query),
+        )
 
     def keyed_labels(self, labels: str, all_: Sequence[str]) -> str:
         """
@@ -1672,7 +1697,6 @@ class OracleCypherCompiler(SqlCypherCompiler):
             f"    {ID} NUMBER;",
             f"    {COUNT} NUMBER;",
             f"    {FOUND} BOOLEAN;",
-            f"    {DOOMED} JSON;",
             f"    {CURSOR} SYS_REFCURSOR;",
             f"    {NOW} TIMESTAMP;",
         ]
@@ -1803,6 +1827,15 @@ _NO_JSON_TABLE_TRANSFORM = "NO_JSON_TABLE_TRANSFORM"
 
 NO_FEEDBACK = "OPT_PARAM('_optimizer_use_feedback' 'false')"
 """The hint that plans a statement without statistics feedback: see `OracleCypherCompiler.planned`."""
+
+_INDEXED_LABEL = re.compile(r"""JSON_EXISTS\(([\w.]+\.labels), '\$\[\*\]\?\(@ == "((?:[^"\\]|\\.)*)"\)'\)""", re.DOTALL)
+"""
+A test of a column of labels, `n1.labels`, as `has_label` writes it, `JSON_EXISTS(n1.labels, '$[*]?(@ == "X")')`, and
+the label, written as JSON writes a string and then as SQL quotes one: see `OracleCypherCompiler.deleted_ids`.
+"""
+
+_UNESCAPE = re.compile(r"\\(.)", re.DOTALL)
+"""A character JSON escapes in a string, and its backslash: see `OracleCypherCompiler.deleted_ids`."""
 
 _HINTED = re.compile(r"SELECT /\*\+ (.*?) \*/")
 """A query that opens with hints, and those hints: Oracle reads the first hint comment of a query alone."""

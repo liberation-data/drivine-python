@@ -11,7 +11,7 @@ from drivine.backend.matching_search import MatchingSearch
 from drivine.backend.oracle.oracle_backend import OracleBackend
 from drivine.backend.oracle.oracle_graph import OracleGraph
 from drivine.backend.sql.bm25 import Bm25Dialect, bm25_ranked, bm25_score
-from drivine.backend.sql.text_query import TextQuery
+from drivine.backend.sql.text_query import TextQuery, counted
 
 
 class Shelf(NodeFragment, labels=["Shelf"]):
@@ -80,15 +80,20 @@ def test_binds_each_term_on_its_own_on_oracle_once_for_its_count_and_once_more_f
     )
     sql = squashed(statement.text)
     query = TextQuery.parse("graph +data -noise")
-    assert list(statement.bindings) == ["_term0", "_term1", "_term2", "_term3", "_term4", "_term5"]
-    assert list(statement.bindings.values()) == [*query.scored, *query.required, *query.excluded, *query.scored]
+    # Each term's two counts (drivine4j#607), the required and the excluded among them, then each scoring term again,
+    # for whether a node holds it.
+    two = [part for term in [*query.scored, *query.required, *query.excluded] for part in counted(term) or ()]
+    assert list(statement.bindings) == [f"_term{it}" for it in range(10)]
+    assert list(statement.bindings.values()) == [*two, *query.scored]
     # The text is lowered to match a term in, and measured as it is.
     assert (
         "SELECT c.nid, LOWER(NVL(JSON_VALUE(c.props, '$.\"title\"' RETURNING CLOB), '')) AS text, "
         "NVL(LENGTH(NVL(JSON_VALUE(c.props, '$.\"title\"' RETURNING CLOB), '')), 0) AS len"
     ) in sql
     assert (
-        "REGEXP_COUNT(s.text, $_term0) AS tf1, REGEXP_COUNT(s.text, $_term1) AS tf2, "
-        "REGEXP_COUNT(s.text, $_term2) AS r1, REGEXP_COUNT(s.text, $_term3) AS x1"
+        "REGEXP_COUNT(s.text, $_term0) - REGEXP_COUNT(s.text, $_term1) AS tf1, "
+        "REGEXP_COUNT(s.text, $_term2) - REGEXP_COUNT(s.text, $_term3) AS tf2, "
+        "REGEXP_COUNT(s.text, $_term4) - REGEXP_COUNT(s.text, $_term5) AS r1, "
+        "REGEXP_COUNT(s.text, $_term6) - REGEXP_COUNT(s.text, $_term7) AS x1"
     ) in sql
-    assert "WHERE (REGEXP_LIKE(s.text, $_term4) OR REGEXP_LIKE(s.text, $_term5))" in sql
+    assert "WHERE (REGEXP_LIKE(s.text, $_term8) OR REGEXP_LIKE(s.text, $_term9))" in sql

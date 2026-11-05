@@ -16,6 +16,53 @@ _SPACES = " \t\n\u000b\u000c\r"
 
 _BOUNDARY_BEFORE = "(^|[^[:alnum:]_])"
 _BOUNDARY_AFTER = "($|[^[:alnum:]_])"
+_BOUNDARY_AHEAD = "(?=$|[^[:alnum:]_])"
+"""What `_BOUNDARY_AFTER` holds to, without taking the character it is: Postgres's and SQLite's lookahead."""
+_BETWEEN = "[^[:alnum:]_]+"
+"""What stands between the words of a phrase in a term's expression."""
+
+SEPARATOR = "([^[:alnum:]_])"
+"""
+One character between words, as a group: for a store whose expressions don't look ahead, Oracle's. Each such character
+of the text written twice (`\\1\\1`), one is there for each, so a term's expression counts in it as `looking_ahead`
+counts in the text. It is the slow way, a fifth as fast as `counted`'s over 100,000 texts on Oracle, kept for the terms
+`counted` can't count.
+"""
+
+
+def looking_ahead(pattern: str) -> str:
+    """
+    A term's expression ending where its last word does, the character after it held to but not taken: counted, a term
+    written again at once still has the character before it (drivine4j#607). Taken, "kiwi kiwi kiwi" counted twice. For
+    a store whose expressions look ahead.
+    """
+    return pattern.removesuffix(_BOUNDARY_AFTER) + _BOUNDARY_AHEAD if pattern.endswith(_BOUNDARY_AFTER) else pattern
+
+
+def counted(pattern: str) -> tuple[str, str | None] | None:
+    """
+    For a store whose expressions don't look ahead, Oracle's: the term's expression ending where its last word does, and
+    that expression holding a letter, a digit or an underscore after it. The term occurs as many times as the first
+    matches less the second, and neither takes the character before the next, so it counts as `looking_ahead` does. None
+    for the second where the term is the start of a word, which may go on (drivine4j#607).
+
+    None where the term is a phrase that repeats a word, or whose last word starts its first: there an occurrence may
+    begin inside another, "la la" in "la la land" or "kiwis kiwi" in "kiwis kiwis kiwi", and the two counts take
+    different ones. Such a term is counted in the text with each `SEPARATOR` written twice.
+
+    The pattern itself, with None for the second, where a word holds a number that isn't a digit, the "²" of "b²b": a
+    word's to `_GAP` but not to `[[:alnum:]]`, so an occurrence may begin at it, and neither way above counts it. The
+    one count undercounts the term only where it is written again at once, as it did before.
+    """
+    if not pattern.endswith(_BOUNDARY_AFTER):
+        return pattern, None
+    ended = pattern.removesuffix(_BOUNDARY_AFTER)
+    words = ended.removeprefix(_BOUNDARY_BEFORE).split(_BETWEEN)
+    if any(not (char.isalpha() or char.isdecimal() or char == "_") for word in words for char in word):
+        return pattern, None
+    overlaps = len(set(words)) < len(words) or (len(words) > 1 and words[0].startswith(words[-1]))
+    return None if overlaps else (ended, f"{ended}[[:alnum:]_]")
+
 
 _OPERATORS: dict[str, Literal["MUST", "NOT", "OR"]] = {
     "AND": "MUST",
@@ -251,9 +298,7 @@ def _term_of(token: _Token) -> _Term | None:
     oracle_text = (
         " ".join([*(f"{{{it}}}" for it in words[:-1]), f"{words[-1]}%"]) if prefix else f"{{{' '.join(words)}}}"
     )
-    return _Term(
-        words, _BOUNDARY_BEFORE + "[^[:alnum:]_]+".join(words) + ("" if prefix else _BOUNDARY_AFTER), oracle_text
-    )
+    return _Term(words, _BOUNDARY_BEFORE + _BETWEEN.join(words) + ("" if prefix else _BOUNDARY_AFTER), oracle_text)
 
 
 def _last_index(items: Sequence[_Char], test: Callable[[_Char], bool]) -> int:

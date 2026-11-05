@@ -864,6 +864,20 @@ class OracleCypherCompiler(SqlCypherCompiler):
         self._keyed.add(test)
         return test
 
+    def grouped_labels(self, labels: str, all_: Sequence[str]) -> str:
+        """
+        Each label by the labels' text (`holds_label`), which the index over labels can't answer, for a node a `MATCH`
+        finds after a `WITH` that groups its rows. Answered by that index, Oracle (23.26) sometimes crashed the session
+        building the cursor (ORA-00600 `[QJSNMV_GET_MVI_MD:2]`, ORA-03113 to the client), after planning, as it put the
+        label test it had rewritten onto the index's column back as it was: `MATCH (p:Person)-[r:ACTED_IN]->() WITH p,
+        collect(DISTINCT [r]) AS l, count(DISTINCT [r]) AS n MATCH (p)-[r2:ACTED_IN]->(:Movie {title: 'The Matrix'})
+        RETURN …` (#418, liberation-data/drivine4j#601, liberation-data/drivine#620); after a rolled-back delete of
+        nodes of the label it crashed in the same index as a `DELETE`'s read did (ORA-07445 `[qjsnmvFindOpt()+16]`,
+        #410). The nodes before the `WITH` keep the index's form. Such a node is mostly found from a node the `WITH`
+        passed on, by its key, so only a node found by its label and nothing else is read without the index.
+        """
+        return " AND ".join(holds_label(labels, it) for it in all_)
+
     def key_value(self, json: str) -> str:
         """A number, as the key's `NUMBER`; anything else, or a number past one, null."""
         return f"JSON_VALUE({json}, '$' RETURNING NUMBER NULL ON ERROR)"

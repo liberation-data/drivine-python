@@ -1620,15 +1620,7 @@ class OracleCypherCompiler(SqlCypherCompiler):
             )
             # An alias names one source of the statement, so one query reads it.
             select = _owning_select(text, read.start()) if read else None
-            if select is None:
-                continue
-            hint = f"CARDINALITY({alias} 1)"
-            after = select + len("SELECT ")
-            if text.startswith("/*+ ", after):
-                end = text.index(" */", after)
-                text = f"{text[:end]} {hint}{text[end:]}"
-            else:
-                text = f"{text[:after]}/*+ {hint} */ {text[after:]}"
+            text = text if select is None else _hinted(text, select, f"CARDINALITY({alias} 1)")
         return text
 
     def _few_rows_planned(self, query: str) -> str:
@@ -1639,15 +1631,7 @@ class OracleCypherCompiler(SqlCypherCompiler):
             read = re.search(rf"COLUMNS \(item_no FOR ORDINALITY, item JSON PATH '\$'\)\) {re.escape(alias)}\b", text)
             # Read back from the `JSON_TABLE`'s closing bracket, past it, to the `SELECT` whose `FROM` holds it.
             select = _owning_select(text, read.end() - len(alias) - 1) if read else None
-            if select is None:
-                continue
-            hint = f"CARDINALITY({alias} {_FEW_ROWS})"
-            after = select + len("SELECT ")
-            if text.startswith("/*+ ", after):
-                end = text.index(" */", after)
-                text = f"{text[:end]} {hint}{text[end:]}"
-            else:
-                text = f"{text[:after]}/*+ {hint} */ {text[after:]}"
+            text = text if select is None else _hinted(text, select, f"CARDINALITY({alias} {_FEW_ROWS})")
         return text
 
     def lateral(self, query: str, name: str, optional: bool, columns: Sequence[tuple[str, bool]]) -> str:
@@ -1950,6 +1934,15 @@ class OracleCypherCompiler(SqlCypherCompiler):
 
     def without_label(self, labels: str, label: str) -> str:
         return f"JSON_TRANSFORM({labels}, REMOVE {literal(f'$[*]?(@ == {_quoted(label)})')})"
+
+
+def _hinted(query: str, select: int, hint: str) -> str:
+    """The query with `hint` among the hints of the `SELECT` at `select`, which it opens with where it holds none."""
+    after = select + len("SELECT ")
+    if query.startswith("/*+ ", after):
+        end = query.index(" */", after)
+        return f"{query[:end]} {hint}{query[end:]}"
+    return f"{query[:after]}/*+ {hint} */ {query[after:]}"
 
 
 def _owning_select(query: str, from_: int) -> int | None:

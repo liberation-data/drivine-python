@@ -10,6 +10,7 @@ These tests pin the SQL each store compiles; tests/integration/sql/test_property
 plans. drivine4j's PropertyKeyIndexTest is the reference.
 """
 
+import re
 from typing import Any
 
 from drivine.backend.oracle.oracle_graph import holds_label, labelled_value
@@ -191,3 +192,41 @@ def test_oracle_lets_bytes_whose_base64_text_its_index_holds_none_of_through_to_
         assert fallback in oracle(BY_ROW, rows(given), INDEXED), given
     assert fallback not in oracle(BY_ROW, rows(bytes(3)), INDEXED)
     assert f"{labelled_value('n2', 'Person', 'id')} = {value} AND" in oracle(BY_ROW, rows(bytes(3)), INDEXED)
+
+
+def test_oracle_plans_each_unwound_list_as_a_few_rows_in_the_query_that_reads_it():
+    # Each hinted alias, and the alias of the first list the query its hint opens reads: they are to be the same.
+    placed = re.compile(
+        r"SELECT /\*\+ CARDINALITY\((u\d+) 10\) \*/ (?:(?!SELECT )[\s\S])*?'\$\[\*\]' COLUMNS "
+        r"\(item_no FOR ORDINALITY, item JSON PATH '\$'\)\) (u\d+)\b"
+    )
+    union = oracle(
+        "UNWIND $rows AS row MATCH (a:Person {id: row.s}) RETURN a.k UNION "
+        "UNWIND $ids AS id MATCH (a:Person {id: id}) RETURN a.k",
+        {**rows("p1"), "ids": ["p2"]},
+        INDEXED,
+    )
+    assert [it.groups() for it in placed.finditer(union)] == [("u1", "u1"), ("u4", "u4")], union
+    # The outermost query reads no list: a hint there is one Oracle doesn't apply.
+    assert not re.match(r"^SELECT /\*\+[^*]*CARDINALITY", union), union
+    # A second UNWIND: only the list whose item finds the node.
+    second = oracle(
+        "UNWIND $a AS x UNWIND $ids AS id MATCH (a:Person {id: id}) RETURN a.k", {"a": [1], "ids": ["p2"]}, INDEXED
+    )
+    assert "CARDINALITY(u2 10)" in second and "CARDINALITY(u1 " not in second, second
+    # A subquery read before the list: the hint is the query's that reads both.
+    after = oracle(
+        "MATCH (b:Person {id: $s}) WITH b UNWIND $ids AS id MATCH (a:Person {id: id}) RETURN a.k",
+        {"s": "p1", "ids": ["p2"]},
+        INDEXED,
+    )
+    hinted = re.search(r"CARDINALITY\((u\d+) 10\)", after)
+    assert hinted is not None and [hinted.group(1)] == re.findall(r"\) (u\d+)\n", after), after
+    assert re.search(
+        r"SELECT /\*\+ CARDINALITY\(u\d+ 10\) \*/ JSON\(JSON_QUERY\(JSON_SERIALIZE\(JSON_TRANSFORM\(n\d+\.props, "
+        r"KEEP '\$\.k'\)",
+        after,
+    ), after
+    # A text of the list that holds a bracket: the brackets read back over are the query's own.
+    bracket = oracle("UNWIND [{s: 'a)('}, {s: 'p2'}] AS row MATCH (a:Person {id: row.s}) RETURN a.k", {}, INDEXED)
+    assert [it.groups() for it in placed.finditer(bracket)] == [("u1", "u1")], bracket

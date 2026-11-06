@@ -19,6 +19,7 @@ from drivine import (
     DatabaseType,
     PersistenceManager,
     PersistenceManagerFactory,
+    QuerySpecification,
     StatelessGraphObjectManager,
     uniqueness_constraint,
 )
@@ -372,6 +373,68 @@ async def test_a_batch_of_relationships_as_apoc_exports_it_finds_each_rows_nodes
     assert await query(
         pm, f"MATCH (a)-[:NEXT_CHUNK]->(b {{`{IMPORT_ID}`: 10}}) RETURN [a.`{IMPORT_ID}`, b.`{IMPORT_ID}`]"
     ) == [[9, 10]]
+
+
+async def test_compiled_knowing_the_indexes_oracle_finds_the_rows_it_finds_compiled_as_the_connection_compiles(
+    pm: PersistenceManager, seeded: None
+):
+    # On Postgres the connection compiles as `compiled` does, and the tests above find its rows. On Oracle the
+    # connection names no index (liberation-data/drivine4j#638), so the labelled index's test is run here: no row it
+    # leaves out may be one the JSON comparison keeps, as 1 and 1.0, or a double and a number, are. The labels of these
+    # nodes are named as indexed, whether or not an index is over them: the rows are the test's, not the plan.
+    if pm.type is not DatabaseType.ORACLE:
+        pytest.skip("Only Oracle compiles a statement otherwise knowing the indexes.")
+    await query(
+        pm,
+        "CREATE (:KeyOdd {id: 'true', k: 1}), (:KeyOdd {id: true, k: 2}), (:KeyOdd {id: '7', k: 3}), "
+        "(:KeyOdd {id: 7, k: 4})",
+    )
+    await query(
+        pm,
+        "CREATE (:KeyScaled {id: 0.25 * 10, k: 1}), (:KeyScaled {id: 0.25 * 4, k: 2}), "
+        "(:KeyScaled {id: 2.0 * 2.0, k: 3}), (:KeyScaled {id: 1.0E-5, k: 4}), (:KeyScaled {id: 8.0, k: 5}), "
+        "(:KeyScaled {id: 1.0e20, k: 6})",
+    )
+    indexed = {("Person", "id"), ("KeyOdd", "id"), ("KeyScaled", "id")}
+
+    async def run(compiler: OracleCypherCompiler, cypher: str, parameters: dict[str, Any]) -> list[str]:
+        it = compiler.compile(cypher, parameters)
+        return [str(row) for row in await pm.query(QuerySpecification[Any](it.sql).bind(dict(it.parameters)))]
+
+    def rows(*values: Any) -> dict[str, Any]:
+        return {"rows": [{"s": it} for it in values]}
+
+    by_row = "UNWIND $rows AS row MATCH (a:Person {id: row.s}) RETURN a.k ORDER BY a.k"
+    cases: list[tuple[str, dict[str, Any]]] = [
+        (by_row, rows("p5", 7, 7.0, 8, True, [1, 2], None, "nobody", "7", ["a", "b"], [], [1], [[1, 2]], 1)),
+        (by_row, rows(0.1, 1.0e20, -7, -0.0, BIG, "", LONG)),
+        (by_row, rows(0.1, 1.0e20, -7, -0.0, BIG, 8.0, 8, 7, 7.0)),
+        (by_row, rows(0.1, 1.0e20, -7.0, 0.0, 8.0)),
+        (
+            "UNWIND $ids AS id MATCH (a:Person {id: id}) RETURN a.k ORDER BY a.k",
+            {"ids": ["p5", 7.0, 8, True, BIG, 0.1]},
+        ),
+        (
+            "UNWIND ['', 'p5', 8, 7.0, 0.1, 1.0e20, -7, -0.0, 0] AS s MATCH (a:Person {id: s}) RETURN a.k ORDER BY a.k",
+            {},
+        ),
+        (
+            "UNWIND $rows AS row MATCH (a:Person {id: row.a.b}) RETURN a.k ORDER BY a.k",
+            {"rows": [{"a": {"b": "p5"}}, {"a": {"b": 8}}, {"a": None}, {}, {"a": {"c": [1]}}]},
+        ),
+        ("UNWIND $rows AS row MATCH (a:KeyOdd {id: row.s}) RETURN a.k ORDER BY a.k", rows(True, "true", 7, "7", 7.0)),
+        (
+            "UNWIND $rows AS row MATCH (a:KeyScaled {id: row.s}) RETURN a.k ORDER BY a.k",
+            rows(2.5, 1, 4, 0.00001, 1.0, 4.0, 8, 8.0, 1.0e20, 10**20),
+        ),
+        ("MATCH (a:Person {id: $s}) RETURN a.k", {"s": "p42"}),
+    ]
+    for cypher, parameters in cases:
+        bare = await run(OracleCypherCompiler(GRAPH), cypher, parameters)
+        assert bare, cypher
+        assert await run(OracleCypherCompiler(GRAPH, indexed_properties=indexed), cypher, parameters) == bare, (
+            f"{cypher} {parameters}"
+        )
 
 
 async def test_a_parameters_text_finds_its_node_through_the_index(pm: PersistenceManager, seeded: None):

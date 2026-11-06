@@ -268,6 +268,69 @@ def test_an_unterminated_name_or_string_is_refused_unicode_names_read_as_written
     assert "runs on its own" in refused("CALL db.awaitIndexes() YIELD x")
 
 
+def test_the_options_and_shapes_a_sql_store_cannot_read_are_refused_saying_what_they_are() -> None:
+    def vector(config: str) -> str:
+        return refused(
+            f"CREATE VECTOR INDEX FOR (c:C) ON c.e OPTIONS {{indexConfig: {{`vector.dimensions`: 3, {config}}}}}"
+        )
+
+    assert refused("CREATE INDEX FOR (n) ON (n.p)") == (
+        "An index is made for the nodes of one label, and this pattern names none."
+    )
+    assert refused("CREATE INDEX FOR (n:L)-[r:T]-() ON (n.p)").startswith("An index on relationships")
+    assert refused("CREATE CONSTRAINT FOR (n:L) REQUIRE n.p IS REL UNIQUE").startswith("A constraint on relationships")
+    assert refused("CREATE CONSTRAINT FOR (n:L) REQUIRE n.p IS NODE KEY").startswith("A key constraint")
+    assert refused("CREATE CONSTRAINT FOR (n:L) REQUIRE n.p IS NODE THING") == (
+        "Invalid schema command: expected UNIQUE, but found 'THING'."
+    )
+    assert refused("CREATE CONSTRAINT x IF NOT FOR (n:L) REQUIRE n.p IS UNIQUE") == (
+        "Invalid schema command: expected EXISTS, but found 'FOR'."
+    )
+    assert refused("DROP INDEX x IF NOT EXISTS") == "Invalid schema command: expected EXISTS, but found 'NOT'."
+    assert refused("CREATE CONSTRAINT `` FOR (n:L) REQUIRE n.p IS UNIQUE") == (
+        "A schema item's name is empty: an item is created with a name, or with none."
+    )
+    assert refused("CREATE FULLTEXT INDEX ON :L(p)") == "Invalid schema command: expected FOR, but found 'ON'."
+    assert refused(
+        "CREATE FULLTEXT INDEX f FOR (n:L) ON EACH [n.a] OPTIONS {indexConfig: {`fulltext.analyzer`: 3}}"
+    ) == ("A full-text index's `fulltext.analyzer` is the name of an analyzer, not 3.")
+    assert refused("CREATE FULLTEXT INDEX f FOR (n:L) ON EACH [n.a] OPTIONS {indexConfig: 'x'}") == (
+        "OPTIONS indexConfig is a map."
+    )
+    assert vector("`vector.similarity_function`: 1") == (
+        "A vector index's `vector.similarity_function` is 'cosine' or 'euclidean', not 1."
+    )
+    assert vector("`vector.quantization.enabled`: 'yes'") == (
+        "A vector index's `vector.quantization.enabled` is true or false, not yes."
+    )
+    assert vector("`vector.hnsw.m`: -3") == "A vector index's `vector.hnsw.m` is a positive whole number, not -3."
+    assert vector("`vector.hnsw.m`: 99999999999") == (
+        "A vector index's `vector.hnsw.m` is a positive whole number, not 99999999999."
+    )
+    assert vector("`vector.hnsw.m`: $m") == "An option given as a parameter, $m, is not read on a SQL store: write it."
+    # Values of other options are read, and left alone.
+    assert translate(
+        "CREATE VECTOR INDEX FOR (c:C) ON c.e OPTIONS {indexConfig: {`vector.dimensions`: 3.0e0, x: [1, -2.5, null, "
+        "{a: []}], 'y': \"\\u00e9\"}}"
+    ) == Create(vector_index("C", "e", 3), None, False)
+
+
+def test_a_superscript_digit_is_no_digit_and_is_refused_as_drivine4j_refuses_it() -> None:
+    assert refused("CREATE VECTOR INDEX FOR (c:C) ON c.e OPTIONS {indexConfig: {`vector.dimensions`: ²}}") == (
+        "Invalid schema command: expected a value, but found '²'."
+    )
+    assert refused("CREATE INDEX FOR (n:L²) ON (n.p)") == "Invalid schema command: expected ')', but found '²'."
+    assert translate("CREATE INDEX FOR (n:L٣) ON (n.p)") == Create(range_index("L٣", "p"), None, False)
+
+
+def test_comments_a_trailing_semicolon_and_one_statement_to_a_text() -> None:
+    assert translate("/* c */ CREATE // x\n INDEX FOR (n:L) ON (n.p) ; // trailing") == Create(
+        range_index("L", "p"), None, False
+    )
+    for text in ("CREATE INDEX ON :L(p);;", "DROP INDEX x; DROP INDEX y"):
+        assert "runs on its own" in refused(text), text
+
+
 @pytest.mark.parametrize("compiler", [PostgresCypherCompiler, OracleCypherCompiler, SqliteCypherCompiler])
 def test_the_sql_compilers_refuse_a_schema_command_as_the_translator_does_or_as_no_query(compiler: type) -> None:
     with pytest.raises(DrivineError) as point:

@@ -35,13 +35,15 @@ from drivine.schema.schema_specs import SchemaSpec
 from drivine.schema.uniqueness_constraint_spec import UniquenessConstraintSpec
 from drivine.schema.vector_index_spec import VectorIndexSpec
 from drivine.sync import concurrency
+from drivine.sync.connection.database_registry import DEFAULT
+from drivine.sync.manager.graph_object_manager_factory import GraphObjectManagerFactory
+from drivine.sync.manager.stateless_graph_object_manager import StatelessGraphObjectManager
 from drivine.sync.schema.schema_manager import SchemaManager
 from drivine.sync.schema.schema_options import SchemaOptions
 
 if TYPE_CHECKING:
     from drivine.sync.connection.connection_provider import ConnectionProvider
     from drivine.sync.manager.persistence_manager_factory import PersistenceManagerFactory
-    from drivine.sync.manager.stateless_graph_object_manager import StatelessGraphObjectManager
 
 logger = logging.getLogger("drivine.schema")
 
@@ -94,12 +96,13 @@ class SchemaCommands:
 
     @staticmethod
     def of(factory: PersistenceManagerFactory, name: str) -> SchemaCommands:
-        """The commands of the database `name` of the factory's registry, ensured and removed through its managers."""
-        from drivine.sync.manager.graph_object_manager_factory import GraphObjectManagerFactory
-
+        """
+        The commands of the database `name` of the factory's registry, ensured and removed through its non-transactional
+        managers.
+        """
         provider = factory.registry.connection_provider(name)
         database = provider.name if provider is not None else name
-        managers = GraphObjectManagerFactory(factory)
+        managers = _NonTransactionalManagers(factory)
         schema = SchemaManager(factory.registry, managers, SchemaOptions())
         return SchemaCommands(database, schema, lambda: managers.get(database))
 
@@ -234,6 +237,24 @@ class SchemaCommands:
         kept = next((it for it in self._recorded(gom) if ddl.name in it.item.aliases), None)
         if kept is not None:
             gom.indexes.alias(kept.kind, kept.item, [it for it in kept.item.aliases if it != ddl.name])
+
+
+class _NonTransactionalManagers(GraphObjectManagerFactory):
+    """
+    The object managers DDL is applied through: each over its database's non-transactional manager, as drivine4j's
+    SchemaManager applies schema, so that the marker's record of what DDL made is written on a connection of its own,
+    as the items are, and not in a transaction open around the command, whose rollback would leave the items made and
+    unrecorded.
+    """
+
+    def get(self, database: str = DEFAULT) -> StatelessGraphObjectManager:
+        manager = self._managers.get(database)
+        if manager is None:
+            manager = StatelessGraphObjectManager(
+                self.persistence_managers.get(database, "NON_TRANSACTIONAL"), self.registry
+            )
+            self._managers[database] = manager
+        return manager
 
 
 def spec_of(recorded: _Recorded) -> SchemaSpec:

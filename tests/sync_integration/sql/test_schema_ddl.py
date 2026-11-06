@@ -26,6 +26,7 @@ from drivine.schema.schema_item import SchemaItem
 from drivine.schema.schema_specs import SchemaSpec, item_name
 from drivine.sync import (
     DatabaseRegistry,
+    DrivineError,
     PersistenceManager,
     PersistenceManagerFactory,
     QuerySpecification,
@@ -40,6 +41,7 @@ from drivine.sync import (
     vector_index,
 )
 from drivine.sync.manager.graph_object_manager_factory import GraphObjectManagerFactory
+from drivine.sync.manager.non_transactional_persistence_manager import NonTransactionalPersistenceManager
 from drivine.sync.schema.schema_commands import OWNER
 from drivine.sync.schema.schema_manager import inventory_key
 from tests.sync_integration.sql.new_graph import drop_graph, registry_on
@@ -303,8 +305,35 @@ def test_an_item_recreated_or_recorded_again_keeps_its_aliases(db: Store):
     # On Oracle a uniqueness constraint over the one property records the range index again, as served by it.
     db.gom.constraints.ensure(uniqueness_constraint("Person", "name"))
     assert db.aliases(range_index("Person", "name")) == ["by_name"]
-    db.schema(SchemaCatalog.of(range_index("Person", "name")).named("app")).recreate_all()
+    # On Oracle the constraint dropped leaves the range index incomplete, and its record is written again as it is
+    # made whole.
+    db.gom.constraints.drop(uniqueness_constraint("Person", "name"))
+    assert (db.gom.indexes.ensure(range_index("Person", "name"))).status in ("CREATED", "ALREADY_MATCHING")
     assert db.aliases(range_index("Person", "name")) == ["by_name"]
+    app = SchemaCatalog.of(range_index("Person", "name"), uniqueness_constraint("Person", "email")).named("app")
+    db.schema(app).recreate_all()
+    assert db.aliases(range_index("Person", "name")) == ["by_name"]
+    assert db.aliases(uniqueness_constraint("Person", "email")) == ["person_email"]
+
+
+def test_a_vector_index_recreated_after_drift_keeps_its_alias_by_the_schema_manager_or_by_hand(db: Store):
+    db.ddl(
+        "CREATE VECTOR INDEX chunk_embedding FOR (n:Chunk) ON n.embedding OPTIONS {indexConfig: "
+        "{`vector.dimensions`: 3}}"
+    )
+    wider = vector_index("Chunk", "embedding", 4)
+    options = SchemaOptions([SchemaCatalog.of(wider).named("app")], recreate_on_drift=True)
+    report = SchemaManager(db.registry, GraphObjectManagerFactory(db.factory), options).enforce()
+
+    assert [it.status for results in report.values() for it in results] == ["RECREATED"]
+    found = db.held(wider)
+    assert found is not None
+    assert found.dimensions == 4
+    assert db.aliases(wider) == ["chunk_embedding"]
+
+    narrower = vector_index("Chunk", "embedding", 3)
+    db.gom.indexes.recreate(narrower)
+    assert db.aliases(narrower) == ["chunk_embedding"]
 
 
 def test_drop_of_an_item_the_application_declares_forgets_it_in_the_ddl_owner_and_leaves_it_in_place(
@@ -518,3 +547,71 @@ def test_remove_drops_what_no_one_else_declares_leaves_what_a_startup_catalog_do
     manager.enforce()
     assert db.held(own) is None
     assert db.keys("app") == [inventory_key(shared)]
+
+
+def test_remove_by_an_owner_with_no_marker_drops_what_no_one_declares_and_writes_no_marker(db: Store):
+    made = range_index("Made", "p")
+    kept = range_index("Kept", "p")
+    db.gom.indexes.ensure(made)
+    db.schema().ensure("app", kept)
+
+    db.schema().remove("nobody", made, kept)
+
+    assert db.held(made) is None
+    assert db.held(kept) is not None
+    assert db.cypher("MATCH (m:_DrivineSchema {scope: 'nobody'}) RETURN count(m)") == [0]
+    assert db.keys("app") == [inventory_key(kept)]
+    with pytest.raises(DrivineError, match="cannot carry a version"):
+        db.schema().remove_catalog(SchemaCatalog.of(made).named("nobody").with_version("2"))
+
+
+def test_a_vector_and_a_full_text_index_are_dropped_by_the_apis_name_or_by_an_alias(db: Store):
+    vector = vector_index("Chunk", "embedding", 3, "EUCLIDEAN")
+    full_text = full_text_index("Chunk", ["text"])
+    db.ddl(
+        "CREATE VECTOR INDEX FOR (n:Chunk) ON n.embedding OPTIONS {indexConfig: "
+        "{`vector.dimensions`: 3, `vector.similarity_function`: 'euclidean'}}"
+    )
+    db.ddl("CREATE FULLTEXT INDEX chunk_text FOR (n:Chunk) ON EACH [n.text]")
+    assert db.keys() == sorted(inventory_key(it) for it in (vector, full_text))
+
+    db.restart()
+    db.ddl(f"DROP INDEX {item_name(vector)}")
+    db.ddl("DROP INDEX chunk_text")
+
+    assert db.held(vector) is None
+    assert db.held(full_text) is None
+    assert db.keys() == []
+
+
+def test_a_uniqueness_constraint_over_keys_held_more_than_once_fails_and_is_not_made(db: Store):
+    db.cypher("CREATE (:Person {email: 'a@example.com'}), (:Person {email: 'a@example.com'})")
+
+    with pytest.raises(Exception) as violation:  # noqa: PT011
+        db.ddl("CREATE CONSTRAINT person_email FOR (p:Person) REQUIRE p.email IS UNIQUE")
+
+    assert "VIOLATION" in messages(violation.value)
+    assert db.held(uniqueness_constraint("Person", "email")) is None
+
+
+def test_ddl_through_a_manager_made_without_a_factory_runs_through_one_of_its_own(db: Store):
+    provider = db.registry.connection_provider(db.store)
+    assert provider is not None
+    standalone = NonTransactionalPersistenceManager(provider, db.store)
+
+    db.ddl("CREATE INDEX by_name FOR (p:Person) ON (p.name)", standalone)
+
+    assert db.aliases(range_index("Person", "name")) == ["by_name"]
+    assert db.keys() == [inventory_key(range_index("Person", "name"))]
+    db.ddl("DROP INDEX by_name", standalone)
+    assert db.held(range_index("Person", "name")) is None
+
+
+def test_ddl_through_the_non_transactional_manager_inside_a_transaction_is_not_undone_by_its_rollback(
+    db: Store,
+):
+    with transaction(rollback=True):
+        db.ddl("CREATE INDEX by_name FOR (p:Person) ON (p.name)")
+
+    assert db.held(range_index("Person", "name")) is not None
+    assert db.keys() == [inventory_key(range_index("Person", "name"))]

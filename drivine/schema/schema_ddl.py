@@ -186,7 +186,7 @@ class _Lexer:
             return self._quoted()
         if c in ("'", '"'):
             return self._string(c)
-        if c.isdigit():
+        if c.isdecimal():
             return self._number()
         if c.isalpha() or c == "_":
             return _Token("WORD", self._word())
@@ -214,7 +214,10 @@ class _Lexer:
 
     def _word(self) -> str:
         start = self.at
-        while self.at < len(self.text) and (self.text[self.at].isalnum() or self.text[self.at] == "_"):
+        # Letters and decimal digits, as drivine4j's isLetterOrDigit reads them: not a superscript, which is no digit.
+        while self.at < len(self.text) and (
+            self.text[self.at].isalpha() or self.text[self.at].isdecimal() or self.text[self.at] == "_"
+        ):
             self.at += 1
         return self.text[start : self.at]
 
@@ -264,22 +267,22 @@ class _Lexer:
     def _number(self) -> _Token:
         text = self.text
         start = self.at
-        while self.at < len(text) and text[self.at].isdigit():
+        while self.at < len(text) and text[self.at].isdecimal():
             self.at += 1
         fraction = False
-        if self.at + 1 < len(text) and text[self.at] == "." and text[self.at + 1].isdigit():
+        if self.at + 1 < len(text) and text[self.at] == "." and text[self.at + 1].isdecimal():
             fraction = True
             self.at += 1
-            while self.at < len(text) and text[self.at].isdigit():
+            while self.at < len(text) and text[self.at].isdecimal():
                 self.at += 1
         if self.at < len(text) and text[self.at] in "eE":
             mark = self.at
             self.at += 1
             if self.at < len(text) and text[self.at] in "+-":
                 self.at += 1
-            if self.at < len(text) and text[self.at].isdigit():
+            if self.at < len(text) and text[self.at].isdecimal():
                 fraction = True
-                while self.at < len(text) and text[self.at].isdigit():
+                while self.at < len(text) and text[self.at].isdecimal():
                     self.at += 1
             else:
                 self.at = mark

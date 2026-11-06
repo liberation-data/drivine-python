@@ -6,6 +6,7 @@ again stand for the next process. drivine4j's SchemaDdlCrossEngineTest, ported.
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import logging
 import uuid
@@ -16,6 +17,7 @@ import pytest
 
 from drivine import (
     DatabaseRegistry,
+    DrivineError,
     PersistenceManager,
     PersistenceManagerFactory,
     QuerySpecification,
@@ -32,6 +34,7 @@ from drivine import (
 from drivine.backend.oracle.oracle_graph import OracleGraph
 from drivine.connection.database_type import DatabaseType
 from drivine.manager.graph_object_manager_factory import GraphObjectManagerFactory
+from drivine.manager.non_transactional_persistence_manager import NonTransactionalPersistenceManager
 from drivine.query.statement import cypher_statement
 from drivine.schema.ensure_result import EnsureResult
 from drivine.schema.full_text_index_spec import FullTextIndexSpec
@@ -305,8 +308,35 @@ async def test_an_item_recreated_or_recorded_again_keeps_its_aliases(db: Store):
     # On Oracle a uniqueness constraint over the one property records the range index again, as served by it.
     await db.gom.constraints.ensure(uniqueness_constraint("Person", "name"))
     assert await db.aliases(range_index("Person", "name")) == ["by_name"]
-    await db.schema(SchemaCatalog.of(range_index("Person", "name")).named("app")).recreate_all()
+    # On Oracle the constraint dropped leaves the range index incomplete, and its record is written again as it is
+    # made whole.
+    await db.gom.constraints.drop(uniqueness_constraint("Person", "name"))
+    assert (await db.gom.indexes.ensure(range_index("Person", "name"))).status in ("CREATED", "ALREADY_MATCHING")
     assert await db.aliases(range_index("Person", "name")) == ["by_name"]
+    app = SchemaCatalog.of(range_index("Person", "name"), uniqueness_constraint("Person", "email")).named("app")
+    await db.schema(app).recreate_all()
+    assert await db.aliases(range_index("Person", "name")) == ["by_name"]
+    assert await db.aliases(uniqueness_constraint("Person", "email")) == ["person_email"]
+
+
+async def test_a_vector_index_recreated_after_drift_keeps_its_alias_by_the_schema_manager_or_by_hand(db: Store):
+    await db.ddl(
+        "CREATE VECTOR INDEX chunk_embedding FOR (n:Chunk) ON n.embedding OPTIONS {indexConfig: "
+        "{`vector.dimensions`: 3}}"
+    )
+    wider = vector_index("Chunk", "embedding", 4)
+    options = SchemaOptions([SchemaCatalog.of(wider).named("app")], recreate_on_drift=True)
+    report = await SchemaManager(db.registry, GraphObjectManagerFactory(db.factory), options).enforce()
+
+    assert [it.status for results in report.values() for it in results] == ["RECREATED"]
+    found = await db.held(wider)
+    assert found is not None
+    assert found.dimensions == 4
+    assert await db.aliases(wider) == ["chunk_embedding"]
+
+    narrower = vector_index("Chunk", "embedding", 3)
+    await db.gom.indexes.recreate(narrower)
+    assert await db.aliases(narrower) == ["chunk_embedding"]
 
 
 async def test_drop_of_an_item_the_application_declares_forgets_it_in_the_ddl_owner_and_leaves_it_in_place(
@@ -520,3 +550,87 @@ async def test_remove_drops_what_no_one_else_declares_leaves_what_a_startup_cata
     await manager.enforce()
     assert await db.held(own) is None
     assert await db.keys("app") == [inventory_key(shared)]
+
+
+async def test_remove_by_an_owner_with_no_marker_drops_what_no_one_declares_and_writes_no_marker(db: Store):
+    made = range_index("Made", "p")
+    kept = range_index("Kept", "p")
+    await db.gom.indexes.ensure(made)
+    await db.schema().ensure("app", kept)
+
+    await db.schema().remove("nobody", made, kept)
+
+    assert await db.held(made) is None
+    assert await db.held(kept) is not None
+    assert await db.cypher("MATCH (m:_DrivineSchema {scope: 'nobody'}) RETURN count(m)") == [0]
+    assert await db.keys("app") == [inventory_key(kept)]
+    with pytest.raises(DrivineError, match="cannot carry a version"):
+        await db.schema().remove_catalog(SchemaCatalog.of(made).named("nobody").with_version("2"))
+
+
+async def test_a_vector_and_a_full_text_index_are_dropped_by_the_apis_name_or_by_an_alias(db: Store):
+    vector = vector_index("Chunk", "embedding", 3, "EUCLIDEAN")
+    full_text = full_text_index("Chunk", ["text"])
+    await db.ddl(
+        "CREATE VECTOR INDEX FOR (n:Chunk) ON n.embedding OPTIONS {indexConfig: "
+        "{`vector.dimensions`: 3, `vector.similarity_function`: 'euclidean'}}"
+    )
+    await db.ddl("CREATE FULLTEXT INDEX chunk_text FOR (n:Chunk) ON EACH [n.text]")
+    assert await db.keys() == sorted(inventory_key(it) for it in (vector, full_text))
+
+    await db.restart()
+    await db.ddl(f"DROP INDEX {item_name(vector)}")
+    await db.ddl("DROP INDEX chunk_text")
+
+    assert await db.held(vector) is None
+    assert await db.held(full_text) is None
+    assert await db.keys() == []
+
+
+async def test_a_uniqueness_constraint_over_keys_held_more_than_once_fails_and_is_not_made(db: Store):
+    await db.cypher("CREATE (:Person {email: 'a@example.com'}), (:Person {email: 'a@example.com'})")
+
+    with pytest.raises(Exception) as violation:  # noqa: PT011
+        await db.ddl("CREATE CONSTRAINT person_email FOR (p:Person) REQUIRE p.email IS UNIQUE")
+
+    assert "VIOLATION" in messages(violation.value)
+    assert await db.held(uniqueness_constraint("Person", "email")) is None
+
+
+async def test_ddl_through_a_manager_made_without_a_factory_runs_through_one_of_its_own(db: Store):
+    provider = db.registry.connection_provider(db.store)
+    assert provider is not None
+    standalone = NonTransactionalPersistenceManager(provider, db.store)
+
+    await db.ddl("CREATE INDEX by_name FOR (p:Person) ON (p.name)", standalone)
+
+    assert await db.aliases(range_index("Person", "name")) == ["by_name"]
+    assert await db.keys() == [inventory_key(range_index("Person", "name"))]
+    await db.ddl("DROP INDEX by_name", standalone)
+    assert await db.held(range_index("Person", "name")) is None
+
+
+async def test_ddl_through_the_non_transactional_manager_inside_a_transaction_is_not_undone_by_its_rollback(
+    db: Store,
+):
+    async with transaction(rollback=True):
+        await db.ddl("CREATE INDEX by_name FOR (p:Person) ON (p.name)")
+
+    assert await db.held(range_index("Person", "name")) is not None
+    assert await db.keys() == [inventory_key(range_index("Person", "name"))]
+
+
+@pytest.mark.async_only
+async def test_ddl_run_at_once_through_the_managers_of_one_database_keeps_each_alias_of_one_item(db: Store):
+    by_default = db.factory.get("default", "NON_TRANSACTIONAL")
+    names = [f"by_name_{it}" for it in range(4)]
+
+    await asyncio.gather(
+        *(
+            db.ddl(f"CREATE INDEX {name} IF NOT EXISTS FOR (p:Person) ON (p.name)", by_default if i % 2 else None)
+            for i, name in enumerate(names)
+        )
+    )
+
+    assert sorted(await db.aliases(range_index("Person", "name"))) == names
+    assert await db.keys() == [inventory_key(range_index("Person", "name"))]

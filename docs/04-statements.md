@@ -131,6 +131,14 @@ people = await pm.query(spec.bind({"city": "Sydney"}))
   was empty, or took a `CALL`'s one row for 100, and read the whole table for each row: `MATCH (n) MERGE (n)-[:R]->(n)`
   took 28 s over 20,000 nodes where it now takes under 1 s. The settings are set for the transaction
   (`set_config(…, true)`), so a statement that fails leaves them as its transaction or savepoint had them.
+- On Postgres, a statement's rows, a JSON list, read each row's node or relationship back from its table by its id
+  through a probe of the table's key, `LEFT JOIN LATERAL (SELECT * FROM … WHERE nid = … OFFSET 0) … ON TRUE`, not a
+  plain join ([#446](https://github.com/liberation-data/drivine-python/issues/446),
+  [drivine4j#644](https://github.com/liberation-data/drivine4j/issues/644)). A plain join is planned by the table's
+  statistics, and where they said the table was empty while it still had pages, as an `ANALYZE` just after a `DELETE`
+  leaves them, each row was compared with every row of the table: a `FOREACH` over 20,000 nodes took 19 s where it now
+  takes under 1 s. The probe is a scan of the key's index whatever the statistics say. Oracle and SQLite keep the
+  plain join.
 - On Oracle a text read out of JSON past 4,000 bytes is read whole where it is measured, cut, changed, searched or
   reversed; an empty text is null; `reduce` doesn't run in a
   statement that writes, in the step of a `reduce`, or where its step reads a path; and `map[key]` reads null where an

@@ -378,6 +378,28 @@ class _LabelTest:
     all_: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class IndexedProperty:
+    """
+    The node's properties `props` a compared property is read from as `property_of` gives it, the property's `key`, and
+    the `labels` the pattern names for the node: what a store whose index is over a label's nodes, as Oracle's, needs to
+    write the index's own expression (#429, liberation-data/drivine4j#617). `scalar` says the value it is compared with
+    is known to be no list or map, as what each row of a list the statement is given holds at the key it is read from
+    is, nor a text the index doesn't hold (`SqlCypherCompiler.index_holds`): a store whose index holds no list need not
+    then let one through.
+    """
+
+    props: str
+    key: str
+    labels: tuple[str, ...]
+    scalar: bool = False
+
+
+_UNGIVEN = object()
+"""What `SqlCypherCompiler._given_tree` gives for a value the statement doesn't give the whole of: None is JSON's
+null."""
+
+
 @dataclass
 class _ComparedKeys:
     """
@@ -933,12 +955,40 @@ class SqlCypherCompiler(ABC):
         """Whether the labels, a JSON list, hold each of `all_`."""
         return " AND ".join(self.has_label(labels, it) for it in all_)
 
-    def indexed_equality(self, property: str, value: str) -> str | None:
+    def indexed_equality(self, property: str, value: str, of: IndexedProperty | None = None) -> str | None:
         """
         A test an index answers, to stand beside the comparison of the property, read as `property_of` gives it, with
-        the value, a text or a truth value; None where there is none.
+        the value, a text or a truth value; None where there is none. `of` is the property's node, where it is one a
+        pattern names.
         """
         return None
+
+    def indexed_equality_of_any(
+        self, property: str, value: str, of: IndexedProperty | None = None, scalar: bool = False
+    ) -> str | None:
+        """
+        As `indexed_equality`, for a value whose kind isn't known as the statement compiles, as an unwound row's: a test
+        an index answers that holds wherever the comparison could, so it leaves out no row the comparison keeps. A
+        number's text differs where its JSON doesn't (`1` and `1.0`). None where the store has none (#429,
+        liberation-data/drivine4j#617).
+        """
+        return None
+
+    def few_rows(self, alias: str) -> None:
+        """
+        Notes that the rows `alias`, an `UNWIND`'s, whose item a node is found by through an index, are to be planned
+        as a few rows, where the store's planner estimates a list given as a value at many: see Oracle's. The store
+        writes nothing for it.
+        """
+        return None
+
+    def index_holds(self, given: Any) -> bool:
+        """
+        Whether the store's index holds the value `given`, a text or a truth value, as a text a test of
+        `indexed_equality` finds: where it doesn't, the comparison stands alone. Oracle's reads an empty text, and one
+        past 4,000 bytes, as null (liberation-data/drivine4j#617).
+        """
+        return True
 
     @abstractmethod
     def key_value(self, json: str) -> str:
@@ -1719,6 +1769,21 @@ class SqlCypherCompiler(ABC):
         carry."""
         self._given_parameters: dict[str, Value] | None = None
         """The parameters an expression reads from a map it is given, where it reads none bound: see Reduce."""
+        self._unwound_given: dict[str, Any] = {}
+        """
+        The list each item an `UNWIND` reads is taken from, as JSON's own kinds, by the item's SQL, where the statement
+        gives the whole of it: a parameter, or a list it writes out of literals, maps, lists and parameters, as APOC's
+        export writes its rows. What `_given_rows_scalar` reads. The statement compiled is so for the values it is
+        given: nothing keeps it to be handed back for others, as `read_cypher` keeps only the statement's tree.
+        """
+        self._unwound: dict[str, str] = {}
+        """The alias of the rows each item an `UNWIND` reads is taken from, by the item's SQL: see `few_rows`."""
+        self._indexed_emitted = False
+        """
+        Whether an `_equality` since this was last set False wrote a test an index answers beside its comparison: the
+        node a pattern's properties are then compared for is found by that index, and is tested for its labels by their
+        text, as a node read by its key is (`keyed_labels`).
+        """
         self._nesting = 0
         """How deep in `FOREACH`es and writing `CALL`s the write being made is: each keeps the rows it puts back in a
         variable of its own depth."""
@@ -2374,6 +2439,10 @@ class SqlCypherCompiler(ABC):
 
         items = self.shared1(self.comparable(self.json(listed)), items_of)
         select.source(self._elements_of(listed, items, name))
+        self._unwound[self.item(name)] = name
+        given = self._given_tree(unwind.list)
+        if given is not _UNGIVEN:
+            self._unwound_given[self.item(name)] = given
         # An item of a list of texts, or of a text, is a text; an item of a list that holds no null holds none, nor is
         # JSON's null.
         select.bind(
@@ -2448,7 +2517,25 @@ class SqlCypherCompiler(ABC):
                 labels = self.grouped_labels if select.after_grouping else self.has_labels
                 select.label_test(value, node.labels, labels(value.labels, node.labels))
             if node.properties is not None:
-                select.where.append(self._properties_match(value.props, node.properties, select.scope))
+                self._indexed_emitted = False
+                # Not after a WITH that groups: Oracle's index expression tests the labels as the index over them does,
+                # which crashed the session there (see grouped_labels).
+                select.where.append(
+                    self._properties_match(
+                        value.props, node.properties, select.scope, () if select.after_grouping else node.labels
+                    )
+                )
+                # The node found by the index a test beside its properties' comparison reads is tested for its labels
+                # by their text, as a node read by its key is (keyed_labels): on Oracle the test the index over labels
+                # answers had it read every node of the label, and the property only as a filter on each
+                # (liberation-data/drivine4j#617).
+                if self._indexed_emitted and node.labels and select.labelled(value.nid) is not None:
+                    select.relabel(value.nid, self.keyed_labels)
+                    # An unwound list whose item is compared so is planned as a few rows: Oracle takes a JSON_TABLE to
+                    # give 8,168, and hashed every node to them (liberation-data/drivine4j#617).
+                    for item, alias in self._unwound.items():
+                        if item in select.where[-1]:
+                            self.few_rows(alias)
             if node.labels or node.properties is not None:
                 self._anchor(select, value.nid)
             bound.append(value)
@@ -2614,7 +2701,7 @@ class SqlCypherCompiler(ABC):
             if node.labels:
                 tests.append(self.has_labels(f"{row}.labels", node.labels))
             if properties is not None:
-                tests.append(self._properties_match(f"{row}.props", properties, before))
+                tests.append(self._properties_match(f"{row}.props", properties, before, node.labels))
             return " AND ".join(tests)
 
         return seed
@@ -2726,7 +2813,7 @@ class SqlCypherCompiler(ABC):
                     for node, row in zip(inner.nodes, rows, strict=True)
                     for test in _present(
                         self.has_labels(f"{row}.labels", node.labels) if node.labels else None,
-                        self._properties_match(f"{row}.props", node.properties, within)
+                        self._properties_match(f"{row}.props", node.properties, within, node.labels)
                         if node.properties is not None
                         else None,
                     )
@@ -2849,14 +2936,17 @@ class SqlCypherCompiler(ABC):
 
         return self.shared1(entities.ids, listed)
 
-    def _properties_match(self, props: str, properties: Expression, scope: Scope) -> str:
-        """A pattern's properties: each key equal to its value, or every key of a parameter's map."""
+    def _properties_match(self, props: str, properties: Expression, scope: Scope, labels: Sequence[str] = ()) -> str:
+        """A pattern's properties: each key equal to its value, or every key of a parameter's map. `labels` are its
+        node's, where it is a node."""
         if isinstance(properties, MapLiteral):
             # A property holds no null, as a graph engine stores none in a list.
             def equal(key: str, value: Expression) -> str:
                 compiled = self._expression(value, scope)
                 plain = self._scalar_valued(value, scope) or self._is_flat(compiled)
-                return self._equality(Json(self.property_of(props, key), flat=True), compiled, value, plain)
+                # Not `_scalar_valued`: a text the statement works out may be one the index doesn't hold (index_holds).
+                of = IndexedProperty(props, key, tuple(labels), self._given_rows_scalar(value, scope))
+                return self._equality(Json(self.property_of(props, key), flat=True), compiled, value, plain, of=of)
 
             return " AND ".join(equal(key, value) for key, value in properties.entries)
         return self.contains_all(props, self.comparable(self.json(self._expression(properties, scope))))
@@ -5634,7 +5724,14 @@ class SqlCypherCompiler(ABC):
             plain = self._plain(binary.left, binary.right, left_value, right_value, scope)
             equal = (
                 None if plain else self._given_itemwise(binary.left, left_value, binary.right, right_value)
-            ) or self._equality(left_value, right_value, binary.right, plain, self._stored(binary.left, scope))
+            ) or self._equality(
+                left_value,
+                right_value,
+                binary.right,
+                plain,
+                self._stored(binary.left, scope),
+                scalar_rows=self._given_rows_scalar(binary.right, scope),
+            )
             if operator is BinaryOperator.NOT_EQUALS:
                 return Bool(f"NOT ({equal})")
             keyed = self._id_equality(binary, left_value, right_value, scope) if conjunct else None
@@ -5894,14 +5991,18 @@ class SqlCypherCompiler(ABC):
         written: Expression | None = None,
         plain: bool = True,
         stored: bool = True,
+        of: IndexedProperty | None = None,
+        scalar_rows: bool = False,
     ) -> str:
         """
         Whether two values are equal: as JSON, so `'7'` is not `7` and `1` is `1.0`. A node is equal to a node by its
         row. Where a property is compared with a value written, a text or a truth value the statement is given, a test
         an index answers stands beside it, where the store has one: such a value's text is equal where its JSON is, and
-        a number's is not (`1` and `1.0`). `left` is `stored` where it is a property read from the store, which is SQL's
-        null where it is not there, and so needs no test of its own beside such a value. Where neither is `plain`,
-        either may hold a null: see `_plain`.
+        a number's is not (`1` and `1.0`). Compared with a value the statement doesn't give, as an unwound row's, the
+        test is one for a value of any kind (`indexed_equality_of_any`), which `of`, the property's node, and
+        `scalar_rows`, that the value is known to be no list or map (see `_given_rows_scalar`), tell more of. `left` is
+        `stored` where it is a property read from the store, which is SQL's null where it is not there, and so needs no
+        test of its own beside such a value. Where neither is `plain`, either may hold a null: see `_plain`.
         """
         temporal = self._temporal_binary(BinaryOperator.EQUALS, left, right)
         if isinstance(temporal, Bool):
@@ -5935,7 +6036,17 @@ class SqlCypherCompiler(ABC):
         if not plain:
             return self._nullable_equals(a, b, self.json_equals)
         given = self._given(written) if written is not None else None
-        indexed = self.indexed_equality(a, b) if isinstance(given, (str, bool)) else None
+        # A value the statement is given is known as it compiles; one it isn't, as an unwound row's, may be of any kind,
+        # and is compared with the index's text as each of its kinds can be: else the join reads every node for each row
+        # (#429, liberation-data/drivine4j#617).
+        if isinstance(given, (str, bool)) and self.index_holds(given):
+            indexed = self.indexed_equality(a, b, of)
+        elif given is None and written is not None and not self._is_given(written):
+            indexed = self.indexed_equality_of_any(a, b, of, (of is not None and of.scalar) or scalar_rows)
+        else:
+            indexed = None
+        if indexed is not None:
+            self._indexed_emitted = True
         # Null is equal to nothing, itself included: the comparison is null, as in Cypher. A value the statement is
         # given that is not null needs no test of its own, and a property that is not there is SQL's null; any other
         # value is tested.
@@ -6415,6 +6526,53 @@ class SqlCypherCompiler(ABC):
             value = self._parameters.value(expression.subject.name)
             return cast(Mapping[str, Any], value).get(expression.key) if isinstance(value, Mapping) else None
         return None
+
+    def _given_tree(self, expression: Expression) -> Any:
+        """The expression as the JSON it is, as JSON's own kinds, where the statement gives the whole of it (see
+        `_unwound_given`); `_UNGIVEN` where it doesn't. A parameter's is the value as it is bound, so bytes are their
+        base64 text, which `index_holds` reads as it reads any text."""
+        if isinstance(expression, Parameter):
+            return self._parameters.tree(expression.name)
+        if isinstance(expression, Literal):
+            return jsonable(expression.value)
+        if isinstance(expression, ListLiteral):
+            items = [self._given_tree(it) for it in expression.items]
+            return _UNGIVEN if any(it is _UNGIVEN for it in items) else items
+        if isinstance(expression, MapLiteral):
+            entries = {key: self._given_tree(value) for key, value in expression.entries}
+            return _UNGIVEN if any(it is _UNGIVEN for it in entries.values()) else entries
+        return _UNGIVEN
+
+    def _given_rows_scalar(self, expression: Expression, scope: Scope) -> bool:
+        """
+        Whether the expression is an item unwound from a list the statement gives (`_unwound_given`), as `id` of `UNWIND
+        $ids AS id`, a key of one, as `row.s` of `UNWIND $rows AS row`, or a key of a map at one, as `row.start._id`, at
+        which no item of the list it is bound to holds a list or a map, or a text the store's index doesn't hold
+        (`index_holds`): the value is then no list or map, though it may be null (#429, liberation-data/drivine4j#617).
+        Nor where a key is read of a list, which Neo4j refuses: Oracle's path reads the key of each of its items, so
+        `row.a.b` of `{a: [{b: [1, 2]}]}` is `[1, 2]` there.
+        """
+        # The keys, outermost first, down to the unwound item: `row.start._id` reads `_id` of `start`.
+        keys: list[str] = []
+        subject = expression
+        while isinstance(subject, Property):
+            keys.insert(0, subject.key)
+            subject = subject.subject
+        if not isinstance(subject, Variable):
+            return False
+        bound = scope.get(subject.name)
+        rows = self._unwound_given.get(bound.sql, _UNGIVEN) if isinstance(bound, Json) else _UNGIVEN
+        if rows is _UNGIVEN:
+            return False
+        for item in cast(list[Any], rows) if isinstance(rows, list) else [rows]:
+            value = item
+            for key in keys:
+                if isinstance(value, list):
+                    return False
+                value = cast(dict[str, Any], value).get(key) if isinstance(value, dict) else None
+            if isinstance(value, (list, dict)) or (isinstance(value, str) and not self.index_holds(value)):
+                return False
+        return True
 
     def _unary(self, unary: Unary, scope: Scope) -> Value:
         if unary.operator is UnaryOperator.NOT:

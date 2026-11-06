@@ -5,9 +5,10 @@ import json as json_
 import math
 import re
 from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from typing import Any, cast
 
-from drivine.backend.oracle.oracle_graph import holds_label
+from drivine.backend.oracle.oracle_graph import holds_label, labelled_value
 from drivine.backend.oracle.oracle_stored_functions import nulls_equal_function, nulls_equal_name
 from drivine.cypher.ast.query import Query
 from drivine.cypher.sql.compiled_cypher import CompiledCypher
@@ -32,6 +33,7 @@ from drivine.cypher.sql.sql_cypher_compiler import (
     SHARED_ABOVE,
     VALUE,
     Body,
+    IndexedProperty,
     SqlCypherCompiler,
     Walk,
     Walked,
@@ -158,14 +160,27 @@ class OracleCypherCompiler(SqlCypherCompiler):
     meets what the node walked from meets of its own, and carries the node it started from.
     """
 
-    def __init__(self, graph: str, nulls_equal_stored: bool = True, era_stored: bool = True) -> None:
+    def __init__(
+        self,
+        graph: str,
+        nulls_equal_stored: bool = True,
+        era_stored: bool = True,
+        indexed_properties: AbstractSet[tuple[str, str]] = frozenset(),
+    ) -> None:
         """
         `nulls_equal_stored` says whether two values that may hold a null are compared by the function the store keeps
         beside the graph's tables, `nulls_equal_name`: see `nulls_equal`. `era_stored` says whether a text or a
         timestamp whose year may be BC is renumbered by the functions the store keeps beside the graph's tables,
         `era_name` and `era_date_name`: see `OracleTemporalSql.era`.
+
+        `indexed_properties` are the labels and properties a range index or a uniqueness constraint is over, each as
+        `(label, key)`: a node a pattern finds by one is read through that index (see `indexed_equality`). Empty, as a
+        statement compiled without the store's catalog is, no node is: its labels tested as the index over them answer,
+        a property with no index of its own would read every node of the graph in place of those of the label
+        (liberation-data/drivine4j#617). Nothing names any yet (liberation-data/drivine4j#638).
         """
         super().__init__(graph)
+        self._indexed_properties = frozenset(indexed_properties)
         self._nulls_equal_stored = nulls_equal_stored
         self._stored_era = graph if era_stored else None
         """The graph whose store keeps the era functions a statement calls, where it may call them."""
@@ -208,6 +223,11 @@ class OracleCypherCompiler(SqlCypherCompiler):
         Each test of a node's labels `keyed_labels` wrote. Kept as text, and looked for in the query `planned` is
         given, so a trial compile that writes one and is thrown away, or a step of a procedure that holds none, is
         planned as before.
+        """
+        self._few_rows: list[str] = []
+        """
+        The aliases of the `JSON_TABLE`s of `UNWIND`s whose item a node is found by through the labelled index
+        (`few_rows`): kept as text, as `_one_row` are, and looked for in the query `planned` is given.
         """
         self._one_row: list[str] = []
         """
@@ -804,6 +824,57 @@ class OracleCypherCompiler(SqlCypherCompiler):
         """
         rest = [holds_label(labels, it) for it in all_[1:]]
         return " AND ".join([self.has_label(labels, all_[0]), *rest])
+
+    def indexed_equality(self, property: str, value: str, of: IndexedProperty | None = None) -> str | None:
+        """
+        The node's property read as the labelled index over its label holds it (`labelled_value`), equal to the value's
+        text, for each label the pattern names for it that `indexed_properties` names: Oracle had no such test, so even
+        a parameter's value was compared only as JSON, inside a `CASE`, which no index answers, and a node found by a
+        property was found by reading every node of the label (#429, liberation-data/drivine4j#617).
+        """
+        return self._labelled_equals(of, f"JSON_VALUE({value}, '$')")
+
+    def index_holds(self, given: Any) -> bool:
+        """An empty text, and one past _SHORT_TEXT bytes, which the index's `JSON_VALUE` reads as null: see
+        `_read_short`."""
+        return _read_short(given)
+
+    def indexed_equality_of_any(
+        self, property: str, value: str, of: IndexedProperty | None = None, scalar: bool = False
+    ) -> str | None:
+        """
+        As `indexed_equality`, for a value of any kind: `JSON_VALUE` gives a number's text as Oracle holds the number,
+        so `1` and `1.0` are the same text. A list has no text, and neither does the property a list is in the labelled
+        index, which holds none: it is let through, to be compared as JSON, so no list a node holds is left out
+        (liberation-data/drivine4j#617). Oracle reads no index beside that `OR`, so where the value is known to be no
+        list or map (`scalar`) it is left out.
+        """
+        if self._labelled_equals(of, value) is None:
+            return None
+        if scalar:
+            return self._labelled_equals(of, f"JSON_VALUE({value}, '$')")
+
+        def let_through(x: str) -> str:
+            text = f"JSON_VALUE({x}, '$')"
+            return f"({self._labelled_equals(of, text)} OR {text} IS NULL)"
+
+        return self.shared1(value, let_through)
+
+    def _labelled_equals(self, of: IndexedProperty | None, text: str) -> str | None:
+        """
+        The text equal to the property `of` names, as the index each label of its node `indexed_properties` names has
+        over it holds it: a range index's labelled one, or a uniqueness constraint's, whose expression this library
+        writes as the labelled index's (see `OracleSchemaGrammar.create_unique`), so one test stands for both, where
+        drivine4j writes one for each. On a node with the label and the property they are the same value. None where no
+        label of the node is so named.
+        """
+        if of is None or not of.labels or not of.props.endswith(".props"):
+            return None
+        alias = of.props.removesuffix(".props")
+        indexed = [it for it in of.labels if (it, of.key) in self._indexed_properties]
+        if not indexed:
+            return None
+        return " AND ".join(f"{labelled_value(alias, label, of.key)} = {text}" for label in indexed)
 
     def same_key(self, a: str, b: str) -> str:
         """
@@ -1520,6 +1591,16 @@ class OracleCypherCompiler(SqlCypherCompiler):
             return f"SELECT /*+ {hinted.group(1)} {hints} */{estimated[hinted.end() :]}"
         return re.sub(r"^SELECT ", f"SELECT /*+ {hints} */ ", estimated, count=1)
 
+    def few_rows(self, alias: str) -> None:
+        """
+        _FEW_ROWS rows for the `JSON_TABLE` `alias`, in its own query's hint (`CARDINALITY(u1 10)`): Oracle (23.26)
+        estimates one over a value given at 8,168, and so read every node once and hashed it to the rows, rather than
+        read each row's node through the index its property is compared by (liberation-data/drivine4j#617). It is an
+        estimate, not a limit: a longer list is read whole, each row's node through the index.
+        """
+        if alias not in self._few_rows:
+            self._few_rows.append(alias)
+
     def _one_row_planned(self, query: str) -> str:
         """
         The query with each query of it that reads the rows of a `FOREACH` or a `CALL { … }` written for each row
@@ -1530,7 +1611,7 @@ class OracleCypherCompiler(SqlCypherCompiler):
         20 s over 10,000 rows where it took 1 s over 2,000 (#419, liberation-data/drivine4j#588). Told of one row,
         Oracle reads each node by its key: 3 buffers a row, at any size.
         """
-        text = query
+        text = self._few_rows_planned(query)
         for alias in self._one_row:
             read = re.search(
                 rf"FROM JSON_TABLE\({re.escape(ROWS)}, '\$\[\*\]' COLUMNS \(item_no FOR ORDINALITY, "
@@ -1542,6 +1623,25 @@ class OracleCypherCompiler(SqlCypherCompiler):
             if select is None:
                 continue
             hint = f"CARDINALITY({alias} 1)"
+            after = select + len("SELECT ")
+            if text.startswith("/*+ ", after):
+                end = text.index(" */", after)
+                text = f"{text[:end]} {hint}{text[end:]}"
+            else:
+                text = f"{text[:after]}/*+ {hint} */ {text[after:]}"
+        return text
+
+    def _few_rows_planned(self, query: str) -> str:
+        """The query with each `JSON_TABLE` `few_rows` names told it is _FEW_ROWS rows, in its own query's hint, where
+        Oracle reads it, as `_one_row_planned` tells a query of one row."""
+        text = query
+        for alias in self._few_rows:
+            read = re.search(rf"COLUMNS \(item_no FOR ORDINALITY, item JSON PATH '\$'\)\) {re.escape(alias)}\b", text)
+            # Read back from the `JSON_TABLE`'s closing bracket, past it, to the `SELECT` whose `FROM` holds it.
+            select = _owning_select(text, read.end() - len(alias) - 1) if read else None
+            if select is None:
+                continue
+            hint = f"CARDINALITY({alias} {_FEW_ROWS})"
             after = select + len("SELECT ")
             if text.startswith("/*+ ", after):
                 end = text.index(" */", after)
@@ -1924,6 +2024,10 @@ _MOST_PLACES = 100
 
 _DOUBLE = "$numberDouble"
 """The key of a double in Oracle's extended JSON."""
+
+_FEW_ROWS = 10
+"""The rows `OracleCypherCompiler.few_rows` estimates an unwound list at: few enough that Oracle reads each row's node
+through the index its property is compared by."""
 
 _SHORT_TEXT = 4000
 """The most bytes a `VARCHAR2` holds in SQL, as a database is made by default (`MAX_STRING_SIZE = STANDARD`)."""

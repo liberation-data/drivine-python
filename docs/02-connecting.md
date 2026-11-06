@@ -146,7 +146,11 @@ applied whole or not at all.
   reads, which narrows the search; `load_matching` scores the same with it and without it, and reads words, a
   `"phrase"`, `+must`, `-not` and a `prefix*`. It scores by BM25, as Lucene and so Neo4j's full-text index do (`k1`
   1.2, `b` 0.75): a term weighs as it is rare among the label's nodes, and a text's counts against its length, in
-  characters, beside the label's average. Oracle without Oracle Text scores the same way.
+  characters, beside the label's average. Oracle without Oracle Text scores the same way. A dotted name, as
+  `org.example.models`, is words here, split at each dot, as it is on Oracle and SQLite: `example models` finds it, and
+  the name itself is the phrase of its words. Neo4j's default analyzer keeps such a name one token, which the whole name
+  finds and `example models` doesn't. drivine4j's `FullTextIndexSpec` picks another analyzer there; drivine-python
+  doesn't take one yet.
 
 ### SQLite
 

@@ -146,6 +146,25 @@ def test_oracle_told_of_the_index_reads_a_rows_and_a_parameters_value_through_it
     assert f"({labelled_value('n1', 'Person', 'id')} = JSON_VALUE(JSON($_cy_s), '$') AND" in parameter, parameter
 
 
+def test_oracle_reads_a_parameters_text_through_the_labelled_index_where_a_walk_sets_out_or_a_quantified_path_finds():
+    # The walk's seed, a variable-length relationship's end, and the same statement compiled bare, which writes none.
+    statement = "MATCH (a:Person)-[:FOLLOWS*1..2]->(b:Person {id: $s}) RETURN a.k"
+    walk = oracle(statement, {"s": "p1"}, INDEXED)
+    seed = re.search(
+        r"WITH w\d+ \(src, nid, depth, nids, eids\) AS \(\s*SELECT [^\n]*\n\s*FROM g_node (p\d+_n) WHERE [^\n]*", walk
+    )
+    assert seed is not None, walk
+    assert f"{labelled_value(seed.group(1), 'Person', 'id')} = JSON_VALUE(JSON($_cy_s), '$')" in seed.group(0), walk
+    assert "NULL ON ERROR) END =" not in oracle(statement, {"s": "p1"})
+    # A node of a quantified path, tested on each step of the walk.
+    quantified = oracle(
+        "MATCH p = ((x:Person {id: $s})-[:FOLLOWS]->(:Person)){1,2} RETURN length(p)", {"s": "p1"}, INDEXED
+    )
+    step = re.search(r"JOIN g_node (n\d+) ON n\d+\.nid = w\d+\.nid", quantified)
+    assert step is not None, quantified
+    assert f"{labelled_value(step.group(1), 'Person', 'id')} = JSON_VALUE(JSON($_cy_s), '$')" in quantified, quantified
+
+
 def test_oracle_lets_a_value_that_may_be_a_list_or_a_text_its_index_holds_none_of_through_to_the_json_comparison():
     long = "x" * 5000
     for given in [rows("p1", [1, 2]), rows("p1", ""), rows("p1", long)]:

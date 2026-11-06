@@ -397,31 +397,56 @@ def test_compiled_knowing_the_indexes_oracle_finds_the_rows_it_finds_compiled_as
         return {"rows": [{"s": it} for it in values]}
 
     by_row = "UNWIND $rows AS row MATCH (a:Person {id: row.s}) RETURN a.k ORDER BY a.k"
-    cases: list[tuple[str, dict[str, Any]]] = [
-        (by_row, rows("p5", 7, 7.0, 8, True, [1, 2], None, "nobody", "7", ["a", "b"], [], [1], [[1, 2]], 1)),
-        (by_row, rows(0.1, 1.0e20, -7, -0.0, BIG, "", LONG)),
-        (by_row, rows(0.1, 1.0e20, -7, -0.0, BIG, 8.0, 8, 7, 7.0)),
-        (by_row, rows(0.1, 1.0e20, -7.0, 0.0, 8.0)),
+    # Each with whether the labelled test is written. Not where a row holds a null, at the key or as the map a key is
+    # read of, nor where a written list holds a negative number, `-7` a negation and no literal: compared as values that
+    # may hold a null, as drivine4j compares them, with no test beside them. Each has a twin without, that writes it.
+    cases: list[tuple[str, dict[str, Any], bool]] = [
+        (by_row, rows("p5", 7, 7.0, 8, True, [1, 2], None, "nobody", "7", ["a", "b"], [], [1], [[1, 2]], 1), False),
+        (by_row, rows("p5", 7, 7.0, 8, True, [1, 2], "nobody", "7", ["a", "b"], [], [1], [[1, 2]], 1), True),
+        (by_row, rows(0.1, 1.0e20, -7, -0.0, BIG, "", LONG), True),
+        (by_row, rows(0.1, 1.0e20, -7, -0.0, BIG, 8.0, 8, 7, 7.0), True),
+        (by_row, rows(0.1, 1.0e20, -7.0, 0.0, 8.0), True),
         (
             "UNWIND $ids AS id MATCH (a:Person {id: id}) RETURN a.k ORDER BY a.k",
             {"ids": ["p5", 7.0, 8, True, BIG, 0.1]},
+            True,
         ),
         (
             "UNWIND ['', 'p5', 8, 7.0, 0.1, 1.0e20, -7, -0.0, 0] AS s MATCH (a:Person {id: s}) RETURN a.k ORDER BY a.k",
             {},
+            False,
+        ),
+        (
+            "UNWIND ['', 'p5', 8, 7.0, 0.1, 1.0e20, 0] AS s MATCH (a:Person {id: s}) RETURN a.k ORDER BY a.k",
+            {},
+            True,
         ),
         (
             "UNWIND $rows AS row MATCH (a:Person {id: row.a.b}) RETURN a.k ORDER BY a.k",
             {"rows": [{"a": {"b": "p5"}}, {"a": {"b": 8}}, {"a": None}, {}, {"a": {"c": [1]}}]},
+            False,
         ),
-        ("UNWIND $rows AS row MATCH (a:KeyOdd {id: row.s}) RETURN a.k ORDER BY a.k", rows(True, "true", 7, "7", 7.0)),
+        (
+            "UNWIND $rows AS row MATCH (a:Person {id: row.a.b}) RETURN a.k ORDER BY a.k",
+            {"rows": [{"a": {"b": "p5"}}, {"a": {"b": 8}}, {}, {"a": {"c": [1]}}]},
+            True,
+        ),
+        (
+            "UNWIND $rows AS row MATCH (a:KeyOdd {id: row.s}) RETURN a.k ORDER BY a.k",
+            rows(True, "true", 7, "7", 7.0),
+            True,
+        ),
         (
             "UNWIND $rows AS row MATCH (a:KeyScaled {id: row.s}) RETURN a.k ORDER BY a.k",
             rows(2.5, 1, 4, 0.00001, 1.0, 4.0, 8, 8.0, 1.0e20, 10**20),
+            True,
         ),
-        ("MATCH (a:Person {id: $s}) RETURN a.k", {"s": "p42"}),
+        ("MATCH (a:Person {id: $s}) RETURN a.k", {"s": "p42"}, True),
     ]
-    for cypher, parameters in cases:
+    for cypher, parameters, writes in cases:
+        plain, knowing = OracleCypherCompiler(GRAPH), OracleCypherCompiler(GRAPH, indexed_properties=indexed)
+        differs = plain.compile(cypher, parameters).sql != knowing.compile(cypher, parameters).sql
+        assert differs is writes, f"{cypher} {parameters}: the labelled test {'not ' if writes else ''}written"
         bare = run(OracleCypherCompiler(GRAPH), cypher, parameters)
         assert bare, cypher
         assert run(OracleCypherCompiler(GRAPH, indexed_properties=indexed), cypher, parameters) == bare, (

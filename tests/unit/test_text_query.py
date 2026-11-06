@@ -99,7 +99,8 @@ def test_reads_a_star_in_the_middle_of_a_word_as_a_gap_between_two_words():
         ("kotlin -python", "({kotlin}) NOT {python}"),
         ("kotlin NOT python ! rust", "({kotlin}) NOT {python} NOT {rust}"),
         ("pre*", "(pre%)"),
-        ('"graph pre*"', "({graph} pre%)"),
+        # A `*` inside quotes is text, as Lucene's parser reads it: the phrase "graph pre" (drivine4j#622).
+        ('"graph pre*"', "({graph pre})"),
         # A star after a backslash that is itself text is the start of a word.
         ("pre\\\\*", "(pre%)"),
         # What stands before a backslashed colon is kept, where a bare colon makes it a field.
@@ -171,3 +172,24 @@ def test_reads_a_word_or_a_phrase_of_any_length():
 
 def test_reads_a_query_of_many_phrases_that_never_close_in_one_pass():
     assert len(TextQuery.parse('"graph ' * 50_000).scored) == 50_000
+
+
+_PHRASE = "(^|[^[:alnum:]_])of[^[:alnum:]_]+sou($|[^[:alnum:]_])"
+
+
+@pytest.mark.parametrize(
+    ("query", "scored"),
+    [
+        ('"of sou*"', [_PHRASE]),
+        ('body:"of sou*"', [_PHRASE]),
+        ('"of sou\\*"', [_PHRASE]),
+        ('"kiw*"', ["(^|[^[:alnum:]_])kiw($|[^[:alnum:]_])"]),
+        ("sou*", ["(^|[^[:alnum:]_])sou"]),
+        ("+kiw*", ["(^|[^[:alnum:]_])kiw"]),
+    ],
+)
+def test_a_star_inside_quotes_is_text_as_lucenes_parser_reads_it_and_outside_them_the_start_of_a_word(
+    query: str, scored: list[str]
+) -> None:
+    # drivine4j#622: Neo4j's parser hands a quoted text to its analyzer whole, which drops the `*`.
+    assert TextQuery.parse(query).scored == scored

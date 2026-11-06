@@ -237,7 +237,7 @@ def _phrase_at(
 def _term_of(token: _Token) -> _Term | None:
     """
     The token's term; None when it holds no word. A word still holds a field up to its first bare colon. The term is
-    the start of a word when its last character is a bare `*`.
+    the start of a word when its last character is a bare `*` and it is not quoted.
     """
     if token.quoted:
         text = token.chars
@@ -247,7 +247,8 @@ def _term_of(token: _Token) -> _Term | None:
     words = [it for it in _GAP.split("".join(it.char for it in text).lower()) if it]
     if not words:
         return None
-    prefix = _is_bare(text[-1], "*")
+    # A `*` inside quotes is text, as Lucene's parser reads it: "of sou*" is the phrase "of sou" (drivine4j#622).
+    prefix = not token.quoted and _is_bare(text[-1], "*")
     oracle_text = (
         " ".join([*(f"{{{it}}}" for it in words[:-1]), f"{words[-1]}%"]) if prefix else f"{{{' '.join(words)}}}"
     )

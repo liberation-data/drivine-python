@@ -171,3 +171,22 @@ def test_reads_a_word_or_a_phrase_of_any_length():
 
 def test_reads_a_query_of_many_phrases_that_never_close_in_one_pass():
     assert len(TextQuery.parse('"graph ' * 50_000).scored) == 50_000
+
+
+@pytest.mark.parametrize(
+    ("query", "words"),
+    [
+        ("किताब", [["किताब"]]),
+        ("bⅻb", [["bⅻb"]]),
+        ("m²x", [["m", "x"]]),
+        ("1½2", [["1", "2"]]),
+        ("٣٤", [["٣٤"]]),
+        ("m\\²x", [["m", "x"]]),
+    ],
+)
+def test_a_word_is_alphabetic_letters_decimal_digits_and_underscores_as_the_texts_expression_reads_it(
+    query: str, words: list[list[str]]
+) -> None:
+    # drivine4j#616: a vowel sign and a letter number are in a word, as [[:alnum:]] holds them; a superscript or a
+    # fraction is between words, as it is in the text and to Neo4j's analyzer. A backslash makes "²" text, still a gap.
+    assert TextQuery.parse(query).scored_words == words

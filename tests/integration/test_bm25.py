@@ -55,6 +55,8 @@ ARTICLES = [
     Bm25Article(id="once", body="kiwi bird"),
     Bm25Article(id="often", body="kiwi kiwi kiwi kiwi kiwi kiwi kiwi kiwi kiwi kiwi"),
     Bm25Article(id="none", body="nothing to see"),
+    Bm25Article(id="hindi", body="एक किताब"),
+    Bm25Article(id="area", body="an m² x here"),
 ]
 
 # A missing property is no text, and its length none.
@@ -112,8 +114,8 @@ class TestBm25:
         if gom.persistence_manager.type != DatabaseType.NEO4J:
             # bm25_ranked's own figure, lengths in characters (Lucene's are in words): "graph" counted 3 times in 45
             # characters (back to back, the pattern counts every other one: drivine4j#607 moves this), against "graph"
-            # and "soup" once each in 15, over 27 texts of 857 characters, "graph" in 22 and "soup" in 1.
-            assert dict(hits)["many"] == pytest.approx(0.07864229315202613, abs=1e-9)
+            # and "soup" once each in 15, over 29 texts of 877 characters, "graph" in 22 and "soup" in 1.
+            assert dict(hits)["many"] == pytest.approx(0.09894838836082837, abs=1e-9)
 
     async def test_a_short_text_outranks_a_long_one_that_holds_the_term_as_often(
         self, gom: StatelessGraphObjectManager
@@ -128,6 +130,14 @@ class TestBm25:
         assert hits["often"] == pytest.approx(1, abs=1e-9)
         # Ten times the count, as long again as the other's text: not ten times the score.
         assert hits["once"] > 0.4
+
+    async def test_a_word_is_read_as_the_texts_expression_reads_it_its_vowel_signs_in_it_a_superscript_between_words(
+        self, gom: StatelessGraphObjectManager
+    ) -> None:
+        # drivine4j#616: split at its vowel sign, किताब was "क", which [[:alnum:]] went on from.
+        assert [id_ for id_, _ in await search(gom, "किताब")] == ["hindi"]
+        # "²" is not in a word: "m²x" is the words "m" and "x", as Neo4j's analyzer reads it.
+        assert [id_ for id_, _ in await search(gom, '"m²x"')] == ["area"]
 
     async def test_a_common_term_still_finds_its_nodes_and_required_and_excluded_terms_keep_their_meaning(
         self, gom: StatelessGraphObjectManager

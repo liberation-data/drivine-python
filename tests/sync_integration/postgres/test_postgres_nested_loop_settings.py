@@ -59,11 +59,11 @@ def settings_after(
             raw.execute("ROLLBACK TO SAVEPOINT cy_planner_test")
         cursor = raw.execute(
             "SELECT current_setting('enable_seqscan') AS a, current_setting('enable_hashjoin') AS b, "
-            "current_setting('enable_mergejoin') AS c"
+            "current_setting('enable_mergejoin') AS c, current_setting('enable_material') AS d"
         )
         row = cursor.fetchone()
         assert row is not None
-        return [row["a"], row["b"], row["c"]]
+        return [row["a"], row["b"], row["c"], row["d"]]
     finally:
         raw.execute("ROLLBACK")
         connection.release()
@@ -72,12 +72,12 @@ def settings_after(
 def test_a_procedure_puts_the_settings_back_as_the_session_had_them_in_its_transaction(
     registry: DatabaseRegistry,
 ):
-    assert settings_after(registry, "SET enable_hashjoin = off", MERGE) == ["on", "off", "on"]
+    assert settings_after(registry, "SET enable_hashjoin = off", MERGE) == ["on", "off", "on", "on"]
 
 
 def test_a_procedure_puts_the_settings_back_as_its_transaction_had_them(registry: DatabaseRegistry):
     settings = settings_after(registry, "SET LOCAL enable_hashjoin = off", MERGE, nodes=True)
-    assert settings == ["on", "off", "on"]
+    assert settings == ["on", "off", "on", "on"]
 
 
 def test_a_procedure_that_fails_in_its_loop_leaves_the_settings_as_they_were_once_its_savepoint_is_rolled_back(
@@ -88,4 +88,4 @@ def test_a_procedure_that_fails_in_its_loop_leaves_the_settings_as_they_were_onc
     failing = "MATCH (n:CyLoop) MERGE (n)-[:CY_SELF {w: n.i / 0}]->(n)"
     setup = "SET LOCAL enable_hashjoin = off"
     settings = settings_after(registry, setup, failing, nodes=True, fails="division by zero")
-    assert settings == ["on", "off", "on"]
+    assert settings == ["on", "off", "on", "on"]

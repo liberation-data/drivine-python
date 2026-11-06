@@ -123,8 +123,10 @@ people = await pm.query(spec.bind({"city": "Sydney"}))
   points over its first 500 characters, and past them by the database's collation. A list read from a property, and a
   map, still order the texts in them by the database's collation (`ORDER BY n.tags`).
 - On Postgres, a write's loop over its rows that reads the node or edge table for each row, where it adds to that table
-  or joins it to the rows of a `CALL { … }`, runs with `enable_seqscan`, `enable_hashjoin` and `enable_mergejoin` off,
-  set back after it to what they were ([#420](https://github.com/liberation-data/drivine-python/issues/420),
+  or joins it to the rows of a `CALL { … }`, runs with `enable_seqscan`, `enable_hashjoin`, `enable_mergejoin` and
+  `enable_material` off, set back after it to what they were
+  ([#420](https://github.com/liberation-data/drivine-python/issues/420),
+  [#430](https://github.com/liberation-data/drivine-python/issues/430),
   [drivine4j#609](https://github.com/liberation-data/drivine4j/issues/609)). Postgres kept a plan made while the table
   was empty, or took a `CALL`'s one row for 100, and read the whole table for each row: `MATCH (n) MERGE (n)-[:R]->(n)`
   took 28 s over 20,000 nodes where it now takes under 1 s. The settings are set for the transaction

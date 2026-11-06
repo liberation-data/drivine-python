@@ -13,15 +13,15 @@ from drivine.cypher.sql.sqlite_cypher_compiler import SqliteCypherCompiler
 
 OFF = (
     "PERFORM set_config('enable_seqscan', 'off', true), set_config('enable_hashjoin', 'off', true), "
-    "set_config('enable_mergejoin', 'off', true);"
+    "set_config('enable_mergejoin', 'off', true), set_config('enable_material', 'off', true);"
 )
 SAVED = (
     "cy_planner := ARRAY[current_setting('enable_seqscan'), current_setting('enable_hashjoin'), "
-    "current_setting('enable_mergejoin')];"
+    "current_setting('enable_mergejoin'), current_setting('enable_material')];"
 )
 RESTORED = (
     "PERFORM set_config('enable_seqscan', cy_planner[1], true), set_config('enable_hashjoin', cy_planner[2], true), "
-    "set_config('enable_mergejoin', cy_planner[3], true);"
+    "set_config('enable_mergejoin', cy_planner[3], true), set_config('enable_material', cy_planner[4], true);"
 )
 
 

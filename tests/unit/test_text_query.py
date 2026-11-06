@@ -1,9 +1,12 @@
 """drivine4j's TextQueryTest, ported as TypeScript's Drivine ported it: the same queries are read alike everywhere."""
 
+import re
+
 import pytest
 
 from drivine import DrivineError
 from drivine.backend.sql.text_query import TextQuery
+from drivine.backend.sqlite.sqlite_patterns import python_pattern
 
 
 def word(text: str) -> str:
@@ -190,3 +193,13 @@ def test_a_word_is_alphabetic_letters_decimal_digits_and_underscores_as_the_text
     # drivine4j#616: a vowel sign and a letter number are in a word, as [[:alnum:]] holds them; a superscript or a
     # fraction is between words, as it is in the text and to Neo4j's analyzer. A backslash makes "²" text, still a gap.
     assert TextQuery.parse(query).scored_words == words
+
+
+@pytest.mark.parametrize(
+    ("char", "in_word"),
+    [("क", True), ("ि", True), ("ⅻ", True), ("٣", True), ("_", True), ("²", False), ("½", False), ("-", False)],
+)
+def test_sqlites_alnum_and_a_querys_words_hold_the_same_characters(char: str, in_word: bool) -> None:
+    # drivine4j#616: the text's [[:alnum:]_] on SQLite and the query's words read a character alike, or they disagree.
+    assert (re.fullmatch(python_pattern("[[:alnum:]_]"), char) is not None) == in_word
+    assert (len(TextQuery.parse(f"a{char}b").scored_words[0]) == 1) == in_word

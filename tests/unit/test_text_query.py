@@ -101,6 +101,8 @@ def test_reads_a_star_in_the_middle_of_a_word_as_a_gap_between_two_words():
         ("pre*", "(pre%)"),
         # A `*` inside quotes is text, as Lucene's parser reads it: the phrase "graph pre" (drivine4j#622).
         ('"graph pre*"', "({graph pre})"),
+        ('"kiw*"', "({kiw})"),
+        ('body:"of sou*"', "({of sou})"),
         # A star after a backslash that is itself text is the start of a word.
         ("pre\\\\*", "(pre%)"),
         # What stands before a backslashed colon is kept, where a bare colon makes it a field.

@@ -144,9 +144,10 @@ applied whole or not at all.
 - A vector index is a pgvector HNSW index over the embeddings of the label's nodes of its size; `load_nearest` is
   approximate through it, and exact with no index made. A full-text index is a trigram index over the text a search
   reads, which narrows the search; `load_matching` scores the same with it and without it, and reads words, a
-  `"phrase"`, `+must`, `-not` and a `prefix*`. It scores by BM25, as Lucene and so Neo4j's full-text index do (`k1`
-  1.2, `b` 0.75): a term weighs as it is rare among the label's nodes, and a text's counts against its length, in
-  characters, beside the label's average. Oracle without Oracle Text scores the same way.
+  `"phrase"`, `+must`, `-not` and a `prefix*`; in a phrase a `*` is text, as on Neo4j: `"of sou*"` is the phrase
+  `of sou`. It scores by BM25, as Lucene and so Neo4j's full-text index do (`k1` 1.2, `b` 0.75): a term weighs as it
+  is rare among the label's nodes, and a text's counts against its length, in characters, beside the label's average.
+  Oracle without Oracle Text scores the same way.
 
 ### SQLite
 

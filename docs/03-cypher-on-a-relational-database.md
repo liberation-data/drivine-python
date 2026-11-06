@@ -112,6 +112,11 @@ drivine-python passes it at v0.22.0 (pinned in [`tests/cypher/VERSION`](../tests
 compile. Cypher the compiler doesn't take yet is refused by name, with a `DrivineError`, before anything is sent to the
 database.
 
+Neo4j's schema DDL (`CREATE INDEX`, `CREATE CONSTRAINT`, `DROP INDEX`, `DROP CONSTRAINT`, `CALL db.awaitIndexes`) is no
+query: given as Cypher to a `PersistenceManager`, it is applied to the store's schema, as
+[Neo4j schema DDL on the SQL stores](07-schema.md#neo4j-schema-ddl-on-the-sql-stores) describes, and the compiler alone
+refuses it.
+
 **How complete is it?** The [openCypher TCK](https://github.com/opencypher/openCypher/tree/main/tck) is openCypher's
 own test suite: 3,896 scenarios, each a graph, a query, and the rows or the error the query must give.
 [drivine4j](https://github.com/liberation-data/drivine4j) runs all of them through its compiler on each store. The

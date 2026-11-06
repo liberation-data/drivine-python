@@ -2,6 +2,7 @@
 # pyright: reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnknownArgumentType=false
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 from drivine.backend.oracle.oracle_graph import (
@@ -13,7 +14,15 @@ from drivine.backend.oracle.oracle_graph import (
     sql_text,
 )
 from drivine.backend.oracle.oracle_side_table import OracleSideTable
-from drivine.backend.sql.sql_catalog import CATALOG_KINDS, CatalogKind, catalog_properties, catalog_record
+from drivine.backend.sql.sql_catalog import (
+    ALIASES,
+    CATALOG_KINDS,
+    CatalogKind,
+    aliases_in,
+    aliases_json,
+    catalog_properties,
+    catalog_record,
+)
 from drivine.model import lower_copies
 from drivine.schema.full_text_index_spec import FullTextIndexSpec
 from drivine.schema.lower_copy_statements import LOWER_COPY_KIND, LowerCopyStatements, Recording, catalog_entries
@@ -139,6 +148,7 @@ def oracle_schema_grammar(graph: OracleGraph) -> SchemaGrammar:
         drop_full_text=lambda spec, name: [grammar.forgotten(spec)],
         unsupported_vector_tuning=portable_pins,
         conflicts=grammar.conflicts,
+        aliased=grammar.aliased,
         labelled_indexes=True,
         lower_copies=_lower_copies(graph),
     )
@@ -397,7 +407,8 @@ END;"""
     def _recorded(self, spec: _Spec, object_name: str | None, details: str = "{}", updated: bool = False) -> str:
         """
         Records the item as made, as `object_name` (none for one nothing was made for), unless it is recorded already;
-        with `updated`, a record there already takes `details`. A MERGE doesn't read again before it inserts, so of two
+        with `updated`, a record there already takes `details`, a range index's, and keeps its aliases (see
+        `_range_details`). A MERGE doesn't read again before it inserts, so of two
         sessions recording it at once the second is refused on the catalog's key: that refusal is taken as recorded.
         """
         key = (
@@ -407,7 +418,10 @@ END;"""
         values = ", ".join(
             [sql_text(item_name(spec)), sql_text(object_name) if object_name else "NULL", sql_text(details)]
         )
-        matched = f"\n    WHEN MATCHED THEN UPDATE SET c.details = {sql_text(details)}" if updated else ""
+        patch = sql_text(_range_details(details))
+        matched = (
+            f"\n    WHEN MATCHED THEN UPDATE SET c.details = JSON_MERGEPATCH(c.details, {patch})" if updated else ""
+        )
         return f"""BEGIN
     MERGE INTO {self.graph.catalog} c
     USING ({key}) k
@@ -420,11 +434,12 @@ END;"""
 
     def _served_by(self, spec: RangeIndexSpec, details: str) -> str:
         """
-        Records the range index as served by a uniqueness constraint's index, `details`, and drops the labelled index it
-        was made with, when it was: the one its record names, and an earlier record's, which the record now made stands
-        for. The index is dropped first: a drop that fails leaves the record naming it, for the next constraint made to
-        find and drop.
+        Records the range index as served by a uniqueness constraint's index, `details`, keeping its aliases, and drops
+        the labelled index it was made with, when it was: the one its record names, and an earlier record's, which the
+        record now made stands for. The index is dropped first: a drop that fails leaves the record naming it, for the
+        next constraint made to find and drop.
         """
+        patch = sql_text(_range_details(details))
         record = catalog_record(spec.kind, spec.label, spec.properties)
         earlier = catalog_record(spec.kind, spec.label, spec.properties, [_EARLIER["RANGE"]])
         return f"""DECLARE
@@ -438,9 +453,18 @@ BEGIN
         EXECUTE IMMEDIATE 'DROP INDEX IF EXISTS ' || it.object_name;
     END LOOP;
     DELETE FROM {self.graph.catalog} WHERE {earlier};
-    UPDATE {self.graph.catalog} SET details = {sql_text(details)} WHERE {record};
+    UPDATE {self.graph.catalog} SET details = JSON_MERGEPATCH(details, {patch}) WHERE {record};
     COMMIT;
 END;"""
+
+    def aliased(self, kind: CatalogKind, item: SchemaItem, aliases: Sequence[str]) -> str:
+        """
+        Records the aliases as all the item's, among its record's details, which a merge patch leaves as they are
+        otherwise; a record of the range index written again (`_range_details`) keeps them.
+        """
+        patch = f'{{"{ALIASES}": {aliases_json(aliases) if aliases else "null"}}}'
+        record = catalog_record(kind, item.label, item.properties, recorded_as(kind))
+        return f"UPDATE {self.graph.catalog} SET details = JSON_MERGEPATCH(details, {sql_text(patch)}) WHERE {record}"
 
     def forgotten(self, spec: _Spec) -> str:
         """
@@ -485,6 +509,25 @@ BEGIN
 END;"""
 
 
+_RANGE_DETAILS = ("labelled", "unique")
+"""
+The keys of a range index's details: the name of its labelled index, or of the uniqueness constraint's index that
+stands for it.
+"""
+
+
+def _range_details(details: str) -> str:
+    """
+    The details of a range index as the merge patch of a record's details that gives it them: each other key a range
+    index's details hold is taken out, and the aliases the record keeps are kept. drivine4j's `rangeDetails`.
+    """
+    absent = ", ".join(f'"{it}": null' for it in _RANGE_DETAILS if f'"{it}"' not in details)
+    if not absent:
+        return details
+    body = details.strip().removeprefix("{").removesuffix("}").strip()
+    return f"{{{absent}}}" if not body else f"{{{body}, {absent}}}"
+
+
 def _items(rows: list[Any]) -> list[SchemaItem]:
     return [
         SchemaItem(
@@ -494,6 +537,7 @@ def _items(rows: list[Any]) -> list[SchemaItem]:
             dimensions=_number((it.get("details") or {}).get("dimensions")),
             similarity=(it.get("details") or {}).get("similarity"),
             incomplete=it.get("incomplete") == "true",
+            aliases=aliases_in(it.get("details")),
         )
         for it in rows
     ]

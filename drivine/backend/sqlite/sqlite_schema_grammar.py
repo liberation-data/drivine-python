@@ -5,7 +5,15 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
-from drivine.backend.sql.sql_catalog import CATALOG_KINDS, CatalogKind, catalog_properties, catalog_record
+from drivine.backend.sql.sql_catalog import (
+    ALIASES,
+    CATALOG_KINDS,
+    CatalogKind,
+    aliases_in,
+    aliases_json,
+    catalog_properties,
+    catalog_record,
+)
 from drivine.backend.sql.sql_graph import sql_text
 from drivine.backend.sqlite.sqlite_graph import JSON_ROWS, LOWER_COPIES, SqliteGraph, has_label, text_of
 from drivine.schema.full_text_index_spec import FullTextIndexSpec
@@ -63,6 +71,7 @@ def sqlite_schema_grammar(graph: SqliteGraph) -> SchemaGrammar:
         # Nothing is made for a vector index: it takes no HNSW parameters.
         unsupported_vector_tuning=portable_pins,
         conflicts=grammar.conflicts,
+        aliased=grammar.aliased,
         lower_copies=_lower_copies(graph),
     )
 
@@ -171,6 +180,18 @@ class _SqliteSchema:
             "ON CONFLICT (kind, label, properties) DO NOTHING"
         )
 
+    def aliased(self, kind: CatalogKind, item: SchemaItem, aliases: Sequence[str]) -> str:
+        """Records the aliases as all the item's, among its record's details, as on Postgres."""
+        details = (
+            f"json_set(details, '$.{ALIASES}', json({sql_text(aliases_json(aliases))}))"
+            if aliases
+            else f"json_remove(details, '$.{ALIASES}')"
+        )
+        return (
+            f"UPDATE {self.graph.catalog} SET details = {details} "
+            f"WHERE {catalog_record(kind, item.label, item.properties)}"
+        )
+
     def forgotten(self, spec: _Spec) -> list[str]:
         """
         Forgets the item, and drops the index it was made as. SQLite has no block to read the record's object in, so the
@@ -211,6 +232,7 @@ def _items(rows: list[Any]) -> list[SchemaItem]:
             it["name"],
             dimensions=_number((it.get("details") or {}).get("dimensions")),
             similarity=(it.get("details") or {}).get("similarity"),
+            aliases=aliases_in(it.get("details")),
         )
         for it in rows
     ]

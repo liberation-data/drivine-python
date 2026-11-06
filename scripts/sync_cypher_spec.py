@@ -1,14 +1,14 @@
 """
 Copies a tagged version of the Cypher spec, github.com/liberation-data/drivine-cypher-spec, to tests/cypher unchanged:
-its queries.yaml, writes.yaml, temporal.yaml, refusals.yaml and README.md, which says what they hold. The tag is
-recorded in tests/cypher/VERSION.
+its queries.yaml, writes.yaml, temporal.yaml, refusals.yaml, schema.yaml and README.md, which says what they hold. The
+tag is recorded in tests/cypher/VERSION.
 
     uv run python scripts/sync_cypher_spec.py v0.3.0
 
 The three Drivine libraries run the same files, so a Cypher statement gives the same rows from each: run this when the
-spec is tagged again, and tests/integration/test_cypher_spec.py and tests/unit/test_cypher_refusals.py run what it
-says. scripts/check_cypher_spec.py checks the copies are the tag's. drivine4j's scripts/sync-cypher-spec.sh,
-ported.
+spec is tagged again, and tests/integration/test_cypher_spec.py, tests/unit/test_cypher_refusals.py and
+tests/unit/test_schema_ddl_spec.py run what it says. scripts/check_cypher_spec.py checks the copies are the tag's.
+drivine4j's scripts/sync-cypher-spec.sh, ported.
 """
 
 from __future__ import annotations
@@ -28,6 +28,7 @@ FILES = (
     "writes.yaml",
     "temporal.yaml",
     "refusals.yaml",
+    "schema.yaml",
     "README.md",
     "model/schema.json",
     "model/README.md",

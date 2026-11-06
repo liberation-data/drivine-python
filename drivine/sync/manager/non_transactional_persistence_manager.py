@@ -2,15 +2,19 @@
 # change that, and run the script again.
 from __future__ import annotations
 
-from typing import TypeVar
+from typing import TYPE_CHECKING, TypeVar
 
 from drivine.cursor.cursor_specification import CursorSpecification
 from drivine.drivine_error import DrivineError
 from drivine.query.query_specification import QuerySpecification
+from drivine.schema.schema_ddl import ddl_of
 from drivine.sync.connection.connection import Connection
 from drivine.sync.connection.connection_provider import ConnectionProvider
 from drivine.sync.cursor.cursor import Cursor
 from drivine.sync.manager.persistence_manager import PersistenceManager
+
+if TYPE_CHECKING:
+    from drivine.sync.schema.schema_commands import SchemaCommands
 
 T = TypeVar("T")
 
@@ -24,8 +28,27 @@ class NonTransactionalPersistenceManager(PersistenceManager):
         self.provider = provider
         self.database = database
         self.type = provider.type
+        self.schema_commands: SchemaCommands | None = None
+        """
+        What runs Neo4j schema DDL given as Cypher to a SQL store (see SchemaCommands): the one the
+        PersistenceManagerFactory made for the database, or, for a manager made without one, one of the manager's own,
+        made when DDL is first run.
+        """
 
     def query(self, spec: QuerySpecification[T]) -> list[T]:
+        """
+        The results of the statement. Neo4j schema DDL (`CREATE INDEX`, `CREATE CONSTRAINT`, `DROP …`,
+        `db.awaitIndexes`) given as Cypher to Postgres, Oracle or SQLite is applied through Drivine's schema machinery,
+        and gives no rows: see SchemaCommands. A graph engine is sent it as it is.
+        """
+        ddl = ddl_of(self.type, spec)
+        if ddl is not None:
+            if self.schema_commands is None:
+                from drivine.sync.schema.schema_commands import SchemaCommands
+
+                self.schema_commands = SchemaCommands.standalone(self.provider)
+            self.schema_commands.run(ddl)
+            return []
         connection = self.provider.connect()
         try:
             results = connection.query(spec)

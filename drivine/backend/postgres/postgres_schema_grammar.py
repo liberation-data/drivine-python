@@ -7,7 +7,15 @@ from typing import Any
 
 from drivine.backend.postgres.postgres_graph import PostgresGraph, has_labels, text_of
 from drivine.backend.postgres.postgres_search import embedding, holds, searched_text
-from drivine.backend.sql.sql_catalog import CATALOG_KINDS, CatalogKind, catalog_properties, catalog_record
+from drivine.backend.sql.sql_catalog import (
+    ALIASES,
+    CATALOG_KINDS,
+    CatalogKind,
+    aliases_in,
+    aliases_json,
+    catalog_properties,
+    catalog_record,
+)
 from drivine.backend.sql.sql_graph import sql_text
 from drivine.model import lower_copies
 from drivine.schema.full_text_index_spec import FullTextIndexSpec
@@ -59,6 +67,7 @@ def postgres_schema_grammar(graph: PostgresGraph) -> SchemaGrammar:
         # drivine4j makes pgvector's index with its own parameters.
         unsupported_vector_tuning=portable_pins,
         conflicts=grammar.conflicts,
+        aliased=grammar.aliased,
         lower_copies=_lower_copies(graph),
     )
 
@@ -182,6 +191,21 @@ class _PostgresSchema:
             "ON CONFLICT (kind, label, properties) DO NOTHING"
         )
 
+    def aliased(self, kind: CatalogKind, item: SchemaItem, aliases: Sequence[str]) -> str:
+        """
+        Records the aliases as all the item's, among its record's details. A record written again keeps them: it is
+        written only where it isn't there (DO NOTHING), and a recreate gives the item made again those it had.
+        """
+        details = (
+            f"jsonb_set(details, '{{{ALIASES}}}', {sql_text(aliases_json(aliases))}::jsonb)"
+            if aliases
+            else f"details - '{ALIASES}'"
+        )
+        return (
+            f"UPDATE {self.graph.catalog} SET details = {details} "
+            f"WHERE {catalog_record(kind, item.label, item.properties)}"
+        )
+
     def forgotten(self, spec: _Spec) -> str:
         """
         Forgets the item, and drops what it was made as when nothing else recorded uses it: the object the record names,
@@ -227,6 +251,7 @@ def _items(rows: list[Any]) -> list[SchemaItem]:
             it["name"],
             dimensions=_number((it.get("details") or {}).get("dimensions")),
             similarity=(it.get("details") or {}).get("similarity"),
+            aliases=aliases_in(it.get("details")),
         )
         for it in rows
     ]

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -21,6 +21,7 @@ from drivine.schema.uniqueness_constraint_spec import UniquenessConstraintSpec
 from drivine.schema.vector_index_spec import VectorIndexSpec
 
 if TYPE_CHECKING:
+    from drivine.backend.sql.sql_catalog import CatalogKind
     from drivine.backend.sql.sql_graph import SqlGraph
 
 
@@ -78,6 +79,13 @@ class SchemaGrammar:
     """
     drop_named_range: Callable[[str], list[str]] = field(default=lambda name: [])
     """Drops the range index the engine names so: one in the way of a constraint, whatever made it."""
+
+    aliased: Callable[[CatalogKind, SchemaItem, Sequence[str]], str] | None = None
+    """
+    Where the store keeps the other names an item goes by beside it (the SQL stores, among its catalog record's
+    `details`), the statement that records the names given as all the aliases of the item of that kind, whose record is
+    there; none, where empty. None on an engine that keeps none. drivine4j's `SchemaAliases.aliased`.
+    """
 
     lower_copies: LowerCopyStatements = CYPHER_LOWER_COPIES
     """

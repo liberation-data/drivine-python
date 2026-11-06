@@ -2,13 +2,19 @@
 # change that, and run the script again.
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from drivine.drivine_error import DrivineError
 from drivine.manager.persistence_manager_type import PersistenceManagerType
+from drivine.schema.schema_ddl import STORES
 from drivine.sync.connection.database_registry import DEFAULT, DatabaseRegistry
 from drivine.sync.manager.delegating_persistence_manager import DelegatingPersistenceManager
 from drivine.sync.manager.non_transactional_persistence_manager import NonTransactionalPersistenceManager
 from drivine.sync.manager.persistence_manager import PersistenceManager
 from drivine.sync.manager.transactional_persistence_manager import TransactionalPersistenceManager
+
+if TYPE_CHECKING:
+    from drivine.sync.schema.schema_commands import SchemaCommands
 
 
 class PersistenceManagerFactory:
@@ -19,6 +25,12 @@ class PersistenceManagerFactory:
     def __init__(self, registry: DatabaseRegistry) -> None:
         self.registry = registry
         self._managers: dict[str, DelegatingPersistenceManager] = {}
+        self._schema_commands: dict[str, SchemaCommands] = {}
+        """
+        The schema commands of each SQL store's database, by its registered name: one for each database, so that the
+        managers asked for by `"default"` and by the database's own name run DDL with one lock and one record of what
+        DDL ensured.
+        """
 
     def get(self, database: str = DEFAULT, type: PersistenceManagerType = "DELEGATING") -> PersistenceManager:
         manager = self._managers.get(database)
@@ -26,9 +38,19 @@ class PersistenceManagerFactory:
             provider = self.registry.connection_provider(database)
             if provider is None:
                 raise DrivineError(f"No database is registered under name: {database}")
+            non_transactional = NonTransactionalPersistenceManager(provider, database)
+            # Neo4j schema DDL given as Cypher to a SQL store is applied through the schema machinery, by the commands
+            # of the database however it is asked for.
+            if provider.type in STORES:
+                commands = self._schema_commands.get(provider.name)
+                if commands is None:
+                    from drivine.sync.schema.schema_commands import SchemaCommands
+
+                    commands = SchemaCommands.of(self, provider.name)
+                    self._schema_commands[provider.name] = commands
+                non_transactional.schema_commands = commands
             manager = DelegatingPersistenceManager(
-                TransactionalPersistenceManager(provider, database),
-                NonTransactionalPersistenceManager(provider, database),
+                TransactionalPersistenceManager(provider, database), non_transactional
             )
             self._managers[database] = manager
         if type == "DELEGATING":

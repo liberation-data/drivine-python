@@ -12,6 +12,8 @@ from typing import Any
 from drivine.backend.sql.sql_catalog import CATALOG_KINDS
 from drivine.connection.database_type import DatabaseType
 from drivine.drivine_error import DrivineError
+from drivine.query.query_specification import QuerySpecification
+from drivine.query.statement import cypher_statement
 from drivine.schema import vector_annotation_check
 from drivine.schema.ensure_result import EnsureResult
 from drivine.schema.recorded_inventory import RecordedInventory, inventory_entries, read_inventory
@@ -22,6 +24,7 @@ from drivine.schema.vector_index_spec import VectorIndexSpec
 from drivine.sync import concurrency
 from drivine.sync.connection.database_registry import DatabaseRegistry
 from drivine.sync.manager.graph_object_manager_factory import GraphObjectManagerFactory
+from drivine.sync.manager.persistence_manager import PersistenceManager
 from drivine.sync.manager.stateless_graph_object_manager import StatelessGraphObjectManager
 from drivine.sync.schema.schema_options import SchemaOptions
 
@@ -157,6 +160,134 @@ class SchemaManager:
             for database, plan in plans.items():
                 report[database] = self._apply_plan(database, plan, False, catalog.name, given)
             return report
+
+    def remove(self, owner: str, *specs: SchemaSpec) -> None:
+        """Takes items back from what `owner` declares, on every graph database. See `remove_catalog`."""
+        self.remove_catalog(SchemaCatalog(tuple(specs), name=owner))
+
+    def remove_catalog(self, catalog: SchemaCatalog) -> None:
+        """
+        Takes the catalog's items back from what its owner declares, on its databases: the counterpart of
+        `ensure_catalog`. Each item is found by its identity (kind, label and properties, in any order), whatever its
+        name.
+
+        An item `ensure` gave the owner is forgotten, so that a later `enforce` doesn't make it again. On each database,
+        the item is then dropped, unless a startup catalog (of any owner) or another owner's runtime items declare it,
+        or another owner's marker there records it (declared or ensured at runtime, by whichever manager or process):
+        it is then left in place, with a warning naming who declares it. Either way the owner's marker no longer records
+        it, so it is no orphan of the owner. An item that isn't there is dropped as nothing, and forgotten all the
+        same. The catalog can't carry a version. drivine4j's `SchemaManager.remove`.
+        """
+        if catalog.version is not None:
+            raise DrivineError(
+                f"Schema removed at runtime cannot carry a version ({catalog.version}): an owner's version is declared "
+                "by its catalogs, with SchemaCatalog.with_version."
+            )
+        if not catalog.items:
+            return
+        with self._lock:
+            identities = {_key_of(it) for it in catalog.items}
+            databases = None if catalog.databases is None else tuple(sorted(set(catalog.databases)))
+            for (owner, targets), specs in self._runtime.items():
+                if owner == catalog.name and (databases is None or targets == databases):
+                    for identity in identities:
+                        specs.pop(identity, None)
+            self._runtime = {key: specs for key, specs in self._runtime.items() if specs}
+            for database in self._targets(catalog):
+                self._remove_from(database, catalog)
+
+    def ensured(self, owner: str) -> list[SchemaSpec]:
+        """What `ensure` has given the owner, on any database."""
+        return [spec for (name, _), specs in self._runtime.items() if name == owner for spec in specs.values()]
+
+    def _remove_from(self, database: str, catalog: SchemaCatalog) -> None:
+        """`remove_catalog`, on one database: drops what no one else declares there, and takes the items out of the
+        owner's marker."""
+        owner = catalog.name
+        gom = self.factory.get(database)
+        pm = gom.persistence_manager
+        elsewhere = [
+            *(it for it in self.options.catalogs if it.items and database in self._targets(it)),
+            *(it for it in _runtime_catalogs(self._runtime) if it.name != owner and database in self._targets(it)),
+        ]
+        # What other owners' markers record, declared or ensured at runtime: an owner this manager wasn't given, such
+        # as an application's, whose catalogs are another manager's or another process's.
+        recorded_elsewhere: dict[str, tuple[str, ...]] = {}
+        for scope in self._marker_scopes(pm):
+            if scope != owner:
+                held = self._recorded(gom, scope)
+                recorded_elsewhere[scope] = held.keys if held is not None else ()
+        dropped = 0
+        kept = 0
+        for spec in catalog.items:
+            identity = _key_of(spec)
+            declaring = list(
+                dict.fromkeys(
+                    [
+                        *(it.name for it in elsewhere if any(_key_of(other) == identity for other in it.items)),
+                        *(
+                            scope
+                            for scope, keys in recorded_elsewhere.items()
+                            if any(_records_identity(key, spec) for key in keys)
+                        ),
+                    ]
+                )
+            )
+            if declaring:
+                logger.warning(
+                    "%s on %s(%s) is removed from owner '%s' on %s and left in place, as %s declare(s) it",
+                    spec.kind,
+                    spec.label,
+                    ", ".join(spec.properties),
+                    owner,
+                    database,
+                    ", ".join(f"'{it}'" for it in declaring),
+                )
+                kept += 1
+                continue
+            if isinstance(spec, UniquenessConstraintSpec):
+                gom.constraints.drop(spec)
+            else:
+                gom.indexes.drop(spec)
+            dropped += 1
+        recorded = self._recorded(gom, owner)
+        if recorded is not None:
+            gone = {key for key in recorded.keys if any(_records_identity(key, it) for it in catalog.items)}
+            if gone:
+                version = pm.maybe_get_one(gom.backend.schema_marker("version").spec({"scope": owner}))
+                items = inventory_entries(
+                    [it for it in recorded.keys if it not in gone],
+                    [it for it in recorded.runtime if it not in gone],
+                    [it for it in recorded.stale if it not in gone],
+                )
+                pm.execute(
+                    gom.backend.record_schema_marker().spec({"scope": owner, "version": version, "items": items})
+                )
+        logger.info(
+            "Schema for owner '%s' on %s: %s removed, %s dropped, %s left in place",
+            owner,
+            database,
+            len(catalog.items),
+            dropped,
+            kept,
+        )
+
+    @staticmethod
+    def _recorded(gom: StatelessGraphObjectManager, owner: str) -> RecordedInventory | None:
+        """What the owner's marker records."""
+        stored = gom.persistence_manager.maybe_get_one(gom.backend.schema_marker("items").spec({"scope": owner}))
+        return read_inventory(gom.backend.marker_items(stored))
+
+    @staticmethod
+    def _marker_scopes(pm: PersistenceManager) -> list[str]:
+        """
+        The owners whose markers the database holds, whichever manager or process recorded them: read as Cypher, which
+        every store with a marker runs (the SQL stores compile it), the marker being a node of the graph on each.
+        """
+        found = pm.query(
+            QuerySpecification[Any](cypher_statement(f"MATCH (m:`{MARKER_LABEL}`) RETURN DISTINCT m.scope"))
+        )
+        return [str(it) for it in found if it is not None]
 
     def _apply(self, recreate: bool) -> dict[str, list[EnsureResult[Any]]]:
         with self._lock:
@@ -355,11 +486,9 @@ class SchemaManager:
 
     def _ensure(self, gom: StatelessGraphObjectManager, spec: SchemaSpec, recreate: bool) -> EnsureResult[Any]:
         if isinstance(spec, UniquenessConstraintSpec):
-            if recreate:
-                gom.constraints.drop(spec)
-            return self._judge(
-                gom.constraints.ensure(spec, self.options.violation_sample_size, self.options.replace_blocking_index)
-            )
+            constraints = gom.constraints
+            make = constraints.recreate if recreate else constraints.ensure
+            return self._judge(make(spec, self.options.violation_sample_size, self.options.replace_blocking_index))
         if recreate:
             return gom.indexes.recreate(spec)
         result = gom.indexes.ensure(spec)
@@ -466,6 +595,24 @@ def _runtime_catalogs(
         SchemaCatalog(tuple(specs.values()), databases=databases, name=owner)
         for (owner, databases), specs in runtime.items()
     ]
+
+
+def _records_identity(key: str, spec: SchemaSpec) -> bool:
+    """
+    Whether the inventory key is of an item of the spec's identity, whatever its name: of its kind and label, and of its
+    properties in any order, as `_key_of` compares them. An item of the properties in another order is the same item,
+    so another owner's key of that order co-owns it, and the owner's own is forgotten with it.
+    """
+    made = made_as(spec)
+    head = f"{CATALOG_KINDS[made.kind]}:{made.label}:"
+    if not key.startswith(head):
+        return False
+    length = sum(len(it) for it in made.properties) + len(made.properties) - 1
+    rest = key[len(head) :]
+    if len(rest) <= length or rest[length] != ":":
+        return False
+    properties = rest[:length]
+    return properties == ",".join(made.properties) or sorted(properties.split(",")) == sorted(made.properties)
 
 
 def _co_owned_keys(owners: Mapping[str, list[SchemaCatalog]]) -> set[str]:

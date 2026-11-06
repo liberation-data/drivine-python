@@ -93,8 +93,11 @@ def timed(pm: PersistenceManager, n: int) -> list[int]:
     times: list[int] = []
     for write in WRITES:
         if vacuumed_empty(pm, write):
-            # Statistics that say the table is empty: autocommitted, as VACUUM runs outside a transaction.
-            pm.execute(QuerySpecification("VACUUM ANALYZE drivine_edge"))
+            # Statistics that say the table is empty: autocommitted, as VACUUM runs outside a transaction. Not in
+            # parallel: a VACUUM of many dead relationships otherwise vacuums the edge indexes in parallel, and the
+            # pooled session that ran it keeps some 1.2 MB of /dev/shm until it ends, which a later parallel build of
+            # a vector index, asking for nearly all of a container's 64 MB, then fails for want of.
+            pm.execute(QuerySpecification("VACUUM (PARALLEL 0, ANALYZE) drivine_edge"))
         start = time.perf_counter()
         rows = query(pm, write.cypher, {"n": n})
         times.append(round((time.perf_counter() - start) * 1000))
@@ -119,6 +122,12 @@ def test_a_write_over_ten_times_the_rows_takes_about_ten_times_as_long_not_a_hun
             TIMES[store] = (timed(pm, SMALL), timed(pm, LARGE))
         finally:
             pm.execute(QuerySpecification("DELETE FROM drivine_node"))
+            if pm.type == DatabaseType.POSTGRES:
+                # The tables are left as small as they were found, which a VACUUM of the empty tables truncates them
+                # to. The node table, left at some 8 MB of dead rows, was over min_parallel_table_scan_size, so a later
+                # index on it was built in parallel: a vector index asks for nearly all of a container's 64 MB of
+                # /dev/shm, and a pooled session that built any index in parallel keeps some of it until it ends.
+                pm.execute(QuerySpecification("VACUUM (PARALLEL 0) drivine_node, drivine_edge"))
     small, large = TIMES[store]
     report = "; ".join(
         f"{it.name} {small[i]} ms over {SMALL} rows, {large[i]} ms over {LARGE}" for i, it in enumerate(WRITES)

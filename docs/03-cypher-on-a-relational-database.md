@@ -91,6 +91,18 @@ Cypher's, so `5.0` is the id `5`, and a text, a list or null is no id. Under `NO
 the nodes of a label the pattern names (`MATCH (n:Person) WHERE id(n) = $id`) by the index over labels, as it does for
 a key written in SQL, `nid = 6`; without the label it reads the key.
 
+On Postgres, a pattern's property compared with a value a row holds (`UNWIND $rows AS row MATCH (n:Person {id:
+row.id})`, `UNWIND $ids AS id MATCH (n:Person {id: id})`, or `WHERE n.id = row.id`) is read through the property's
+range index or uniqueness constraint, as one compared with a text given is: beside the comparison stands a test of the
+property's text among the texts the value can be stored as, a number's with no zeros after its point and with each
+count of them up to 16, since `numeric` keeps the scale a product makes (`0.25 * 10` is stored as `2.50`)
+([#429](https://github.com/liberation-data/drivine-python/issues/429)). This holds where the rows are known to hold no
+list or map at the key: a parameter's, or a list written of literals, maps, lists and parameters, as APOC's export
+writes its rows. A row that may hold a list, or a null in a list or a map, is compared as JSON alone, as before, which
+reads every node of the label for each row. Oracle compares such a value as JSON alone for now: the compiler can read
+it through the labelled index where it is told the graph has one (`OracleCypherCompiler(indexed_properties=…)`), and
+the connection doesn't tell it yet ([drivine4j#638](https://github.com/liberation-data/drivine4j/issues/638)).
+
 A `DELETE` deletes the nodes and relationships of all its rows at once, a statement for each table, not one for each
 row: the relationships first, then the nodes, a node's relationships going with it where it is `DETACH`. One that ends
 the statement and deletes one variable, a node with `DETACH` or a relationship, of a match that binds only nodes and

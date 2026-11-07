@@ -29,6 +29,7 @@ from drivine.cypher.sql.sql_cypher_compiler import (
     ROWS,
     SAVED,
     VALUE,
+    IndexedProperty,
     SqlCypherCompiler,
     Walk,
     Walked,
@@ -193,7 +194,7 @@ class SqliteCypherCompiler(SqlCypherCompiler):
         """The test a partial index over the label's nodes is made with: see sqlite_graph.has_label."""
         return holds_label(labels, label)
 
-    def indexed_equality(self, property: str, value: str) -> str | None:
+    def indexed_equality(self, property: str, value: str, of: IndexedProperty | None = None) -> str | None:
         """
         The property's text, as a range index or a uniqueness constraint reads it (see sqlite_graph.property_text),
         compared with the value's: a string's text, or a truth value's JSON.

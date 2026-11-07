@@ -125,8 +125,29 @@ def test_a_phrase_whose_first_word_starts_a_later_one_counts_by_how_often_it_occ
     both('"ki kiwi bird"', "ki ki kiwi bird ki kiwi birds ki kiwi bird ki kiwi bird", 3)
 
 
-def test_oracle_counts_a_term_holding_a_number_that_is_not_a_digit_by_its_one_expression() -> None:
-    # "²" is a word's to the query, not to [[:alnum:]]: "b²b" in "b²b²bx" begins inside the first.
-    assert counted(term("b²b")) == (term("b²b"), None)
+def test_oracle_counts_a_term_with_a_character_not_measured_as_alnum_there_by_its_one_expression() -> None:
+    # A circled letter, "ⓐ", is a word's to the query, which reads it as alphabetic, and may not be to Oracle's
+    # [[:alnum:]]: an occurrence could begin inside another there, so the one count counts it.
+    assert counted(term("bⓐb")) == (term("bⓐb"), None)
+    # "²" is between words (drivine4j#616): "b²b" is the phrase "b b", which repeats a word, and still counts the same.
+    assert counted(term("b²b")) is None
     both("b²b", "b²b²bx", 1)
-    assert counted(term("bⅻb")) == (term("bⅻb"), None)
+
+
+def test_oracle_counts_a_word_with_a_vowel_sign_written_again_at_once_each_time_by_its_two_counts() -> None:
+    # A vowel sign is in a word (drivine4j#616) and a combining mark is [[:alnum:]] on Oracle, so no occurrence begins
+    # inside another: counted by the one expression, "किताब किताब" was once.
+    assert (counted(term("किताब")) or ("", None))[1] is not None
+    both("किताब", "किताब किताब", 2)
+    both('"एक किताब"', "एक किताब एक किताब", 2)
+    # The vowel signs of किताब are spacing marks (Mc); the anusvara of हिंदी is a non-spacing one (Mn).
+    assert (counted(term("हिंदी")) or ("", None))[1] is not None
+    both("हिंदी", "हिंदी हिंदी", 2)
+    # Its next character a vowel sign, the word goes on, as it does in the text on each store: no occurrence.
+    assert by_oracle("किताब", "किताबें") == 0
+
+
+def test_oracle_counts_a_word_with_a_letter_number_written_again_at_once_each_time_by_its_two_counts() -> None:
+    # "ⅻ" is [[:alnum:]] on Oracle, as measured (drivine4j#616): counted by the one expression, "bⅻb bⅻb" was once.
+    assert (counted(term("bⅻb")) or ("", None))[1] is not None
+    both("bⅻb", "bⅻb bⅻb", 2)

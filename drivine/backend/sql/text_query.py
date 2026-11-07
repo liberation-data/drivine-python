@@ -1,15 +1,34 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from functools import cache
 from typing import Literal
 
+from drivine.backend.sqlite.sqlite_patterns import class_text, property_ranges, union
 from drivine.drivine_error import DrivineError
 
-_GAP = re.compile(r"\W+")
-"""What stands between two words: a run of anything but letters, digits and underscores."""
-_GAP_CHAR = re.compile(r"^\W$")
+
+@cache
+def _gap() -> re.Pattern[str]:
+    """
+    What stands between two words: a run of anything but letters as Unicode's Alphabetic holds them, decimal digits and
+    underscores, as a term's expression's `[[:alnum:]_]` reads them in the text, on Postgres and through sqlite_patterns
+    (Java's `\\p{Alnum}`): it takes in the vowel signs of Indic scripts and the letter numbers (`ⅻ`). Read as `\\w`, a
+    query split a Hindi word at its vowel sign, which the text went on from, and kept "²" in a word where the text ends
+    one at it, as Neo4j's analyzer does (drivine4j#616). Oracle's `[[:alnum:]]` holds every combining mark too.
+    """
+    word = class_text(union(property_ranges("Alnum"), [(ord("_"), ord("_"))]), negated=True)
+    # Built on the first query, not on import: the ranges are read from every code point.
+    return re.compile(word + "+")
+
+
+def _is_gap(char: str) -> bool:
+    """Whether `char` is a character between two words (see `_gap`)."""
+    return _gap().fullmatch(char) is not None
+
 
 _SPACES = " \t\n\u000b\u000c\r"
 """The characters that end a term."""
@@ -20,6 +39,12 @@ _BOUNDARY_AHEAD = "(?=$|[^[:alnum:]_])"
 """What `_BOUNDARY_AFTER` holds to, without taking the character it is: Postgres's and SQLite's lookahead."""
 _BETWEEN = "[^[:alnum:]_]+"
 """What stands between the words of a phrase in a term's expression."""
+
+_ALNUM_CATEGORIES = frozenset({"Nd", "Nl", "Mn", "Mc"})
+"""
+Beside the letters (Python's `isalpha`, the L categories), what Oracle's `[[:alnum:]_]` was measured to hold: decimal
+digits, letter numbers and combining marks.
+"""
 
 SEPARATOR = "([^[:alnum:]_])"
 """
@@ -50,15 +75,21 @@ def counted(pattern: str) -> tuple[str, str | None] | None:
     begin inside another, "la la" in "la la land" or "kiwis kiwi" in "kiwis kiwis kiwi", and the two counts take
     different ones. Such a term is counted in the text with each `SEPARATOR` written twice.
 
-    The pattern itself, with None for the second, where a word holds a number that isn't a digit, the "²" of "b²b": a
-    word's to `_GAP` but not to `[[:alnum:]]`, so an occurrence may begin at it, and neither way above counts it. The
-    one count undercounts the term only where it is written again at once, as it did before.
+    The pattern itself, with None for the second, where a word holds a character that is a word's to `_gap` but may not
+    be to Oracle's `[[:alnum:]]`, which was measured on letters, decimal digits, letter numbers ("ⅻ") and combining
+    marks (a Hindi vowel sign) alone: a circled letter, the "ⓐ" of "bⓐb". An occurrence may begin at it, and neither
+    way above counts it. The one count undercounts the term only where it is written again at once, as it did before.
     """
     if not pattern.endswith(_BOUNDARY_AFTER):
         return pattern, None
     ended = pattern.removesuffix(_BOUNDARY_AFTER)
     words = ended.removeprefix(_BOUNDARY_BEFORE).split(_BETWEEN)
-    if any(not (char.isalpha() or char.isdecimal() or char == "_") for word in words for char in word):
+    alnum = (
+        char.isalpha() or char == "_" or unicodedata.category(char) in _ALNUM_CATEGORIES
+        for word in words
+        for char in word
+    )
+    if not all(alnum):
         return pattern, None
     overlaps = len(set(words)) < len(words) or (len(words) > 1 and words[0].startswith(words[-1]))
     return None if overlaps else (ended, f"{ended}[[:alnum:]_]")
@@ -213,7 +244,7 @@ def _chars_of(query: str) -> list[_Char]:
     at = 0
     while at < len(query):
         following = query[at + 1] if at + 1 < len(query) else None
-        if query[at] == "\\" and following is not None and _GAP_CHAR.match(following):
+        if query[at] == "\\" and following is not None and _is_gap(following):
             out.append(_Char(following, True))
             at += 2
         else:
@@ -296,7 +327,7 @@ def _term_of(token: _Token) -> _Term | None:
     else:
         colon = next((i for i, it in enumerate(token.chars) if _is_bare(it, ":")), -1)
         text = token.chars[colon + 1 :]
-    words = [it for it in _GAP.split("".join(it.char for it in text).lower()) if it]
+    words = [it for it in _gap().split("".join(it.char for it in text).lower()) if it]
     if not words:
         return None
     prefix = _is_bare(text[-1], "*")

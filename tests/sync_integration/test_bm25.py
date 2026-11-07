@@ -59,6 +59,8 @@ ARTICLES = [
     Bm25Article(id="once", body="kiwi bird"),
     Bm25Article(id="often", body="kiwi kiwi kiwi kiwi kiwi kiwi kiwi kiwi kiwi kiwi"),
     Bm25Article(id="none", body="nothing to see"),
+    Bm25Article(id="hindi", body="एक किताब"),
+    Bm25Article(id="area", body="an m² x here"),
     # As long as each other: counted three times and twice (drivine4j#607).
     Bm25Article(id="triple", body="okapi okapi okapi"),
     Bm25Article(id="apart", body="okapi lemur okapi"),
@@ -90,10 +92,22 @@ FRUITS = {
     "other": "nothing here",
 }
 
+
+class Bm25Book(NodeFragment, labels=["Bm25Book"]):
+    """Texts in Hindi, to count a word with vowel signs."""
+
+    id: Annotated[str, NodeId()]
+    body: Annotated[str | None, FullTextIndex()] = None
+
+
+# A Hindi word twice and once, in texts as long as each other in characters and in tokens.
+BOOKS = {"twice": "किताब किताब", "once": "किताब हिसाब", "other": "कुछ नहीं"}
+
 SPECS = [
     full_text_index("Bm25Article", "body"),
     full_text_index("Bm25Paper", ["title", "body"]),
     full_text_index("Bm25Fruit", "body"),
+    full_text_index("Bm25Book", "body"),
 ]
 
 
@@ -115,8 +129,15 @@ def gom(cypher_pm: PersistenceManager) -> StatelessGraphObjectManager:
     gom = StatelessGraphObjectManager(cypher_pm)
     for spec in SPECS:
         gom.indexes.drop(spec)
-    clear(cypher_pm, "Bm25Article", "Bm25Paper", "Bm25Fruit")
-    gom.save_all([*ARTICLES, *PAPERS, *(Bm25Fruit(id=id_, body=body) for id_, body in FRUITS.items())])
+    clear(cypher_pm, "Bm25Article", "Bm25Paper", "Bm25Fruit", "Bm25Book")
+    gom.save_all(
+        [
+            *ARTICLES,
+            *PAPERS,
+            *(Bm25Fruit(id=id_, body=body) for id_, body in FRUITS.items()),
+            *(Bm25Book(id=id_, body=body) for id_, body in BOOKS.items()),
+        ]
+    )
     if cypher_pm.type == DatabaseType.NEO4J:
         for spec in SPECS:
             gom.indexes.ensure(spec)
@@ -137,8 +158,8 @@ class TestBm25:
         if gom.persistence_manager.type != DatabaseType.NEO4J:
             # bm25_ranked's own figure, lengths in characters (Lucene's are in words): "graph" 5 times in 45
             # characters, each counted though written again at once (drivine4j#607), against "graph" and "soup" once
-            # each in 15, over 31 texts of 920 characters, "graph" in 22 and "soup" in 1.
-            assert dict(hits)["many"] == pytest.approx(0.13588906225574401, abs=1e-9)
+            # each in 15, over 33 texts of 940 characters, "graph" in 22 and "soup" in 1.
+            assert dict(hits)["many"] == pytest.approx(0.1541609729904888, abs=1e-9)
 
     def test_a_short_text_outranks_a_long_one_that_holds_the_term_as_often(
         self, gom: StatelessGraphObjectManager
@@ -153,6 +174,14 @@ class TestBm25:
         assert hits["often"] == pytest.approx(1, abs=1e-9)
         # Ten times the count, as long again as the other's text: not ten times the score.
         assert hits["once"] > 0.4
+
+    def test_a_word_is_read_as_the_texts_expression_reads_it_its_vowel_signs_in_it_a_superscript_between_words(
+        self, gom: StatelessGraphObjectManager
+    ) -> None:
+        # drivine4j#616: split at its vowel sign, किताब was "क", which [[:alnum:]] went on from.
+        assert [id_ for id_, _ in search(gom, "किताब")] == ["hindi"]
+        # "²" is not in a word: "m²x" is the words "m" and "x", as Neo4j's analyzer reads it.
+        assert [id_ for id_, _ in search(gom, '"m²x"')] == ["area"]
 
     def test_a_prefix_term_scores_every_node_that_holds_it_alike_as_lucenes_prefix_query_does(
         self, gom: StatelessGraphObjectManager
@@ -201,6 +230,15 @@ class TestBm25:
     ) -> None:
         hits = search(gom, "okapi")
         assert [id_ for id_, _ in hits] == ["triple", "apart"]
+        assert hits[0][1] > hits[1][1]
+
+    def test_a_hindi_word_written_twice_running_counts_twice_as_a_word_of_letters_is(
+        self, gom: StatelessGraphObjectManager
+    ) -> None:
+        # Its vowel signs are in the word, and [[:alnum:]] on Oracle: counted there by the one expression, "किताब किताब"
+        # counted once and tied with "किताब हिसाब", as long (drivine4j#607, drivine4j#616).
+        hits = [(it.value.id, it.score) for it in gom.load_matching(Bm25Book, "किताब", top_k=50)]
+        assert [id_ for id_, _ in hits] == ["twice", "once"]
         assert hits[0][1] > hits[1][1]
 
     def test_a_phrase_that_repeats_a_word_or_whose_last_word_starts_its_first_is_found_where_it_begins_again(

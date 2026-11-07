@@ -110,6 +110,9 @@ found = await gom.load_matching(Chunk, "graph AND database", top_k=10, threshold
   holds a term as often. A term written again at once, `kiwi kiwi kiwi`, is counted each time, where it was counted
   every other time. A `prefix*` adds the same to every hit that holds it, as on Neo4j. The hits can come in another
   order, and a `threshold` can keep others.
+- **A query's words on Postgres, SQLite and Oracle changed after 0.3.2.** A word was a run of what Python's `\w`
+  holds. It is now one of what the text's `[[:alnum:]_]` holds (see [Postgres](02-connecting.md#postgres)): a Hindi
+  word is no longer split at its vowel sign, and `m²x` is the phrase `m x`, as Neo4j's analyzer reads it.
 - **Filters apply after the search:** `threshold`, `where`, and a view's required relationships. So a search can return
   fewer than `top_k`; `search_k` asks the index for more, and `top_k` trims after the filter.
 - **A full-text search is bounded where the index yields.** A matching score is scaled over every hit the index

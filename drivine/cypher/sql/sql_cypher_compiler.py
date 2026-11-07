@@ -737,6 +737,14 @@ class SqlCypherCompiler(ABC):
         """The column of the rows named `name` that a `lateral` join gives, which holds JSON where `json`."""
         return f"{name}.{column}"
 
+    def key_join(self, table: str, row: str, key: str, id_: str) -> str:
+        """
+        The join of the node or relationship table `table`, as `row`, to the one row whose key column `key` is `id_`:
+        how a row of a write's or a list's rows reads its node or relationship back by its id. A plain `LEFT JOIN`;
+        Postgres probes the key for each row instead, as a plain join is planned by the table's statistics (#446).
+        """
+        return f"LEFT JOIN {table} {row} ON {row}.{key} = {id_}"
+
     def _laterally(self, value: Value, name: str, columns: Sequence[tuple[str, bool]]) -> Value:
         """The value, whose columns are named for a query not yet named (PENDING), read from the rows named `name`
         that a `lateral` join gives, of the columns `columns`."""
@@ -2424,10 +2432,10 @@ class SqlCypherCompiler(ABC):
             select.source(self.elements(listed.ids, name))
             row = self._alias("e" if listed.relationships else "n")
             if listed.relationships:
-                select.join(f"LEFT JOIN {self.edges} {row} ON {row}.eid = {self.id_of(self.item(name), None)}")
+                select.join(self.key_join(self.edges, row, "eid", self.id_of(self.item(name), None)))
                 select.bind(unwind.variable, _relationship(row))
             else:
-                select.join(f"LEFT JOIN {self.nodes} {row} ON {row}.nid = {self.id_of(self.item(name), None)}")
+                select.join(self.key_join(self.nodes, row, "nid", self.id_of(self.item(name), None)))
                 select.bind(unwind.variable, _node(row))
             select.order.append((self.item_no(name), False))
             return
@@ -2930,8 +2938,7 @@ class SqlCypherCompiler(ABC):
                 table, value, id_ = self.nodes, self.json(_node(row)).sql, "nid"
             return (
                 f"CASE WHEN {ids} IS NOT NULL THEN (SELECT {self.aggregate_list(value, self.item_no(u))} "
-                f"FROM {self.elements(ids, u)} LEFT JOIN {table} {row} "
-                f"ON {row}.{id_} = {self.id_of(self.item(u), None)}) END"
+                f"FROM {self.elements(ids, u)} {self.key_join(table, row, id_, self.id_of(self.item(u), None))}) END"
             )
 
         return self.shared1(entities.ids, listed)
@@ -3105,11 +3112,11 @@ class SqlCypherCompiler(ABC):
             key = self._key(variable)
             if kind is _Kind.NODE:
                 n = self._alias("n")
-                select.join(f"LEFT JOIN {self.nodes} {n} ON {n}.nid = {self.id_of(row, key)}")
+                select.join(self.key_join(self.nodes, n, "nid", self.id_of(row, key)))
                 select.bind(variable, _node(n))
             elif kind is _Kind.RELATIONSHIP:
                 e = self._alias("e")
-                select.join(f"LEFT JOIN {self.edges} {e} ON {e}.eid = {self.id_of(row, key)}")
+                select.join(self.key_join(self.edges, e, "eid", self.id_of(row, key)))
                 select.bind(variable, _relationship(e))
             elif kind is _Kind.VALUE:
                 carried = values.get(variable)
@@ -4906,17 +4913,10 @@ class SqlCypherCompiler(ABC):
         `relationships`, its relationship; and the item each row is, that node or relationship.
         """
         row = self._alias("e" if relationships else "n")
+        id_ = self.id_of(self.item(name), None)
         if relationships:
-            return (
-                f"FROM {self.elements(ids, name)} LEFT JOIN {self.edges} {row} "
-                f"ON {row}.eid = {self.id_of(self.item(name), None)}",
-                _relationship(row),
-            )
-        return (
-            f"FROM {self.elements(ids, name)} LEFT JOIN {self.nodes} {row} "
-            f"ON {row}.nid = {self.id_of(self.item(name), None)}",
-            _node(row),
-        )
+            return f"FROM {self.elements(ids, name)} {self.key_join(self.edges, row, 'eid', id_)}", _relationship(row)
+        return f"FROM {self.elements(ids, name)} {self.key_join(self.nodes, row, 'nid', id_)}", _node(row)
 
     def _entity_comprehension(self, expression: ListComprehension, listed: Entities, scope: Scope) -> Value:
         """

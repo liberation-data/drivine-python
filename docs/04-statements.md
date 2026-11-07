@@ -107,8 +107,8 @@ people = await pm.query(spec.bind({"city": "Sydney"}))
   cut short (`date.truncate('month', d, {day: 2})`), but not yet a nanosecond, a week's or a quarter's field, or a
   named zone.
 - `CALL db.labels()` and `CALL db.relationshipTypes()` compile, alone or within a query with `YIELD`, and give each
-  label and type something has now, read from the nodes and relationships; any other procedure is refused. A parameter
-  may be named by a keyword (`$limit`), as in Neo4j. Functions of numbers (`exp`, `log`, `sin`, `atan2`, `round` by a
+  label and type something has now, read from the nodes and relationships; any other procedure is refused. A parameter or a
+  variable may be named by a keyword (`$limit`, `MATCH (end)`), as in Neo4j. Functions of numbers (`exp`, `log`, `sin`, `atan2`, `round` by a
   mode …) give the floats Neo4j gives, but where Neo4j gives NaN or an infinity (`log(0)`, `sqrt(-1)`, `exp(1000)`) the
   statement fails: JSON holds neither. A float is written as Java writes a double, by `toString` and added to a text:
   `1.0E7`, `1.2E-4`.

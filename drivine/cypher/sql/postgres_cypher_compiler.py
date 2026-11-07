@@ -31,6 +31,7 @@ from drivine.cypher.sql.sql_cypher_compiler import (
     ROWS,
     SAVED,
     VALUE,
+    IndexedProperty,
     SqlCypherCompiler,
     T,
     Walk,
@@ -61,6 +62,13 @@ _SCIENTIFIC = "9.9999999999999999EEEE"
 
 _PROPERTY = re.compile(r"^\(([\w.]+) -> ('(?:[^']|'')*')\)$")
 """A property as `property_of` reads it from a column: `(n1.props -> 'name')`."""
+
+TRAILING_ZEROS = 16
+"""
+The most trailing zeros a stored number's text is looked for with, past the row's number's own (see
+`PostgresCypherCompiler.indexed_equality_of_any`): a number past them, as one a long chain of products of numbers with
+zeros after their point makes, is found where the index is not read, and is missed where it is.
+"""
 
 _JOIN_METHODS = ("enable_seqscan", "enable_hashjoin", "enable_mergejoin", "enable_material")
 """The planner's settings a loop's statements for each row are planned with off: see `_planned_as_nested_loops`."""
@@ -176,11 +184,43 @@ class PostgresCypherCompiler(SqlCypherCompiler):
     def has_label(self, labels: str, label: str) -> str:
         return f"{labels} @> {literal(cypher_json([label]))}"
 
-    def indexed_equality(self, property: str, value: str) -> str | None:
+    def indexed_equality(self, property: str, value: str, of: IndexedProperty | None = None) -> str | None:
         """The property's text, as a range index or a uniqueness constraint reads it with `->>`, compared with the
         value's."""
         match = _PROPERTY.fullmatch(property)
         return f"({match.group(1)} ->> {match.group(2)}) = ({value} #>> '{{}}')" if match else None
+
+    def indexed_equality_of_any(
+        self, property: str, value: str, of: IndexedProperty | None = None, scalar: bool = False
+    ) -> str | None:
+        """
+        The property's text, as its index holds it, among the texts the value can be stored as: a text's or a truth
+        value's own, and a number's with no trailing zeros and with each count of them up to TRAILING_ZEROS: `numeric`
+        keeps the scale a sum or a product makes, so `0.25 * 10` is stored as `2.50`, and `1` finds `1.0` and `1.00` as
+        `2.5` finds `2.50`; `jsonb` writes no number with an exponent. `= ANY` of an array is a test the index answers
+        for each row, where a `CASE` around the comparison was not (#429, liberation-data/drivine4j#617).
+
+        Only where the value is known to be no list or map (`scalar`): a list's numbers may be stored at any scale,
+        `[1.0]` equal to `[1]`, which no list of texts holds, so a value that may be a list is compared as JSON alone,
+        as before.
+        """
+        read = _PROPERTY.fullmatch(property) if scalar else None
+        if read is None:
+            return None
+
+        def among(x: str) -> str:
+            number = f"trim_scale(({x})::numeric)::text"
+
+            def zeros(point: str) -> str:
+                return ", ".join(f"{number} || '{point}{'0' * i}'" for i in range(1, TRAILING_ZEROS + 1))
+
+            return (
+                f"({read.group(1)} ->> {read.group(2)}) = ANY(CASE WHEN jsonb_typeof({x}) <> 'number' "
+                f"THEN ARRAY[{x} #>> '{{}}'] WHEN scale(trim_scale(({x})::numeric)) = 0 "
+                f"THEN ARRAY[{number}, {zeros('.')}] ELSE ARRAY[{number}, {zeros('')}] END)"
+            )
+
+        return self.shared1(value, among)
 
     def bytewise(self, text: str) -> str:
         return f'({text}) COLLATE "C"'

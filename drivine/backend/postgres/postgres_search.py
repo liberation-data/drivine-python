@@ -9,7 +9,7 @@ from drivine.backend.nearest_search import NearestSearch
 from drivine.backend.postgres.postgres_graph import PostgresGraph, has_labels, json_value, node_document, text_of
 from drivine.backend.postgres.postgres_views import PostgresViews
 from drivine.backend.sql.bm25 import Bm25Dialect, bm25_ranked
-from drivine.backend.sql.text_query import TextQuery
+from drivine.backend.sql.text_query import TextQuery, looking_ahead
 from drivine.drivine_error import DrivineError
 from drivine.model.graph_view_model import GraphViewModel
 from drivine.model.target_model import TargetModel
@@ -94,7 +94,9 @@ class PostgresSearch:
             f"SELECT {length} AS len FROM {self.graph.nodes} c WHERE {has_labels('c', labels)}",
             query,
             Bm25Dialect(
-                count=lambda text, term: f"(SELECT count(*) FROM regexp_matches({text}, {bind(term)}, 'g'))",
+                count=lambda text, term: (
+                    f"(SELECT count(*) FROM regexp_matches({text}, {bind(looking_ahead(term))}, 'g'))"
+                ),
                 holds=lambda text, term: f"{text} ~ {bind(term)}",
                 ln=lambda value: f"ln({value})",
                 real=lambda value: f"CAST({value} AS double precision)",

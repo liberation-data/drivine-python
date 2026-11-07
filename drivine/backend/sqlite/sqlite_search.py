@@ -8,7 +8,7 @@ from drivine.backend.matching_search import MatchingSearch
 from drivine.backend.nearest_search import NearestSearch
 from drivine.backend.sql.bm25 import Bm25Dialect, bm25_ranked
 from drivine.backend.sql.sql_graph import sql_text
-from drivine.backend.sql.text_query import TextQuery
+from drivine.backend.sql.text_query import TextQuery, looking_ahead
 from drivine.backend.sqlite.sqlite_graph import (
     JSON_ROWS,
     LOWER,
@@ -76,7 +76,7 @@ class SqliteSearch:
             f"SELECT {length} AS len FROM {labelled}",
             query,
             Bm25Dialect(
-                count=lambda text, term: f"{REGEXP_COUNT}({text}, {bind(term)})",
+                count=lambda text, term: f"{REGEXP_COUNT}({text}, {bind(looking_ahead(term))})",
                 holds=lambda text, term: f"{REGEXP_COUNT}({text}, {bind(term)}) > 0",
                 ln=lambda value: f"{MATH}('log', {value})",
                 real=lambda value: f"CAST({value} AS REAL)",

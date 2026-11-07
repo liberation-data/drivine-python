@@ -146,9 +146,10 @@ applied whole or not at all.
   reads, which narrows the search; `load_matching` scores the same with it and without it, and reads words, a
   `"phrase"`, `+must`, `-not` and a `prefix*`. It scores by BM25, as Lucene and so Neo4j's full-text index do (`k1`
   1.2, `b` 0.75): a term weighs as it is rare among the label's nodes, and a text's counts against its length, in
-  characters, beside the label's average. A `prefix*` adds the same to every node that holds it, however often and
-  however rare, as Lucene's prefix query does: in `kiw* melon`, a node with `kiwi` and no `melon` scores about 0.54 of
-  one with both, as on Neo4j. Oracle without Oracle Text scores the same way.
+  characters, beside the label's average. A term written again at once, `kiwi kiwi kiwi`, is counted each time. A
+  `prefix*` adds the same to every node that holds it, however often and however rare, as Lucene's prefix query does:
+  in `kiw* melon`, a node with `kiwi` and no `melon` scores about 0.54 of one with both, as on Neo4j. Oracle without
+  Oracle Text scores the same way.
 
 ### SQLite
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from drivine.backend.graph_statement import GraphStatement
@@ -9,7 +9,7 @@ from drivine.backend.nearest_search import NearestSearch
 from drivine.backend.oracle.oracle_graph import OracleGraph, has_labels, json_key, node_document
 from drivine.backend.oracle.oracle_views import OracleViews
 from drivine.backend.sql.bm25 import Bm25Dialect, bm25_ranked
-from drivine.backend.sql.text_query import TextQuery
+from drivine.backend.sql.text_query import SEPARATOR, TextQuery, counted
 from drivine.drivine_error import DrivineError
 from drivine.model.graph_view_model import GraphViewModel
 from drivine.model.target_model import TargetModel
@@ -110,7 +110,11 @@ class OracleSearch:
             f"SELECT {length} AS len FROM {labelled}",
             query,
             Bm25Dialect(
-                count=lambda text, term: f"REGEXP_COUNT({text}, {bind(term)})",
+                # Oracle's expressions don't look ahead: the term ending where its last word does, less those a word
+                # goes on from (counted); a phrase an occurrence of which may begin inside another, in the text with
+                # each character between words written twice (SEPARATOR); a prefix term, or one with a character not
+                # measured as [[:alnum:]], by its one expression (drivine4j#607).
+                count=lambda text, term: _oracle_count(text, term, bind),
                 holds=lambda text, term: f"REGEXP_LIKE({text}, {bind(term)})",
                 ln=lambda value: f"LN({value})",
                 real=lambda value: value,
@@ -149,3 +153,13 @@ class OracleSearch:
             ),
             dict(bindings or {}),
         )
+
+
+def _oracle_count(text: str, term: str, bind: Callable[[str], str]) -> str:
+    """How often `term` occurs in `text` on Oracle, each bound in the order the statement reads them (see `counted`)."""
+    two = counted(term)
+    if two is None:
+        return f"REGEXP_COUNT(REGEXP_REPLACE({text}, '{SEPARATOR}', '\\1\\1'), {bind(term)})"
+    ended, continued = two
+    first = f"REGEXP_COUNT({text}, {bind(ended)})"
+    return first if continued is None else f"{first} - REGEXP_COUNT({text}, {bind(continued)})"

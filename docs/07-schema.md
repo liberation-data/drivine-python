@@ -107,7 +107,12 @@ found = await gom.load_matching(Chunk, "graph AND database", top_k=10, threshold
 - **Full-text scores on Postgres, SQLite and Oracle without Oracle Text changed after 0.3.2.** A hit scored by how
   often the query's terms occur in it. It now scores by BM25, as Neo4j's index scores it (see
   [Postgres](02-connecting.md#postgres)): a rare term outweighs a common one, and a short text outranks a long one that
-  holds a term as often. The hits can come in another order, and a `threshold` can keep others.
+  holds a term as often. A term written again at once, `kiwi kiwi kiwi`, is counted each time, where it was counted
+  every other time. A `prefix*` adds the same to every hit that holds it, as on Neo4j. The hits can come in another
+  order, and a `threshold` can keep others.
+- **A query's words on Postgres, SQLite and Oracle changed after 0.3.2.** A word was a run of what Python's `\w`
+  holds. It is now one of what the text's `[[:alnum:]_]` holds (see [Postgres](02-connecting.md#postgres)): a Hindi
+  word is no longer split at its vowel sign, and `m²x` is the phrase `m x`, as Neo4j's analyzer reads it.
 - **Filters apply after the search:** `threshold`, `where`, and a view's required relationships. So a search can return
   fewer than `top_k`; `search_k` asks the index for more, and `top_k` trims after the filter.
 - **A full-text search is bounded where the index yields.** A matching score is scaled over every hit the index
@@ -119,7 +124,8 @@ found = await gom.load_matching(Chunk, "graph AND database", top_k=10, threshold
   return fewer than `top_k` rows while the index holds more that pass it. The index is asked for no more than 2,147,483,647 hits, and Memgraph's for no more than
   1,000,000, however large `top_k` is.
 - `property` names the field to search when a fragment declares more than one index; `partition_label` searches the
-  vector index of another label. Full-text text is the engine's own query language, passed as it is.
+  vector index of another label. Full-text text is the engine's own query language, passed as it is; Postgres,
+  SQLite and Oracle read the core of Lucene's, as Neo4j does, so in a `"phrase"` a `*` is text, not a `prefix*`.
 
 ### Index advice
 

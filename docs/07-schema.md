@@ -124,7 +124,8 @@ found = await gom.load_matching(Chunk, "graph AND database", top_k=10, threshold
   return fewer than `top_k` rows while the index holds more that pass it. The index is asked for no more than 2,147,483,647 hits, and Memgraph's for no more than
   1,000,000, however large `top_k` is.
 - `property` names the field to search when a fragment declares more than one index; `partition_label` searches the
-  vector index of another label. Full-text text is the engine's own query language, passed as it is.
+  vector index of another label. Full-text text is the engine's own query language, passed as it is; Postgres,
+  SQLite and Oracle read the core of Lucene's, as Neo4j does, so in a `"phrase"` a `*` is text, not a `prefix*`.
 
 ### Index advice
 

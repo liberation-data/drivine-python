@@ -79,7 +79,8 @@ def test_a_phrase_written_again_at_once_is_counted_each_time_its_gap_any_punctua
 
 def test_a_prefix_term_counts_each_word_it_starts() -> None:
     both("kiw*", "kiwi kiwis kiw akiwi", 3)
-    both('"of sou*"', "of soup of soups", 2)
+    # A `*` inside quotes is text (drivine4j#622): "of sou*" is the phrase "of sou", not in "of soup of soups".
+    both('"of sou*"', "of soup of soups", 0)
 
 
 def test_a_word_in_any_script_is_a_word() -> None:

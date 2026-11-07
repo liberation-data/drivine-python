@@ -177,6 +177,13 @@ class TestBm25:
         # Ten times the count, as long again as the other's text: not ten times the score.
         assert hits["once"] > 0.4
 
+    async def test_a_star_inside_quotes_is_text_so_a_phrase_ending_in_one_is_the_phrase_without_it(
+        self, gom: StatelessGraphObjectManager
+    ) -> None:
+        # drivine4j#622: "of sou*" is the phrase "of sou", which "a graph of soup" doesn't hold, as on Neo4j.
+        assert [id_ for id_, _ in await search(gom, '"of sou*"')] == []
+        assert [id_ for id_, _ in await search(gom, '"of soup*"')] == ["rare"]
+
     async def test_a_word_is_read_as_the_texts_expression_reads_it_its_vowel_signs_in_it_a_superscript_between_words(
         self, gom: StatelessGraphObjectManager
     ) -> None:

@@ -159,9 +159,10 @@ class TextQuery:
     whole word in lower-cased text. Through an Oracle Text index it is `oracle_text`.
 
     It reads the plain core of the Lucene syntax the graph engines take: words, a `"quoted phrase"`, `+must`, `-not` and
-    `NOT not`, a `prefix*`, and `field:word` as the word. `AND` makes the word after it one a node must hold; `OR` is
-    the default between words. Anything else is read as text. A backslash before a character that is not part of a word
-    makes that character text; before a letter, a digit or an underscore it is itself text.
+    `NOT not`, a `prefix*` (outside quotes: inside them, as in Lucene, a `*` is text), and `field:word` as the word.
+    `AND` makes the word after it one a node must hold; `OR` is the default between words. Anything else is read as
+    text. A backslash before a character that is not part of a word makes that character text; before a letter, a digit
+    or an underscore it is itself text.
     """
 
     scored: list[str]
@@ -320,7 +321,7 @@ def _phrase_at(
 def _term_of(token: _Token) -> _Term | None:
     """
     The token's term; None when it holds no word. A word still holds a field up to its first bare colon. The term is
-    the start of a word when its last character is a bare `*`.
+    the start of a word when its last character is a bare `*` and it is not quoted.
     """
     if token.quoted:
         text = token.chars
@@ -330,7 +331,8 @@ def _term_of(token: _Token) -> _Term | None:
     words = [it for it in _gap().split("".join(it.char for it in text).lower()) if it]
     if not words:
         return None
-    prefix = _is_bare(text[-1], "*")
+    # A `*` inside quotes is text, as Lucene's parser reads it: "of sou*" is the phrase "of sou" (drivine4j#622).
+    prefix = not token.quoted and _is_bare(text[-1], "*")
     oracle_text = (
         " ".join([*(f"{{{it}}}" for it in words[:-1]), f"{words[-1]}%"]) if prefix else f"{{{' '.join(words)}}}"
     )

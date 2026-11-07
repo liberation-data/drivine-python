@@ -151,7 +151,11 @@ applied whole or not at all.
   and a text's counts against its length, in characters, beside the label's average. A term written again at once,
   `kiwi kiwi kiwi`, is counted each time. A `prefix*` adds the same to every node that holds it, however often and
   however rare, as Lucene's prefix query does: in `kiw* melon`, a node with `kiwi` and no `melon` scores about 0.54 of
-  one with both, as on Neo4j. Oracle without Oracle Text scores the same way.
+  one with both, as on Neo4j. Oracle without Oracle Text scores the same way. A dotted name, as `org.example.models`,
+  is words here, split at each dot, as it is on Oracle and SQLite: `example models` finds it, and the name itself is
+  the phrase of its words. Neo4j's default analyzer keeps such a name one token, which the whole name finds and
+  `example models` doesn't. drivine4j's `FullTextIndexSpec` picks another analyzer there; drivine-python doesn't take
+  one yet.
 
 ### SQLite
 

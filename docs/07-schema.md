@@ -108,7 +108,8 @@ found = await gom.load_matching(Chunk, "graph AND database", top_k=10, threshold
   often the query's terms occur in it. It now scores by BM25, as Neo4j's index scores it (see
   [Postgres](02-connecting.md#postgres)): a rare term outweighs a common one, and a short text outranks a long one that
   holds a term as often. A term written again at once, `kiwi kiwi kiwi`, is counted each time, where it was counted
-  every other time. The hits can come in another order, and a `threshold` can keep others.
+  every other time. A `prefix*` adds the same to every hit that holds it, as on Neo4j. The hits can come in another
+  order, and a `threshold` can keep others.
 - **Filters apply after the search:** `threshold`, `where`, and a view's required relationships. So a search can return
   fewer than `top_k`; `search_k` asks the index for more, and `top_k` trims after the filter.
 - **A full-text search is bounded where the index yields.** A matching score is scaled over every hit the index

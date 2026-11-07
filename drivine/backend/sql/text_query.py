@@ -64,6 +64,11 @@ def counted(pattern: str) -> tuple[str, str | None] | None:
     return None if overlaps else (ended, f"{ended}[[:alnum:]_]")
 
 
+def is_prefix(pattern: str) -> bool:
+    """Whether a term's expression is a prefix term's: one whose last word is the start of a word, `kiw*`."""
+    return not pattern.endswith(_BOUNDARY_AFTER)
+
+
 _OPERATORS: dict[str, Literal["MUST", "NOT", "OR"]] = {
     "AND": "MUST",
     "&&": "MUST",

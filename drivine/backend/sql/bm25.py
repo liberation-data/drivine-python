@@ -3,13 +3,21 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
-from drivine.backend.sql.text_query import TextQuery
+from drivine.backend.sql.text_query import TextQuery, is_prefix
 
 K1 = 1.2
 """How soon a term's count stops adding to its score: Lucene's."""
 
 B = 0.75
 """How much a text's length, against the average, weighs its counts down: Lucene's."""
+
+PREFIX = K1 + 1
+"""
+What a prefix term adds to the score of each node that holds it. Lucene scores a prefix query as a constant, its boost
+of 1, beside terms it scores by BM25 without the `k1 + 1` that `bm25_score`'s carries: on `bm25_score`'s scale that is
+`k1 + 1`. Measured on Neo4j, `kiw*` gave each node it found 1, and in `kiw* melon` 0.54 to those without "melon" beside
+1 for the one with it, as this gives (drivine4j#612).
+"""
 
 
 @dataclass(frozen=True)
@@ -72,8 +80,13 @@ def bm25_ranked(candidates: str, label: str, query: TextQuery, sql: Bm25Dialect)
         *(f"SUM(CASE WHEN h.{t} > 0 THEN 1 ELSE 0 END) OVER () AS {d}" for t, d in zip(tf, df, strict=True)),
     ]
     weighed = f"SELECT {', '.join(weighed_columns)} FROM ({counted}) h"
-    score = bm25_score(
-        [(f"w.{t}", f"w.{d}") for t, d in zip(tf, df, strict=True)], "w.n", "w.len", "NULLIF(w.avglen, 0)", sql.ln
+    # A prefix term weighs the same for each node that holds it, as Lucene's prefix query scores it: a constant, not by
+    # how often or how rare (drivine4j#612). Every other term by BM25.
+    score = " + ".join(
+        f"CASE WHEN w.{tf[i]} > 0 THEN {PREFIX} ELSE 0 END"
+        if is_prefix(term)
+        else bm25_score([(f"w.{tf[i]}", f"w.{df[i]}")], "w.n", "w.len", "NULLIF(w.avglen, 0)", sql.ln)
+        for i, term in enumerate(query.scored)
     )
     conditions = [*(f"w.{it} > 0" for it in required), *(f"w.{it} = 0" for it in excluded)]
     filtered = f" WHERE {' AND '.join(conditions)}" if conditions else ""

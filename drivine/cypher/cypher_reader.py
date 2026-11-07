@@ -770,7 +770,9 @@ class _Reader:
     # ----- Names -----
 
     def name(self, context: Context) -> str:
-        return _symbolic(context.oC_SymbolicName())
+        """A variable's name: a keyword, as `end`, as it is written (drivine4j#635)."""
+        symbolic = context.oC_SymbolicName()
+        return _symbolic(symbolic) if symbolic is not None else context.oC_KeywordVariable().getText()
 
     def schema_name(self, context: Context) -> str:
         """A name, as written or between backticks, where a doubled backtick is one."""

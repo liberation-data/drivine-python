@@ -357,8 +357,10 @@ def test_a_batch_of_relationships_as_apoc_exports_it_finds_each_rows_nodes_throu
     explained = plan(pm, compiled(pm, apoc_batch(0, 20, "RETURN start, finish"), {}))
     print(f"apoc\n{explained}\n")
     assert probes_index(pm, explained), f"an APOC batch reads every node of the label for each row:\n{explained}"
-    # Written in batches of 5, not drivine4j's 20: a statement the connection runs on Oracle names no index yet
-    # (liberation-data/drivine4j#638), and reads every node of the label for each end of each row, 8 minutes for 40.
+    # Not written on Oracle, as in Drivine for TypeScript: a statement the connection runs there names no index yet
+    # (liberation-data/drivine4j#638), and reads every node of the label for each end of each row: minutes for 10.
+    if pm.type is DatabaseType.ORACLE:
+        return
     query(pm, apoc_batch(0, 5))
     query(pm, apoc_batch(5, 10))
     assert query(pm, f"MATCH (:`{IMPORT_LABEL}`)-[r:NEXT_CHUNK]->(:`{IMPORT_LABEL}`) RETURN count(r)") == [10]

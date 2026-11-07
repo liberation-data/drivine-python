@@ -129,13 +129,13 @@ def test_counts_a_phrase_that_repeats_a_word_on_oracle_in_the_text_with_each_cha
 
 @pytest.mark.parametrize(
     ("text", "bound"),
-    [("kiw*", "(^|[^[:alnum:]_])kiw"), ("b²b", "(^|[^[:alnum:]_])b²b($|[^[:alnum:]_])")],
+    [("kiw*", "(^|[^[:alnum:]_])kiw"), ("bⓐb", "(^|[^[:alnum:]_])bⓐb($|[^[:alnum:]_])")],
 )
-def test_counts_a_prefix_term_or_one_holding_a_number_not_a_digit_on_oracle_by_its_one_expression(
+def test_counts_a_prefix_term_or_one_with_a_character_not_measured_as_alnum_on_oracle_by_its_one_expression(
     text: str, bound: str
 ) -> None:
-    # A prefix term takes no character after it, and "²" begins an occurrence that two counts would lose
-    # (drivine4j#607).
+    # A prefix term takes no character after it, and "ⓐ", a word's to the query and not measured on Oracle, may begin an
+    # occurrence there that two counts would lose (drivine4j#607).
     statement = _oracle_matching(text)
     assert "SELECT s.nid, s.len, REGEXP_COUNT(s.text, $_term0) AS tf1 FROM" in squashed(statement.text)
     assert statement.bindings["_term0"] == bound

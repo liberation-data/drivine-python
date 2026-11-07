@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from functools import cache
@@ -39,6 +40,12 @@ _BOUNDARY_AHEAD = "(?=$|[^[:alnum:]_])"
 _BETWEEN = "[^[:alnum:]_]+"
 """What stands between the words of a phrase in a term's expression."""
 
+_ALNUM_CATEGORIES = frozenset({"Nd", "Nl", "Mn", "Mc"})
+"""
+Beside the letters (Python's `isalpha`, the L categories), what Oracle's `[[:alnum:]_]` was measured to hold: decimal
+digits, letter numbers and combining marks.
+"""
+
 SEPARATOR = "([^[:alnum:]_])"
 """
 One character between words, as a group: for a store whose expressions don't look ahead, Oracle's. Each such character
@@ -68,15 +75,21 @@ def counted(pattern: str) -> tuple[str, str | None] | None:
     begin inside another, "la la" in "la la land" or "kiwis kiwi" in "kiwis kiwis kiwi", and the two counts take
     different ones. Such a term is counted in the text with each `SEPARATOR` written twice.
 
-    The pattern itself, with None for the second, where a word holds a number that isn't a digit, the "²" of "b²b": a
-    word's to `_GAP` but not to `[[:alnum:]]`, so an occurrence may begin at it, and neither way above counts it. The
-    one count undercounts the term only where it is written again at once, as it did before.
+    The pattern itself, with None for the second, where a word holds a character that is a word's to `_gap` but may not
+    be to Oracle's `[[:alnum:]]`, which was measured on letters, decimal digits, letter numbers ("ⅻ") and combining
+    marks (a Hindi vowel sign) alone: a circled letter, the "ⓐ" of "bⓐb". An occurrence may begin at it, and neither
+    way above counts it. The one count undercounts the term only where it is written again at once, as it did before.
     """
     if not pattern.endswith(_BOUNDARY_AFTER):
         return pattern, None
     ended = pattern.removesuffix(_BOUNDARY_AFTER)
     words = ended.removeprefix(_BOUNDARY_BEFORE).split(_BETWEEN)
-    if any(not (char.isalpha() or char.isdecimal() or char == "_") for word in words for char in word):
+    alnum = (
+        char.isalpha() or char == "_" or unicodedata.category(char) in _ALNUM_CATEGORIES
+        for word in words
+        for char in word
+    )
+    if not all(alnum):
         return pattern, None
     overlaps = len(set(words)) < len(words) or (len(words) > 1 and words[0].startswith(words[-1]))
     return None if overlaps else (ended, f"{ended}[[:alnum:]_]")

@@ -7,11 +7,12 @@ from typing import Annotated
 import pytest
 
 from drivine import FullTextIndex, ModelRegistry, NodeFragment, NodeId
+from drivine.backend.graph_statement import GraphStatement
 from drivine.backend.matching_search import MatchingSearch
 from drivine.backend.oracle.oracle_backend import OracleBackend
 from drivine.backend.oracle.oracle_graph import OracleGraph
 from drivine.backend.sql.bm25 import Bm25Dialect, bm25_ranked, bm25_score
-from drivine.backend.sql.text_query import TextQuery
+from drivine.backend.sql.text_query import TextQuery, counted, is_prefix
 
 
 class Shelf(NodeFragment, labels=["Shelf"]):
@@ -62,6 +63,17 @@ def test_filters_nothing_after_the_window_when_no_term_is_required_or_excluded()
     assert ") w) b WHERE b.score > 0" in sql
 
 
+def test_scores_a_prefix_term_by_k1_plus_1_for_each_node_that_holds_it_as_lucenes_prefix_query_the_rest_by_bm25():
+    query = TextQuery.parse("kiw* melon")
+    assert [is_prefix(it) for it in query.scored] == [True, False]
+    sql = bm25_ranked("CANDIDATES", "LABEL", query, dialect)
+    assert (
+        "REAL(CASE WHEN w.tf1 > 0 THEN 2.2 ELSE 0 END + LN(1 + (w.n - w.df2 + 0.5) / (w.df2 + 0.5)) * w.tf2 * 2.2 / "
+        "(w.tf2 + 1.2 * (0.25 + 0.75 * w.len / NULLIF(w.avglen, 0)))) AS score"
+    ) in sql
+    assert "w.df1 + 0.5" not in sql
+
+
 def test_scores_as_lucene_does_with_k1_1_2_and_b_0_75_drivine4js_figures():
     def score(count: int, holding: int, nodes: int, length: int, average: float) -> float:
         # The score, as SQL, worked out in Python: its arithmetic is the same in both.
@@ -80,15 +92,50 @@ def test_binds_each_term_on_its_own_on_oracle_once_for_its_count_and_once_more_f
     )
     sql = squashed(statement.text)
     query = TextQuery.parse("graph +data -noise")
-    assert list(statement.bindings) == ["_term0", "_term1", "_term2", "_term3", "_term4", "_term5"]
-    assert list(statement.bindings.values()) == [*query.scored, *query.required, *query.excluded, *query.scored]
+    # Each term's two counts (drivine4j#607), the required and the excluded among them, then each scoring term again,
+    # for whether a node holds it.
+    two = [part for term in [*query.scored, *query.required, *query.excluded] for part in counted(term) or ()]
+    assert list(statement.bindings) == [f"_term{it}" for it in range(10)]
+    assert list(statement.bindings.values()) == [*two, *query.scored]
     # The text is lowered to match a term in, and measured as it is.
     assert (
         "SELECT c.nid, LOWER(NVL(JSON_VALUE(c.props, '$.\"title\"' RETURNING CLOB), '')) AS text, "
         "NVL(LENGTH(NVL(JSON_VALUE(c.props, '$.\"title\"' RETURNING CLOB), '')), 0) AS len"
     ) in sql
     assert (
-        "REGEXP_COUNT(s.text, $_term0) AS tf1, REGEXP_COUNT(s.text, $_term1) AS tf2, "
-        "REGEXP_COUNT(s.text, $_term2) AS r1, REGEXP_COUNT(s.text, $_term3) AS x1"
+        "REGEXP_COUNT(s.text, $_term0) - REGEXP_COUNT(s.text, $_term1) AS tf1, "
+        "REGEXP_COUNT(s.text, $_term2) - REGEXP_COUNT(s.text, $_term3) AS tf2, "
+        "REGEXP_COUNT(s.text, $_term4) - REGEXP_COUNT(s.text, $_term5) AS r1, "
+        "REGEXP_COUNT(s.text, $_term6) - REGEXP_COUNT(s.text, $_term7) AS x1"
     ) in sql
-    assert "WHERE (REGEXP_LIKE(s.text, $_term4) OR REGEXP_LIKE(s.text, $_term5))" in sql
+    assert "WHERE (REGEXP_LIKE(s.text, $_term8) OR REGEXP_LIKE(s.text, $_term9))" in sql
+
+
+def _oracle_matching(text: str) -> GraphStatement:
+    return OracleBackend(OracleGraph()).matching(
+        ModelRegistry().fragment(Shelf), MatchingSearch("Shelf", ("title",), 10, text=text)
+    )
+
+
+def test_counts_a_phrase_that_repeats_a_word_on_oracle_in_the_text_with_each_character_between_words_twice() -> None:
+    # Two counts would take different occurrences where one begins inside another: "la la" in "la la land"
+    # (drivine4j#607).
+    statement = _oracle_matching('"la la"')
+    assert (
+        "SELECT s.nid, s.len, REGEXP_COUNT(REGEXP_REPLACE(s.text, '([^[:alnum:]_])', '\\1\\1'), $_term0) AS tf1 FROM"
+    ) in squashed(statement.text)
+    assert statement.bindings["_term0"] == "(^|[^[:alnum:]_])la[^[:alnum:]_]+la($|[^[:alnum:]_])"
+
+
+@pytest.mark.parametrize(
+    ("text", "bound"),
+    [("kiw*", "(^|[^[:alnum:]_])kiw"), ("b²b", "(^|[^[:alnum:]_])b²b($|[^[:alnum:]_])")],
+)
+def test_counts_a_prefix_term_or_one_holding_a_number_not_a_digit_on_oracle_by_its_one_expression(
+    text: str, bound: str
+) -> None:
+    # A prefix term takes no character after it, and "²" begins an occurrence that two counts would lose
+    # (drivine4j#607).
+    statement = _oracle_matching(text)
+    assert "SELECT s.nid, s.len, REGEXP_COUNT(s.text, $_term0) AS tf1 FROM" in squashed(statement.text)
+    assert statement.bindings["_term0"] == bound

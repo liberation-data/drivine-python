@@ -107,7 +107,9 @@ found = await gom.load_matching(Chunk, "graph AND database", top_k=10, threshold
 - **Full-text scores on Postgres, SQLite and Oracle without Oracle Text changed after 0.3.2.** A hit scored by how
   often the query's terms occur in it. It now scores by BM25, as Neo4j's index scores it (see
   [Postgres](02-connecting.md#postgres)): a rare term outweighs a common one, and a short text outranks a long one that
-  holds a term as often. The hits can come in another order, and a `threshold` can keep others.
+  holds a term as often. A term written again at once, `kiwi kiwi kiwi`, is counted each time, where it was counted
+  every other time. A `prefix*` adds the same to every hit that holds it, as on Neo4j. The hits can come in another
+  order, and a `threshold` can keep others.
 - **A query's words on Postgres, SQLite and Oracle changed after 0.3.2.** A word was a run of what Python's `\w`
   holds. It is now one of what the text's `[[:alnum:]_]` holds (see [Postgres](02-connecting.md#postgres)): a Hindi
   word is no longer split at its vowel sign, and `m²x` is the phrase `m x`, as Neo4j's analyzer reads it.

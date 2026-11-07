@@ -38,7 +38,9 @@ def test_each_list_a_write_keeps_rows_in_is_declared_as_the_stores_own_list(comp
 def test_a_procedure_that_keeps_no_rows_declares_its_out_as_before(compiled: Callable[[str], str], json: str):
     sql = compiled("MATCH (n:A) CALL (n) { DETACH DELETE n }")
     assert f"\n    cy_out {json};\n" in sql, sql
-    assert "cy_returned" not in sql and "[]" not in sql.split("BEGIN")[0], sql
+    # The one array declared on Postgres holds the planner's settings around the loop, not rows (#420).
+    arrays = [it for it in sql.split("BEGIN")[0].split("\n") if "[]" in it and it != "    cy_planner text[];"]
+    assert "cy_returned" not in sql and not arrays, sql
 
 
 def test_the_lists_kept_in_are_found_within_loops_and_conditions_once_each_in_the_order_first_made():

@@ -8,11 +8,16 @@ which is slower at both, passes alike. drivine4j's `CompiledWriteLoopTimeTest`, 
 `CypherWriteLoopTime.spec.ts`. The tests run one at a time, so no other test's load is in the timings.
 
 On Postgres the MERGE is timed with the edge table vacuumed while empty, as autovacuum leaves it late in a full run:
-its per-row read is then a Seq Scan, so it is quadratic (#420). A vacuum doesn't always leave statistics that say
-empty (one run took 2.4 s over 20,000 rows, not 27 s), so the case is an xfail allowed to pass until #420 is fixed.
-The CALL…RETURN joins its one-row list to the node table for each row, and Postgres, which takes the list for 100
-rows, may scan every node for it instead (liberation-data/drivine4j#609): 36.8 s over 20,000 rows in one CI run. It
-too is an xfail allowed to pass, until #420 is fixed.
+its per-row read was then planned as a Seq Scan, kept as the loop filled the table, so it was quadratic: 27 s over
+20,000 rows (#420, liberation-data/drivine4j#609). The CALL…RETURN joins its one-row list to the node table for each
+row, and Postgres, which takes the list for 100 rows, scanned every node for it instead: 36.8 s over 20,000 rows in one
+CI run. Each loop is now planned with seq scans and hash and merge joins off (see
+PostgresCypherCompiler._planned_as_nested_loops), and both pass as the other writes do.
+
+On Postgres every write is also timed with the node table analyzed just after it was emptied, as an autoanalyze then
+leaves it: its pages of dead rows taken to hold one row. The CALL…RETURN's per-row read was then planned to materialize
+a scan of the whole primary key index and filter it for the row's node, so it was quadratic again, as seen three times
+in CI: 72 s to 142 s over 20,000 rows (#430). Materialization is now off in the loop too.
 """
 
 import time
@@ -73,7 +78,10 @@ TIMES: dict[str, tuple[list[int], list[int]]] = {}
 
 
 def vacuumed_empty(pm: PersistenceManager, write: Write) -> bool:
-    """Whether the write is timed with the edge table vacuumed while empty, in which state it is quadratic (#420)."""
+    """
+    Whether the write is timed with the edge table vacuumed while empty, in which state its per-row read was quadratic
+    until #420.
+    """
     return pm.type == DatabaseType.POSTGRES and write.name == "MERGE"
 
 
@@ -85,11 +93,18 @@ async def timed(pm: PersistenceManager, n: int) -> list[int]:
     """The milliseconds each write took over `n` rows, each checked by what it gave and what it left."""
     # A node's relationships go with it: the relationship table cascades.
     await pm.execute(QuerySpecification("DELETE FROM drivine_node"))
+    if pm.type == DatabaseType.POSTGRES:
+        # Statistics that say the node table, still at its pages of dead rows, is empty, as an autoanalyze that runs
+        # just after the DELETE leaves them (#430).
+        await pm.execute(QuerySpecification("ANALYZE drivine_node"))
     times: list[int] = []
     for write in WRITES:
         if vacuumed_empty(pm, write):
-            # Statistics that say the table is empty: autocommitted, as VACUUM runs outside a transaction.
-            await pm.execute(QuerySpecification("VACUUM ANALYZE drivine_edge"))
+            # Statistics that say the table is empty: autocommitted, as VACUUM runs outside a transaction. Not in
+            # parallel: a VACUUM of many dead relationships otherwise vacuums the edge indexes in parallel, and the
+            # pooled session that ran it keeps some 1.2 MB of /dev/shm until it ends, which a later parallel build of
+            # a vector index, asking for nearly all of a container's 64 MB, then fails for want of.
+            await pm.execute(QuerySpecification("VACUUM (PARALLEL 0, ANALYZE) drivine_edge"))
         start = time.perf_counter()
         rows = await query(pm, write.cypher, {"n": n})
         times.append(round((time.perf_counter() - start) * 1000))
@@ -100,25 +115,36 @@ async def timed(pm: PersistenceManager, n: int) -> list[int]:
     return times
 
 
+def slow(small: int, large: int) -> bool:
+    """Whether a write that took `small` ms over SMALL rows and `large` over LARGE grew faster than its rows."""
+    return large > max(RATIO * small, FLOOR_MS)
+
+
 @pytest.mark.parametrize("write", WRITES, ids=[it.name for it in WRITES])
 async def test_a_write_over_ten_times_the_rows_takes_about_ten_times_as_long_not_a_hundred(
-    pm: PersistenceManager, store: str, write: Write, request: pytest.FixtureRequest
+    pm: PersistenceManager, store: str, write: Write
 ):
-    if vacuumed_empty(pm, write):
-        reason = "#420: with the edge table vacuumed empty, a compiled MERGE's per-row read is a Seq Scan on Postgres."
-        request.applymarker(pytest.mark.xfail(strict=False, reason=reason))
-    if pm.type == DatabaseType.POSTGRES and write.name == "CALL…RETURN":
-        reason = "#420: a CALL's one-row list joined to the node table may be planned as a Seq Scan on Postgres."
-        request.applymarker(pytest.mark.xfail(strict=False, reason=reason))
     if store not in TIMES:
+        if pm.type == DatabaseType.POSTGRES:
+            # The node table keeps the statistics its ANALYZE gave it while the writes are timed: an autoanalyze that
+            # lands after the CREATE, as one did in the first of a run's Postgres timings, takes the table to hold its
+            # rows, and the CALL…RETURN passed without #430's fix.
+            await pm.execute(QuerySpecification("ALTER TABLE drivine_node SET (autovacuum_enabled = off)"))
         try:
             TIMES[store] = (await timed(pm, SMALL), await timed(pm, LARGE))
         finally:
             await pm.execute(QuerySpecification("DELETE FROM drivine_node"))
+            if pm.type == DatabaseType.POSTGRES:
+                await pm.execute(QuerySpecification("ALTER TABLE drivine_node RESET (autovacuum_enabled)"))
+                # The tables are left as small as they were found, which a VACUUM of the empty tables truncates them
+                # to. The node table, left at some 8 MB of dead rows, was over min_parallel_table_scan_size, so a later
+                # index on it was built in parallel: a vector index asks for nearly all of a container's 64 MB of
+                # /dev/shm, and a pooled session that built any index in parallel keeps some of it until it ends.
+                await pm.execute(QuerySpecification("VACUUM (PARALLEL 0) drivine_node, drivine_edge"))
     small, large = TIMES[store]
     report = "; ".join(
         f"{it.name} {small[i]} ms over {SMALL} rows, {large[i]} ms over {LARGE}" for i, it in enumerate(WRITES)
     )
     print(f"CompiledWriteLoopTime {pm.type.name}: {report}")
     i = WRITES.index(write)
-    assert large[i] <= max(RATIO * small[i], FLOOR_MS), report
+    assert not slow(small[i], large[i]), report

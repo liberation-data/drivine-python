@@ -18,8 +18,9 @@ release reaches your tests as soon as it is out; pin one with its `<TYPE>_TEST_I
 Drivine's own tests run on Oracle only with `ORACLE_TESTS=true`: its image is large, and the database wants two
 gigabytes. A run without it ends with the line `Oracle tests skipped: set ORACLE_TESTS=true to run them`. CI runs the
 Oracle tests in jobs of their own, with `pytest -k oracle`. CI splits each run over parallel jobs, `pytest --shard i/n`
-(tests/shards.py), and a pull request's run leaves out the tests marked `nightly`: the timings, Oracle's plans, and the
-texts past 32 KB. They run each night (`.github/workflows/nightly.yml`, which opens an issue labelled `nightly` when
+(tests/shards.py), a pull request's run takes the database suite on Python 3.11 and 3.14 alone (3.12 and 3.13 run `tests/unit`), and it
+leaves out the tests marked `nightly`: the timings, Oracle's plans, and the
+texts past 32 KB. Those, and the database suite on every Python, run each night (`.github/workflows/nightly.yml`, which opens an issue labelled `nightly` when
 they fail), on each push to main, in a release's gate, and on a pull request labelled `full-ci`. A local `pytest` runs
 them all. The tests run on the plugin's own images, the latest Neo4j,
 Memgraph and FalkorDB, so that an engine release that changes what Drivine reads or writes shows up at once. CI holds

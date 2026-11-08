@@ -3,7 +3,8 @@ name: CI
 # Lints and tests drivine on each Python it supports, and again with Oracle, each run split over parallel jobs with
 # containers of their own: `pytest --shard i/n` runs one part, a module whole in one part (tests/shards.py).
 #
-# A pull request's run leaves out the nightly tests (`-m nightly`, the tests marked so): slow ones, and ones that rest
+# A pull request's run takes the database suite on Python 3.11 and 3.14 alone, and tests/unit on 3.12 and 3.13; a full
+# run takes it on all four. A pull request's run also leaves out the nightly tests (`-m nightly`, the tests marked so): slow ones, and ones that rest
 # on a timing or a plan. A full run has them too, in a part of their own: a push to main, a pull request labelled
 # `full-ci`, nightly.yml each night, and release.yml's gate. release.yml calls this as the gate before a release,
 # unless a full push or pull_request run of it has already passed on the same tree.
@@ -73,9 +74,10 @@ jobs:
       - name: Check the Cypher spec
         run: python scripts/check_cypher_spec.py
 
-  # Every test but Oracle's, on each Python, in three parts, and the nightly tests in a fourth on a full run (picked by
-  # the same test as `tree`'s record). The first part lints too. The parts of a pull request's run hold every test but
-  # the nightly ones once.
+  # Every test but Oracle's, in three parts, and the nightly tests in a fourth: on each Python on a full run (picked by
+  # the same test as `tree`'s record). A pull request's run takes the database suite on the oldest and the newest
+  # Python alone, 3.11 and 3.14, in the three parts, which hold every test but the nightly ones once; on 3.12 and 3.13
+  # it runs tests/unit alone, which needs no database, with no containers. The first part, or the unit part, lints too.
   test:
     name: test (${{ matrix.python }}, ${{ matrix.part }})
     runs-on: ubuntu-latest
@@ -83,27 +85,30 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python: ["3.11", "3.12", "3.13", "3.14"]
-        part: ${{ fromJSON((inputs.full || github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'full-ci')) && '["1/3", "2/3", "3/3", "nightly"]' || '["1/3", "2/3", "3/3"]') }}
+        include: ${{ fromJSON((inputs.full || github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'full-ci')) && '[{"python":"3.11","part":"1/3"},{"python":"3.11","part":"2/3"},{"python":"3.11","part":"3/3"},{"python":"3.11","part":"nightly"},{"python":"3.12","part":"1/3"},{"python":"3.12","part":"2/3"},{"python":"3.12","part":"3/3"},{"python":"3.12","part":"nightly"},{"python":"3.13","part":"1/3"},{"python":"3.13","part":"2/3"},{"python":"3.13","part":"3/3"},{"python":"3.13","part":"nightly"},{"python":"3.14","part":"1/3"},{"python":"3.14","part":"2/3"},{"python":"3.14","part":"3/3"},{"python":"3.14","part":"nightly"}]' || '[{"python":"3.11","part":"1/3"},{"python":"3.11","part":"2/3"},{"python":"3.11","part":"3/3"},{"python":"3.14","part":"1/3"},{"python":"3.14","part":"2/3"},{"python":"3.14","part":"3/3"},{"python":"3.12","part":"unit"},{"python":"3.13","part":"unit"}]') }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: ${{ matrix.python }}
       - run: uv sync
-      - if: matrix.part == '1/3'
+      - if: matrix.part == '1/3' || matrix.part == 'unit'
         run: uv run ruff check .
-      - if: matrix.part == '1/3'
+      - if: matrix.part == '1/3' || matrix.part == 'unit'
         run: uv run ruff format --check .
-      - if: matrix.part == '1/3'
+      - if: matrix.part == '1/3' || matrix.part == 'unit'
         run: uv run pyright
-      - if: matrix.part == '1/3'
+      - if: matrix.part == '1/3' || matrix.part == 'unit'
         run: uv run python scripts/unasync.py --check
       - name: Run the tests
         env:
           PART: ${{ matrix.part }}
         run: |
-          if [ "$PART" = nightly ]; then picked=(-m nightly); else picked=(-m "not nightly" --shard "$PART"); fi
+          case "$PART" in
+            nightly) picked=(-m nightly) ;;
+            unit) picked=(-o drivine_test_containers=false tests/unit) ;;
+            *) picked=(-m "not nightly" --shard "$PART") ;;
+          esac
           uv run pytest -q --durations=15 --record-durations durations.json "${picked[@]}"
       # How long each module took, to balance the parts by (tests/durations.json). From the slowest Python alone.
       - if: always() && matrix.python == '3.11'

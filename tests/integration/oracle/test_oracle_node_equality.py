@@ -42,7 +42,7 @@ async def seeded(factory: PersistenceManagerFactory) -> AsyncIterator[None]:
     await clear(pm)
 
 
-pytestmark = [ON_ORACLE, pytest.mark.usefixtures("seeded")]
+pytestmark = [ON_ORACLE, pytest.mark.usefixtures("seeded"), pytest.mark.nightly]
 
 
 async def assert_joined(pm: PersistenceManager, statement: str, expected: list[Any]) -> None:

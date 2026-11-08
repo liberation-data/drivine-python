@@ -429,7 +429,7 @@ async def test_a_cypher_statement_is_compiled_against_the_tables_of_the_graph_it
 
 
 @pytest.mark.skipif(not ORACLE, reason="Oracle isn't configured: set ORACLE_TESTS=true.")
-async def test_nodes_of_two_labels_a_transaction_has_made_and_not_yet_committed_are_found_by_both(
+async def test_nodes_of_two_labels_a_transaction_has_made_and_not_yet_committed_are_found_by_both_on_oracle(
     factory: PersistenceManagerFactory,
 ):
     pm = factory.get("oracle")
@@ -451,8 +451,9 @@ async def test_a_cypher_statement_that_writes_is_not_read_through_a_cursor_on_or
         await factory.get("oracle").open_cursor(cursor_spec)
 
 
+@pytest.mark.nightly
 @pytest.mark.skipif(not ORACLE, reason="Oracle isn't configured: set ORACLE_TESTS=true.")
-async def test_a_text_past_32_kb_set_on_two_nodes_beside_a_whole_float_or_not_leaves_the_session_open(
+async def test_a_text_past_32_kb_set_on_two_nodes_beside_a_whole_float_or_not_leaves_the_session_open_on_oracle(
     factory: PersistenceManagerFactory,
 ):
     # Oracle crashed the session as the block freed its parameters, held in a JSON variable it had read once for each
@@ -475,8 +476,9 @@ async def test_a_text_past_32_kb_set_on_two_nodes_beside_a_whole_float_or_not_le
             assert rows == [{"id": it, **written} for it in (1, 2)]
 
 
+@pytest.mark.nightly
 @pytest.mark.skipif(not ORACLE, reason="Oracle isn't configured: set ORACLE_TESTS=true.")
-async def test_a_text_past_32_kb_in_a_map_parameter_read_and_set_on_two_nodes_leaves_the_session_open(
+async def test_a_text_past_32_kb_in_a_map_parameter_read_and_set_on_two_nodes_leaves_the_session_open_on_oracle(
     factory: PersistenceManagerFactory,
 ):
     # Oracle crashed the session where a statement read a value past 32 KB from a map parameter, by a property or by a
@@ -505,6 +507,7 @@ async def test_a_text_past_32_kb_in_a_map_parameter_read_and_set_on_two_nodes_le
                 assert rows == [{"id": it, **written} for it in (1, 2)]
 
 
+@pytest.mark.nightly
 @pytest.mark.skipif(not ORACLE, reason="Oracle isn't configured: set ORACLE_TESTS=true.")
 async def test_a_property_past_32_kb_read_on_two_nodes_leaves_the_session_open_on_oracle(
     factory: PersistenceManagerFactory, registry: DatabaseRegistry
@@ -558,6 +561,7 @@ async def test_a_property_past_32_kb_read_on_two_nodes_leaves_the_session_open_o
         await clear(factory.get("oracle"))
 
 
+@pytest.mark.nightly
 @pytest.mark.skipif(not ORACLE, reason="Oracle isn't configured: set ORACLE_TESTS=true.")
 async def test_a_text_past_32_kb_set_from_an_unwound_parameter_on_two_nodes_leaves_the_session_open_on_oracle(
     factory: PersistenceManagerFactory, registry: DatabaseRegistry
@@ -615,8 +619,9 @@ async def test_a_map_an_unwound_item_holds_with_a_key_as_extended_jsons_is_writt
     assert await pm.query(spec("MATCH (n:CyWrite) RETURN properties(n) ORDER BY n.id")) == items
 
 
+@pytest.mark.nightly
 @pytest.mark.skipif(not ORACLE, reason="Oracle isn't configured: set ORACLE_TESTS=true.")
-async def test_a_text_past_32_kb_from_an_unwound_parameter_returned_or_passed_on_over_two_rows_leaves_the_session_open(
+async def test_a_text_past_32_kb_of_an_unwound_parameter_returned_or_passed_on_for_two_rows_leaves_oracles_session_open(
     factory: PersistenceManagerFactory, registry: DatabaseRegistry
 ):
     # Oracle crashed the session where a statement took a text past 32 KB from an item of an unwound parameter as JSON,

@@ -21,7 +21,7 @@ from drivine.query.statement import cypher_statement
 from tests.cypher.cypher_spec import load
 from tests.integration.oracle.oracle_seed import ON_ORACLE
 
-pytestmark = ON_ORACLE
+pytestmark = [ON_ORACLE, pytest.mark.nightly]
 
 GRAPH = "drivine_adaptive_plans"
 

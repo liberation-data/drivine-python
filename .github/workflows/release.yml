@@ -3,7 +3,7 @@
 # - A push to main that raises pyproject.toml's version (the merge of a "Release vX.Y.Z" PR) publishes it, and tags
 #   the commit vX.Y.Z. A push to main that changes pyproject.toml without raising the version publishes nothing.
 # - A push of a tag vX.Y.Z, by hand, publishes too: the fallback.
-# - Either way, the full CI runs, unless CI has already passed on the same tree; the distributions are built and
+# - Either way, the full CI runs, the nightly tests with it, unless a full CI run has already passed on the same tree; the distributions are built and
 #   checked, and those exact files are uploaded to PyPI with trusted publishing.
 # - workflow_dispatch, and a pull request that changes the release machinery, are dry runs: everything but the
 #   publish, with the built files left as the run's artifact to inspect.
@@ -95,9 +95,9 @@ jobs:
           echo "publish=$publish" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
-  # Whether ci.yml has already passed on the git tree this run builds, from a push or a pull request, so the gate
-  # needn't run it again: the release PR's run, when it was up to date with main and squash merged, or the push run on
-  # the merge commit, which starts beside this one and is waited for. A run on this tree that fails fails the release.
+  # Whether ci.yml has already passed on the git tree this run builds, from a push or a pull request, with the nightly
+  # tests, so the gate needn't run it again: the release PR's run (labelled full-ci), when it was up to date with main
+  # and squash merged, or the push run on the merge commit, which starts beside this one and is waited for. A run on this tree that fails fails the release.
   # scripts/ci_trust.py says how a run's tree is known, and why a pull request's run can be believed; the step summary
   # links the run trusted, or says why none was. Skipped, as the gate is, on a push that releases nothing.
   trust:
@@ -125,12 +125,15 @@ jobs:
           tree=$(git rev-parse 'HEAD^{tree}')
           python3 scripts/ci_trust.py "$GITHUB_REPOSITORY" "$tree" "$(git rev-parse HEAD)" "$PR_HEAD"
 
-  # The full CI, as ci.yml runs it on a push or a pull request, unless trust found it has already passed on this tree.
-  # A push that releases nothing stops at check: ci.yml runs on the same push to main by itself.
+  # The full CI, as ci.yml runs it on a push to main, with the nightly tests a pull request's run leaves out, unless
+  # trust found it has already passed on this tree. A push that releases nothing stops at check: ci.yml runs on the
+  # same push to main by itself.
   gate:
     needs: [check, trust]
     if: needs.trust.outputs.trusted != 'true'
     uses: ./.github/workflows/ci.yml
+    with:
+      full: true
 
   # Runs when the gate passed, or was skipped because trust found CI had passed on this tree. A failed or cancelled
   # check, trust or gate stops it, and so does a gate skipped for any other reason (a push that releases nothing).

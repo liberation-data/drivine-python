@@ -29,7 +29,7 @@ from drivine.sync.connection.oracle.oracle_connection_provider import OracleConn
 from tests.cypher.cypher_spec import load
 from tests.sync_integration.oracle.oracle_seed import ON_ORACLE
 
-pytestmark = ON_ORACLE
+pytestmark = [ON_ORACLE, pytest.mark.nightly]
 
 GRAPH = "drivine_adaptive_plans"
 

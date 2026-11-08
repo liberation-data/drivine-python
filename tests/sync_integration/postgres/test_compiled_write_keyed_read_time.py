@@ -35,7 +35,7 @@ from drivine.sync import (
 from tests.sync_integration.postgres.conftest import ON_POSTGRES
 from tests.sync_integration.sql.test_compiled_write_loop_time import LARGE, SMALL, slow
 
-pytestmark = ON_POSTGRES
+pytestmark = [ON_POSTGRES, pytest.mark.nightly]
 
 GRAPH = "cy_keyed"
 """The graph the writes are timed on: tables of their own, apart from those the other tests read."""

@@ -194,6 +194,21 @@ def test_doesnt_trust_a_pull_requests_run_that_tested_another_tree_as_its_base_h
     assert f"it tested its merge ref, tree {OTHER}, as its base had moved on" in result.text
 
 
+def test_names_the_tree_alone_of_a_pull_requests_run_of_the_pr_set_that_tested_another_tree() -> None:
+    result = decide(
+        {
+            runs_on(SHA): workflow_runs(),
+            RECORDS: record_on(),
+            runs_on(HEAD): workflow_runs(run(4, event="pull_request", head_sha=HEAD)),
+            artifacts_of(4): recorded(f"pr-set-{OTHER}"),
+        },
+        [SHA, HEAD],
+    )
+
+    assert result.decision == "gate"
+    assert f"it tested its merge ref, tree {OTHER}, as its base had moved on" in result.text
+
+
 def test_doesnt_believe_a_record_on_a_run_whose_head_commit_is_another_tree_as_a_forks_ci_could_make_it() -> None:
     forged = run(5, event="pull_request", head_sha=HEAD, tree=OTHER)
     result = decide({runs_on(SHA): workflow_runs(), RECORDS: record_on(5), run_path(5): forged})
@@ -217,6 +232,23 @@ def test_doesnt_trust_a_pull_requests_run_that_recorded_no_tree_as_one_before_ci
 
     assert result.decision == "gate"
     assert "it recorded no tree" in result.text
+
+
+def test_doesnt_wait_for_or_trust_a_pull_requests_run_of_the_pr_set_alone_as_it_leaves_out_the_nightly_tests() -> None:
+    answers = {
+        runs_on(SHA): workflow_runs(),
+        runs_on(HEAD): workflow_runs(going(11, event="pull_request", head_sha=HEAD)),
+        RECORDS: record_on(),
+        artifacts_of(11): recorded(f"pr-set-{TREE}"),
+    }
+    going_run = decide(answers, [SHA, HEAD])
+    answers[runs_on(HEAD)] = workflow_runs(run(11, event="pull_request", head_sha=HEAD))
+    answers[jobs_of(11)] = PASSED_JOBS
+    passed = decide(answers, [SHA, HEAD])
+
+    assert (going_run.decision, going_run.sleeps) == ("gate", [])
+    assert passed.decision == "gate"
+    assert "it ran the pull request set alone, without the nightly tests" in passed.text
 
 
 def test_counts_neither_the_nightly_which_drops_the_falkordb_pin_nor_a_run_of_another_workflow() -> None:

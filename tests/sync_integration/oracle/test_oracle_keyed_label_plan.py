@@ -65,7 +65,7 @@ def seeded(factory: PersistenceManagerFactory) -> Iterator[None]:
     clear(pm)
 
 
-pytestmark = [ON_ORACLE, pytest.mark.usefixtures("seeded")]
+pytestmark = [ON_ORACLE, pytest.mark.usefixtures("seeded"), pytest.mark.nightly]
 
 
 def later_compared(sql: str) -> str:

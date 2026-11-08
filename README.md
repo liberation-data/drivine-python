@@ -36,7 +36,8 @@ pip install "drivine[postgres]"   # Postgres 14 or later, through psycopg 3
 pip install drivine               # SQLite 3.45 or later, a graph in a file, through Python's own sqlite3
 ```
 
-Python 3.11 or newer.
+Python 3.11 or newer. A SQLite store and what a transaction gives there are in
+[Connecting](docs/02-connecting.md#sqlite).
 
 ## Quick start
 
@@ -67,21 +68,6 @@ asyncio.run(main())
 
 Views that compose fragments and relationships, queries, transactions, schema and the sync API are in the
 [full quick start](https://drivine.org/py/quick-start/) and the pages after it.
-
-## SQLite
-
-A graph in a file, with no server: `DATABASE_TYPE=SQLITE`, and `DATABASE_NAME` the file's path. The file holds
-drivine4j's tables, so drivine4j and Drivine for TypeScript read and write it too. What a transaction gives there:
-
-- One writer at a time: a transaction takes the file's write lock as it begins, so even one that only reads waits for
-  the lock, for up to the busy timeout (30 seconds). One that holds it longer than 5 seconds is logged as a warning.
-- Reads outside a transaction don't wait for a writer.
-- Saves and deletes outside a transaction are run again when SQLite turns them away as contended.
-- Each statement Drivine writes applies whole or not at all.
-- A connection you open yourself, with `sqlite3.connect`, gets none of this.
-
-Cypher you write is compiled to SQLite's SQL (`pip install "drivine[sqlite]"`): see
-[Cypher on a relational database](docs/03-cypher-on-a-relational-database.md).
 
 ## Documentation
 

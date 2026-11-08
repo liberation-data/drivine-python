@@ -211,10 +211,12 @@ for up to its busy timeout, 30 seconds by default.
   transaction that only reads waits for the lock, for up to the busy timeout. One that holds it longer than 5 seconds
   is logged as a warning when it ends, committed, rolled back or released.
 - Reads outside a transaction don't wait for a writer: each reads the file as it last was.
-- Saves and deletes outside a transaction are run again when SQLite turns them away as contended (`SQLITE_BUSY`).
+- Saves, patches and deletes outside a transaction are run again when SQLite turns them away as contended
+  (`SQLITE_BUSY`).
 - Each statement Drivine writes applies whole or not at all.
-- A connection you open yourself, with `sqlite3.connect`, has none of this: no log, no foreign keys, no busy timeout
-  and none of Drivine's functions.
+- A connection you open yourself, with `sqlite3.connect`, has none of this: no foreign keys, no write lock taken as a
+  transaction begins, no warning, Python's wait of 5 seconds for a locked file rather than 30, and none of Drivine's
+  functions. It does write ahead to the log, as the file keeps that mode once Drivine has set it.
 
 Drivine reads `os.environ`, and doesn't load `.env` files itself: use python-dotenv, pydantic-settings, or your
 platform's way.

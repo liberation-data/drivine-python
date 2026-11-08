@@ -10,6 +10,7 @@ from drivine.backend.sql.sql_graph import DEFAULT_GRAPH
 from drivine.backend.sql.sql_json import to_json
 from drivine.connection.connection import Connection
 from drivine.connection.postgres.postgres_cursor import PostgresCursor
+from drivine.connection.postgres.postgres_non_finite import read_non_finite
 from drivine.connection.postgres.postgres_result_mapper import PostgresResultMapper
 from drivine.connection.postgres.postgres_spec_compiler import PostgresSpecCompiler
 from drivine.cursor.cursor_specification import CursorSpecification
@@ -30,7 +31,9 @@ class PostgresConnection(Connection):
     A connection to Postgres, through psycopg. Outside a transaction each statement commits itself, as a statement does
     on the graph engines. A statement without parameters is sent as it is, so it may hold several statements, or a
     block. A Cypher statement is compiled to SQL over the graph's tables (see SqlCypherCompiler), and gives a row as a
-    graph engine gives it: its one item, or a list of its items.
+    graph engine gives it: its one item, or a list of its items. A compiled statement that says it was given NaN or an
+    infinity has its cursor read the numbers that stand for them (see postgres_non_finite); every other is read as
+    psycopg reads it.
     """
 
     def __init__(self, connection: Any, release: Any, session_id: str, graph: str = DEFAULT_GRAPH) -> None:
@@ -48,6 +51,8 @@ class PostgresConnection(Connection):
         compiled = PostgresSpecCompiler(sql).compile()
         start = time.perf_counter()
         async with self.connection.cursor() as cursor:
+            if cypher is not None and cypher.non_finite:
+                read_non_finite(cursor)
             if prelude is not None:
                 await cursor.execute(prelude)
             await cursor.execute(compiled.statement, _bindable(compiled.parameters))
@@ -74,6 +79,8 @@ class PostgresConnection(Connection):
             cursor = self.connection.cursor()
         else:
             cursor = self.connection.cursor(name=f"drivine_{next(_CURSORS)}", withhold=not self._in_transaction)
+        if cypher is not None and cypher.non_finite:
+            read_non_finite(cursor)
         await cursor.execute(compiled.statement, _bindable(compiled.parameters))
         return PostgresCursor(finalized, cursor, self.result_mapper, compiled=sql is not finalized)
 

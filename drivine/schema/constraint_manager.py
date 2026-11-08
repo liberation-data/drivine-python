@@ -156,6 +156,26 @@ class ConstraintManager:
         """
         return await self._await_build(made_as(spec), until_listed=False) == "BUILT"
 
+    async def recreate(
+        self, spec: UniquenessConstraintSpec, sample_size: int = VIOLATION_SAMPLE, replace_blocking_index: bool = False
+    ) -> EnsureResult[UniquenessConstraintSpec]:
+        """
+        Drops the constraint, and makes it again as `ensure` makes it, which gives what `ensure` gives. The constraint
+        made again keeps the aliases its record kept (see `IndexManager.alias`).
+        """
+        made = made_as(spec)
+        held = next(
+            (it for it in await self.list() if it.label == made.label and set(it.properties) == set(made.properties)),
+            None,
+        )
+        await self.drop(spec)
+        result = await self.ensure(spec, sample_size, replace_blocking_index)
+        if held is not None and held.aliases and result.status == "CREATED":
+            await IndexManager(self.executor, self.grammar).alias(
+                "UNIQUE", SchemaItem(made.label, made.properties), held.aliases
+            )
+        return result
+
     async def drop(self, declared: UniquenessConstraintSpec) -> None:
         """Drops the constraint, or one whose build FalkorDB listed as FAILED, which `list` leaves out."""
         spec = made_as(declared)

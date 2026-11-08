@@ -8,6 +8,7 @@ from drivine.cursor.cursor_specification import CursorSpecification
 from drivine.drivine_error import DrivineError
 from drivine.manager.persistence_manager import PersistenceManager
 from drivine.query.query_specification import QuerySpecification
+from drivine.schema.schema_ddl import refused_in_transaction
 from drivine.transaction.transaction import Transaction, current_transaction
 
 T = TypeVar("T")
@@ -24,6 +25,13 @@ class TransactionalPersistenceManager(PersistenceManager):
         self.type = provider.type
 
     async def query(self, spec: QuerySpecification[T]) -> list[T]:
+        """
+        The results of the statement, run in the transaction. Neo4j schema DDL given as Cypher to Postgres, Oracle or
+        SQLite is refused here, as Drivine applies it outside any transaction (see SchemaCommands), save for
+        `db.awaitIndexes`, which does nothing there.
+        """
+        if refused_in_transaction(self.type, spec):
+            return []
         return await self._transaction().query(spec, self.provider)
 
     async def open_cursor(self, spec: CursorSpecification[T]) -> Cursor[T]:

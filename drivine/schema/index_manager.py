@@ -3,8 +3,8 @@ from __future__ import annotations
 import dataclasses
 import itertools
 import logging
-from collections.abc import Callable
-from typing import Literal, TypeVar
+from collections.abc import Callable, Sequence
+from typing import TYPE_CHECKING, Literal, TypeVar
 
 from drivine.schema.ensure_result import EnsureResult
 from drivine.schema.full_text_index_spec import FullTextIndexSpec
@@ -15,6 +15,9 @@ from drivine.schema.schema_grammar import SchemaGrammar
 from drivine.schema.schema_item import SchemaItem
 from drivine.schema.schema_specs import IndexSpec, item_name, made_as
 from drivine.schema.vector_index_spec import VectorIndexSpec
+
+if TYPE_CHECKING:
+    from drivine.backend.sql.sql_catalog import CatalogKind
 
 S = TypeVar("S", bound=RangeIndexSpec | VectorIndexSpec | FullTextIndexSpec)
 
@@ -80,7 +83,7 @@ class IndexManager:
             )
             return EnsureResult("CREATED", spec)
         if found is not None:
-            if self._matches(spec, found):
+            if self.matches(spec, found):
                 return EnsureResult("ALREADY_MATCHING", spec)
             return EnsureResult("DRIFT", spec, found=found)
         await self._create(spec)
@@ -92,13 +95,27 @@ class IndexManager:
         """
         Drops the index over the label and properties, whatever its shape, and makes it as the spec says. An index that
         ignores case fills the lowercased copies in again on every node of its label, recorded or not, where Cypher or
-        SQL of your own, which keeps no copy, left one out of step.
+        SQL of your own, which keeps no copy, left one out of step. The index made again keeps the aliases its record
+        kept (see `alias`).
         """
         await fill_in_lower_copies(self.copies, spec, True)
+        made = made_as(spec)
+        found = await self._find(made)
         await self.drop(spec)
-        await self._create(made_as(spec))
+        await self._create(made)
+        if found is not None and found.aliases:
+            await self.alias(made.kind, SchemaItem(made.label, made.properties), found.aliases)
         self.changed()
         return EnsureResult("RECREATED", spec)
+
+    async def alias(self, kind: CatalogKind, item: SchemaItem, aliases: Sequence[str]) -> None:
+        """
+        Records the aliases as all those of the item, an index or a constraint of that kind whose record is there: the
+        names Neo4j's schema DDL gave it where the schema API names it otherwise (see SchemaCommands). Nothing, on a
+        store that keeps none.
+        """
+        if self.grammar.aliased is not None:
+            await self.executor.run(self.grammar.aliased(kind, item, aliases))
 
     async def drop(self, declared: IndexSpec) -> None:
         spec = made_as(declared)
@@ -135,7 +152,7 @@ class IndexManager:
             shape = ", ".join(
                 f"{key}={value}"
                 for key, value in dataclasses.asdict(found).items()
-                if value is not None and key not in ("label", "properties", "name")
+                if value is not None and key not in ("label", "properties", "name", "aliases")
             )
             logger.info("Vector index %s on %s[%s]: %s", item_name(spec), spec.label, spec.properties[0], shape)
 
@@ -190,7 +207,8 @@ class IndexManager:
             return SchemaItem(spec.label, spec.properties) if every else None
         return next((it for it in items if it.properties == spec.properties), None)
 
-    def _matches(self, spec: IndexSpec, found: SchemaItem) -> bool:
+    def matches(self, spec: IndexSpec, found: SchemaItem) -> bool:
+        """Whether the index the engine holds, `found` for the spec, is of the spec's shape: else it is drift."""
         if isinstance(spec, VectorIndexSpec):
             # Unpinned is never drift: with no declared value there is nothing for the engine to differ from. A pin the
             # engine reports otherwise is; one the engine doesn't report, or can't express, isn't checked.

@@ -107,6 +107,8 @@ from drivine.cypher.sql.value import (
 from drivine.cypher.sql.variable_kinds import check_variable_kinds
 from drivine.drivine_error import DrivineError
 from drivine.model import stamps
+from drivine.schema import schema_ddl
+from drivine.schema.schema_ddl_result import NotDdl, Refused
 
 logger = logging.getLogger("drivine.cypher")
 
@@ -600,7 +602,16 @@ class SqlCypherCompiler(ABC):
         return dataclasses.replace(compiled, sql="WITH\n" + "\n".join(self._functions) + "\n" + compiled.sql)
 
     def compile(self, cypher: str, parameters: Mapping[str, Any] | None = None) -> CompiledCypher:
-        """The statement, with its parameters' values, as SQL."""
+        """
+        The statement, with its parameters' values, as SQL. Neo4j schema DDL is no query: one a SQL store cannot honour
+        is refused as `schema_ddl.translate` refuses it, and the rest as a schema command, which a PersistenceManager
+        runs through the schema machinery (see SchemaCommands).
+        """
+        ddl = schema_ddl.translate(cypher)
+        if isinstance(ddl, Refused):
+            raise DrivineError(ddl.message)
+        if not isinstance(ddl, NotDdl):
+            raise DrivineError(schema_ddl.SCHEMA_COMMAND)
         return self.compile_query(read_cypher(cypher), parameters or {})
 
     def compile_query(self, query: Query, parameters: Mapping[str, Any]) -> CompiledCypher:

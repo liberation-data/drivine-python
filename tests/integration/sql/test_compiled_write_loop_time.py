@@ -59,10 +59,13 @@ WRITES = [
     Write("CREATE", "UNWIND range(1, $n) AS i CREATE (:CyLoop {i: i})", "MATCH (n:CyLoop) RETURN count(n)", None),
     Write("SET", "MATCH (n:CyLoop) SET n.x = n.i", "MATCH (n:CyLoop) WHERE n.x IS NOT NULL RETURN count(n)", None),
     Write("REMOVE", "MATCH (n:CyLoop) REMOVE n.x", "MATCH (n:CyLoop) WHERE n.x IS NOT NULL RETURN count(n)", 0),
+    # The check reads each self-loop from its one node. Read as `(:CyLoop)-[r:CY_SELF]->(:CyLoop)`, it joined the node
+    # table twice, which on Postgres, its statistics left saying the table is empty (#430), was planned as a nested
+    # loop over every node for each node: 8 minutes over 20,000 rows, untimed, in CI (liberation-data/drivine#680).
     Write(
         "MERGE",
         "MATCH (n:CyLoop) MERGE (n)-[:CY_SELF]->(n)",
-        "MATCH (:CyLoop)-[r:CY_SELF]->(:CyLoop) RETURN count(r)",
+        "MATCH (n:CyLoop)-[r:CY_SELF]->(n) RETURN count(r)",
         None,
     ),
     Write(

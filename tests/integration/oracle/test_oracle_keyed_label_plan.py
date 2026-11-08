@@ -67,7 +67,7 @@ async def seeded(factory: PersistenceManagerFactory) -> AsyncIterator[None]:
     await clear(pm)
 
 
-pytestmark = [ON_ORACLE, pytest.mark.usefixtures("seeded")]
+pytestmark = [ON_ORACLE, pytest.mark.usefixtures("seeded"), pytest.mark.nightly]
 
 
 def later_compared(sql: str) -> str:

@@ -7,13 +7,14 @@ liberation-data/drivine4j#313 (#218).
 from typing import Any
 
 import oracledb
+import pytest
 
 from drivine import ConnectionProperties, QuerySpecification, cypher_statement
 from drivine.connection.oracle.oracle_connection_provider import OracleConnectionProvider
 from drivine.testing.drivine_test_containers import TEST_CONTAINER_PASSWORD
 from tests.integration.oracle.oracle_seed import ON_ORACLE
 
-pytestmark = ON_ORACLE
+pytestmark = [ON_ORACLE, pytest.mark.nightly]
 
 GRAPH = "drivine_long_text_memory"
 

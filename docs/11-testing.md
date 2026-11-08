@@ -17,11 +17,15 @@ release reaches your tests as soon as it is out; pin one with its `<TYPE>_TEST_I
 
 Drivine's own tests run on Oracle only with `ORACLE_TESTS=true`: its image is large, and the database wants two
 gigabytes. A run without it ends with the line `Oracle tests skipped: set ORACLE_TESTS=true to run them`. CI runs the
-Oracle tests in a job of their own, with `pytest -k oracle`. The tests run on the plugin's own images, the latest Neo4j,
+Oracle tests in jobs of their own, with `pytest -k oracle`. CI splits each run over parallel jobs, `pytest --shard i/n`
+(tests/shards.py), and a pull request's run leaves out the tests marked `nightly`: the timings, Oracle's plans, and the
+texts past 32 KB. They run each night (`.github/workflows/nightly.yml`, which opens an issue labelled `nightly` when
+they fail), on each push to main, in a release's gate, and on a pull request labelled `full-ci`. A local `pytest` runs
+them all. The tests run on the plugin's own images, the latest Neo4j,
 Memgraph and FalkorDB, so that an engine release that changes what Drivine reads or writes shows up at once. CI holds
 FalkorDB at a release that passes, with `FALKORDB_TEST_IMAGE` in `.github/workflows/ci.yml`: Docker Hub's
 `falkordb/falkordb:latest` is sometimes a 4.x patch release
-([FalkorDB/FalkorDB#3551](https://github.com/FalkorDB/FalkorDB/issues/3551)). CI's nightly run leaves the pin out, so
+([FalkorDB/FalkorDB#3551](https://github.com/FalkorDB/FalkorDB/issues/3551)). The nightly run leaves the pin out, so
 it shows when the pin can move or go, and runs `ghcr.io/falkordb/falkordb:latest` in place of Docker Hub's `latest`:
 Docker Hub's is whichever release FalkorDB pushed last, and that can be an older line's backport, as `v4.22.3` took it
 after `6.0.3`, while ghcr.io's is FalkorDB's newest release. Once Docker Hub's `latest` follows FalkorDB's newest line

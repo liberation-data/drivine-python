@@ -821,6 +821,7 @@ def bios(gom: StatelessGraphObjectManager) -> dict[str, str | None]:
     return {it.uuid: it.bio for it in gom.load_all(Person)}
 
 
+@pytest.mark.nightly
 @pytest.mark.parametrize("text", LONG_TEXTS, ids=["ascii", "multibyte"])
 class TestLongText:
     def test_saves_loads_and_saves_again_a_node_with_a_long_property(self, gom, text):

@@ -84,6 +84,7 @@ markers = [
     "needs_exact_float_reads: fails on a SQLite that reads 1.5E300 from text inexactly (#376); xfail there, strictly",
     "needs_sqlite_3_53: fails on SQLite before 3.53 (#376); xfail there, strictly",
     "async_only: runs tasks concurrently; left out of the sync tests scripts/unasync.py writes",
+    "nightly: slow, or rests on a timing or a plan; a pull request's CI leaves it out, and the nightly, a push to main, a release and a PR labelled full-ci run it",
 ]
 
 [tool.ruff]

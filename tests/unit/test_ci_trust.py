@@ -219,6 +219,23 @@ def test_doesnt_trust_a_pull_requests_run_that_recorded_no_tree_as_one_before_ci
     assert "it recorded no tree" in result.text
 
 
+def test_doesnt_wait_for_or_trust_a_pull_requests_run_of_the_pr_set_alone_as_it_leaves_out_the_nightly_tests() -> None:
+    answers = {
+        runs_on(SHA): workflow_runs(),
+        runs_on(HEAD): workflow_runs(going(11, event="pull_request", head_sha=HEAD)),
+        RECORDS: record_on(),
+        artifacts_of(11): recorded(f"pr-set-{TREE}"),
+    }
+    going_run = decide(answers, [SHA, HEAD])
+    answers[runs_on(HEAD)] = workflow_runs(run(11, event="pull_request", head_sha=HEAD))
+    answers[jobs_of(11)] = PASSED_JOBS
+    passed = decide(answers, [SHA, HEAD])
+
+    assert (going_run.decision, going_run.sleeps) == ("gate", [])
+    assert passed.decision == "gate"
+    assert "it ran the pull request set alone, without the nightly tests" in passed.text
+
+
 def test_counts_neither_the_nightly_which_drops_the_falkordb_pin_nor_a_run_of_another_workflow() -> None:
     result = decide(
         {

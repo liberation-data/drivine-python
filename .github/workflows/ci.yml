@@ -1,31 +1,46 @@
 name: CI
 
+# Lints and tests drivine on each Python it supports, and again with Oracle, each run split over parallel jobs with
+# containers of their own: `pytest --shard i/n` runs one part, a module whole in one part (tests/shards.py).
+#
+# A pull request's run leaves out the nightly tests (`-m nightly`, the tests marked so): slow ones, and ones that rest
+# on a timing or a plan. A full run has them too, in a part of their own: a push to main, a pull request labelled
+# `full-ci`, nightly.yml each night, and release.yml's gate. release.yml calls this as the gate before a release,
+# unless a full push or pull_request run of it has already passed on the same tree.
 on:
   push:
     branches: [main]
   pull_request:
-  # release.yml runs this as its gate, so that a release passes the same CI as a pull request, unless a push or
-  # pull_request run of it has already passed on the same tree.
+    # As the default, and labeled, so that labelling a pull request `full-ci` runs the full set on it.
+    types: [opened, synchronize, reopened, labeled]
   workflow_call:
-  # Each night on the latest images, without the pin below, so an engine's new release shows up here and not in a pull
-  # request's run.
-  schedule:
-    - cron: "17 4 * * *"
+    inputs:
+      full:
+        description: Run the nightly tests too, as a release and the nightly do.
+        type: boolean
+        default: false
 
-# FalkorDB is held at a release that passes: a pull request's run takes falkordb/falkordb:6.0.3. The nightly run takes
-# ghcr.io/falkordb/falkordb:latest, FalkorDB's newest release, and not the falkordb/falkordb:latest the plugin names:
-# Docker Hub's latest is whichever release FalkorDB pushed last, and that can be an older line's backport, as v4.22.3
-# took it after 6.0.3 (no =~, and no pattern comprehension in a function, FalkorDB/FalkorDB#3551). Drop the nightly's
-# ghcr.io image once Docker Hub's latest follows FalkorDB's newest line again; move the pin, or drop it, once the
-# nightly passes.
+# A pull request's newer run, of a later push or a label, takes the place of the one still going. Any other run, and
+# this workflow called by another, is a group of its own.
+concurrency:
+  group: ${{ github.workflow == 'CI' && github.event_name == 'pull_request' && format('ci-pr-{0}', github.event.pull_request.number) || format('ci-{0}-{1}', github.workflow, github.run_id) }}
+  cancel-in-progress: true
+
+# FalkorDB is held at a release that passes: a pull request's run takes falkordb/falkordb:6.0.3. The nightly run
+# (nightly.yml, whose name this sees as its workflow) takes ghcr.io/falkordb/falkordb:latest, FalkorDB's newest release,
+# and not the falkordb/falkordb:latest the plugin names: Docker Hub's latest is whichever release FalkorDB pushed last,
+# and that can be an older line's backport, as v4.22.3 took it after 6.0.3 (no =~, and no pattern comprehension in a
+# function, FalkorDB/FalkorDB#3551). Drop the nightly's ghcr.io image once Docker Hub's latest follows FalkorDB's newest
+# line again; move the pin, or drop it, once the nightly passes.
 env:
-  FALKORDB_TEST_IMAGE: ${{ github.event_name == 'schedule' && 'ghcr.io/falkordb/falkordb:latest' || 'falkordb/falkordb:6.0.3' }}
+  FALKORDB_TEST_IMAGE: ${{ github.workflow == 'Nightly' && 'ghcr.io/falkordb/falkordb:latest' || 'falkordb/falkordb:6.0.3' }}
 
 jobs:
   # Records the git tree this run tests, as an artifact named ci-tree-<tree>, so a release of the same tree can trust
   # this run and skip its gate (scripts/ci_trust.py). It matters on a pull request, which tests its merge ref, not the
-  # head commit the run names. It has no condition, as no job here may: release.yml trusts a run only when every job
-  # in it passed, and a job skipped by a condition doesn't.
+  # head commit the run names. A run of the pull request set alone, without the nightly tests, names it
+  # ci-tree-pr-set-<tree>, which a release doesn't trust. It has no condition, as no job here may: release.yml trusts
+  # a run only when every job in it passed, and a job skipped by a condition doesn't.
   tree:
     name: record the tree
     runs-on: ubuntu-latest
@@ -41,7 +56,7 @@ jobs:
       # Overwritten when the run is re-run, as an artifact's name is unique within a run.
       - uses: actions/upload-artifact@v4
         with:
-          name: ci-tree-${{ steps.tree.outputs.tree }}
+          name: ci-tree-${{ !(inputs.full || github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'full-ci')) && 'pr-set-' || '' }}${{ steps.tree.outputs.tree }}
           path: ci-tree.txt
           if-no-files-found: error
           overwrite: true
@@ -58,30 +73,57 @@ jobs:
       - name: Check the Cypher spec
         run: python scripts/check_cypher_spec.py
 
+  # Every test but Oracle's, on each Python, in three parts, and the nightly tests in a fourth on a full run (picked by
+  # the same test as `tree`'s record). The first part lints too. The parts of a pull request's run hold every test but
+  # the nightly ones once.
   test:
+    name: test (${{ matrix.python }}, ${{ matrix.part }})
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         python: ["3.11", "3.12", "3.13", "3.14"]
+        part: ${{ fromJSON((inputs.full || github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'full-ci')) && '["1/3", "2/3", "3/3", "nightly"]' || '["1/3", "2/3", "3/3"]') }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: ${{ matrix.python }}
       - run: uv sync
-      - run: uv run ruff check .
-      - run: uv run ruff format --check .
-      - run: uv run pyright
-      - run: uv run python scripts/unasync.py --check
-      - run: uv run pytest -q
+      - if: matrix.part == '1/3'
+        run: uv run ruff check .
+      - if: matrix.part == '1/3'
+        run: uv run ruff format --check .
+      - if: matrix.part == '1/3'
+        run: uv run pyright
+      - if: matrix.part == '1/3'
+        run: uv run python scripts/unasync.py --check
+      - name: Run the tests
+        env:
+          PART: ${{ matrix.part }}
+        run: |
+          if [ "$PART" = nightly ]; then picked=(-m nightly); else picked=(-m "not nightly" --shard "$PART"); fi
+          uv run pytest -q --durations=15 --record-durations durations.json "${picked[@]}"
+      # How long each module took, to balance the parts by (tests/durations.json). From the slowest Python alone.
+      - if: always() && matrix.python == '3.11'
+        uses: actions/upload-artifact@v4
+        with:
+          name: durations-default-${{ strategy.job-index }}
+          path: durations.json
+          if-no-files-found: ignore
+          overwrite: true
 
-  # Oracle is left out of the job above: its tests run only with ORACLE_TESTS=true. This job runs what Oracle adds,
-  # on the newest Python alone: the tests whose name or parameters say oracle, which `-k oracle` picks.
-  test-oracle:
-    name: test (Oracle)
+  # What Oracle adds, on the newest Python alone, with ORACLE_TESTS=true: the tests whose name or parameters say oracle,
+  # which `-k oracle` picks. In four parts, and the nightly ones in a fifth on a full run.
+  oracle-part:
+    name: test (Oracle, ${{ matrix.part }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        part: ${{ fromJSON((inputs.full || github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'full-ci')) && '["1/4", "2/4", "3/4", "4/4", "nightly"]' || '["1/4", "2/4", "3/4", "4/4"]') }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -93,6 +135,29 @@ jobs:
         run: docker pull gvenzl/oracle-free:23-faststart
       - run: uv sync
       - name: Run the Oracle tests
-        run: uv run pytest -q -k oracle
         env:
           ORACLE_TESTS: "true"
+          PART: ${{ matrix.part }}
+        run: |
+          if [ "$PART" = nightly ]; then picked=(-m nightly); else picked=(-m "not nightly" --shard "$PART"); fi
+          uv run pytest -q -k oracle --durations=15 --record-durations durations.json "${picked[@]}"
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: durations-oracle-${{ strategy.job-index }}
+          path: durations.json
+          if-no-files-found: ignore
+          overwrite: true
+
+  # The check the single Oracle job gave before it was split: it passes when every part with Oracle passed. It runs
+  # whatever they concluded, as no job here may be skipped (see `tree`).
+  oracle:
+    name: test (Oracle)
+    needs: oracle-part
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every part passed
+        run: |
+          echo "The parts with Oracle concluded ${{ needs.oracle-part.result }}."
+          [ "${{ needs.oracle-part.result }}" = success ]

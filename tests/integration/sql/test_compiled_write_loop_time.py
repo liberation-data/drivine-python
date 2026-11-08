@@ -29,6 +29,8 @@ import pytest
 from drivine import DatabaseType, PersistenceManager, QuerySpecification
 from drivine.query.statement import cypher_statement
 
+pytestmark = pytest.mark.nightly
+
 SMALL = 2_000
 LARGE = 20_000
 

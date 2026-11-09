@@ -5,7 +5,10 @@ CaseInsensitive on every store: the lowercased copy each write keeps, the items 
 that read it once it is. drivine4j's CaseInsensitiveCrossEngineTest.
 """
 
+import contextlib
+import os
 import uuid
+from collections.abc import Iterator
 from typing import Annotated, Any
 
 import pytest
@@ -14,6 +17,8 @@ from pydantic import create_model
 from drivine.query.statement import cypher_statement
 from drivine.sync import (
     CaseInsensitive,
+    ConnectionProperties,
+    DatabaseRegistry,
     DatabaseType,
     DrivineError,
     GraphProperty,
@@ -23,6 +28,7 @@ from drivine.sync import (
     NodeStamp,
     NullPolicy,
     PersistenceManager,
+    PersistenceManagerFactory,
     QuerySpecification,
     Relationship,
     Root,
@@ -34,6 +40,8 @@ from drivine.sync import (
     refs,
     uniqueness_constraint,
 )
+from drivine.testing.container_connection import ContainerConnection
+from drivine.testing.drivine_test_containers import TEST_CONTAINER_SPECS, DrivineTestContainers
 from tests.sync_integration.stores import create, is_oracle, is_postgres, is_sqlite, nodes
 
 COPY = "__drivine.lower.email"
@@ -96,6 +104,41 @@ def set_copy(pm: PersistenceManager, label: str, uuid_: str, value: str) -> None
     else:
         statement = f"MATCH (n:{label} {{uuid: $uuid}}) SET n.`{COPY}` = $value"
     pm.execute(QuerySpecification[Any](statement).bind({"uuid": uuid_, "value": value}))
+
+
+@pytest.fixture(scope="module")
+def own_neo4j(request: pytest.FixtureRequest) -> Iterator[ContainerConnection]:
+    """
+    A Neo4j of the module's own, for the one test that writes a text too long for a range index. Neo4j checks the size
+    of a write's index entries before it logs the write, but not against an index still populating: a write checked
+    while a new index populates, and applied once it is online, is refused only after it is in the log. Neo4j 2026.10
+    then fails to apply it and panics ("The database has encountered a critical error, and needs to be restarted"), and
+    every later test on that Neo4j fails. TODO(upstream): link the Neo4j report. Started only when that test runs on
+    Neo4j, and stopped after the module.
+    """
+    if not request.config.getini("drivine_test_containers") or DrivineTestContainers.use_local(
+        DatabaseType.NEO4J, os.environ
+    ):
+        pytest.skip("Runs on a Neo4j container of its own, and test containers are off for Neo4j")
+    spec = TEST_CONTAINER_SPECS[DatabaseType.NEO4J]
+    started = spec.container(DrivineTestContainers.image(DatabaseType.NEO4J, os.environ) or spec.image).start()
+    try:
+        yield spec.connection(started)
+    finally:
+        started.stop()
+
+
+@contextlib.contextmanager
+def own_manager(reach: ContainerConnection) -> Iterator[PersistenceManager]:
+    """A manager of the Neo4j `own_neo4j` started, in a registry of its own, closed after."""
+    registry = DatabaseRegistry()
+    registry.builder().with_properties(
+        ConnectionProperties(DatabaseType.NEO4J, reach.host, reach.port, reach.user_name, reach.password)
+    ).register("own_neo4j")
+    try:
+        yield PersistenceManagerFactory(registry).get("own_neo4j")
+    finally:
+        registry.close()
 
 
 class TestTheCopy:
@@ -361,18 +404,20 @@ class TestLongTexts:
         assert not again["l4"]
         assert again["l5"] == wide.lower()
 
-    def test_under_the_index_over_the_copy_neo4j_refuses_to_save_one_of_40001_characters(self, gom, pm, label):
-        """The reference for a text too long for a range index: once there is the index over the copy, Neo4j refuses."""
+    def test_under_the_index_over_the_copy_neo4j_refuses_to_save_one_of_40001_characters(self, pm, label, request):
+        """
+        The reference for a text too long for a range index: once there is the index over the copy, Neo4j refuses.
+        On a Neo4j of its own (see `own_neo4j`), and once the index is online, as drivine4j's test waits for it.
+        """
         if pm.type is not DatabaseType.NEO4J:
             pytest.skip("Neo4j's own refusal")
-        account = fragment(label)
-        spec = range_index(label, "email", ignore_case=True)
-        gom.indexes.ensure(spec)
-        try:
+        with own_manager(request.getfixturevalue("own_neo4j")) as own:
+            gom = StatelessGraphObjectManager(own)
+            account = fragment(label)
+            gom.indexes.ensure(range_index(label, "email", ignore_case=True))
+            own.execute(QuerySpecification("CALL db.awaitIndexes(60)"))
             with pytest.raises(Exception, match="is too large for the index"):
                 gom.save(account(uuid="g1", email="Ab" * 20_000 + "C"))
-        finally:
-            gom.indexes.drop(spec)
 
 
 class TestUniqueness:

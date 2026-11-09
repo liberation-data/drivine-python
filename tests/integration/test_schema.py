@@ -400,6 +400,22 @@ class TestAnEnsureReturnsOnceTheIndexIsBuilt:
         finally:
             await StatelessGraphObjectManager(pm).indexes.drop(range_index(label, "code"))
 
+    async def test_on_falkordb_a_constraints_range_index_is_waited_for_within_the_timeout_set(self, factory, pm, label):
+        if pm.type is not DatabaseType.FALKORDB:
+            pytest.skip("Only FalkorDB makes a range index before a constraint, and waits for it")
+        await seed(pm, label)
+        catalog = catalog_of(pm, label, uniqueness_constraint(label, "code"))
+        manager = schema_manager(factory, "FAIL_FAST", 0)
+        gom = StatelessGraphObjectManager(pm)
+        try:
+            with pytest.raises(
+                DrivineError, match=rf"STILL BUILDING: .*RANGE index on {label}\(code\) .*waited at most 0 s"
+            ):
+                await manager.ensure_catalog(catalog)
+        finally:
+            await gom.constraints.drop(uniqueness_constraint(label, "code"))
+            await gom.indexes.drop(range_index(label, "code"))
+
 
 class TestSchemaManager:
     async def test_enforces_what_fragments_declare(self, factory, pm, label):

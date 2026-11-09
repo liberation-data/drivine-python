@@ -228,6 +228,22 @@ async def test_on_neo4j_a_wait_that_fails_neither_by_a_failed_build_nor_by_its_t
     assert raised.value is other
 
 
+async def test_on_neo4j_a_wait_that_fails_where_the_state_cant_be_read_is_raised_as_it_is():
+    class Unreadable(Neo4jLike):
+        def answer(self, statement: str | NativeOperation, bindings: Mapping[str, Any]) -> list[Any]:
+            if statement == GRAMMAR.index_state:
+                raise DrivineError("connection lost")
+            return super().answer(statement, bindings)
+
+    other = DrivineError("connection lost")
+    store = Unreadable("P_a", other)
+
+    with pytest.raises(DrivineError) as raised:
+        await manager(store).ensure(range_index("P", "a"))
+
+    assert raised.value is other
+
+
 class FalkorDbLike:
     """
     An executor over a FalkorDB, which builds an index in the background: once made, the label's indexes are listed
@@ -280,6 +296,15 @@ async def test_on_falkordb_an_index_still_under_construction_when_the_wait_ends_
         "FalkorDB RANGE index on P(a) is still being built, having waited at most 0.05 s: "
         "it is [Indexing] 0/20000: UNDER CONSTRUCTION"
     )
+
+
+async def test_on_falkordb_a_label_not_listed_when_the_wait_ends_raises_saying_so():
+    class NotListed(FalkorDbLike):
+        async def run(self, statement: str | NativeOperation, bindings: Mapping[str, Any] | None = None) -> list[Any]:
+            return []
+
+    with pytest.raises(IndexNotBuilt, match="still being built, having waited at most 0.05 s: it is not listed"):
+        await falkordb(NotListed(), 0.05).ensure(range_index("P", "a"))
 
 
 async def test_on_falkordb_a_failed_build_raises():

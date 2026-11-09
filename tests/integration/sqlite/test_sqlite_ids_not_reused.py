@@ -181,8 +181,9 @@ async def test_a_file_an_earlier_drivine_made_is_refused_through_a_registrys_per
     try:
         pm = PersistenceManagerFactory(registry).get("earlier")
         for _ in range(2):
-            with pytest.raises(ReusedIdsError, match="earlier Drivine"):
+            with pytest.raises(ReusedIdsError, match="earlier Drivine") as refused:
                 await pm.query(QuerySpecification[Any]("SELECT 1"))
+            assert type(refused.value) is ReusedIdsError
     finally:
         await registry.close()
 

@@ -272,6 +272,109 @@ class TestLookups:
         assert (stored(pm, label))["a1"][COPY] == "ada@x.com"
 
 
+class TestLongTexts:
+    """A text past what Oracle reads a text as, and a VARCHAR2 holds (drivine4j#532)."""
+
+    def test_one_of_40001_characters_is_saved_with_its_copy_and_found_once_the_index_is_there(self, gom, pm, label):
+        if pm.type is DatabaseType.FALKORDB:
+            pytest.skip("FalkorDB finds no node by eq_ignore_case on a text this long")
+        account = fragment(label)
+        spec = range_index(label, "email", ignore_case=True)
+        long = "Ab" * 20_000 + "C"
+        gom.save_all(
+            [
+                account(uuid="g1", email=long),
+                account(uuid="g2", email="Ann@X.com"),
+                account(uuid="g3", email=long + "d"),
+                account(uuid="g4", email="Ab"),
+            ]
+        )
+        assert (stored(pm, label))["g1"][COPY] == long.lower()
+        # Saved again as an empty text, the copy goes on Oracle, which keeps an empty text as null; elsewhere it is
+        # empty.
+        gom.save(account(uuid="g4", email=""))
+        if is_oracle(pm):
+            assert COPY not in (stored(pm, label))["g4"]
+        else:
+            assert not (stored(pm, label))["g4"].get(COPY)
+
+        # Neo4j cannot hold a text this long in a range index: the index fails, and the lookup reads the label's nodes.
+        gom.indexes.ensure(spec)
+        try:
+            q = refs(account)
+
+            def found(email: str) -> set[str]:
+                return {it.uuid for it in gom.load_all(account, q.email.eq_ignore_case(email))}
+
+            assert found(long.upper()) == {"g1"}
+            assert found("ann@x.COM") == {"g2"}
+            assert found(long[:-1]) == set()
+            assert (gom.load(account, "g1")).email == long
+        finally:
+            # Dropped, so that a failed index on Neo4j is not waited for by a test after this one.
+            gom.indexes.drop(spec)
+
+    def test_ensuring_the_index_fills_in_the_copy_of_a_text_of_5000_bytes_and_a_lookup_finds_it(self, gom, pm, label):
+        if pm.type is DatabaseType.FALKORDB:
+            pytest.skip("FalkorDB finds no node by eq_ignore_case on a text this long")
+        account = fragment(label)
+        long = "Ab" * 2_500
+        # 2,800 characters of 4,200 bytes: past what Oracle reads a text as, though fewer than 4,000 characters. Only
+        # its ASCII is lowercased, as Memgraph's toLower lowercases nothing else.
+        wide = "\u00e9A" * 1_400
+        # Written outside Drivine, so no node has a copy until the index fills it in.
+        create(
+            pm,
+            label,
+            {"uuid": "l1", "email": long},
+            {"uuid": "l2", "email": "Bob@X.com"},
+            {"uuid": "l3", "email": ""},
+            {"uuid": "l4", "email": "", COPY: "stale"},
+            {"uuid": "l5", "email": wide},
+        )
+        assert COPY not in (stored(pm, label))["l1"]
+
+        gom.indexes.ensure(range_index(label, "email", ignore_case=True))
+        copies = {k: v.get(COPY) for k, v in (stored(pm, label)).items()}
+        assert copies["l1"] == long.lower()
+        assert copies["l2"] == "bob@x.com"
+        # The copy of an empty text is empty, or on Oracle, which keeps an empty text as null, there is none.
+        assert not copies["l3"]
+        assert not copies["l4"]
+        if is_oracle(pm):
+            assert COPY not in (stored(pm, label))["l4"]
+        assert copies["l5"] == wide.lower()
+        q = refs(account)
+
+        def found(email: str) -> set[str]:
+            return {it.uuid for it in gom.load_all(account, q.email.eq_ignore_case(email))}
+
+        assert found(long.upper()) == {"l1"}
+        assert found("BOB@x.com") == {"l2"}
+        assert found(wide) == {"l5"}
+        # Filled in again, the copies stay as the properties are.
+        catalog = gom._lower_copies()
+        assert catalog is not None
+        catalog.fill_in(label, ["email"], True)
+        again = {k: v.get(COPY) for k, v in (stored(pm, label)).items()}
+        assert again["l1"] == long.lower()
+        assert not again["l4"]
+        assert again["l5"] == wide.lower()
+
+    def test_under_the_index_over_the_copy_neo4j_refuses_to_save_one_of_40001_characters(self, gom, pm, label):
+        """The reference for a text too long for a range index: once there is the index over the copy, Neo4j refuses."""
+        if pm.type is not DatabaseType.NEO4J:
+            pytest.skip("Neo4j's own refusal")
+        account = fragment(label)
+        spec = range_index(label, "email", ignore_case=True)
+        gom.indexes.ensure(spec)
+        try:
+            with pytest.raises(Exception, match="is too large for the index"):
+                gom.save(account(uuid="g1", email="Ab" * 20_000 + "C"))
+        finally:
+            gom.indexes.drop(spec)
+
+
 class TestUniqueness:
     def test_two_values_differing_only_in_case_are_a_violation_and_then_refused(self, gom, pm, label):
         account = fragment(label)

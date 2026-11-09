@@ -129,7 +129,8 @@ class OracleQueryRenderer(SqlQueryRenderer):
         The comparison of the root's property `name` with text as the expression of a range index or a uniqueness
         constraint of one of the root's labels that begins with the property, the first label with one: None where
         there is none, or where the comparison isn't `eq`, `gt`, `gte`, `lt`, `lte` or an equality with a lowercased
-        copy (see lower_copies), with text of at most 4,000 bytes.
+        copy (see lower_copies), with text of at most 4,000 bytes; nor an equality with a copy for a value that may
+        lowercase past what the index holds (see `past_text`).
 
         It is written beside the JSON test, which still decides: the expression is the property as text, so it holds of
         every node the test holds of, and of a number written as the same text too. It is null for a node without the
@@ -141,6 +142,8 @@ class OracleQueryRenderer(SqlQueryRenderer):
         operator = "=" if lowered else _SQL_OPERATORS.get(test.operator)
         value = storable(stored(test.value))
         if operator is None or not isinstance(value, str) or len(value.encode()) > 4000:
+            return None
+        if lowered and past_text(value):
             return None
         label = next(
             (it for it in self.root_labels if any(i.label == it and i.properties[:1] == (name,) for i in self.indexed)),
@@ -184,6 +187,10 @@ class OracleQueryRenderer(SqlQueryRenderer):
             return f"NOT {present}"
         if operator == "IS_NOT_NULL":
             return present
+        # One past what the index holds is compared as a CLOB, and the index does not answer it.
+        if operator == "EQ_LOWERED" and past_text(test.value):
+            bound = self._bind(str(test.value))
+            return f"DBMS_LOB.COMPARE(JSON_VALUE({column}, '${k}' RETURNING CLOB), LOWER(TO_CLOB({bound}))) = 0"
         return self._compare_text(operator, test.value, f"JSON_VALUE({column}, '${k}')")
 
     def _compare_text(self, operator: str, value: Any, text: str) -> str:
@@ -221,6 +228,17 @@ class OracleQueryRenderer(SqlQueryRenderer):
         flags = ", 'i'" if ignore_case else ""
         anchored = f"^({body})\\z"
         return f"REGEXP_LIKE({text}, {self._bind(anchored)}{flags})"
+
+
+def past_text(value: Any) -> bool:
+    """
+    Whether `value`, lowercased, may be past the 4,000 bytes `JSON_VALUE` reads a text as, and an index over it holds,
+    as drivine4j's `OraclePredicates.pastText` decides it, so the same lookup is written alike in all three libraries:
+    its length in UTF-16 units, as Java and JavaScript count it, times three. No UTF-16 unit takes more than three
+    bytes of UTF-8, and a character of four bytes is two units. A copy that long reads as null, so an equality with it
+    is compared as a CLOB. A lone surrogate, which a Python text may hold, is one unit, as in Java.
+    """
+    return isinstance(value, str) and len(value.encode("utf-16-le", "surrogatepass")) // 2 * 3 > 4000
 
 
 def _renumbered(body: str) -> str:

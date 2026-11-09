@@ -37,6 +37,7 @@ from drivine.backend.cypher_grammar import NEO4J_GRAMMAR
 from drivine.backend.fragment_group import FragmentGroup
 from drivine.backend.oracle.oracle_backend import OracleBackend
 from drivine.backend.oracle.oracle_graph import OracleGraph
+from drivine.backend.oracle.oracle_query_renderer import past_text
 from drivine.backend.postgres.postgres_backend import PostgresBackend
 from drivine.backend.postgres.postgres_graph import PostgresGraph
 from drivine.connection.database_type import DatabaseType
@@ -59,6 +60,7 @@ from drivine.schema.lower_copy_statements import (
     lowered_entry,
 )
 from drivine.schema.schema_grammar import FALKORDB_SCHEMA, MEMGRAPH_SCHEMA, NEO4J_SCHEMA, schema_grammar_for
+from drivine.schema.schema_item import SchemaItem
 from drivine.schema.schema_manager import inventory_key
 from drivine.schema.schema_specs import item_name, lowercased, made_as
 from tests.models import Account, AccountFriends
@@ -202,6 +204,10 @@ class TestWrites:
         )
         assert "lower_node(v_root, $x_" in statement.text
         assert "PROCEDURE lower_node(p NUMBER, p_keys VARCHAR2) IS" in statement.text
+        # Read and written as a CLOB, so a text past what a VARCHAR2 holds has its copy too (drivine4j#532).
+        assert "        v CLOB;\n" in statement.text
+        assert "v := LOWER(o.get_clob(k));" in statement.text
+        assert "IF v IS NULL OR LENGTH(v) = 0 THEN o.remove(" in statement.text
         assert '["display_name","email"]' in statement.bindings.values()
 
     def test_on_oracle_a_block_without_copies_declares_no_lower_node(self):
@@ -299,6 +305,19 @@ class TestTheRecord:
         rows = [{"label": "Account", "properties": '["email"]'}, {"label": "A", "properties": "x"}]
         assert catalog_entries(rows) == [("Account", "email")]
 
+    def test_on_oracle_a_fill_reads_the_property_and_its_copy_as_clobs(self):
+        # Read as CLOBs, a text past 4,000 bytes has its copy too (drivine4j#532).
+        fill = schema_grammar_for(DatabaseType.ORACLE).lower_copies.fill("CiAccount", "email", 10000)
+        assert (
+            "SET n.props = JSON_TRANSFORM(n.props, SET '$.\"__drivine.lower.email\"' = "
+            "LOWER(JSON_VALUE(n.props, '$.email' RETURNING CLOB)) REMOVE ON NULL)"
+        ) in fill
+        assert (
+            "AND DBMS_LOB.COMPARE(JSON_VALUE(n.props, '$.\"__drivine.lower.email\"' RETURNING CLOB) || ' ', "
+            "LOWER(JSON_VALUE(n.props, '$.email' RETURNING CLOB)) || ' ') <> 0"
+        ) in fill
+        assert "AND ROWNUM <= 10000" in fill
+
 
 class TestLookups:
     registry = ModelRegistry()
@@ -350,6 +369,45 @@ class TestLookups:
         rendered = backend.render_query(Query(where=where), account, lambda it: self.registry.fragment(it).labels)
         assert written in rendered.where
         assert "Ada@X.com" in rendered.bindings.values()
+
+    def test_on_oracle_compare_a_value_that_may_lowercase_past_the_index_as_a_clob(self):
+        # As drivine4j's pastText: a value of more than 1,333 UTF-16 units, three bytes each at most, may lowercase past
+        # the 4,000 bytes the index holds, so the copy is compared as a CLOB and the label tested on its own.
+        account = self.registry.fragment(Account)
+        indexed = [SchemaItem("Account", ("__drivine.lower.email",))]
+
+        def lowered(value: str) -> tuple[str, tuple[str, ...]]:
+            where = lowered_where(refs(Account).email.eq_ignore_case(value), account, {"email"})
+            rendered = OracleBackend(OracleGraph()).render_query(
+                Query(where=where), account, lambda it: self.registry.fragment(it).labels, indexed
+            )
+            return rendered.where, rendered.labels_tested
+
+        clob = (
+            "DBMS_LOB.COMPARE(JSON_VALUE(n.props, '$.\"__drivine.lower.email\"' RETURNING CLOB), "
+            "LOWER(TO_CLOB($_q0))) = 0"
+        )
+        assert lowered("a" * 1_334) == (clob, ())
+        # A character outside the BMP is two UTF-16 units, as Java and JavaScript count it: 1,333 characters, 1,334
+        # units.
+        assert lowered("\U0001f600" + "a" * 1_332) == (clob, ())
+        assert lowered("a" * 1_333) == (
+            "CASE WHEN JSON_EXISTS(n.labels, '$?(@ == \"Account\")') THEN JSON_VALUE(n.props, "
+            "'$.\"__drivine.lower.email\"' RETURNING VARCHAR2(4000) NULL ON ERROR) END = LOWER($_q0) AND "
+            "JSON_VALUE(n.props, '$.\"__drivine.lower.email\"') = LOWER($_q1)",
+            ("Account",),
+        )
+        assert lowered("\U0001f600" + "a" * 1_331)[1] == ("Account",)
+
+    def test_past_text_counts_utf_16_units_of_a_text_and_nothing_else(self):
+        # As drivine4j's pastText: a lone surrogate, which a Python text may hold, is one unit, and not an error.
+        assert past_text("\ud800" * 1_334)
+        assert not past_text("\ud800" * 1_333)
+        # Only a text: a number, a list or None is never past it.
+        assert not past_text(10**5000)
+        assert not past_text(["a" * 2_000])
+        assert not past_text(b"a" * 2_000)
+        assert not past_text(None)
 
 
 class _Store:

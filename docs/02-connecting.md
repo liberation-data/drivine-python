@@ -193,8 +193,9 @@ it, as on Oracle and Postgres: an element id an application holds names the elem
 SQLite keeps the greatest id each table has given in its own table, `sqlite_sequence`; deleting every row, as a test's
 cleanup does, leaves it, so ids go on from there. A file whose graph tables an earlier Drivine made, with `INTEGER
 PRIMARY KEY` alone, which gives a new row the id of the last one deleted, is refused on the provider's first
-connection and on every one after it, with a `ReusedIdsError` that names the graph and the file. There is no
-migration: make a new file and save the graph into it again.
+connection and on every one after it, with a `ReusedIdsError`, from `drivine` and `drivine.sync`, that names the
+graph and the file. Its `graph` is the graph's name, as the provider was given it, and its `path` the file, `None` for a
+database in memory or in a temporary file. There is no migration: make a new file and save the graph into it again.
 
 - A save is the plan of steps Postgres's write function carries out, carried out by a function Drivine registers on
   each connection, `drivine_write`, under a savepoint: applied whole or not at all, in a transaction or not. The other

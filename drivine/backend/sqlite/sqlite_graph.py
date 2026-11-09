@@ -123,8 +123,8 @@ class SqliteGraph(SqlGraph):
         that is there, so the store is looked for first.
 
         The count is REUSES_IDS where the table of nodes or of relationships is there and was made without
-        `AUTOINCREMENT`, as SQLite keeps the statement that made it: one look finds both. drivine4j's text, but for the
-        `KEY` before `AUTOINCREMENT`, so that a graph whose name holds the word is not taken for one made with it.
+        `AUTOINCREMENT`, as SQLite keeps the statement that made it: one look finds both. drivine4j's text: it looks for
+        `KEY AUTOINCREMENT`, so that a graph whose name holds the word is not taken for one made with it.
         """
         names: list[str] = []
         for it in self.ddl:

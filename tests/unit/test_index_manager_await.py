@@ -184,27 +184,48 @@ async def test_on_neo4j_an_index_still_populating_when_the_wait_ends_raises_sayi
     assert not raised.value.failed
 
 
-async def test_on_neo4j_a_wait_shorter_than_a_second_is_asked_of_neo4j_as_0_seconds():
+@pytest.mark.parametrize(("asked", "seconds"), [(0, 0), (0.0, 0), (0.005, 1), (0.5, 1), (1, 1), (1.001, 2), (60, 60)])
+async def test_on_neo4j_the_wait_is_rounded_up_to_whole_seconds_so_it_is_at_least_what_was_asked(asked, seconds):
     store = Neo4jLike()
 
-    await manager(store, 0.005).ensure(range_index("P", "a"))
+    await manager(store, asked).ensure(range_index("P", "a"))
 
-    assert [it["timeout"] for it in store.awaited] == [0]
+    assert store.awaited == [{"name": "P_a_range", "timeout": seconds}], "only a zero timeout checks once"
+
+
+class Coded(Exception):
+    """A driver's error, with Neo4j's code."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def timed_out() -> DrivineError:
+    error = DrivineError("did not come online within 1 SECONDS")
+    error.__cause__ = Coded("Neo.ClientError.Procedure.ProcedureTimedOut", "did not come online within 1 SECONDS")
+    return error
 
 
 async def test_on_neo4j_a_wait_that_timed_out_raises_though_the_index_came_online_since():
-    timed_out = DrivineError("did not come online within 0 SECONDS")
-    store = Neo4jLike("P_a", timed_out, {"state": "ONLINE", "failure": None})
+    store = Neo4jLike("P_a", timed_out(), {"state": "ONLINE", "failure": None})
 
     with pytest.raises(IndexNotBuilt, match="still being built, having waited at most 0.005 s: did not come online"):
         await manager(store, 0.005).ensure(range_index("P", "a"))
 
+    assert not [it for it, _ in store.ran if it == GRAMMAR.index_state], "a timeout is told by its code"
 
-async def test_on_neo4j_a_failed_wait_on_an_index_whose_state_cant_be_read_raises_giving_the_failure():
-    store = Neo4jLike("P_a", DrivineError("There is no such index P_a"), None)
 
-    with pytest.raises(IndexNotBuilt, match="still being built, having waited at most 60 s: There is no such index"):
+@pytest.mark.parametrize("state", [None, {"state": "ONLINE", "failure": None}], ids=["not-listed", "online"])
+async def test_on_neo4j_a_wait_that_fails_neither_by_a_failed_build_nor_by_its_timeout_is_raised_as_it_is(state):
+    # An index not there, or a connection lost: neither a build to report as failed nor one still running.
+    other = DrivineError("There is no such index P_a")
+    store = Neo4jLike("P_a", other, state)
+
+    with pytest.raises(DrivineError) as raised:
         await manager(store).ensure(range_index("P", "a"))
+
+    assert raised.value is other
 
 
 class FalkorDbLike:

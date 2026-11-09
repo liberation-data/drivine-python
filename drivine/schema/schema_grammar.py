@@ -95,10 +95,17 @@ class SchemaGrammar:
     back. None where the DDL returns the index built (Memgraph, the SQL stores), or where the listings give the build's
     status instead (`list_index_statuses`).
     """
+    is_build_timeout: Callable[[BaseException], bool] = field(default=lambda failure: False)
+    """
+    Beside `await_index`, whether its failure says the index was still being built when the wait ended, rather than
+    that its build failed: by the code of the driver's error.
+    """
     index_state: str | None = None
     """
     Beside `await_index`, the statement giving the `state` of the index named `$name`, and its `failure`, the message
-    the engine gives for a failed build: one row, or none when there is no such index.
+    the engine gives for a failed build: one row, or none when there is no such index. Read when the wait fails other
+    than by its timeout: only an index listed FAILED is taken for a failed build, and one POPULATING for one still
+    being built.
     """
     list_index_statuses: SchemaListing | None = None
     """
@@ -164,16 +171,24 @@ been dropped.", which Neo4j 4.4 to 2026 all give.
 """
 
 
-def _neo4j_blocked_by_index(failure: BaseException) -> bool:
+PROCEDURE_TIMED_OUT = "Neo.ClientError.Procedure.ProcedureTimedOut"
+"""Neo4j's code for a procedure whose wait ran out: `db.awaitIndex`'s, for an index still populating."""
+
+
+def _neo4j_coded(failure: BaseException, code: str) -> bool:
     """By the code of the driver's error, under whatever wraps it; never by the message, or a clash of names."""
     cause: BaseException | None = failure
     for _ in range(10):
         if cause is None:
             return False
-        if getattr(cause, "code", None) == INDEX_ALREADY_EXISTS:
+        if getattr(cause, "code", None) == code:
             return True
         cause = cause.__cause__
     return False
+
+
+def _neo4j_blocked_by_index(failure: BaseException) -> bool:
+    return _neo4j_coded(failure, INDEX_ALREADY_EXISTS)
 
 
 def _pattern(spec: Any) -> str:
@@ -303,6 +318,7 @@ NEO4J_SCHEMA = SchemaGrammar(
     # it is ONLINE: an entry too large for it, written as it comes online, is refused only after it is in the log, and
     # Neo4j 2026.10 then panics until restarted. So an index is waited for before it is reported made.
     await_index="CALL db.awaitIndex($name, $timeout)",
+    is_build_timeout=lambda failure: _neo4j_coded(failure, PROCEDURE_TIMED_OUT),
     index_state=(
         "SHOW INDEXES YIELD name, state, failureMessage WHERE name = $name "
         "RETURN {state: state, failure: failureMessage}"

@@ -37,5 +37,5 @@ class SchemaOptions:
     index_build_timeout: float = BUILD_TIMEOUT
     """
     How many seconds an index the engine builds in the background (Neo4j, FalkorDB) is waited on to be built before
-    `ensure` goes on. Neo4j waits in whole seconds.
+    `ensure` goes on. Neo4j waits in whole seconds, so it is rounded up to them there: only 0 checks once.
     """

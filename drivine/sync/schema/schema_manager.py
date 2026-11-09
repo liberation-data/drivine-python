@@ -399,7 +399,8 @@ class SchemaManager:
         changed since it last applied (a first version is adopted, not acted on); an item another owner declares too is
         never recreated by one owner's version. Items the owner applied before and no longer declares (orphans) are
         reported, never dropped. The owner's version and inventory are recorded only when the apply succeeds, so a
-        failed one is tried again on the next enforce.
+        failed one is tried again on the next enforce. An index whose build failed or did not end in time is reported
+        once the other items are applied: raised, every such index listed, under FAIL_FAST, and logged under WARN.
 
         `only`, from `ensure`, is the keys of the items given: just those are applied, the version stays as recorded,
         and `recreate_on_startup` doesn't apply. Runtime items an earlier manager recorded and this one hasn't been
@@ -437,11 +438,22 @@ class SchemaManager:
         applied = own if only is None else [it for it in own if inventory_key(it) in only]
         ordered = [*(it for it in applied if it.kind != "UNIQUE"), *(it for it in applied if it.kind == "UNIQUE")]
         results: list[EnsureResult[Any]] = []
+        unbuilt: list[IndexNotBuilt] = []
         for spec in ordered:
             # A runtime item marked stale missed its owner's recreate, and is recreated now.
             key = inventory_key(spec)
             recreate = forced or ((recreate_owner or key in stale) and key not in plan.co_owned)
-            results.append(self._ensure(gom, spec, recreate))
+            results.append(self._ensure(gom, spec, recreate, unbuilt))
+        problems = [_described(it) for it in unbuilt]
+        if problems and self.options.mode != "WARN":
+            # After the owner's other items are applied, and before its marker is written, so the next apply waits
+            # again.
+            raise DrivineError(
+                f"Schema application for owner '{owner}' on database '{database}' found problems:\n"
+                + "\n".join(problems)
+                + "\nResolve them, make SchemaOptions(index_build_timeout=...) longer for an index still being built, "
+                'or set mode="WARN" to continue with warnings.'
+            ) from unbuilt[0]
         # A carried item has no spec here to be recreated from: it is marked, and recreated when next ensured. A
         # version change spares one another owner declares, as it spares a co-owned item. A runtime item not applied
         # this time keeps its mark.
@@ -456,6 +468,8 @@ class SchemaManager:
                 {"scope": owner, "version": stored if ensuring else version, "items": items}
             )
         )
+        for problem in problems:
+            logger.warning(problem)
         return results
 
     def _ensure_singleton(self, gom: StatelessGraphObjectManager, owner: str) -> None:
@@ -485,15 +499,19 @@ class SchemaManager:
                 ", ".join(orphans),
             )
 
-    def _ensure(self, gom: StatelessGraphObjectManager, spec: SchemaSpec, recreate: bool) -> EnsureResult[Any]:
+    def _ensure(
+        self, gom: StatelessGraphObjectManager, spec: SchemaSpec, recreate: bool, unbuilt: list[IndexNotBuilt]
+    ) -> EnsureResult[Any]:
+        """
+        Applies the item, adding an index whose build failed or did not end in time to `unbuilt`, which needs
+        attention as a drift does, and giving what was done: raised under FAIL_FAST once the owner's other items are
+        applied, and logged under WARN.
+        """
         try:
             return self._ensure_built(gom, spec, recreate)
-        except IndexNotBuilt as unbuilt:
-            # FAIL_FAST raises an index whose build failed or did not end in time; WARN logs it and goes on.
-            if self.options.mode != "WARN":
-                raise
-            logger.warning("%s. It is left as it is.", unbuilt)
-            return unbuilt.result
+        except IndexNotBuilt as not_built:
+            unbuilt.append(not_built)
+            return not_built.result
 
     def _ensure_built(self, gom: StatelessGraphObjectManager, spec: SchemaSpec, recreate: bool) -> EnsureResult[Any]:
         timeout = self.options.index_build_timeout
@@ -600,6 +618,16 @@ class SchemaManager:
             f"{by} declare the {spec.kind} on {spec.label}({', '.join(spec.properties)}){on} differently: "
             f"{held} and {spec}."
         )
+
+
+def _described(unbuilt: IndexNotBuilt) -> str:
+    """An index not built, as SchemaManager reports it, as drivine4j's does."""
+    if unbuilt.failed:
+        return (
+            f"  - BUILD FAILED: {unbuilt}. It is left in place, failed: drop or recreate it once the data it failed on "
+            "is fixed"
+        )
+    return f"  - STILL BUILDING: {unbuilt}. It is left to be built, and waited for again on the next enforce"
 
 
 def _runtime_catalogs(

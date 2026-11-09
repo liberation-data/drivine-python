@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import itertools
 import logging
+import math
 import time
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any, Literal, NoReturn, TypeVar, cast
@@ -206,12 +207,14 @@ class IndexManager:
         just as it comes online stops the database until it is restarted; FalkorDB answers a query from an index it is
         still building, with part of the rows. So nothing that makes an index hands it back before it is built.
 
-        - Neo4j waits on the server, with `db.awaitIndex`, for the index by its name.
+        - Neo4j waits on the server, with `db.awaitIndex`, for the index by its name, `build_timeout` rounded up to
+          whole seconds.
         - FalkorDB is polled, every BUILD_POLL seconds, until `db.indexes()` no longer lists the label's indexes as
           UNDER CONSTRUCTION (`list_index_statuses`).
 
         A build that failed, or did not end in time, raises IndexNotBuilt (see `_not_built`). The index is left as it
-        is. Elsewhere the DDL returns the index built, and nothing is waited for.
+        is. Any other failure of the wait (an index not there, a connection lost) is raised as it is. Elsewhere the
+        DDL returns the index built, and nothing is waited for.
         """
         if self.grammar.await_index is not None:
             found = self._find(spec)
@@ -223,12 +226,20 @@ class IndexManager:
             # process made under another name.
             name = found.name
             try:
-                # Neo4j takes whole seconds.
-                self.executor.run(self.grammar.await_index, {"name": name, "timeout": int(self.build_timeout)})
+                # Neo4j takes whole seconds, rounded up so that the wait is at least what was asked: only a zero
+                # timeout is zero, which Neo4j takes as checking once.
+                timeout = math.ceil(self.build_timeout)
+                self.executor.run(self.grammar.await_index, {"name": name, "timeout": timeout})
             except Exception as error:
-                # Neo4j's failure says why, and its state whether the build failed or was still running.
-                state = self._state(name)
-                failed = state is not None and str(state.get("state")).upper() == "FAILED"
+                # A timeout is told by its code. Any other error is a failed build only where the index is listed
+                # FAILED, and still being built where POPULATING: one not there, or a connection lost, is raised as it
+                # is, not taken for a build that failed or is still running.
+                timed_out = self.grammar.is_build_timeout(error)
+                state = None if timed_out else self._state(name)
+                listed = str((state or {}).get("state")).upper()
+                if not timed_out and listed not in ("FAILED", "POPULATING"):
+                    raise
+                failed = listed == "FAILED"
                 reason = (state or {}).get("failure") if failed else None
                 self._not_built(result, name, failed, str(reason or error), error)
             return
@@ -262,7 +273,8 @@ class IndexManager:
     ) -> NoReturn:
         """
         Raises IndexNotBuilt for the index of `result`: the one place a build that failed, or is still running once the
-        wait is over, is raised. SchemaManager logs it instead under its WARN mode.
+        wait is over, is raised. SchemaManager collects it, and raises an owner's at the end under FAIL_FAST, or logs
+        them under WARN.
         """
         spec = result.spec
         named = f"{name} " if name else ""

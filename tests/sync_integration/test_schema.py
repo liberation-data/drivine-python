@@ -224,6 +224,12 @@ def catalog_of(pm: PersistenceManager, label: str, *specs: Any) -> SchemaCatalog
     return SchemaCatalog.of(*specs).named(label).for_database(pm.database)
 
 
+def recorded(pm: PersistenceManager, owner: str) -> str | None:
+    """The items the owner's marker records; None where it has none."""
+    backend = StatelessGraphObjectManager(pm).backend
+    return pm.maybe_get_one(backend.schema_marker("items").spec({"scope": owner}))
+
+
 TOO_LONG = "x" * 40_000
 """A text too large for a Neo4j range index: an index made over it after it is saved fails to build."""
 
@@ -323,36 +329,56 @@ class TestAnEnsureReturnsOnceTheIndexIsBuilt:
             with caplog.at_level(logging.WARNING):
                 results = (manager.ensure_catalog(catalog))[pm.database]
 
-            assert [it.status for it in results] == ["CREATED", "CREATED"]
+            assert [it.status for it in results] == ["CREATED", "CREATED"], "reported as what was done"
             [warned] = [it.getMessage() for it in caplog.records if "failed to build" in it.getMessage()]
+            assert "BUILD FAILED" in warned
             assert f"{label}_code_range" in warned and "too large" in warned.lower()
             assert states(pm, label) == ["FAILED", "ONLINE"], "the index after it was made"
+            assert recorded(pm, label) is not None, "the owner is recorded"
+
+            # Found again, the failed index is not taken for one that serves: it is logged again.
+            caplog.clear()
+            with caplog.at_level(logging.WARNING):
+                again = (manager.ensure_catalog(catalog))[pm.database]
+            assert [it.status for it in again] == ["ALREADY_MATCHING", "ALREADY_MATCHING"]
+            assert len([it for it in caplog.records if "BUILD FAILED" in it.getMessage()]) == 1
         finally:
             manager.remove_catalog(catalog)
 
-    def test_on_neo4j_a_failed_build_raises_under_fail_fast(self, factory, pm, label):
+    def test_on_neo4j_a_failed_build_raises_under_fail_fast_once_the_owners_other_items_are_applied(
+        self, factory, pm, label
+    ):
         on_neo4j(pm)
         create(pm, label, {"code": TOO_LONG})
-        catalog = catalog_of(pm, label, range_index(label, "code"))
+        catalog = catalog_of(pm, label, range_index(label, "code"), range_index(label, "email"))
         manager = schema_manager(factory, "FAIL_FAST")
+        gom = StatelessGraphObjectManager(pm)
         try:
-            with pytest.raises(IndexNotBuilt, match=f"{label}_code_range.* failed to build: .*too large"):
+            with pytest.raises(
+                DrivineError, match=f"BUILD FAILED: .*{label}_code_range.* failed to build: .*too large"
+            ):
                 manager.ensure_catalog(catalog)
+            # As with a drift, the owner's other items are applied before it fails, and its marker is not written.
+            assert states(pm, label) == ["FAILED", "ONLINE"], "the index after it was made"
+            assert recorded(pm, label) is None, "the owner's marker is not written"
         finally:
-            StatelessGraphObjectManager(pm).indexes.drop(range_index(label, "code"))
+            gom.indexes.drop(range_index(label, "code"))
+            gom.indexes.drop(range_index(label, "email"))
 
     def test_a_build_not_ended_in_time_is_logged_under_warn_and_the_run_goes_on(self, factory, pm, label, caplog):
         builds_in_background(pm)
         seed(pm, label)
         catalog = catalog_of(pm, label, range_index(label, "code"))
-        manager = schema_manager(factory, "WARN", 0.005)
+        # Zero: Neo4j checks once, as it rounds a timeout under a second up to a whole one.
+        manager = schema_manager(factory, "WARN", 0)
         try:
             with caplog.at_level(logging.WARNING):
                 results = (manager.ensure_catalog(catalog))[pm.database]
 
             assert [it.status for it in results] == ["CREATED"]
             [warned] = [it.getMessage() for it in caplog.records if "still being built" in it.getMessage()]
-            assert "RANGE index" in warned and f"on {label}(code)" in warned and "at most 0.005 s" in warned
+            assert "STILL BUILDING" in warned
+            assert "RANGE index" in warned and f"on {label}(code)" in warned and "at most 0 s" in warned
         finally:
             manager.remove_catalog(catalog)
 
@@ -360,11 +386,14 @@ class TestAnEnsureReturnsOnceTheIndexIsBuilt:
         builds_in_background(pm)
         seed(pm, label)
         catalog = catalog_of(pm, label, range_index(label, "code"))
-        manager = schema_manager(factory, "FAIL_FAST", 0.005)
+        manager = schema_manager(factory, "FAIL_FAST", 0)
         try:
-            with pytest.raises(IndexNotBuilt, match=rf"on {label}\(code\) is still being built") as raised:
+            with pytest.raises(
+                DrivineError, match=rf"STILL BUILDING: .*on {label}\(code\) is still being built"
+            ) as raised:
                 manager.ensure_catalog(catalog)
-            assert not raised.value.failed
+            assert "index_build_timeout" in str(raised.value)
+            assert isinstance(raised.value.__cause__, IndexNotBuilt) and not raised.value.__cause__.failed
         finally:
             StatelessGraphObjectManager(pm).indexes.drop(range_index(label, "code"))
 

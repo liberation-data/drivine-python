@@ -3,7 +3,7 @@
 import logging
 import re
 import uuid
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import pytest
 
@@ -31,6 +31,7 @@ from drivine.sync import (
     vector_index,
 )
 from drivine.sync.manager.graph_object_manager_factory import GraphObjectManagerFactory
+from drivine.sync.schema.index_manager import IndexNotBuilt
 from tests.sync_integration.stores import create
 
 
@@ -173,6 +174,199 @@ class TestConstraints:
         assert result.status == "VIOLATION" and result.sample is not None
         assert [(it["count"], len(it["nodes"])) for it in result.sample] == [(150, 150)]
         assert sorted(it["name"] for it in result.sample[0]["nodes"]) == names
+
+
+SEEDED = 20_000
+"""Nodes enough that Neo4j and FalkorDB take a measurable while to build an index over them."""
+
+BUILT = {DatabaseType.NEO4J: "ONLINE", DatabaseType.FALKORDB: "OPERATIONAL"}
+"""What each engine that builds an index in the background calls one built."""
+
+
+def builds_in_background(pm: PersistenceManager) -> None:
+    if pm.type not in BUILT:
+        pytest.skip("Only Neo4j and FalkorDB build an index in the background once the statement making it returns")
+
+
+def on_neo4j(pm: PersistenceManager) -> None:
+    if pm.type is not DatabaseType.NEO4J:
+        pytest.skip("Neo4j's own")
+
+
+def seed(pm: PersistenceManager, label: str) -> None:
+    pm.execute(
+        QuerySpecification[Any](
+            f"UNWIND range(1, {SEEDED}) AS k CREATE (:{label} {{code: 'code-' + toString(k), "
+            "email: 'Someone' + toString(k) + '@Example.com', text: 'some words ' + toString(k), "
+            "embedding: [toFloat(k % 7), toFloat(k % 11), 1.0]})"
+        )
+    )
+
+
+def states(pm: PersistenceManager, label: str) -> list[str]:
+    """
+    The state each index over the label's nodes is in, a constraint's own among them: SHOW INDEXES on Neo4j, and on
+    FalkorDB the one status `db.indexes()` gives all of a label's.
+    """
+    if pm.type is DatabaseType.FALKORDB:
+        statement = "CALL db.indexes() YIELD label, status WHERE label = $label RETURN status"
+    else:
+        statement = "SHOW INDEXES YIELD labelsOrTypes, state WHERE $label IN labelsOrTypes RETURN state"
+    return sorted(pm.query(QuerySpecification[Any](statement).bind({"label": label})))
+
+
+def schema_manager(factory: Any, mode: Literal["FAIL_FAST", "WARN"], timeout: float = 60.0) -> SchemaManager:
+    options = SchemaOptions(mode=mode, index_build_timeout=timeout)
+    return SchemaManager(factory.registry, GraphObjectManagerFactory(factory), options)
+
+
+def catalog_of(pm: PersistenceManager, label: str, *specs: Any) -> SchemaCatalog:
+    return SchemaCatalog.of(*specs).named(label).for_database(pm.database)
+
+
+TOO_LONG = "x" * 40_000
+"""A text too large for a Neo4j range index: an index made over it after it is saved fails to build."""
+
+
+class TestAnEnsureReturnsOnceTheIndexIsBuilt:
+    """
+    Neo4j's CREATE INDEX returns while the index is POPULATING, and Neo4j checks a write's index entries only against
+    an index that is ONLINE: a write too large for it, made as it comes online, is refused once it is in the log, and
+    Neo4j 2026.10 then panics. FalkorDB's returns while it builds the index, and a query answers from the half-built
+    index. So `ensure` and `recreate` return only once the index is built. drivine4j's EnsureAwaitsIndexesTest.
+    """
+
+    @pytest.mark.parametrize(
+        "spec",
+        [
+            lambda label: range_index(label, "code"),
+            lambda label: range_index(label, "email", ignore_case=True),
+            lambda label: full_text_index(label, "text"),
+            lambda label: vector_index(label, "embedding", 3, "COSINE"),
+        ],
+        ids=["range", "range-ignoring-case", "full-text", "vector"],
+    )
+    def test_ensure(self, gom, pm, label, spec):
+        builds_in_background(pm)
+        seed(pm, label)
+
+        assert (gom.indexes.ensure(spec(label))).status == "CREATED"
+
+        assert states(pm, label) == [BUILT[pm.type]]
+        gom.indexes.drop(spec(label))
+
+    def test_recreate(self, gom, pm, label):
+        builds_in_background(pm)
+        seed(pm, label)
+        spec = range_index(label, "code")
+        gom.indexes.ensure(spec)
+
+        assert (gom.indexes.recreate(spec)).status == "RECREATED"
+
+        assert states(pm, label) == [BUILT[pm.type]]
+        gom.indexes.drop(spec)
+
+    def test_through_the_schema_manager(self, factory, pm, label):
+        builds_in_background(pm)
+        seed(pm, label)
+        manager = schema_manager(factory, "FAIL_FAST")
+        catalog = catalog_of(
+            pm,
+            label,
+            range_index(label, "email", ignore_case=True),
+            full_text_index(label, "text"),
+            vector_index(label, "embedding", 3, "COSINE"),
+        )
+
+        results = (manager.ensure_catalog(catalog))[pm.database]
+
+        assert [it.status for it in results] == ["CREATED"] * 3
+        assert set(states(pm, label)) == {BUILT[pm.type]}
+        manager.remove_catalog(catalog)
+
+    def test_on_neo4j_a_constraints_own_index_is_online_as_neo4j_builds_it_within_the_statement(self, gom, pm, label):
+        on_neo4j(pm)
+        seed(pm, label)
+        spec = uniqueness_constraint(label, "code")
+
+        assert (gom.constraints.ensure(spec)).status == "CREATED"
+
+        assert states(pm, label) == ["ONLINE"]
+        gom.constraints.drop(spec)
+
+    def test_on_neo4j_a_failed_build_raises_naming_the_index_and_neo4js_reason_on_every_ensure(self, gom, pm, label):
+        on_neo4j(pm)
+        # There before the index is, so the build fails and the index stays FAILED: this can't panic Neo4j.
+        create(pm, label, {"code": TOO_LONG})
+        spec = range_index(label, "code")
+        try:
+            with pytest.raises(IndexNotBuilt) as raised:
+                gom.indexes.ensure(spec)
+            assert raised.value.failed
+            assert f"{label}_code_range" in str(raised.value) and "too large" in str(raised.value).lower()
+            assert states(pm, label) == ["FAILED"]
+
+            # Found again, it is not taken for an index that serves.
+            with pytest.raises(IndexNotBuilt, match=f"{label}_code_range"):
+                gom.indexes.ensure(spec)
+        finally:
+            gom.indexes.drop(spec)
+
+    def test_on_neo4j_a_failed_build_is_logged_under_warn_and_the_run_goes_on(self, factory, pm, label, caplog):
+        on_neo4j(pm)
+        create(pm, label, {"code": TOO_LONG})
+        failed = range_index(label, "code")
+        after = range_index(label, "email")
+        catalog = catalog_of(pm, label, failed, after)
+        manager = schema_manager(factory, "WARN")
+        try:
+            with caplog.at_level(logging.WARNING):
+                results = (manager.ensure_catalog(catalog))[pm.database]
+
+            assert [it.status for it in results] == ["CREATED", "CREATED"]
+            [warned] = [it.getMessage() for it in caplog.records if "failed to build" in it.getMessage()]
+            assert f"{label}_code_range" in warned and "too large" in warned.lower()
+            assert states(pm, label) == ["FAILED", "ONLINE"], "the index after it was made"
+        finally:
+            manager.remove_catalog(catalog)
+
+    def test_on_neo4j_a_failed_build_raises_under_fail_fast(self, factory, pm, label):
+        on_neo4j(pm)
+        create(pm, label, {"code": TOO_LONG})
+        catalog = catalog_of(pm, label, range_index(label, "code"))
+        manager = schema_manager(factory, "FAIL_FAST")
+        try:
+            with pytest.raises(IndexNotBuilt, match=f"{label}_code_range.* failed to build: .*too large"):
+                manager.ensure_catalog(catalog)
+        finally:
+            StatelessGraphObjectManager(pm).indexes.drop(range_index(label, "code"))
+
+    def test_a_build_not_ended_in_time_is_logged_under_warn_and_the_run_goes_on(self, factory, pm, label, caplog):
+        builds_in_background(pm)
+        seed(pm, label)
+        catalog = catalog_of(pm, label, range_index(label, "code"))
+        manager = schema_manager(factory, "WARN", 0.005)
+        try:
+            with caplog.at_level(logging.WARNING):
+                results = (manager.ensure_catalog(catalog))[pm.database]
+
+            assert [it.status for it in results] == ["CREATED"]
+            [warned] = [it.getMessage() for it in caplog.records if "still being built" in it.getMessage()]
+            assert "RANGE index" in warned and f"on {label}(code)" in warned and "at most 0.005 s" in warned
+        finally:
+            manager.remove_catalog(catalog)
+
+    def test_a_build_not_ended_in_time_raises_under_fail_fast(self, factory, pm, label):
+        builds_in_background(pm)
+        seed(pm, label)
+        catalog = catalog_of(pm, label, range_index(label, "code"))
+        manager = schema_manager(factory, "FAIL_FAST", 0.005)
+        try:
+            with pytest.raises(IndexNotBuilt, match=rf"on {label}\(code\) is still being built") as raised:
+                manager.ensure_catalog(catalog)
+            assert not raised.value.failed
+        finally:
+            StatelessGraphObjectManager(pm).indexes.drop(range_index(label, "code"))
 
 
 class TestSchemaManager:

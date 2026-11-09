@@ -109,7 +109,7 @@ from drivine.sync.manager.persistence_manager_factory import PersistenceManagerF
 from drivine.sync.manager.stateless_graph_object_manager import StatelessGraphObjectManager
 from drivine.sync.manager.transactional_persistence_manager import TransactionalPersistenceManager
 from drivine.sync.schema.constraint_manager import ConstraintManager
-from drivine.sync.schema.index_manager import IndexManager
+from drivine.sync.schema.index_manager import IndexManager, IndexNotBuilt
 from drivine.sync.schema.schema_manager import SchemaManager
 from drivine.sync.schema.schema_options import SchemaOptions
 from drivine.sync.transaction.transaction import Transaction, current_transaction
@@ -174,6 +174,7 @@ __all__ = [
     "hop",
     "IndexAdvicePolicy",
     "IndexManager",
+    "IndexNotBuilt",
     "JsonPacked",
     "key",
     "ListRef",

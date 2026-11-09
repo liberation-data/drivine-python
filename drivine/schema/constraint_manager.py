@@ -8,7 +8,7 @@ from typing import Any, Literal
 from drivine import concurrency
 from drivine.drivine_error import DrivineError
 from drivine.schema.ensure_result import EnsureResult
-from drivine.schema.index_manager import IndexManager
+from drivine.schema.index_manager import BUILD_TIMEOUT, IndexManager
 from drivine.schema.lower_copy_catalog import LowerCopyCatalog, fill_in_lower_copies
 from drivine.schema.schema_executor import SchemaExecutor
 from drivine.schema.schema_grammar import SchemaGrammar
@@ -37,16 +37,19 @@ class ConstraintManager:
         grammar: SchemaGrammar,
         changed: Callable[[], None] = lambda: None,
         copies: LowerCopyCatalog | None = None,
+        build_timeout: float = BUILD_TIMEOUT,
     ) -> None:
         """
         `changed` is told once this has made or dropped a constraint, as the object manager's list is then stale.
         `copies` fills in the lowercased copies a constraint that ignores case is made over; without it, such a
-        constraint is refused.
+        constraint is refused. `build_timeout` is how long the range index a constraint needs first (FalkorDB) is waited
+        on to be built (see `IndexManager.ensure`).
         """
         self.executor = executor
         self.grammar = grammar
         self.changed = changed
         self.copies = copies
+        self.build_timeout = build_timeout
 
     async def list(self) -> list[SchemaItem]:
         return self.grammar.list_uniques.read(await self.executor.run(self.grammar.list_uniques.statement))
@@ -109,7 +112,7 @@ class ConstraintManager:
         if sample:
             return EnsureResult("VIOLATION", spec, sample=tuple(sample))
         if self.grammar.unique_needs_range:
-            await IndexManager(self.executor, self.grammar, self.changed).ensure(
+            await IndexManager(self.executor, self.grammar, self.changed, build_timeout=self.build_timeout).ensure(
                 range_index(spec.label, spec.properties)
             )
         try:

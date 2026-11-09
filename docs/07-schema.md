@@ -46,6 +46,17 @@ missing `DATABASE_TYPE` raises `DrivineError` there rather than on first use. Wi
   construction is waited on, and matches once built, and a failed one is dropped and made again. `drop` also removes a
   constraint FalkorDB failed to build.
   `mode="FAIL_FAST"`, the default, raises on either; `"WARN"` logs.
+- **Indexes are built before `ensure` returns.** Neo4j and FalkorDB build an index in the background, after the
+  statement that makes it has returned, so on them `ensure` and `recreate` wait until each index they made, or found
+  there, is built: Neo4j's `db.awaitIndex`, by the index's name, and on FalkorDB `db.indexes()` asked every 200 ms
+  until it lists the label's indexes as OPERATIONAL. Memgraph and the SQL stores build an index within the statement,
+  and nothing is waited for. The wait is at most `SchemaOptions(index_build_timeout=60)` seconds (Neo4j waits in whole
+  seconds). An index whose build failed (on Neo4j, one over a text too large for a range index, say), or that is still
+  being built when the wait ends, raises `IndexNotBuilt`, a `DrivineError` that names the index and gives the engine's
+  reason, and is left as it is: `mode="FAIL_FAST"` raises it, `"WARN"` logs it and goes on to the next item.
+  `gom.indexes.ensure` by hand always raises it. On FalkorDB an index still being built answers a query with part of
+  the rows: the wait covers the indexes Drivine's `ensure` makes, but one made otherwise, by Cypher of your own or
+  another process, can give partial rows until FalkorDB lists it as OPERATIONAL.
 - **Versions.** `catalog.with_version("2")` recreates the catalog's items once, the first time it is enforced. Items an
   owner applied before and no longer declares are reported, never dropped. Each owner's version and inventory are kept
   in a `_DrivineSchema` node, as drivine4j and TypeScript keep them.

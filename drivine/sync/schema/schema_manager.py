@@ -26,6 +26,7 @@ from drivine.sync.connection.database_registry import DatabaseRegistry
 from drivine.sync.manager.graph_object_manager_factory import GraphObjectManagerFactory
 from drivine.sync.manager.persistence_manager import PersistenceManager
 from drivine.sync.manager.stateless_graph_object_manager import StatelessGraphObjectManager
+from drivine.sync.schema.index_manager import IndexNotBuilt
 from drivine.sync.schema.schema_options import SchemaOptions
 
 logger = logging.getLogger("drivine.schema")
@@ -485,15 +486,29 @@ class SchemaManager:
             )
 
     def _ensure(self, gom: StatelessGraphObjectManager, spec: SchemaSpec, recreate: bool) -> EnsureResult[Any]:
+        try:
+            return self._ensure_built(gom, spec, recreate)
+        except IndexNotBuilt as unbuilt:
+            # FAIL_FAST raises an index whose build failed or did not end in time; WARN logs it and goes on.
+            if self.options.mode != "WARN":
+                raise
+            logger.warning("%s. It is left as it is.", unbuilt)
+            return unbuilt.result
+
+    def _ensure_built(self, gom: StatelessGraphObjectManager, spec: SchemaSpec, recreate: bool) -> EnsureResult[Any]:
+        timeout = self.options.index_build_timeout
         if isinstance(spec, UniquenessConstraintSpec):
             constraints = gom.constraints
+            constraints.build_timeout = timeout
             make = constraints.recreate if recreate else constraints.ensure
             return self._judge(make(spec, self.options.violation_sample_size, self.options.replace_blocking_index))
+        indexes = gom.indexes
+        indexes.build_timeout = timeout
         if recreate:
-            return gom.indexes.recreate(spec)
-        result = gom.indexes.ensure(spec)
+            return indexes.recreate(spec)
+        result = indexes.ensure(spec)
         if result.status == "DRIFT" and self.options.recreate_on_drift:
-            return gom.indexes.recreate(spec)
+            return indexes.recreate(spec)
         return self._judge(result)
 
     def _judge(self, result: EnsureResult[Any]) -> EnsureResult[Any]:

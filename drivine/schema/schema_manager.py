@@ -19,6 +19,7 @@ from drivine.query.query_specification import QuerySpecification
 from drivine.query.statement import cypher_statement
 from drivine.schema import vector_annotation_check
 from drivine.schema.ensure_result import EnsureResult
+from drivine.schema.index_manager import IndexNotBuilt
 from drivine.schema.recorded_inventory import RecordedInventory, inventory_entries, read_inventory
 from drivine.schema.schema_catalog import DEFAULT_SCOPE, SchemaCatalog
 from drivine.schema.schema_options import SchemaOptions
@@ -483,17 +484,33 @@ class SchemaManager:
             )
 
     async def _ensure(self, gom: StatelessGraphObjectManager, spec: SchemaSpec, recreate: bool) -> EnsureResult[Any]:
+        try:
+            return await self._ensure_built(gom, spec, recreate)
+        except IndexNotBuilt as unbuilt:
+            # FAIL_FAST raises an index whose build failed or did not end in time; WARN logs it and goes on.
+            if self.options.mode != "WARN":
+                raise
+            logger.warning("%s. It is left as it is.", unbuilt)
+            return unbuilt.result
+
+    async def _ensure_built(
+        self, gom: StatelessGraphObjectManager, spec: SchemaSpec, recreate: bool
+    ) -> EnsureResult[Any]:
+        timeout = self.options.index_build_timeout
         if isinstance(spec, UniquenessConstraintSpec):
             constraints = gom.constraints
+            constraints.build_timeout = timeout
             make = constraints.recreate if recreate else constraints.ensure
             return self._judge(
                 await make(spec, self.options.violation_sample_size, self.options.replace_blocking_index)
             )
+        indexes = gom.indexes
+        indexes.build_timeout = timeout
         if recreate:
-            return await gom.indexes.recreate(spec)
-        result = await gom.indexes.ensure(spec)
+            return await indexes.recreate(spec)
+        result = await indexes.ensure(spec)
         if result.status == "DRIFT" and self.options.recreate_on_drift:
-            return await gom.indexes.recreate(spec)
+            return await indexes.recreate(spec)
         return self._judge(result)
 
     def _judge(self, result: EnsureResult[Any]) -> EnsureResult[Any]:

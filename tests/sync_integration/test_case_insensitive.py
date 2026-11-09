@@ -40,6 +40,7 @@ from drivine.sync import (
     refs,
     uniqueness_constraint,
 )
+from drivine.sync.schema.index_manager import IndexNotBuilt
 from drivine.testing.container_connection import ContainerConnection
 from drivine.testing.drivine_test_containers import TEST_CONTAINER_SPECS, DrivineTestContainers
 from tests.sync_integration.stores import create, is_oracle, is_postgres, is_sqlite, nodes
@@ -341,9 +342,16 @@ class TestLongTexts:
         else:
             assert not (stored(pm, label))["g4"].get(COPY)
 
-        # Neo4j cannot hold a text this long in a range index: the index fails, and the lookup reads the label's nodes.
-        gom.indexes.ensure(spec)
         try:
+            if pm.type is DatabaseType.NEO4J:
+                # Neo4j cannot hold a text this long in a range index: the index's build fails, which ensure raises,
+                # naming the index, and the lookup reads the label's nodes.
+                with pytest.raises(IndexNotBuilt) as failed:
+                    gom.indexes.ensure(spec)
+                assert f"{label}_email_ci_range" in str(failed.value)
+                assert "too large for the index" in str(failed.value)
+            else:
+                gom.indexes.ensure(spec)
             q = refs(account)
 
             def found(email: str) -> set[str]:
@@ -407,7 +415,8 @@ class TestLongTexts:
     def test_under_the_index_over_the_copy_neo4j_refuses_to_save_one_of_40001_characters(self, pm, label, request):
         """
         The reference for a text too long for a range index: once there is the index over the copy, Neo4j refuses.
-        On a Neo4j of its own (see `own_neo4j`), and once the index is online, as drivine4j's test waits for it.
+        On a Neo4j of its own (see `own_neo4j`). The save follows `ensure` at once, which returns only once the index
+        is online (see `IndexManager._await_built`), so the save is checked against it and refused before it is logged.
         """
         if pm.type is not DatabaseType.NEO4J:
             pytest.skip("Neo4j's own refusal")
@@ -415,7 +424,6 @@ class TestLongTexts:
             gom = StatelessGraphObjectManager(own)
             account = fragment(label)
             gom.indexes.ensure(range_index(label, "email", ignore_case=True))
-            own.execute(QuerySpecification("CALL db.awaitIndexes(60)"))
             with pytest.raises(Exception, match="is too large for the index"):
                 gom.save(account(uuid="g1", email="Ab" * 20_000 + "C"))
 

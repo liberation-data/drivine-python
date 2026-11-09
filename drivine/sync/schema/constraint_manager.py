@@ -15,7 +15,7 @@ from drivine.schema.schema_listing import SchemaListing
 from drivine.schema.schema_specs import lowercased, made_as, range_index
 from drivine.schema.uniqueness_constraint_spec import UniquenessConstraintSpec
 from drivine.sync import concurrency
-from drivine.sync.schema.index_manager import IndexManager
+from drivine.sync.schema.index_manager import BUILD_TIMEOUT, IndexManager
 from drivine.sync.schema.lower_copy_catalog import LowerCopyCatalog, fill_in_lower_copies
 from drivine.sync.schema.schema_executor import SchemaExecutor
 
@@ -39,16 +39,19 @@ class ConstraintManager:
         grammar: SchemaGrammar,
         changed: Callable[[], None] = lambda: None,
         copies: LowerCopyCatalog | None = None,
+        build_timeout: float = BUILD_TIMEOUT,
     ) -> None:
         """
         `changed` is told once this has made or dropped a constraint, as the object manager's list is then stale.
         `copies` fills in the lowercased copies a constraint that ignores case is made over; without it, such a
-        constraint is refused.
+        constraint is refused. `build_timeout` is how long the range index a constraint needs first (FalkorDB) is waited
+        on to be built (see `IndexManager.ensure`).
         """
         self.executor = executor
         self.grammar = grammar
         self.changed = changed
         self.copies = copies
+        self.build_timeout = build_timeout
 
     def list(self) -> list[SchemaItem]:
         return self.grammar.list_uniques.read(self.executor.run(self.grammar.list_uniques.statement))
@@ -111,7 +114,9 @@ class ConstraintManager:
         if sample:
             return EnsureResult("VIOLATION", spec, sample=tuple(sample))
         if self.grammar.unique_needs_range:
-            IndexManager(self.executor, self.grammar, self.changed).ensure(range_index(spec.label, spec.properties))
+            IndexManager(self.executor, self.grammar, self.changed, build_timeout=self.build_timeout).ensure(
+                range_index(spec.label, spec.properties)
+            )
         try:
             for statement in self.grammar.create_unique(spec):
                 self.executor.run(statement)

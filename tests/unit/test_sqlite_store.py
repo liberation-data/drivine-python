@@ -86,6 +86,9 @@ class TestTheGraph:
             ],
         }
         assert connection.execute(graph.made).fetchone() == (len(graph.ddl),)
+        # Keys that never give a deleted row's id again (drivine4j#713).
+        assert "    nid    INTEGER PRIMARY KEY AUTOINCREMENT,\n" in graph.ddl[0]
+        assert "    eid   INTEGER PRIMARY KEY AUTOINCREMENT,\n" in graph.ddl[1]
 
 
 class TestTheSql:

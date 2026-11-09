@@ -32,6 +32,7 @@ from drivine.connection.connection_provider import ConnectionProvider
 from drivine.connection.connection_provider_builder import ConnectionProviderBuilder
 from drivine.connection.database_registry import DatabaseRegistry
 from drivine.connection.database_type import DatabaseType
+from drivine.connection.reused_ids_error import ReusedIdsError
 from drivine.connection.transaction_mode import TransactionMode
 from drivine.cursor.cursor import Cursor
 from drivine.cursor.cursor_specification import CursorSpecification
@@ -212,6 +213,7 @@ __all__ = [
     "RelateMode",
     "Relationship",
     "RelationshipFragment",
+    "ReusedIdsError",
     "RemovedTargets",
     "Root",
     "SaveOptions",

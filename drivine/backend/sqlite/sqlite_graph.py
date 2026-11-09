@@ -1,16 +1,23 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
-from typing import Literal
+from collections.abc import Callable, Sequence
+from typing import Any, Literal
 
 from drivine.backend.sql.sql_graph import DEFAULT_GRAPH, SqlGraph, sql_text
 from drivine.backend.sql.write_plan import WritePlan, WriteReturns
+from drivine.connection.reused_ids_error import ReusedIdsError
 from drivine.drivine_error import DrivineError
 from drivine.model import stamps
 
 MAX_OBJECT_NAME = 63
 """SQLite takes a name of any length; this keeps one as long as the other stores' do, as drivine4j does."""
+
+REUSES_IDS = -1
+"""What `made` gives for a store whose tables give a deleted row's id again: see ReusedIdsError."""
+
+DATABASE_FILE = "SELECT file FROM pragma_database_list WHERE name = 'main'"
+"""The file of the connection's database, read only to name it as a store is refused: empty for one in memory."""
 
 JSON_ROWS = "/* drivine:json */"
 """
@@ -67,6 +74,12 @@ class SqliteGraph(SqlGraph):
 
     SQLite reads a table's name without regard to case, so a graph called `Contracts` is the same graph as one called
     `contracts`, as on Postgres. The tables keep the case of the name that made them.
+
+    A node's `nid` and a relationship's `eid` are `AUTOINCREMENT` keys, so an id is never given again once its row is
+    deleted, as Oracle's and Postgres's identity keys are never given again: without it SQLite gives a new row the
+    greatest key plus one, which is the key of the last row deleted when it had the greatest (drivine4j#713). A file
+    whose tables were made without it, by an earlier Drivine, is refused as the store is looked for (see `ensure`):
+    there is no migration, as SQLite cannot change a table's key in place.
     """
 
     def __init__(self, name: str = DEFAULT_GRAPH) -> None:
@@ -77,13 +90,13 @@ class SqliteGraph(SqlGraph):
         """What makes the store, drivine4j's statements: each may run again."""
         return [
             f"CREATE TABLE IF NOT EXISTS {self.nodes} (\n"
-            "    nid    INTEGER PRIMARY KEY,\n"
+            "    nid    INTEGER PRIMARY KEY AUTOINCREMENT,\n"
             "    labels TEXT NOT NULL,\n"
             "    props  TEXT NOT NULL,\n"
             "    stamp  TEXT\n"
             ")",
             f"CREATE TABLE IF NOT EXISTS {self.edges} (\n"
-            "    eid   INTEGER PRIMARY KEY,\n"
+            "    eid   INTEGER PRIMARY KEY AUTOINCREMENT,\n"
             f"    src   INTEGER NOT NULL REFERENCES {self.nodes} (nid) ON DELETE CASCADE,\n"
             f"    dst   INTEGER NOT NULL REFERENCES {self.nodes} (nid) ON DELETE CASCADE,\n"
             "    type  TEXT NOT NULL,\n"
@@ -108,13 +121,36 @@ class SqliteGraph(SqlGraph):
         Counts what of the `ddl` makes is there: each table and index, by its name in any case. A user who may only
         read the file, or a connection with `query_only` set, is refused a `CREATE … IF NOT EXISTS` even over a table
         that is there, so the store is looked for first.
+
+        The count is REUSES_IDS where the table of nodes or of relationships is there and was made without
+        `AUTOINCREMENT`, as SQLite keeps the statement that made it: one look finds both. drivine4j's text, but for the
+        `KEY` before `AUTOINCREMENT`, so that a graph whose name holds the word is not taken for one made with it.
         """
         names: list[str] = []
         for it in self.ddl:
             found = re.search(r"IF NOT EXISTS (\w+)", it)
             assert found is not None
             names.append(sql_text(found.group(1).lower()))
-        return f"SELECT COUNT(*) FROM sqlite_master WHERE lower(name) IN ({', '.join(names)})"
+        keyed = ", ".join(sql_text(it.lower()) for it in (self.nodes, self.edges))
+        return (
+            "SELECT CASE WHEN EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND lower(name) IN "
+            f"({keyed}) AND sql NOT LIKE '%KEY AUTOINCREMENT%') THEN {REUSES_IDS} ELSE COUNT(*) END FROM sqlite_master "
+            f"WHERE lower(name) IN ({', '.join(names)})"
+        )
+
+    def ensure(self, run: Callable[[str], Any]) -> None:
+        """
+        Runs the `ddl`, each statement on its own, unless `made` finds all it makes there; `run` gives the first value
+        of a statement's first row, None for none. A store whose tables give a deleted row's id again is refused with
+        ReusedIdsError, naming its file, before anything is made.
+        """
+        found = run(self.made)
+        if found == REUSES_IDS:
+            raise ReusedIdsError(self.name, run(DATABASE_FILE) or None)
+        if found == len(self.ddl):
+            return
+        for it in self.ddl:
+            run(it)
 
     booleans: tuple[str, str] = ("1", "0")
     """True and false written into a patch's query, as the driver binds them (see PlanGraph)."""

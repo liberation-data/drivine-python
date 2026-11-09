@@ -408,7 +408,12 @@ class TestTheSession:
         session = SqliteSession(str(tmp_path / "graph.db"))
         try:
             session.query("CREATE TABLE t (x)", {})
-            for text in ("INSERT INTO t VALUES (1); DROP TABLE t", "INSERT INTO t VALUES ($x);\n-- c\nSELECT 1"):
+            for text in (
+                "INSERT INTO t VALUES (1); DROP TABLE t",
+                "INSERT INTO t VALUES ($x);\n-- c\nSELECT 1",
+                "INSERT INTO t VALUES ($x); /* c */ DROP TABLE t",
+                "INSERT INTO t VALUES ($x);" + " " * 64 + "DROP TABLE t",
+            ):
                 with pytest.raises(DrivineError, match="one statement at a time"):
                     session.query(text, {"x": 1})
                 with pytest.raises(DrivineError, match="one statement at a time"):

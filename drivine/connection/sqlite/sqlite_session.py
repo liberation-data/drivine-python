@@ -49,7 +49,7 @@ LOCK_WARNING_SECONDS = 5.0
 
 _POSITIONAL = re.compile(r"\$(\d+)(?![0-9])")
 
-_NO_STATEMENT = re.compile(r"(?:\s+|--[^\n]*|/\*.*?(?:\*/|$)|;)*", re.DOTALL)
+_NO_STATEMENT = re.compile(r"(?:\s|--[^\n]*+|/\*(?:[^*]|\*(?!/))*+(?:\*/|\Z)|;)*+")
 """What may follow a statement and holds none: blanks, comments and semicolons, as `sqlite3` let one end with."""
 
 

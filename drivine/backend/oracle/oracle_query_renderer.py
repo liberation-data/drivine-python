@@ -236,9 +236,9 @@ def past_text(value: Any) -> bool:
     as drivine4j's `OraclePredicates.pastText` decides it, so the same lookup is written alike in all three libraries:
     its length in UTF-16 units, as Java and JavaScript count it, times three. No UTF-16 unit takes more than three
     bytes of UTF-8, and a character of four bytes is two units. A copy that long reads as null, so an equality with it
-    is compared as a CLOB.
+    is compared as a CLOB. A lone surrogate, which a Python text may hold, is one unit, as in Java.
     """
-    return isinstance(value, str) and len(value.encode("utf-16-le")) // 2 * 3 > 4000
+    return isinstance(value, str) and len(value.encode("utf-16-le", "surrogatepass")) // 2 * 3 > 4000
 
 
 def _renumbered(body: str) -> str:

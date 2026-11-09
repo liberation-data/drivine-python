@@ -37,6 +37,7 @@ from drivine.backend.cypher_grammar import NEO4J_GRAMMAR
 from drivine.backend.fragment_group import FragmentGroup
 from drivine.backend.oracle.oracle_backend import OracleBackend
 from drivine.backend.oracle.oracle_graph import OracleGraph
+from drivine.backend.oracle.oracle_query_renderer import past_text
 from drivine.backend.postgres.postgres_backend import PostgresBackend
 from drivine.backend.postgres.postgres_graph import PostgresGraph
 from drivine.connection.database_type import DatabaseType
@@ -397,6 +398,16 @@ class TestLookups:
             ("Account",),
         )
         assert lowered("\U0001f600" + "a" * 1_331)[1] == ("Account",)
+
+    def test_past_text_counts_utf_16_units_of_a_text_and_nothing_else(self):
+        # As drivine4j's pastText: a lone surrogate, which a Python text may hold, is one unit, and not an error.
+        assert past_text("\ud800" * 1_334)
+        assert not past_text("\ud800" * 1_333)
+        # Only a text: a number, a list or None is never past it.
+        assert not past_text(10**5000)
+        assert not past_text(["a" * 2_000])
+        assert not past_text(b"a" * 2_000)
+        assert not past_text(None)
 
 
 class _Store:

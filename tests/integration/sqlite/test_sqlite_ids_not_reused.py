@@ -5,9 +5,9 @@ drivine4j's SqliteIdsNotReusedTest, ported.
 """
 
 import asyncio
-import sqlite3
 from typing import Any
 
+import apsw
 import pytest
 
 from drivine import (
@@ -130,7 +130,7 @@ async def test_clearing_the_graph_keeps_its_ids_counting_from_where_they_were_as
 
 def earlier_file(path: str, graph: str, keep_edges: bool = False) -> str:
     """A file with the graph's tables made as an earlier Drivine made them: keys without AUTOINCREMENT."""
-    connection = sqlite3.connect(path)
+    connection = apsw.Connection(path)
     try:
         connection.execute(
             f"CREATE TABLE {graph}_node (nid INTEGER PRIMARY KEY, labels TEXT NOT NULL, props TEXT NOT NULL, "
@@ -142,14 +142,13 @@ def earlier_file(path: str, graph: str, keep_edges: bool = False) -> str:
             "props TEXT NOT NULL DEFAULT '{}')"
         )
         connection.execute(f'INSERT INTO {graph}_node (labels, props) VALUES (\'["Person"]\', \'{{"name": "Ada"}}\')')
-        connection.commit()
     finally:
         connection.close()
     return path
 
 
 def count(path: str, statement: str) -> int:
-    connection = sqlite3.connect(path)
+    connection = apsw.Connection(path)
     try:
         return connection.execute(statement).fetchone()[0]
     finally:
@@ -283,7 +282,7 @@ def test_the_graphs_look_refuses_a_store_an_earlier_drivine_made_before_anything
     earlier_file(path, "G")
     graph = SqliteGraph("G")
     sent: list[str] = []
-    connection = sqlite3.connect(path)
+    connection = apsw.Connection(path)
 
     def run(statement: str) -> Any:
         sent.append(statement)
@@ -303,7 +302,7 @@ def test_the_graphs_look_refuses_a_store_an_earlier_drivine_made_before_anything
 def test_a_graph_whose_name_holds_autoincrement_an_earlier_drivine_made_is_refused(path: str):
     # Its table's name is in the statement that made it, and is not the key's AUTOINCREMENT.
     earlier_file(path, "autoincrement")
-    connection = sqlite3.connect(path)
+    connection = apsw.Connection(path)
 
     def run(statement: str) -> Any:
         row = connection.execute(statement).fetchone()
@@ -317,7 +316,7 @@ def test_a_graph_whose_name_holds_autoincrement_an_earlier_drivine_made_is_refus
 
 
 def test_a_store_in_memory_an_earlier_drivine_made_is_refused_naming_no_file():
-    connection = sqlite3.connect(":memory:")
+    connection = apsw.Connection(":memory:")
     try:
         connection.execute("CREATE TABLE drivine_node (nid INTEGER PRIMARY KEY, labels TEXT, props TEXT, stamp TEXT)")
 
@@ -357,7 +356,7 @@ async def test_a_fresh_file_is_made_with_autoincrement_keys_and_works(path: str)
         "AND sql LIKE '%AUTOINCREMENT%'"
     )
     assert count(path, keyed) == 2
-    connection = sqlite3.connect(path)
+    connection = apsw.Connection(path)
     try:
         assert [it[0] for it in connection.execute("SELECT name FROM sqlite_sequence ORDER BY name")] == [
             "drivine_edge",

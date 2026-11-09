@@ -4,12 +4,11 @@ SqliteGraphTest, SqliteSqlTest, SqliteSchemaGrammarTest and SqliteBackendTest, p
 """
 
 import json
-import sqlite3
-import sys
 from decimal import Decimal
 from pathlib import Path
 from typing import Annotated
 
+import apsw
 import pytest
 
 from drivine import (
@@ -27,7 +26,6 @@ from drivine.backend.nearest_search import NearestSearch
 from drivine.backend.sqlite import exact_json
 from drivine.backend.sqlite.sqlite_backend import SqliteBackend
 from drivine.backend.sqlite.sqlite_functions import (
-    Failures,
     _delete,
     _lower,
     _Patterns,
@@ -65,7 +63,7 @@ class TestTheGraph:
                 SqliteGraph(name)
 
     def test_is_the_tables_postgres_keeps_with_json_as_text_each_statement_safe_to_run_again(self):
-        connection = sqlite3.connect(":memory:")
+        connection = apsw.Connection(":memory:")
         graph = SqliteGraph()
         for _ in range(2):
             for it in graph.ddl:
@@ -104,7 +102,7 @@ class TestTheSql:
             path("")
 
     def test_a_property_is_read_as_the_text_postgres_gives_a_number_only_where_one_is_stored(self):
-        connection = sqlite3.connect(":memory:")
+        connection = apsw.Connection(":memory:")
         props = '{"s":"7","i":7,"r":1.50,"t":true,"z":null,"a":[1,"x"]}'
         read = {
             key: connection.execute(
@@ -124,7 +122,7 @@ class TestTheSql:
         assert text_of("n", stamps.PROPERTY) == "n.stamp"
 
     def test_a_nodes_document_is_its_properties_with_its_stamp_and_its_labels_apart(self):
-        connection = sqlite3.connect(":memory:")
+        connection = apsw.Connection(":memory:")
         select = f"SELECT {node_document('n')} FROM (SELECT ? AS labels, ? AS props, ? AS stamp) n"
         stamped = connection.execute(select, ('["A"]', '{"x":1}', "s:t")).fetchone()[0]
         assert exact_json.loads(stamped) == {"props": {"x": 1, stamps.PROPERTY: "s:t"}, "labels": ["A"]}
@@ -132,7 +130,7 @@ class TestTheSql:
         assert exact_json.loads(unstamped) == {"props": {"x": 1}, "labels": ["A"]}
 
     def test_a_group_key_orders_as_jsonb_does_with_a_node_of_no_value_last_ascending_and_first_descending(self):
-        connection = sqlite3.connect(":memory:")
+        connection = apsw.Connection(":memory:")
         keys = [None, "{}", "[1]", "true", "false", "2.5", "1", '"b"', '"a"', "null"]
         rows = " UNION ALL ".join("SELECT ? AS k" for _ in keys)
         groups = SqliteGroups(SqliteGraph())
@@ -159,12 +157,12 @@ class TestTheStatementsOnAStore:
     """The backend's statements, run on a store in memory with the functions Drivine registers."""
 
     @staticmethod
-    def store(nodes: list[tuple[int, str, str]], edges: list[tuple[int, int]]) -> sqlite3.Connection:
-        connection = sqlite3.connect(":memory:")
+    def store(nodes: list[tuple[int, str, str]], edges: list[tuple[int, int]]) -> apsw.Connection:
+        connection = apsw.Connection(":memory:")
         for it in SqliteGraph().ddl:
             connection.execute(it)
         connection.execute("PRAGMA foreign_keys = ON")
-        register(connection, Failures())
+        register(connection)
         for nid, label, props in nodes:
             connection.execute(
                 "INSERT INTO drivine_node (nid, labels, props) VALUES (?, ?, ?)", (nid, f'["{label}"]', props)
@@ -190,7 +188,7 @@ class TestTheStatementsOnAStore:
             [(1, 3), (2, 4), (5, 4)],
         )
         calls: list[object] = []
-        connection.create_function(DELETE, 2, lambda *it: calls.append(it) or _delete(connection, *it))
+        connection.create_scalar_function(DELETE, lambda *it: calls.append(it) or _delete(connection, *it), 2)
         statement = SqliteBackend(SqliteGraph()).delete(ModelRegistry().model_of(PersonCareer), None, cascade)
 
         assert connection.execute(statement.text, {"id": "p1"}).fetchall() == [(2,)]
@@ -308,26 +306,24 @@ class TestTheFunctions:
         assert patterns.count("l'école, école", word) == 2
         assert patterns.matches("^a", "abc") == 1 and patterns.matches(None, "x") is None
 
-    def test_a_failure_in_a_function_is_kept_and_raised_as_itself(self):
-        connection = sqlite3.connect(":memory:")
-        failures = Failures()
-        register(connection, failures)
-        with pytest.raises(sqlite3.OperationalError, match="user-defined function raised exception"):
+    def test_a_failure_in_a_function_is_raised_as_itself(self):
+        connection = apsw.Connection(":memory:")
+        register(connection)
+        with pytest.raises(ValueError, match="drivine_write names a graph"):
             connection.execute("SELECT drivine_write('drivine', NULL, NULL, NULL, 'COUNT', NULL)")
-        assert isinstance(failures.take(), ValueError)
-        assert failures.take() is None
 
 
 class TestContention:
     def test_a_locked_file_or_table_is_contention_by_its_code_or_by_its_message_and_no_other_failure_is(self):
         backend = SqliteBackend()
-        busy = sqlite3.OperationalError("database is locked")
-        coded = sqlite3.OperationalError("whatever")
-        coded.sqlite_errorcode = 517  # SQLITE_BUSY_SNAPSHOT
+        busy = apsw.BusyError("database is locked")
+        said = apsw.SQLError("database table is locked")
+        coded = apsw.SQLError("whatever")
+        coded.extendedresult = 517  # SQLITE_BUSY_SNAPSHOT
         wrapped = DrivineError("save failed")
         wrapped.__cause__ = busy
-        assert backend.contended(busy) and backend.contended(coded) and backend.contended(wrapped)
-        assert not backend.contended(sqlite3.IntegrityError("UNIQUE constraint failed"))
+        assert all(backend.contended(it) for it in (busy, said, coded, wrapped, apsw.LockedError("x")))
+        assert not backend.contended(apsw.ConstraintError("UNIQUE constraint failed"))
         assert not backend.contended(ValueError("database is locked"))
 
 
@@ -359,25 +355,29 @@ class TestTheSession:
             session.query("INSERT INTO t VALUES ('a'), ('b'), ('c')", {})
             with pytest.raises(Exception, match="unterminated") as raised:
                 session.query("SELECT CASE WHEN x = 'b' THEN x REGEXP '(' END AS r FROM t ORDER BY x", {})
-            assert not isinstance(raised.value, sqlite3.Error)
-            assert isinstance(raised.value.__cause__, sqlite3.Error)
-            assert session.failures.take() is None
+            assert not isinstance(raised.value, apsw.Error)
         finally:
             session.close()
 
-    def test_pysqlite3_is_taken_where_pythons_sqlite_is_not_complete_for_compiled_cypher_and_its_is(
-        self, monkeypatch: pytest.MonkeyPatch
-    ):
-        from types import SimpleNamespace
+    def test_floats_are_written_to_17_digits_and_a_column_named_where_a_statement_gives_no_row(self, tmp_path: Path):
+        # apsw bundles SQLite 3.53 or later, which writes a float as text to 17 significant digits (#376).
+        session = SqliteSession(str(tmp_path / "graph.db"))
+        try:
+            assert session.query("SELECT json_quote(0.1 + 0.2) AS f, json_array(1.0 / 3) AS t", {}) == [
+                {"f": "0.30000000000000004", "t": "[0.33333333333333332]"}
+            ]
+            assert session.query("SELECT 1 AS n WHERE 0", {}) == []
+            rows = session.execute("SELECT 1 AS n UNION ALL SELECT 2", ())
+            try:
+                assert session.fetch("", rows, 1) == [{"n": 1}]
+                assert session.fetch("", rows, 5) == [{"n": 2}]
+                assert session.fetch("", rows, 5) == []
+            finally:
+                rows.close()
+        finally:
+            session.close()
 
-        from drivine.connection.sqlite import sqlite_session
-
-        later = SimpleNamespace(__name__="pysqlite3.dbapi2", sqlite_version_info=(3, 53, 0))
-        monkeypatch.setitem(sys.modules, "pysqlite3.dbapi2", later)
-        for pythons, its, chosen in ((True, True, sqlite3), (False, True, later), (False, False, sqlite3)):
-
-            def complete(module: object, pythons: bool = pythons, its: bool = its) -> bool:
-                return pythons if module is sqlite3 else its
-
-            monkeypatch.setattr(sqlite_session, "complete", complete)
-            assert sqlite_session.sqlite_module() is chosen
+    def test_a_sqlite_older_than_3_53_is_refused(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setattr(apsw, "sqlite_lib_version", lambda: "3.49.1")
+        with pytest.raises(DrivineError, match="SQLite 3.53 or later, and apsw runs SQLite 3.49.1"):
+            SqliteSession(str(tmp_path / "graph.db"))

@@ -31,7 +31,7 @@ async def sleep(seconds: float) -> None:
 
 async def blocking(function: Callable[..., R], *arguments: Any, on: Executor | None = None) -> R:
     """
-    Runs a call that blocks, such as one of the `sqlite3` module, on a thread of its own, so the event loop goes on
+    Runs a call that blocks, such as one on a SQLite connection, on a thread of its own, so the event loop goes on
     meanwhile: on the executor `on` where one is given, as a SQLite connection gives its own (see SqliteSession.thread).
     The sync API calls it where it is.
     """

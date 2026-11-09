@@ -160,16 +160,23 @@ applied whole or not at all.
 ### SQLite
 
 SQLite keeps a graph in a file, with no server: drivine4j's store, in the same tables as Postgres, so a file one library
-wrote, drivine4j, Drivine for TypeScript or this one, the others read and write as it is. It takes SQLite 3.45 or later
-through Python's own `sqlite3` module, so there is nothing to install; where Python's SQLite is older, install
-`pysqlite3-binary` and Drivine uses it. Models, the query DSL and the object manager are the same as on the other
-stores; the persistence manager runs plain SQL, with cursors and transactions, and Cypher you write is compiled to
-SQLite's SQL, as on Postgres and Oracle (`pip install "drivine[sqlite]"` adds the runtime its compiler takes): see
-[Cypher on Postgres, Oracle and SQLite](04-statements.md#cypher-on-postgres-oracle-and-sqlite). Compiled Cypher wants
-SQLite 3.53 or later, writing a float as text to 17 significant digits as 3.53 does by default: on an older one, or one
-built to write 15, a float may lose its last digits and a `CALL { … }` that groups by a variable it imports is refused
-before 3.53, and Drivine logs a warning once. Where Python's SQLite isn't such a one and `pysqlite3`'s is, Drivine uses
-`pysqlite3` for the store, plain SQL and the object manager too.
+wrote, drivine4j, Drivine for TypeScript or this one, the others read and write as it is. `pip install "drivine[sqlite]"`
+installs what it takes: [apsw](https://github.com/rogerbinns/apsw), whose wheels bundle a SQLite of their own (3.53 or
+later), and the runtime of the Cypher compiler. So the store runs on the same SQLite whatever SQLite Python was built
+with, as drivine4j's and Drivine for TypeScript's run on the one their drivers bundle. Models, the query DSL and the
+object manager are the same as on the other stores; the persistence manager runs plain SQL, with cursors and
+transactions, and Cypher you write is compiled to SQLite's SQL, as on Postgres and Oracle: see
+[Cypher on Postgres, Oracle and SQLite](04-statements.md#cypher-on-postgres-oracle-and-sqlite). SQLite 3.53 writes a
+float as text to 17 significant digits, so a float compiled Cypher gives is the one a graph engine gives, and it runs
+a `CALL { … }` that groups by a variable it imports. A SQLite older than 3.53, as an apsw built against an older
+SQLite of the system runs, is refused as a connection opens.
+
+**Breaking change.** SQLite now goes through apsw and the SQLite it bundles: `pip install "drivine[sqlite]"` brings
+it, and `pip install drivine` alone no longer opens a SQLite store. Python's own `sqlite3` module and `pysqlite3` are no
+longer used, and Drivine no longer warns that floats may lose their last digits, as no SQLite it runs on does. A
+failure inside a function Drivine registers, such as a regular expression that doesn't compile, is raised as itself,
+and SQLite's own failures are apsw's (`apsw.Error`, `apsw.ConstraintError`, `apsw.BusyError` …), not `sqlite3.Error`.
+The SQLite file is the same: one written before reads and writes as it did (#376).
 
 ```
 DATABASE_TYPE=SQLITE

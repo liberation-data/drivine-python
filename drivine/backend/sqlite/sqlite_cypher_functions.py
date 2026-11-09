@@ -1,3 +1,5 @@
+# apsw's stubs type a bytes value as collections.abc.Buffer, which Python 3.11 lacks: what they give is partly unknown.
+# pyright: reportUnknownMemberType=false, reportUnknownArgumentType=false, reportUnknownVariableType=false
 """
 The functions compiled Cypher calls on SQLite, for what Cypher does with its values, JSON text each, that SQLite does
 not: drivine4j's, registered on each connection by `register` (see sqlite_functions.register), by the names in
@@ -17,14 +19,13 @@ sqlite_graph, of the same arity and as deterministic as drivine4j's.
 - `drivine_fail` fails the statement with its text, where Neo4j fails on a value it reads.
 
 A function reads its arguments as drivine4j's reads them, as SQLite gives them as text or as a number (see
-sqlite_arguments), and a failure in one is the statement's (see sqlite_functions.Failures).
+sqlite_arguments), and a failure in one fails the statement as itself.
 """
 
 from __future__ import annotations
 
 import math
 import re
-import sqlite3
 import uuid
 from collections.abc import Callable
 from decimal import (
@@ -41,6 +42,8 @@ from decimal import (
 from functools import partial
 from typing import Any
 
+import apsw
+
 from drivine.backend.sqlite import sqlite_arguments as arguments
 from drivine.backend.sqlite import sqlite_cypher_procedure, sqlite_graph
 from drivine.backend.sqlite import sqlite_cypher_values as values
@@ -49,15 +52,12 @@ from drivine.backend.sqlite.sqlite_temporal_functions import temporal, to_char
 from drivine.drivine_error import DrivineError
 
 
-def register(connection: sqlite3.Connection, kept: Any, patterns: Patterns) -> None:
-    """
-    Registers on the connection the functions compiled Cypher calls, each through `kept`, which keeps a failure for the
-    connection to raise (see sqlite_functions.Failures.kept).
-    """
+def register(connection: apsw.Connection, patterns: Patterns) -> None:
+    """Registers on the connection the functions compiled Cypher calls."""
     g = sqlite_graph
 
     def add(name: str, arity: int, function: Any, deterministic: bool = True) -> None:
-        connection.create_function(name, arity, kept(function), deterministic=deterministic)
+        connection.create_scalar_function(name, function, arity, deterministic=deterministic)
 
     add(g.CYPHER, 2, partial(sqlite_cypher_procedure.run, connection), False)
     add(g.EQUAL, 2, equal)

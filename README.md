@@ -33,7 +33,7 @@ pip install "drivine[neo4j]"      # Neo4j, Memgraph, Neptune
 pip install "drivine[falkordb]"   # FalkorDB
 pip install "drivine[oracle]"     # Oracle 23.9 or later, through python-oracledb in thin mode
 pip install "drivine[postgres]"   # Postgres 14 or later, through psycopg 3
-pip install drivine               # SQLite 3.45 or later, a graph in a file, through Python's own sqlite3
+pip install "drivine[sqlite]"     # SQLite, a graph in a file, through apsw and the SQLite it bundles
 ```
 
 Python 3.11 or newer. A SQLite store and what a transaction gives there are in

@@ -1,14 +1,16 @@
+# apsw's stubs type a bytes value as collections.abc.Buffer, which Python 3.11 lacks: what they give is partly unknown.
+# pyright: reportUnknownMemberType=false, reportUnknownArgumentType=false, reportUnknownVariableType=false
 """
-One `sqlite3` connection as Drivine opens it, and the calls on it that block: the async and sync connections both run
-them, the async one on a thread of its own (see concurrency.blocking).
+One apsw connection to a SQLite file as Drivine opens it, and the calls on it that block: the async and sync connections
+both run them, the async one on a thread of its own (see concurrency.blocking).
 """
 
 from __future__ import annotations
 
+import itertools
 import json
 import logging
 import re
-import sqlite3
 import time
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -16,13 +18,14 @@ from datetime import date, datetime
 from datetime import time as clock_time
 from decimal import Decimal
 from enum import Enum
-from types import ModuleType
-from typing import Any, NoReturn, TypeVar, cast
+from typing import Any, TypeVar
 from uuid import UUID
+
+import apsw
 
 from drivine.backend.sql.sql_json import storable, to_json
 from drivine.backend.sqlite import sqlite_functions
-from drivine.backend.sqlite.sqlite_contention import ERRORS, locked
+from drivine.backend.sqlite.sqlite_contention import locked
 from drivine.backend.sqlite.sqlite_graph import JSON_ROWS, SqliteGraph
 from drivine.drivine_error import DrivineError
 
@@ -30,14 +33,12 @@ logger = logging.getLogger("drivine.connection")
 
 T = TypeVar("T")
 
-MINIMUM_VERSION = (3, 45, 0)
-"""The oldest SQLite Drivine's statements run on: drivine4j's, for its JSON functions and aggregate order."""
-
-FULL_FLOATS_VERSION = (3, 53, 0)
+MINIMUM_VERSION = (3, 53, 0)
 """
-The oldest SQLite that writes a float as text to 17 significant digits by default, not 15, as compiled Cypher needs it
-to give the floats a graph engine gives: each value is JSON text there. An older SQLite also refuses a subquery in
-`json_each` that groups by a column of the row it is in, which a `CALL { … }` that aggregates may compile to (#376).
+The oldest SQLite Drivine keeps a graph in: the first to write a float as text to 17 significant digits by default,
+not 15, as compiled Cypher needs to give the floats a graph engine gives, each value being JSON text there. An older one
+also refuses a subquery in `json_each` that groups by a column of the row it is in, which a `CALL { … }` that
+aggregates may compile to (#376). apsw's wheels bundle a later one.
 """
 
 DEFAULT_BUSY_TIMEOUT = 30_000
@@ -46,60 +47,38 @@ DEFAULT_BUSY_TIMEOUT = 30_000
 LOCK_WARNING_SECONDS = 5.0
 """How long a transaction may hold the file's write lock before its end is logged as a warning."""
 
-_FUNCTION_FAILED = "user-defined function raised exception"
-
 _POSITIONAL = re.compile(r"\$(\d+)(?![0-9])")
 
 
-def sqlite_module() -> ModuleType:
+def sqlite_version() -> tuple[int, ...]:
+    """The version of the SQLite apsw runs."""
+    return tuple(int(it) for it in apsw.sqlite_lib_version().split("."))
+
+
+def _check_version() -> None:
+    """Refuses a SQLite older than MINIMUM_VERSION, as an apsw built against an older SQLite of the system runs."""
+    if sqlite_version() < MINIMUM_VERSION:
+        raise DrivineError(
+            f"Drivine keeps a graph in SQLite 3.53 or later, and apsw runs SQLite {apsw.sqlite_lib_version()}. "
+            'Install apsw\'s wheel, which bundles a later one: pip install "drivine[sqlite]".'
+        )
+
+
+class Rows:
     """
-    The `sqlite3` module whose SQLite is 3.45 or later: Python's own, or `pysqlite3` where Python's is older and it is
-    installed (`pip install pysqlite3-binary`). Where Python's isn't `complete` for compiled Cypher and `pysqlite3`'s
-    is, `pysqlite3`.
+    A statement's cursor, with the names of its columns, as apsw tells them while it runs: they are read as it begins,
+    as apsw tells none once its last row is read. A statement that gave no row has none.
     """
-    if complete(sqlite3):
-        return sqlite3
-    try:
-        import importlib
 
-        dbapi2: Any = importlib.import_module("pysqlite3.dbapi2")
-    except ImportError:
-        dbapi2 = None
-    if dbapi2 is not None and complete(dbapi2):
-        return cast(ModuleType, dbapi2)
-    if sqlite3.sqlite_version_info >= MINIMUM_VERSION:
-        return sqlite3
-    if dbapi2 is not None and dbapi2.sqlite_version_info >= MINIMUM_VERSION:
-        return cast(ModuleType, dbapi2)
-    raise DrivineError(
-        "Drivine keeps a graph in SQLite 3.45 or later, and Python's sqlite3 module is SQLite "
-        f"{sqlite3.sqlite_version}. "
-        "Install one that is later: pip install pysqlite3-binary, or a Python built with a later SQLite."
-    )
+    def __init__(self, cursor: apsw.Cursor) -> None:
+        self.cursor = cursor
+        try:
+            self.names: list[str] = [it[0] for it in cursor.get_description()]
+        except apsw.ExecutionCompleteError:
+            self.names = []
 
-
-_COMPLETE: dict[str, bool] = {}
-"""`complete` of each module, by name: it is the same for the process."""
-
-
-def complete(module: Any) -> bool:
-    """
-    Whether the module's SQLite gives compiled Cypher all it needs: it is FULL_FLOATS_VERSION or later, and writes a
-    float as text to 17 significant digits, as 3.53 does by default, where a build may keep 15 as before (#376).
-    """
-    name: str = module.__name__
-    if name not in _COMPLETE:
-        _COMPLETE[name] = module.sqlite_version_info >= FULL_FLOATS_VERSION and full_floats(module)
-    return _COMPLETE[name]
-
-
-def full_floats(module: Any) -> bool:
-    """Whether the module's SQLite writes a float as text to 17 significant digits."""
-    connection = module.connect(":memory:")
-    try:
-        return connection.execute("SELECT json_quote(0.1 + 0.2)").fetchone()[0] == "0.30000000000000004"
-    finally:
-        connection.close()
+    def close(self) -> None:
+        self.cursor.close()
 
 
 class SqliteSession:
@@ -122,31 +101,29 @@ class SqliteSession:
     """
 
     def __init__(self, path: str, busy_timeout: int = DEFAULT_BUSY_TIMEOUT) -> None:
-        module = sqlite_module()
+        _check_version()
         try:
-            self.connection: sqlite3.Connection = module.connect(
-                path, timeout=busy_timeout / 1000, isolation_level=None, check_same_thread=False
-            )
-        except module.Error as error:
+            # apsw opens no transaction of its own: outside BEGIN … COMMIT each statement commits as it runs.
+            self.connection = apsw.Connection(path)
+        except apsw.Error as error:
             # SQLite's message, as for a folder that is not there, does not name the file.
             raise DrivineError(f"Could not open the SQLite file '{path}': {error}.") from error
         self.thread = ThreadPoolExecutor(max_workers=1, thread_name_prefix="drivine-sqlite")
-        self.failures = sqlite_functions.Failures()
         try:
+            self.connection.set_busy_timeout(int(busy_timeout))
             deadline = time.monotonic() + busy_timeout / 1000
             for pragma in ("journal_mode = WAL", "foreign_keys = ON", "synchronous = NORMAL"):
                 while True:
                     try:
                         self.connection.execute(f"PRAGMA {pragma}").close()
                         break
-                    except ERRORS as error:
+                    except apsw.Error as error:
                         # A connection opened as another closes, or recovers the log, is turned away at once, without
                         # SQLite's wait: it tries again, as long as it waits for a locked file.
                         if not locked(error) or time.monotonic() >= deadline:
                             raise
                         time.sleep(0.005)
-            self.connection.execute(f"PRAGMA busy_timeout = {int(busy_timeout)}").close()
-            sqlite_functions.register(self.connection, self.failures)
+            sqlite_functions.register(self.connection)
         except BaseException:
             self.connection.close()
             raise
@@ -158,20 +135,17 @@ class SqliteSession:
 
     def query(self, statement: str, parameters: Mapping[str, Any] | Sequence[Any]) -> list[dict[str, Any]]:
         """The rows the statement gives, each a dict of its columns: see `rows`."""
-        cursor = self.execute(statement, parameters)
+        found = self.execute(statement, parameters)
         try:
-            return rows(statement, cursor, cursor.fetchall())
-        except ERRORS as error:
-            # A function may fail at a later row, as it reaches it.
-            self._raise_told(error)
+            return rows(statement, found, found.cursor.fetchall())
         finally:
-            cursor.close()
+            found.close()
 
     def query_writing(self, statement: str, parameters: Mapping[str, Any] | Sequence[Any]) -> list[dict[str, Any]]:
         """`query` of a statement that writes, in a transaction of its own where none is open: see `writing`."""
         return self.writing(lambda: self.query(statement, parameters))
 
-    def execute_writing(self, statement: str, parameters: Mapping[str, Any] | Sequence[Any]) -> sqlite3.Cursor:
+    def execute_writing(self, statement: str, parameters: Mapping[str, Any] | Sequence[Any]) -> Rows:
         """`execute` of a statement that writes, in a transaction of its own where none is open: see `writing`."""
         return self.writing(lambda: self.execute(statement, parameters))
 
@@ -192,26 +166,17 @@ class SqliteSession:
             raise
         return done
 
-    def execute(self, statement: str, parameters: Mapping[str, Any] | Sequence[Any]) -> sqlite3.Cursor:
+    def execute(self, statement: str, parameters: Mapping[str, Any] | Sequence[Any]) -> Rows:
         """
-        Runs the statement with its values bound (see `bindable`), and gives its cursor. A failure inside a function
-        Drivine registered is raised as itself, not as the "user-defined function raised exception" SQLite says of it.
+        Runs the statement with its values bound (see `bindable`), and gives its rows to read. A failure inside a
+        function Drivine registered is raised as itself, as apsw raises it.
         """
         sql, values = bindable(statement, parameters)
-        try:
-            return self.connection.execute(sql, values)
-        except ERRORS as error:
-            self._raise_told(error)
-        except BaseException:
-            self.failures.take()
-            raise
+        return Rows(self.connection.execute(sql, values))
 
-    def fetch(self, statement: str, cursor: sqlite3.Cursor, count: int) -> list[dict[str, Any]]:
-        """The next `count` rows of the cursor at most."""
-        try:
-            return rows(statement, cursor, cursor.fetchmany(count))
-        except ERRORS as error:
-            self._raise_told(error)
+    def fetch(self, statement: str, found: Rows, count: int) -> list[dict[str, Any]]:
+        """The next `count` rows at most."""
+        return rows(statement, found, list(itertools.islice(found.cursor, count)))
 
     def begin(self) -> None:
         """Opens a transaction, the file's write lock taken."""
@@ -233,7 +198,7 @@ class SqliteSession:
         """
         try:
             self.connection.execute("ROLLBACK").close()
-        except ERRORS:
+        except apsw.Error:
             if self.connection.in_transaction:
                 raise
         finally:
@@ -278,20 +243,10 @@ class SqliteSession:
                 held * 1000,
             )
 
-    def _raise_told(self, error: Exception) -> NoReturn:
-        """
-        Raises the failure a function raised, caused by SQLite's error, where SQLite says only that one did; the error
-        itself otherwise.
-        """
-        kept = self.failures.take()
-        if kept is not None and _FUNCTION_FAILED in str(error):
-            raise kept from error
-        raise error
-
 
 def bindable(statement: str, parameters: Mapping[str, Any] | Sequence[Any]) -> tuple[str, Any]:
     """
-    The statement and its values as `sqlite3` binds them. SQLite reads `$name` itself, so a statement's named values
+    The statement and its values as apsw binds them. SQLite reads `$name` itself, so a statement's named values
     are bound by name; each positional `$1` becomes SQLite's `?1`. A map or a list is bound as its JSON text, as
     Drivine's statements take one; a date as ISO 8601 text, an Enum as its value, and so on, as a save writes them (see
     storable).
@@ -313,14 +268,14 @@ def _value(value: Any) -> Any:
     return value
 
 
-def rows(statement: str, cursor: sqlite3.Cursor, fetched: list[Any]) -> list[dict[str, Any]]:
+def rows(statement: str, found: Rows, fetched: list[Any]) -> list[dict[str, Any]]:
     """
     The rows as dicts of their columns. Where the statement opens with JSON_ROWS, each text value is JSON, which is
     read: SQLite has no JSON type for a column to say so.
     """
-    if cursor.description is None:
+    if not fetched:
         return []
-    names = [it[0] for it in cursor.description]
+    names = found.names
     documents = statement.lstrip().startswith(JSON_ROWS)
     return [
         {

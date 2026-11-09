@@ -165,6 +165,12 @@ async def test_another_refusal_is_raised_as_it_is():
     assert raised.value is store.refusal and store.dropped == []
 
 
+BUILT_RANGE = {"label": "Person", "properties": ["email"], "types": {"email": ["RANGE"]}, "status": "OPERATIONAL"}
+"""The range index a FalkorDB constraint needs, built: FalkorDB lists its label so once made."""
+
+STATUSES = FALKORDB_SCHEMA.list_index_statuses.statement if FALKORDB_SCHEMA.list_index_statuses else ""
+
+
 class FalkorDbLike:
     """
     An executor over a FalkorDB, which builds a constraint in the background: once made, the constraint is missing
@@ -181,6 +187,7 @@ class FalkorDbLike:
         self.made = False
         self.listings = 0
         self.dropped = False
+        self.indexed = False
         self.read: list[str] = []
 
     async def run(self, statement: str | NativeOperation, bindings: Mapping[str, Any] | None = None) -> list[Any]:
@@ -197,6 +204,11 @@ class FalkorDbLike:
                 return []
             status = "UNDER CONSTRUCTION" if self.listings <= self.pending + self.building else self.status
             return [{"label": "Person", "properties": ["email"], "status": status}]
+        if statement.startswith("CREATE INDEX"):
+            self.indexed = True
+            return []
+        if statement == STATUSES and self.indexed:
+            return [BUILT_RANGE]
         if "holders > 1" in statement:
             answer = self.conflicts[min(len(self.read), len(self.conflicts) - 1)]
             self.read.append(statement)
@@ -369,6 +381,7 @@ class BuildingInStore:
         self.refused_drop = refused_drop
         self.phase = "building"
         self.listings = 0
+        self.indexed = False
         self.ran: list[str | NativeOperation] = []
 
     async def run(self, statement: str | NativeOperation, bindings: Mapping[str, Any] | None = None) -> list[Any]:
@@ -392,6 +405,11 @@ class BuildingInStore:
             status = statuses[min(self.listings, len(statuses) - 1)]
             self.listings += 1
             return [{"label": "Person", "properties": ["email"], "status": status}] if status else []
+        if statement.startswith("CREATE INDEX"):
+            self.indexed = True
+            return []
+        if statement == STATUSES and self.indexed:
+            return [BUILT_RANGE]
         return self.conflicts if "holders > 1" in statement else []
 
     def count(self, native: str) -> int:

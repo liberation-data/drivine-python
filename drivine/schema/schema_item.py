@@ -29,3 +29,19 @@ class SchemaItem:
     `details`): names Neo4j's schema DDL gave it where the schema API names it otherwise, so that a `DROP` by one finds
     it (see SchemaCommands). drivine4j's `RecordedItem.aliases`.
     """
+    status: str | None = field(default=None, compare=False)
+    """
+    The status the engine gives the item's build, where it builds one in the background: FalkorDB's, for a label's
+    indexes (`SchemaGrammar.list_index_statuses`: UNDER CONSTRUCTION, with its progress, until OPERATIONAL). None
+    where it gives none.
+    """
+
+    @property
+    def failed(self) -> bool:
+        """Whether the engine reports the item's build failed."""
+        return self.status is not None and "FAILED" in self.status.upper()
+
+    @property
+    def building(self) -> bool:
+        """Whether the engine reports the item still being built: it has a status, neither OPERATIONAL nor failed."""
+        return self.status is not None and self.status.upper() != "OPERATIONAL" and not self.failed

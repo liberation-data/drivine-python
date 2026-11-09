@@ -87,6 +87,33 @@ class SchemaGrammar:
     there; none, where empty. None on an engine that keeps none. drivine4j's `SchemaAliases.aliased`.
     """
 
+    await_index: str | None = None
+    """
+    Where the statement that makes an index returns while the engine still populates it in the background (Neo4j), the
+    statement that waits on the server for the index named `$name` to be online, for at most `$timeout` whole
+    seconds, and fails when its build failed or did not end in time: IndexManager runs it before it hands an index
+    back. None where the DDL returns the index built (Memgraph, the SQL stores), or where the listings give the build's
+    status instead (`list_index_statuses`).
+    """
+    is_build_timeout: Callable[[BaseException], bool] = field(default=lambda failure: False)
+    """
+    Beside `await_index`, whether its failure says the index was still being built when the wait ended, rather than
+    that its build failed: by the code of the driver's error.
+    """
+    index_state: str | None = None
+    """
+    Beside `await_index`, the statement giving the `state` of the index named `$name`, and its `failure`, the message
+    the engine gives for a failed build: one row, or none when there is no such index. Read when the wait fails other
+    than by its timeout: only an index listed FAILED is taken for a failed build, and one POPULATING for one still
+    being built.
+    """
+    list_index_statuses: SchemaListing | None = None
+    """
+    Where the DDL returns while the engine builds the index in the background, and a listing gives the build's status
+    (FalkorDB), that listing: an item for each label with indexes, its `status` that of all of them, which IndexManager
+    polls until it is built.
+    """
+
     lower_copies: LowerCopyStatements = CYPHER_LOWER_COPIES
     """
     The statements that fill in the lowercased copies of a property and record that every node of a label has them
@@ -144,16 +171,24 @@ been dropped.", which Neo4j 4.4 to 2026 all give.
 """
 
 
-def _neo4j_blocked_by_index(failure: BaseException) -> bool:
+PROCEDURE_TIMED_OUT = "Neo.ClientError.Procedure.ProcedureTimedOut"
+"""Neo4j's code for a procedure whose wait ran out: `db.awaitIndex`'s, for an index still populating."""
+
+
+def _neo4j_coded(failure: BaseException, code: str) -> bool:
     """By the code of the driver's error, under whatever wraps it; never by the message, or a clash of names."""
     cause: BaseException | None = failure
     for _ in range(10):
         if cause is None:
             return False
-        if getattr(cause, "code", None) == INDEX_ALREADY_EXISTS:
+        if getattr(cause, "code", None) == code:
             return True
         cause = cause.__cause__
     return False
+
+
+def _neo4j_blocked_by_index(failure: BaseException) -> bool:
+    return _neo4j_coded(failure, INDEX_ALREADY_EXISTS)
 
 
 def _pattern(spec: Any) -> str:
@@ -279,6 +314,15 @@ NEO4J_SCHEMA = SchemaGrammar(
     drop_full_text=lambda spec, name: [f"DROP INDEX {quote_name(name or item_name(spec))} IF EXISTS"],
     conflicts=lambda spec, limit: _conflicts(spec, limit, "elementId"),
     blocked_by_index=_neo4j_blocked_by_index,
+    # CREATE INDEX returns while the index is POPULATING, and Neo4j checks a write's index entries against it only once
+    # it is ONLINE: an entry too large for it, written as it comes online, is refused only after it is in the log, and
+    # Neo4j 2026.10 then panics until restarted. So an index is waited for before it is reported made.
+    await_index="CALL db.awaitIndex($name, $timeout)",
+    is_build_timeout=lambda failure: _neo4j_coded(failure, PROCEDURE_TIMED_OUT),
+    index_state=(
+        "SHOW INDEXES YIELD name, state, failureMessage WHERE name = $name "
+        "RETURN {state: state, failure: failureMessage}"
+    ),
     drop_named_range=lambda name: [f"DROP INDEX {quote_name(name)} IF EXISTS"],
 )
 
@@ -402,6 +446,13 @@ _FALKORDB_VECTOR_INDEXES = (
     "CALL db.indexes() YIELD label, properties, types, options, entitytype WHERE entitytype = 'NODE' "
     "RETURN {label: label, properties: properties, types: types, options: options}"
 )
+_FALKORDB_INDEX_STATUSES = (
+    "CALL db.indexes() YIELD label, entitytype, status WHERE entitytype = 'NODE' RETURN {label: label, status: status}"
+)
+"""
+The status of each label's indexes, one for all of them: `[Indexing] 0/N: UNDER CONSTRUCTION` while any is being
+built, then OPERATIONAL. A statement of its own, so that the listings stay the ones TypeScript's Drivine writes.
+"""
 _FALKORDB_UNIQUES = (
     "CALL db.constraints() YIELD type, label, properties, entitytype, status WHERE type = 'UNIQUE' AND "
     "entitytype = 'NODE' RETURN {label: label, properties: properties, status: status}"
@@ -428,6 +479,10 @@ def _falkordb_constrainable(spec: UniquenessConstraintSpec) -> None:
 
 FALKORDB_SCHEMA = SchemaGrammar(
     engine="FalkorDB",
+    # CREATE INDEX returns at once, and a query answers from the index while it is built, with part of the rows.
+    list_index_statuses=SchemaListing(
+        _FALKORDB_INDEX_STATUSES, lambda rows: [SchemaItem(it["label"], (), status=it.get("status")) for it in rows]
+    ),
     require_constrainable=_falkordb_constrainable,
     ranges_per_property=True,
     unique_needs_range=True,

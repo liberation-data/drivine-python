@@ -19,6 +19,7 @@ from drivine.query.query_specification import QuerySpecification
 from drivine.query.statement import cypher_statement
 from drivine.schema import vector_annotation_check
 from drivine.schema.ensure_result import EnsureResult
+from drivine.schema.index_manager import IndexNotBuilt
 from drivine.schema.recorded_inventory import RecordedInventory, inventory_entries, read_inventory
 from drivine.schema.schema_catalog import DEFAULT_SCOPE, SchemaCatalog
 from drivine.schema.schema_options import SchemaOptions
@@ -396,7 +397,8 @@ class SchemaManager:
         changed since it last applied (a first version is adopted, not acted on); an item another owner declares too is
         never recreated by one owner's version. Items the owner applied before and no longer declares (orphans) are
         reported, never dropped. The owner's version and inventory are recorded only when the apply succeeds, so a
-        failed one is tried again on the next enforce.
+        failed one is tried again on the next enforce. An index whose build failed or did not end in time is reported
+        once the other items are applied: raised, every such index listed, under FAIL_FAST, and logged under WARN.
 
         `only`, from `ensure`, is the keys of the items given: just those are applied, the version stays as recorded,
         and `recreate_on_startup` doesn't apply. Runtime items an earlier manager recorded and this one hasn't been
@@ -434,11 +436,22 @@ class SchemaManager:
         applied = own if only is None else [it for it in own if inventory_key(it) in only]
         ordered = [*(it for it in applied if it.kind != "UNIQUE"), *(it for it in applied if it.kind == "UNIQUE")]
         results: list[EnsureResult[Any]] = []
+        unbuilt: list[IndexNotBuilt] = []
         for spec in ordered:
             # A runtime item marked stale missed its owner's recreate, and is recreated now.
             key = inventory_key(spec)
             recreate = forced or ((recreate_owner or key in stale) and key not in plan.co_owned)
-            results.append(await self._ensure(gom, spec, recreate))
+            results.append(await self._ensure(gom, spec, recreate, unbuilt))
+        problems = [_described(it) for it in unbuilt]
+        if problems and self.options.mode != "WARN":
+            # After the owner's other items are applied, and before its marker is written, so the next apply waits
+            # again.
+            raise DrivineError(
+                f"Schema application for owner '{owner}' on database '{database}' found problems:\n"
+                + "\n".join(problems)
+                + "\nResolve them, make SchemaOptions(index_build_timeout=...) longer for an index still being built, "
+                'or set mode="WARN" to continue with warnings.'
+            ) from unbuilt[0]
         # A carried item has no spec here to be recreated from: it is marked, and recreated when next ensured. A
         # version change spares one another owner declares, as it spares a co-owned item. A runtime item not applied
         # this time keeps its mark.
@@ -453,6 +466,8 @@ class SchemaManager:
                 {"scope": owner, "version": stored if ensuring else version, "items": items}
             )
         )
+        for problem in problems:
+            logger.warning(problem)
         return results
 
     async def _ensure_singleton(self, gom: StatelessGraphObjectManager, owner: str) -> None:
@@ -482,18 +497,38 @@ class SchemaManager:
                 ", ".join(orphans),
             )
 
-    async def _ensure(self, gom: StatelessGraphObjectManager, spec: SchemaSpec, recreate: bool) -> EnsureResult[Any]:
+    async def _ensure(
+        self, gom: StatelessGraphObjectManager, spec: SchemaSpec, recreate: bool, unbuilt: list[IndexNotBuilt]
+    ) -> EnsureResult[Any]:
+        """
+        Applies the item, adding an index whose build failed or did not end in time to `unbuilt`, which needs
+        attention as a drift does, and giving what was done: raised under FAIL_FAST once the owner's other items are
+        applied, and logged under WARN.
+        """
+        try:
+            return await self._ensure_built(gom, spec, recreate)
+        except IndexNotBuilt as not_built:
+            unbuilt.append(not_built)
+            return not_built.result
+
+    async def _ensure_built(
+        self, gom: StatelessGraphObjectManager, spec: SchemaSpec, recreate: bool
+    ) -> EnsureResult[Any]:
+        timeout = self.options.index_build_timeout
         if isinstance(spec, UniquenessConstraintSpec):
             constraints = gom.constraints
+            constraints.build_timeout = timeout
             make = constraints.recreate if recreate else constraints.ensure
             return self._judge(
                 await make(spec, self.options.violation_sample_size, self.options.replace_blocking_index)
             )
+        indexes = gom.indexes
+        indexes.build_timeout = timeout
         if recreate:
-            return await gom.indexes.recreate(spec)
-        result = await gom.indexes.ensure(spec)
+            return await indexes.recreate(spec)
+        result = await indexes.ensure(spec)
         if result.status == "DRIFT" and self.options.recreate_on_drift:
-            return await gom.indexes.recreate(spec)
+            return await indexes.recreate(spec)
         return self._judge(result)
 
     def _judge(self, result: EnsureResult[Any]) -> EnsureResult[Any]:
@@ -585,6 +620,16 @@ class SchemaManager:
             f"{by} declare the {spec.kind} on {spec.label}({', '.join(spec.properties)}){on} differently: "
             f"{held} and {spec}."
         )
+
+
+def _described(unbuilt: IndexNotBuilt) -> str:
+    """An index not built, as SchemaManager reports it, as drivine4j's does."""
+    if unbuilt.failed:
+        return (
+            f"  - BUILD FAILED: {unbuilt}. It is left in place, failed: drop or recreate it once the data it failed on "
+            "is fixed"
+        )
+    return f"  - STILL BUILDING: {unbuilt}. It is left to be built, and waited for again on the next enforce"
 
 
 def _runtime_catalogs(

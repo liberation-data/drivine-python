@@ -5,9 +5,12 @@ from __future__ import annotations
 import dataclasses
 import itertools
 import logging
+import math
+import time
 from collections.abc import Callable, Sequence
-from typing import TYPE_CHECKING, Literal, TypeVar
+from typing import TYPE_CHECKING, Any, Literal, NoReturn, TypeVar, cast
 
+from drivine.drivine_error import DrivineError
 from drivine.schema.ensure_result import EnsureResult
 from drivine.schema.full_text_index_spec import FullTextIndexSpec
 from drivine.schema.range_index_spec import RangeIndexSpec
@@ -15,6 +18,7 @@ from drivine.schema.schema_grammar import SchemaGrammar
 from drivine.schema.schema_item import SchemaItem
 from drivine.schema.schema_specs import IndexSpec, item_name, made_as
 from drivine.schema.vector_index_spec import VectorIndexSpec
+from drivine.sync import concurrency
 from drivine.sync.schema.lower_copy_catalog import LowerCopyCatalog, fill_in_lower_copies
 from drivine.sync.schema.schema_executor import SchemaExecutor
 
@@ -24,6 +28,27 @@ if TYPE_CHECKING:
 S = TypeVar("S", bound=RangeIndexSpec | VectorIndexSpec | FullTextIndexSpec)
 
 logger = logging.getLogger("drivine.schema")
+
+BUILD_TIMEOUT = 60.0
+"""
+How many seconds `ensure` and `recreate` wait, by default, for an index the engine builds in the background (Neo4j,
+FalkorDB) to be built: as long as Drivine's own tests wait, with `db.awaitIndexes(60)`. `SchemaOptions` sets it.
+"""
+
+BUILD_POLL = 0.2
+"""How many seconds apart FalkorDB is asked whether an index is built."""
+
+
+class IndexNotBuilt(DrivineError):
+    """
+    An index `ensure` or `recreate` made, or found there, whose build failed (`failed`), or was still running when the
+    wait ended. The index is left as it is. `result` is what `ensure` would have given had it been built.
+    """
+
+    def __init__(self, message: str, result: EnsureResult[Any], failed: bool) -> None:
+        super().__init__(message)
+        self.result = result
+        self.failed = failed
 
 
 class IndexManager:
@@ -38,16 +63,18 @@ class IndexManager:
         grammar: SchemaGrammar,
         changed: Callable[[], None] = lambda: None,
         copies: LowerCopyCatalog | None = None,
+        build_timeout: float = BUILD_TIMEOUT,
     ) -> None:
         """
         `changed` is told once this has made or dropped an index: the object manager's index list is then stale.
         `copies` fills in the lowercased copies an index that ignores case is made over; without it, such an index is
-        refused.
+        refused. `build_timeout` is how many seconds an index the engine builds in the background is waited for.
         """
         self.executor = executor
         self.grammar = grammar
         self.changed = changed
         self.copies = copies
+        self.build_timeout = build_timeout
 
     def list(self, kind: Literal["RANGE", "VECTOR", "FULLTEXT"] = "RANGE") -> list[SchemaItem]:
         """The indexes of a kind the engine holds."""
@@ -64,13 +91,18 @@ class IndexManager:
         RangeIndexSpec) is made over the lowercased copies, and first fills them in on the nodes of its label that have
         none, recording that they all have them, whatever the result. Where the index isn't there yet, the copies are
         filled in again even where recorded, as by `recreate`: those a field kept before it lost `CaseInsensitive` went
-        out of step meanwhile.
+        out of step meanwhile. On an engine that builds an index in the background (Neo4j, FalkorDB), returns once the
+        index, made here or there already, is built, and raises IndexNotBuilt for one whose build failed or did not end
+        within `build_timeout` (see `_await_built`).
         """
         made = made_as(spec)
         self._warn_unsupported(made)
         found = self._find(made)
         fill_in_lower_copies(self.copies, spec, found is None)
-        return dataclasses.replace(self._ensure_made(made, found), spec=spec)
+        result = dataclasses.replace(self._ensure_made(made, found), spec=spec)
+        if result.status != "DRIFT":
+            self._await_built(made, result)
+        return result
 
     def _ensure_made(self, spec: S, found: SchemaItem | None) -> EnsureResult[S]:
         """`ensure`, of the index as it is made, which the engine holds as `found`."""
@@ -98,7 +130,7 @@ class IndexManager:
         Drops the index over the label and properties, whatever its shape, and makes it as the spec says. An index that
         ignores case fills the lowercased copies in again on every node of its label, recorded or not, where Cypher or
         SQL of your own, which keeps no copy, left one out of step. The index made again keeps the aliases its record
-        kept (see `alias`).
+        kept (see `alias`), and is returned once it is built, as by `ensure`.
         """
         fill_in_lower_copies(self.copies, spec, True)
         made = made_as(spec)
@@ -108,7 +140,9 @@ class IndexManager:
         if found is not None and found.aliases:
             self.alias(made.kind, SchemaItem(made.label, made.properties), found.aliases)
         self.changed()
-        return EnsureResult("RECREATED", spec)
+        result = EnsureResult("RECREATED", spec)
+        self._await_built(made, result)
+        return result
 
     def alias(self, kind: CatalogKind, item: SchemaItem, aliases: Sequence[str]) -> None:
         """
@@ -164,6 +198,105 @@ class IndexManager:
             return
         for statement in self._statements(missing, "create"):
             self.executor.run(statement)
+
+    def _await_built(self, spec: IndexSpec, result: EnsureResult[Any]) -> None:
+        """
+        Waits until the index of `result`, which `ensure` or `recreate` made or found there, as `spec` makes it, is
+        built, on an engine that builds an index in the background, for at most `build_timeout` seconds. Neo4j returns
+        from `CREATE INDEX` while the index is still POPULATING, and a write of a value too large for it that commits
+        just as it comes online stops the database until it is restarted; FalkorDB answers a query from an index it is
+        still building, with part of the rows. So nothing that makes an index hands it back before it is built.
+
+        - Neo4j waits on the server, with `db.awaitIndex`, for the index by its name, `build_timeout` rounded up to
+          whole seconds.
+        - FalkorDB is polled, every BUILD_POLL seconds, until `db.indexes()` no longer lists the label's indexes as
+          UNDER CONSTRUCTION (`list_index_statuses`).
+
+        A build that failed, or did not end in time, raises IndexNotBuilt (see `_not_built`). The index is left as it
+        is. Any other failure of the wait (an index not there, a connection lost) is raised as it is. Elsewhere the
+        DDL returns the index built, and nothing is waited for.
+        """
+        if self.grammar.await_index is not None:
+            found = self._find(spec)
+            if found is None or not found.name:
+                # None listed: IF NOT EXISTS made none, as a uniqueness constraint's own index covers the properties,
+                # which Neo4j builds within the statement that makes the constraint.
+                return
+            # By the name Neo4j holds it under: IF NOT EXISTS makes none over an index of the same shape another
+            # process made under another name.
+            name = found.name
+            try:
+                # Neo4j takes whole seconds, rounded up so that the wait is at least what was asked: only a zero
+                # timeout is zero, which Neo4j takes as checking once.
+                timeout = math.ceil(self.build_timeout)
+                self.executor.run(self.grammar.await_index, {"name": name, "timeout": timeout})
+            except Exception as error:
+                # A timeout is told by its code. Any other error is a failed build only where the index is listed
+                # FAILED, and still being built where POPULATING: one not there, or a connection lost, is raised as it
+                # is, not taken for a build that failed or is still running.
+                timed_out = self.grammar.is_build_timeout(error)
+                state = None if timed_out else self._state(name)
+                listed = str((state or {}).get("state")).upper()
+                if not timed_out and listed not in ("FAILED", "POPULATING"):
+                    raise
+                failed = listed == "FAILED"
+                reason = (state or {}).get("failure") if failed else None
+                self._not_built(result, name, failed, str(reason or error), error)
+            return
+        listing = self.grammar.list_index_statuses
+        if listing is None:
+            return
+        deadline = time.monotonic() + self.build_timeout
+
+        def status() -> SchemaItem | None:
+            return next(
+                (it for it in listing.read(self.executor.run(listing.statement)) if it.label == spec.label), None
+            )
+
+        found = status()
+        while found is None or found.building:
+            if time.monotonic() >= deadline:
+                self._not_built(result, None, False, f"it is {found.status if found is not None else 'not listed'}")
+            # Asked again at the deadline at the latest, so a wait shorter than the poll ends when it should.
+            concurrency.sleep(max(0.0, min(BUILD_POLL, deadline - time.monotonic())))
+            found = status()
+        if found.failed:
+            self._not_built(result, None, True, f"it is {found.status}")
+
+    def _not_built(
+        self,
+        result: EnsureResult[Any],
+        name: str | None,
+        failed: bool,
+        reason: str,
+        cause: BaseException | None = None,
+    ) -> NoReturn:
+        """
+        Raises IndexNotBuilt for the index of `result`: the one place a build that failed, or is still running once the
+        wait is over, is raised. SchemaManager collects it, and raises an owner's at the end under FAIL_FAST, or logs
+        them under WARN.
+        """
+        spec = result.spec
+        named = f"{name} " if name else ""
+        what = f"{self.grammar.engine} {spec.kind} index {named}on {spec.label}({', '.join(spec.properties)})"
+        message = (
+            f"{what} failed to build: {reason}"
+            if failed
+            else f"{what} is still being built, having waited at most {self.build_timeout:g} s: {reason}"
+        )
+        raise IndexNotBuilt(message, result, failed) from cause
+
+    def _state(self, name: str) -> dict[str, Any] | None:
+        """The state Neo4j gives the index of that name, and its failure; None where there is none, or none is read."""
+        if self.grammar.index_state is None:
+            return None
+        try:
+            rows = self.executor.run(self.grammar.index_state, {"name": name})
+        except Exception as unreadable:
+            logger.debug("Could not read the state of the index %s: %s", name, unreadable)
+            return None
+        row: Any = rows[0] if rows else None
+        return cast("dict[str, Any]", row) if isinstance(row, dict) else None
 
     def _missing(self, spec: IndexSpec) -> IndexSpec:
         """

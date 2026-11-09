@@ -46,6 +46,22 @@ missing `DATABASE_TYPE` raises `DrivineError` there rather than on first use. Wi
   construction is waited on, and matches once built, and a failed one is dropped and made again. `drop` also removes a
   constraint FalkorDB failed to build.
   `mode="FAIL_FAST"`, the default, raises on either; `"WARN"` logs.
+- **Indexes are built before `ensure` returns.** Neo4j and FalkorDB build an index in the background, after the
+  statement that makes it has returned, so on them `ensure` and `recreate` wait until each index they made, or found
+  there, is built: Neo4j's `db.awaitIndex`, by the index's name, and on FalkorDB `db.indexes()` asked every 200 ms
+  until it lists the label's indexes as OPERATIONAL. Memgraph and the SQL stores build an index within the statement,
+  and nothing is waited for. The wait is at most `SchemaOptions(index_build_timeout=60)` seconds (Neo4j's procedure
+  counts whole seconds, so a timeout is rounded up to them, and only a zero timeout checks once). An index whose build
+  failed (on Neo4j, one over a text too large for a range index, say), or that is still being built when the wait
+  ends, is left as it is, to finish building or to stay failed. `gom.indexes.ensure` by hand raises it as
+  `IndexNotBuilt`, a `DrivineError` that names the index and gives the engine's reason; a wait that fails otherwise
+  (an index not there, a connection lost) raises its own error. Applied by the `SchemaManager`, it is a problem of its
+  owner, as a drift is: `mode="FAIL_FAST"` raises once the owner's other items are applied, listing each such index as
+  `BUILD FAILED` or `STILL BUILDING`, and doesn't record the owner's marker; `"WARN"` logs each so, and the item is
+  reported as what was done (`CREATED`, `ALREADY_MATCHING` or `RECREATED`). Either way the next apply waits for it
+  again. On FalkorDB an index still being built answers a query with part of
+  the rows: the wait covers the indexes Drivine's `ensure` makes, but one made otherwise, by Cypher of your own or
+  another process, can give partial rows until FalkorDB lists it as OPERATIONAL.
 - **Versions.** `catalog.with_version("2")` recreates the catalog's items once, the first time it is enforced. Items an
   owner applied before and no longer declares are reported, never dropped. Each owner's version and inventory are kept
   in a `_DrivineSchema` node, as drivine4j and TypeScript keep them.

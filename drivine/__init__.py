@@ -104,7 +104,7 @@ from drivine.query.statement import Statement, cypher_file, cypher_statement, sq
 from drivine.schema.constraint_manager import ConstraintManager
 from drivine.schema.engine_vector_options import EngineVectorOptions
 from drivine.schema.ensure_result import EnsureResult, ViolatingKey
-from drivine.schema.index_manager import IndexManager
+from drivine.schema.index_manager import IndexManager, IndexNotBuilt
 from drivine.schema.schema_catalog import SchemaCatalog
 from drivine.schema.schema_manager import SchemaManager
 from drivine.schema.schema_options import SchemaOptions
@@ -172,6 +172,7 @@ __all__ = [
     "hop",
     "IndexAdvicePolicy",
     "IndexManager",
+    "IndexNotBuilt",
     "JsonPacked",
     "key",
     "ListRef",

@@ -33,12 +33,12 @@ logger = logging.getLogger("drivine.connection")
 
 T = TypeVar("T")
 
-MINIMUM_VERSION = (3, 53, 0)
+MINIMUM_VERSION = (3, 53, 2)
 """
 The oldest SQLite Drivine keeps a graph in: the first to write a float as text to 17 significant digits by default,
-not 15, as compiled Cypher needs to give the floats a graph engine gives, each value being JSON text there. An older one
-also refuses a subquery in `json_each` that groups by a column of the row it is in, which a `CALL { … }` that
-aggregates may compile to (#376). apsw's wheels bundle a later one.
+not 15 (apsw's 3.53.0 and 3.53.1 still write 15), as compiled Cypher needs to give the floats a graph engine gives,
+each value being JSON text there. An older one also refuses a subquery in `json_each` that groups by a column of the
+row it is in, which a `CALL { … }` that aggregates may compile to (#376). apsw's wheels bundle a later one.
 """
 
 DEFAULT_BUSY_TIMEOUT = 30_000
@@ -55,14 +55,14 @@ _NO_STATEMENT = re.compile(r"(?:\s|--[^\n]*+|/\*(?:[^*]|\*(?!/))*+(?:\*/|\Z)|;)*
 
 def sqlite_version() -> tuple[int, ...]:
     """The version of the SQLite apsw runs."""
-    return tuple(int(it) for it in apsw.sqlite_lib_version().split("."))
+    return tuple(int(it) for it in apsw.sqlite_lib_version().split(".")[:3])
 
 
 def _check_version() -> None:
     """Refuses a SQLite older than MINIMUM_VERSION, as an apsw built against an older SQLite of the system runs."""
     if sqlite_version() < MINIMUM_VERSION:
         raise DrivineError(
-            f"Drivine keeps a graph in SQLite 3.53 or later, and apsw runs SQLite {apsw.sqlite_lib_version()}. "
+            f"Drivine keeps a graph in SQLite 3.53.2 or later, and apsw runs SQLite {apsw.sqlite_lib_version()}. "
             'Install apsw\'s wheel, which bundles a later one: pip install "drivine[sqlite]".'
         )
 

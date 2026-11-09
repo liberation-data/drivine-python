@@ -3,7 +3,7 @@ An argument of a function Drivine registers on a SQLite connection, read as SQLi
 `sqlite3_value_double` and `sqlite3_value_int64` read one, as drivine4j's functions read theirs. apsw
 hands a function each argument as the value SQLite holds: an int, a float, a str, bytes or None.
 
-A real number read as text is written as the SQLite drivine4j links (3.53) writes one: to 15 significant digits where
+A real number read as text is written as the SQLite drivine4j links (3.53.2) writes one: to 15 significant digits where
 those read back as the same double, else to 17. SQLite works the 17 out by its own arithmetic, which may miss the
 exact decimal in the last digit (`1.0 / 3` is `0.33333333333333332`, exactly `…31`): here they are the exact digits.
 Either reads back as the same double. A function here is given the double itself, so it gives what drivine4j does.

@@ -402,6 +402,11 @@ class TestTheSession:
         with pytest.raises(DrivineError, match=f"SQLite 3.53.2 or later, and apsw runs SQLite {version}"):
             SqliteSession(str(tmp_path / "graph.db"))
 
+    @pytest.mark.parametrize("version", ["3.53.2", "3.53.10", "3.54.0"])
+    def test_a_sqlite_of_3_53_2_or_later_is_kept(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, version: str):
+        monkeypatch.setattr(apsw, "sqlite_lib_version", lambda: version)
+        SqliteSession(str(tmp_path / "graph.db")).close()
+
     def test_a_text_of_more_than_one_statement_is_refused_before_any_runs_and_one_ending_in_comments_runs(
         self, tmp_path: Path
     ):

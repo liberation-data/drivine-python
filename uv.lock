@@ -535,7 +535,7 @@ requires-dist = [
     { name = "antlr4-python3-runtime", marker = "extra == 'oracle'", specifier = ">=4.13.2,<4.14" },
     { name = "antlr4-python3-runtime", marker = "extra == 'postgres'", specifier = ">=4.13.2,<4.14" },
     { name = "antlr4-python3-runtime", marker = "extra == 'sqlite'", specifier = ">=4.13.2,<4.14" },
-    { name = "apsw", marker = "extra == 'sqlite'", specifier = ">=3.53" },
+    { name = "apsw", marker = "extra == 'sqlite'", specifier = ">=3.53.2" },
     { name = "falkordb", marker = "extra == 'falkordb'", specifier = ">=1.2" },
     { name = "neo4j", marker = "extra == 'neo4j'", specifier = ">=5.20" },
     { name = "oracledb", marker = "extra == 'oracle'", specifier = ">=3.0" },

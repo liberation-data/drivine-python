@@ -30,6 +30,7 @@ from drivine.annotation.unique import Unique
 from drivine.annotation.vector_index import VectorIndex
 from drivine.connection.connection_properties import ConnectionProperties
 from drivine.connection.database_type import DatabaseType
+from drivine.connection.reused_ids_error import ReusedIdsError
 from drivine.connection.transaction_mode import TransactionMode
 from drivine.cursor.cursor_specification import CursorSpecification
 from drivine.drivine_error import DrivineError
@@ -214,6 +215,7 @@ __all__ = [
     "RelateMode",
     "Relationship",
     "RelationshipFragment",
+    "ReusedIdsError",
     "RemovedTargets",
     "Root",
     "SaveOptions",

@@ -182,11 +182,20 @@ file is made if it isn't there, and the graph's tables on the first connection, 
 each pooled connection would open a database of its own. In the async API each connection's calls run on a thread of
 the connection's own, so one waiting for the file's lock holds up neither the event loop nor another connection.
 
-**How a graph is stored.** `<graph>_node (nid INTEGER PRIMARY KEY, labels TEXT, props TEXT, stamp TEXT)`,
-`<graph>_edge (eid INTEGER PRIMARY KEY, src, dst REFERENCES <graph>_node ON DELETE CASCADE, type, props TEXT)` and
-`<graph>_schema`, the indexes and constraints Drivine made. Labels and properties are JSON text, not SQLite's binary
-`jsonb`, and labels are written sorted, with nothing escaped that JSON does not require: a label is found by its text.
-The stamp is a column. Moments compare and order to the nanosecond, whatever their offset.
+**How a graph is stored.** `<graph>_node (nid INTEGER PRIMARY KEY AUTOINCREMENT, labels TEXT, props TEXT, stamp
+TEXT)`, `<graph>_edge (eid INTEGER PRIMARY KEY AUTOINCREMENT, src, dst REFERENCES <graph>_node ON DELETE CASCADE, type,
+props TEXT)` and `<graph>_schema`, the indexes and constraints Drivine made. Labels and properties are JSON text, not
+SQLite's binary `jsonb`, and labels are written sorted, with nothing escaped that JSON does not require: a label is
+found by its text. The stamp is a column. Moments compare and order to the nanosecond, whatever their offset.
+
+The id of a node or relationship that is deleted is never given to another, within a statement, a transaction or after
+it, as on Oracle and Postgres: an element id an application holds names the element it was read from or nothing.
+SQLite keeps the greatest id each table has given in its own table, `sqlite_sequence`; deleting every row, as a test's
+cleanup does, leaves it, so ids go on from there. A file whose graph tables an earlier Drivine made, with `INTEGER
+PRIMARY KEY` alone, which gives a new row the id of the last one deleted, is refused on the provider's first
+connection and on every one after it, with a `ReusedIdsError`, from `drivine` and `drivine.sync`, that names the
+graph and the file. Its `graph` is the graph's name, as the provider was given it, and its `path` the file, `None` for a
+database in memory or in a temporary file. There is no migration: make a new file and save the graph into it again.
 
 - A save is the plan of steps Postgres's write function carries out, carried out by a function Drivine registers on
   each connection, `drivine_write`, under a savepoint: applied whole or not at all, in a transaction or not. The other

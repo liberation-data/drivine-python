@@ -58,6 +58,10 @@ class GraphTables:
     A store that will not make the tables (see will_not_make), as a user who may not make them or a database open
     read-only, is warned of once and not asked again on this pool: the connection is handed out, plain SQL works, and a
     statement over tables that are not there says so. Asked again, the block would fail every connection.
+
+    A SQLite file whose tables an earlier Drivine made, whose ids could be reused, is refused with ReusedIdsError on
+    every connection, and no connection is handed out (drivine4j#713): it is not a store that will not make them, so
+    the pool is not marked as made.
     """
 
     def __init__(self, ensuring: str) -> None:

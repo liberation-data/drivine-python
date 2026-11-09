@@ -243,13 +243,20 @@ class SqliteSession:
     def ensure(self, graph: SqliteGraph) -> None:
         """
         Makes the graph's tables where they are not all there, each statement on its own: a user who may only read the
-        file is refused a `CREATE … IF NOT EXISTS` even over a table that is there, so the store is looked for first.
+        file is refused a `CREATE … IF NOT EXISTS` even over a table that is there, so the store is looked for first
+        (see SqliteGraph.ensure). A file an earlier Drivine made, whose ids could be reused, is refused with
+        ReusedIdsError.
         """
-        found = self.connection.execute(graph.made).fetchone()
-        if found is not None and found[0] == len(graph.ddl):
-            return
-        for it in graph.ddl:
-            self.connection.execute(it).close()
+        graph.ensure(self._first_value)
+
+    def _first_value(self, statement: str) -> Any:
+        """The first value of the statement's first row; None where it gives none."""
+        cursor = self.connection.execute(statement)
+        try:
+            row = cursor.fetchone()
+        finally:
+            cursor.close()
+        return None if row is None else row[0]
 
     def close(self) -> None:
         self.connection.close()

@@ -625,7 +625,7 @@ transaction is a `@transactional` service method, or opens `async with transacti
   - Each statement is logged at DEBUG with its session id and elapsed time.
   - `DRIVINE_LOG_LEVEL` is honoured when the application hasn't configured logging.
 - **Errors:** Python's naming, all subclasses of `DrivineError`: `StaleObjectError`, `NonAtomicBatchError`,
-  `TransactionRolledBackError`.
+  `TransactionRolledBackError`, `ReusedIdsError`.
 
 ## Same Store as TypeScript and the JVM
 

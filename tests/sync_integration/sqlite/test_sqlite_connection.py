@@ -254,7 +254,8 @@ def test_a_provider_is_built_from_properties_with_the_files_path_as_the_database
             QuerySpecification[Any]("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
         )
         connection.release()
-        assert [it["name"] for it in tables] == ["g_edge", "g_node", "g_schema"]
+        # sqlite_sequence is SQLite's own, kept for the AUTOINCREMENT keys (drivine4j#713).
+        assert [it["name"] for it in tables] == ["g_edge", "g_node", "g_schema", "sqlite_sequence"]
     finally:
         registry.close()
     with pytest.raises(DrivineError, match="DATABASE_NAME"):

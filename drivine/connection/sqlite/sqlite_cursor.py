@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import sqlite3
 from typing import TypeVar
 
 from drivine import concurrency
 from drivine.connection.postgres.postgres_result_mapper import PostgresResultMapper
-from drivine.connection.sqlite.sqlite_session import SqliteSession
+from drivine.connection.sqlite.sqlite_session import Rows, SqliteSession
 from drivine.cursor.buffered_cursor import BufferedCursor
 from drivine.cursor.cursor_specification import CursorSpecification
 from drivine.cypher.cypher_specification import RESULT
@@ -14,14 +13,14 @@ T = TypeVar("T")
 
 
 class SqliteCursor(BufferedCursor[T]):
-    """Reads a batch at a time from a `sqlite3` cursor, each fetch on a thread of its own (see SqliteConnection)."""
+    """Reads a batch at a time from a statement's rows, each fetch on a thread of its own (see SqliteConnection)."""
 
     def __init__(
         self,
         spec: CursorSpecification[T],
         session: SqliteSession,
         statement: str,
-        cursor: sqlite3.Cursor,
+        cursor: Rows,
         result_mapper: PostgresResultMapper,
         compiled: bool = False,
     ) -> None:

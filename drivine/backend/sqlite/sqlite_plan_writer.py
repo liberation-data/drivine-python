@@ -2,10 +2,11 @@
 # pyright: reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnknownArgumentType=false
 from __future__ import annotations
 
-import sqlite3
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, TypeVar
+
+import apsw
 
 from drivine.backend.sql.write_plan import WriteReturns
 from drivine.backend.sqlite import exact_json
@@ -80,7 +81,7 @@ class SqlitePlanWriter:
     def __init__(
         self,
         graph: SqliteGraph,
-        connection: sqlite3.Connection,
+        connection: apsw.Connection,
         plan: str,
         shapes: str,
         mark: str,

@@ -30,7 +30,7 @@ def sleep(seconds: float) -> None:
 
 def blocking(function: Callable[..., R], *arguments: Any, on: Executor | None = None) -> R:
     """
-    Runs a call that blocks, such as one of the `sqlite3` module, where it is: the async API runs it on a thread, `on`'s
+    Runs a call that blocks, such as one on a SQLite connection, where it is: the async API runs it on a thread, `on`'s
     where it is given.
     """
     return function(*arguments)

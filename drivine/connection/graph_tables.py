@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from drivine import concurrency
+from drivine.backend.sqlite.sqlite_contention import result_code
 from drivine.manager.contention import any_cause
 
 logger = logging.getLogger("drivine.connection")
@@ -34,8 +35,8 @@ def will_not_make(failure: BaseException) -> bool:
 
 def _sqlite_code(failure: BaseException) -> int | None:
     """The primary result code of a SQLite error; None for any other failure."""
-    code = getattr(failure, "sqlite_errorcode", None)
-    return code & 0xFF if isinstance(code, int) else None
+    code = result_code(failure)
+    return code & 0xFF if code is not None else None
 
 
 class GraphTables:

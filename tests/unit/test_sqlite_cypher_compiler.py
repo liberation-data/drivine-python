@@ -6,12 +6,12 @@ them. What the statements give is the Cypher spec's, run on SQLite in the integr
 
 import json
 import re
-import sqlite3
 from typing import Any
 
+import apsw
 import pytest
 
-from drivine.backend.sqlite.sqlite_functions import Failures, register
+from drivine.backend.sqlite.sqlite_functions import register
 from drivine.backend.sqlite.sqlite_graph import SqliteGraph
 from drivine.connection.sqlite.sqlite_session import bindable
 from drivine.cypher.sql.oracle_cypher_compiler import OracleCypherCompiler
@@ -90,8 +90,8 @@ def test_the_last_item_and_a_negative_index_are_read_by_a_path_sqlite_before_3_4
 
 def plan(cypher: str) -> list[str]:
     """The tables SQLite reads for the statement, in the order its plan reads them: each `SCAN` and `SEARCH`."""
-    connection = sqlite3.connect(":memory:")
-    register(connection, Failures())
+    connection = apsw.Connection(":memory:")
+    register(connection)
     for statement in SqliteGraph("g").ddl:
         connection.execute(statement)
     sql, values = bindable(SqliteCypherCompiler("g").compile(cypher, {}).sql, {})

@@ -380,8 +380,8 @@ async def test_a_call_made_after_one_whose_caller_was_cancelled_runs_once_it_end
         threads.append(threading.get_ident())
         return 2
 
-    connection.session.connection.create_function("hold", 0, hold)
-    connection.session.connection.create_function("where_now", 0, where)
+    connection.session.connection.create_scalar_function("hold", hold, 0)
+    connection.session.connection.create_scalar_function("where_now", where, 0)
     try:
         held = asyncio.create_task(connection.query(QuerySpecification[Any]("SELECT hold() AS n")))
         await asyncio.to_thread(started.wait, 5)

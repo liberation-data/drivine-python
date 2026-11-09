@@ -9,23 +9,22 @@ from __future__ import annotations
 import json
 import math
 import re
-import sqlite3
 from collections.abc import Iterator
 from typing import Any
 
+import apsw
 import pytest
 
 from drivine.backend.sqlite import sqlite_graph
-from drivine.backend.sqlite.sqlite_functions import Failures, register
+from drivine.backend.sqlite.sqlite_functions import register
 from drivine.backend.sqlite.sqlite_patterns import python_pattern
 from drivine.drivine_error import DrivineError
 
 
 class Database:
     def __init__(self) -> None:
-        self.connection = sqlite3.connect(":memory:", isolation_level=None)
-        self.failures = Failures()
-        register(self.connection, self.failures)
+        self.connection = apsw.Connection(":memory:")
+        register(self.connection)
 
     def row(self, sql: str) -> tuple[Any, ...]:
         return self.connection.execute(sql).fetchone()
@@ -34,12 +33,11 @@ class Database:
         return self.row(f"SELECT {sql}")[0]
 
     def fails(self, sql: str) -> BaseException:
-        """The failure a function raised in the statement, as the connection raises it in SQLite's place."""
-        with pytest.raises(sqlite3.Error, match="user-defined function raised exception"):
+        """The failure a function raised in the statement, which fails the statement as itself."""
+        with pytest.raises(Exception) as raised:
             self.row(sql)
-        kept = self.failures.take()
-        assert kept is not None
-        return kept
+        assert not isinstance(raised.value, apsw.Error)
+        return raised.value
 
 
 @pytest.fixture

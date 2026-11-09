@@ -1,3 +1,5 @@
+# apsw's stubs type a bytes value as collections.abc.Buffer, which Python 3.11 lacks: what they give is partly unknown.
+# pyright: reportUnknownMemberType=false, reportUnknownArgumentType=false, reportUnknownVariableType=false
 """
 `drivine_cypher(steps, parameters)`: carries out the procedure a Cypher statement that writes compiles to (see
 `SqliteCypherCompiler.procedure`), as Postgres runs its PL/pgSQL and Oracle its PL/SQL, step by step on the connection
@@ -27,11 +29,11 @@ from __future__ import annotations
 
 import json
 import math
-import sqlite3
 from typing import Any, cast
 
+import apsw
+
 from drivine.backend.sqlite import sqlite_arguments as arguments
-from drivine.backend.sqlite.sqlite_contention import ERRORS
 from drivine.drivine_error import DrivineError
 
 PARAMS = "cy_params"
@@ -40,7 +42,7 @@ PARAMS = "cy_params"
 _SAVEPOINT = "drivine_cypher"
 
 
-def run(connection: sqlite3.Connection, steps: Any, parameters: Any) -> str:
+def run(connection: apsw.Connection, steps: Any, parameters: Any) -> str:
     """Carries out the procedure the steps make, with the parameters' object, and gives the JSON list it returns."""
     program = arguments.text(steps)
     if program is None:
@@ -54,7 +56,7 @@ def run(connection: sqlite3.Connection, steps: Any, parameters: Any) -> str:
         for it in (f"ROLLBACK TO {_SAVEPOINT}", f"RELEASE {_SAVEPOINT}"):
             try:
                 connection.execute(it).close()
-            except ERRORS:
+            except apsw.Error:
                 # The failure that stopped the procedure is the one to give.
                 pass
         raise
@@ -95,7 +97,7 @@ def _java_int(value: int | float) -> int:
 class _Procedure:
     """A procedure as it is carried out: its variables, and the rows it has returned."""
 
-    def __init__(self, connection: sqlite3.Connection, parameters: str | None) -> None:
+    def __init__(self, connection: apsw.Connection, parameters: str | None) -> None:
         self.connection = connection
         self.variables: dict[str, Any] = {PARAMS: parameters}
         self.rows: list[Any] = []

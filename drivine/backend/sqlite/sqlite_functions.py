@@ -1,3 +1,5 @@
+# apsw's stubs type a bytes value as collections.abc.Buffer, which Python 3.11 lacks: what they give is partly unknown.
+# pyright: reportUnknownMemberType=false, reportUnknownArgumentType=false, reportUnknownVariableType=false
 """
 The functions Drivine registers on each connection to a SQLite store, which its statements call: SQLite keeps no
 function of its own a statement could, and runs one written in the application's language as readily as its own.
@@ -16,9 +18,8 @@ sqlite_cypher_functions.
 
 A function that reads only its arguments is registered as deterministic, so SQLite may index an expression over it.
 
-A failure inside a function reaches the statement as "user-defined function raised exception", which says nothing of
-it: the failure is kept on the connection's Failures, and the connection raises it in its place (see SqliteConnection),
-so a uniqueness constraint that refused a save, or a file another connection locked, is told as itself.
+A failure inside a function fails the statement as itself, as apsw raises it: so a uniqueness constraint that refused a
+save, or a file another connection locked, is told as itself.
 """
 
 from __future__ import annotations
@@ -26,14 +27,14 @@ from __future__ import annotations
 import json
 import math
 import re
-import sqlite3
-from collections.abc import Callable
 from datetime import UTC, datetime
+from functools import partial
 from typing import Any, cast
+
+import apsw
 
 from drivine.backend.sqlite import sqlite_cypher_functions, sqlite_graph
 from drivine.backend.sqlite.sqlite_arguments import text as text_of_argument
-from drivine.backend.sqlite.sqlite_contention import ERRORS
 from drivine.backend.sqlite.sqlite_graph import SqliteGraph, has_label, path, text_of
 from drivine.backend.sqlite.sqlite_patterns import Patterns
 from drivine.backend.sqlite.sqlite_plan_writer import SqlitePlanWriter, Stopped
@@ -45,50 +46,25 @@ REGEXP = "regexp"
 _SAVEPOINT = "drivine_write"
 
 
-class Failures:
-    """
-    The failure a function of one connection raised last, kept so the connection raises it in place of SQLite's
-    "user-defined function raised exception".
-    """
-
-    def __init__(self) -> None:
-        self.last: BaseException | None = None
-
-    def kept(self, function: Callable[..., Any]) -> Callable[..., Any]:
-        """`function`, its failures kept here before SQLite takes them."""
-
-        def run(*arguments: Any) -> Any:
-            try:
-                return function(*arguments)
-            except BaseException as failure:
-                self.last = failure
-                raise
-
-        return run
-
-    def take(self) -> BaseException | None:
-        """The failure kept, now forgotten."""
-        failure, self.last = self.last, None
-        return failure
-
-
-def register(connection: sqlite3.Connection, failures: Failures) -> None:
+def register(connection: apsw.Connection) -> None:
     """Registers every function on the connection, for the statements run on it."""
     patterns = _Patterns()
     similarity = _Similarity()
-    connection.create_function(sqlite_graph.WRITE, 6, failures.kept(lambda *it: _write(connection, *it)))
-    connection.create_function(sqlite_graph.DELETE, 2, failures.kept(lambda *it: _delete(connection, *it)))
-    connection.create_function(sqlite_graph.LOWER_COPIES, 4, failures.kept(lambda *it: _lower_copies(connection, *it)))
-    connection.create_function(sqlite_graph.SIMILARITY, 3, failures.kept(similarity.score), deterministic=True)
-    connection.create_function(sqlite_graph.REGEXP_COUNT, 2, failures.kept(patterns.count), deterministic=True)
-    connection.create_function(REGEXP, 2, failures.kept(patterns.matches), deterministic=True)
-    connection.create_function(sqlite_graph.LOWER, 1, failures.kept(_lower), deterministic=True)
-    connection.create_function(sqlite_graph.EPOCH, 1, failures.kept(epoch), deterministic=True)
-    sqlite_cypher_functions.register(connection, failures.kept, patterns)
+    # apsw's stubs give a function any SQLite value; each here reads what it is given (see sqlite_arguments).
+    add: Any = connection.create_scalar_function
+    add(sqlite_graph.WRITE, partial(_write, connection), 6)
+    add(sqlite_graph.DELETE, partial(_delete, connection), 2)
+    add(sqlite_graph.LOWER_COPIES, partial(_lower_copies, connection), 4)
+    add(sqlite_graph.SIMILARITY, similarity.score, 3, deterministic=True)
+    add(sqlite_graph.REGEXP_COUNT, patterns.count, 2, deterministic=True)
+    add(REGEXP, patterns.matches, 2, deterministic=True)
+    add(sqlite_graph.LOWER, _lower, 1, deterministic=True)
+    add(sqlite_graph.EPOCH, epoch, 1, deterministic=True)
+    sqlite_cypher_functions.register(connection, patterns)
 
 
 def _write(
-    connection: sqlite3.Connection,
+    connection: apsw.Connection,
     graph: str | None,
     plan: str | None,
     shapes: str | None,
@@ -126,13 +102,13 @@ def _write(
         for it in (f"ROLLBACK TO {_SAVEPOINT}", f"RELEASE {_SAVEPOINT}"):
             try:
                 connection.execute(it).close()
-            except ERRORS:
+            except apsw.Error:
                 pass
         raise
     return json.dumps(given, ensure_ascii=False, separators=(",", ":"))
 
 
-def _delete(connection: sqlite3.Connection, graph: str | None, nids: str | None) -> int:
+def _delete(connection: apsw.Connection, graph: str | None, nids: str | None) -> int:
     """
     `drivine_delete(graph, nids)`: deletes the nodes of the graph whose ids the JSON array `nids` holds, and gives how
     many it deleted. Their relationships go with them: the relationship table cascades.
@@ -145,17 +121,14 @@ def _delete(connection: sqlite3.Connection, graph: str | None, nids: str | None)
         raise ValueError("drivine_delete names no graph.")
     if nids is None:
         return 0
-    cursor = connection.execute(
+    connection.execute(
         f"DELETE FROM {SqliteGraph(graph).nodes} WHERE nid IN (SELECT value FROM json_each(?))", (nids,)
-    )
-    try:
-        return cursor.rowcount
-    finally:
-        cursor.close()
+    ).close()
+    return connection.changes()
 
 
 def _lower_copies(
-    connection: sqlite3.Connection, graph: str | None, label: str | None, property: str | None, batch: int | None
+    connection: apsw.Connection, graph: str | None, label: str | None, property: str | None, batch: int | None
 ) -> int:
     """
     `drivine_lower_copies(graph, label, property, batch)`: writes the lowercased copy of `property` (see lower_copies)
@@ -171,7 +144,7 @@ def _lower_copies(
     def lowered(alias: str) -> str:
         return f"{sqlite_graph.LOWER}({text_of(alias, property)})"
 
-    cursor = connection.execute(
+    connection.execute(
         f"UPDATE {nodes} AS n\n"
         f"SET props = CASE WHEN {text_of('n', property)} IS NULL THEN json_remove(n.props, {path(copy)}) "
         f"ELSE json_set(n.props, {path(copy)}, {lowered('n')}) END\n"
@@ -180,11 +153,8 @@ def _lower_copies(
         f"    WHERE {has_label('m', label)} AND {text_of('m', copy)} IS NOT {lowered('m')}\n"
         "    LIMIT ?)",
         (batch if batch is not None else 0,),
-    )
-    try:
-        return cursor.rowcount
-    finally:
-        cursor.close()
+    ).close()
+    return connection.changes()
 
 
 def _lower(text: str | None) -> str | None:

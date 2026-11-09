@@ -12,7 +12,7 @@ from drivine.backend.sqlite.sqlite_graph import CYPHER, JSON_ROWS
 from drivine.connection.connection import Connection
 from drivine.connection.postgres.postgres_result_mapper import PostgresResultMapper
 from drivine.connection.sqlite.sqlite_cursor import SqliteCursor
-from drivine.connection.sqlite.sqlite_session import SqliteSession, complete, sqlite_module
+from drivine.connection.sqlite.sqlite_session import SqliteSession
 from drivine.cursor.cursor_specification import CursorSpecification
 from drivine.cypher.cypher_specification import RESULT, cypher_compiled
 from drivine.drivine_error import DrivineError
@@ -27,7 +27,7 @@ logger = logging.getLogger("drivine.connection")
 
 class SqliteConnection(Connection):
     """
-    A connection to a SQLite file, through the `sqlite3` module (see SqliteSession). Outside a transaction each
+    A connection to a SQLite file, through apsw (see SqliteSession). Outside a transaction each
     statement commits itself, as a statement does on the graph engines. A transaction takes the file's write lock as it
     begins, so one writer works at a time. Rows are dicts of their columns, as on Postgres; a statement that opens with
     `/* drivine:json */` has its text values read as JSON. A Cypher statement is compiled to SQL over the graph's tables
@@ -107,7 +107,6 @@ def _compiled(spec: QuerySpecification[Any], graph: str) -> tuple[str, Any, bool
     """
     sql, cypher = cypher_compiled(spec, "SQLITE", graph)
     if cypher is not None:
-        _warn_of_rounded_floats()
         assert sql.statement is not None
         sql.statement = dataclasses.replace(sql.statement, text=f"{JSON_ROWS}\n{sql.statement.text}")
         spec = sql
@@ -124,26 +123,3 @@ def _compiled(spec: QuerySpecification[Any], graph: str) -> tuple[str, Any, bool
 def _writes(statement: str) -> bool:
     """Whether the compiled statement writes: a procedure `drivine_cypher` carries out."""
     return f"{CYPHER}(" in statement
-
-
-_warned: list[bool] = []
-"""Whether `_warn_of_rounded_floats` has warned: once for the process."""
-
-
-def _warn_of_rounded_floats() -> None:
-    """
-    Warns, once, where compiled Cypher runs on a SQLite that isn't `complete` for it: one older than 3.53, or one built
-    to write a float as text to 15 significant digits, as before 3.53, which compiled Cypher gives its floats to (#376).
-    """
-    if _warned:
-        return
-    _warned.append(True)
-    module = sqlite_module()
-    if not complete(module):
-        logger.warning(
-            "Cypher compiled for SQLite %s may give floats to 15 significant digits, and refuse a CALL { ... } that "
-            "groups by a variable it imports: SQLite 3.53 or later, writing floats to 17 digits, gives a graph "
-            "engine's (liberation-data/drivine-python#376). Use a Python built with a later SQLite, or "
-            "pip install pysqlite3-binary.",
-            module.sqlite_version,
-        )

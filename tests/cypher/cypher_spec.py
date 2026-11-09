@@ -19,31 +19,11 @@ import yaml
 SPEC = Path(__file__).parent
 
 
-def _sqlite_rounding_floats() -> set[str]:
-    """SQLite, where the SQLite Drivine uses writes a float to 15 significant digits, as before 3.53: see `HELD`."""
-    from drivine.connection.sqlite.sqlite_session import full_floats, sqlite_module
-
-    return set() if full_floats(sqlite_module()) else {"sqlite"}
-
-
-def _sqlite_before_3_53() -> set[str]:
-    """SQLite, where the SQLite Drivine uses is older than 3.53: see `HELD`."""
-    from drivine.connection.sqlite.sqlite_session import FULL_FLOATS_VERSION, sqlite_module
-
-    return {"sqlite"} if sqlite_module().sqlite_version_info < FULL_FLOATS_VERSION else set()
-
-
 GROUPS = {
     "graph": {"neo4j", "memgraph", "falkordb", "neptune"},
     "sql": {"postgres", "oracle", "sqlite"},
-    "sqlite-rounding-floats": _sqlite_rounding_floats(),
-    "sqlite-before-3.53": _sqlite_before_3_53(),
 }
-"""
-The groups a step may name for its stores: the graph engines, and the stores Cypher is compiled to SQL for. A hold may
-name SQLite that writes floats to 15 digits, or SQLite older than 3.53, which is SQLite where the tests run on one
-(#376).
-"""
+"""The groups a step may name for its stores: the graph engines, and the stores Cypher is compiled to SQL for."""
 
 
 class _Loader(yaml.SafeLoader):
@@ -238,22 +218,13 @@ HELD: dict[str, dict[str, list[Hold]]] = {
         # v0.25.0, liberation-data/drivine-cypher-spec#48: on Oracle a path a WITH passes on gives the first row's
         # nodes and relationships on every row (drivine4j#537).
         "A path a WITH passes on": [Hold(371, ("oracle",), (*_steps(1, 10), 12, 13, 16))],
-        # A SQLite that writes a float to 15 significant digits, as before 3.53 or built to; and before 3.53 one that
-        # refuses a subquery in json_each that groups by a column of its row (#376).
-        "Round to a fractional or negative precision": [Hold(376, ("sqlite-rounding-floats",), (15, 17))],
-        "CALL imports only what it names": [Hold(376, ("sqlite-before-3.53",), (12,))],
-        "Float arithmetic": [Hold(376, ("sqlite-rounding-floats",), (1, 2, 4, 5, 6))],
-        "Functions of numbers": [Hold(376, ("sqlite-rounding-floats",), (2, 8, 9, 11))],
         # v0.22.0, liberation-data/drivine-cypher-spec#47: a float literal past a double's range is read as an
         # infinity, not refused (drivine4j#295). Step 4, too small to tell from 0, passes.
         # On SQLite step 1 is read as an infinity too, as on Postgres and Oracle here.
         "Float bounds": [Hold(323, ("sql",), (1, 2, 3))],
         # v0.22.0, liberation-data/drivine-cypher-spec#32: an integer sum past a long's range is summed exactly, not
         # given as a float as on Neo4j (drivine4j#339, fixed by drivine4j#455).
-        "Aggregates of floats": [
-            Hold(293, ("postgres", "oracle"), _steps(13, 16)),
-            Hold(376, ("sqlite-rounding-floats",), (12,)),
-        ],
+        "Aggregates of floats": [Hold(293, ("postgres", "oracle"), _steps(13, 16))],
     },
     "writes.yaml": {
         # v0.21.0, liberation-data/drivine-cypher-spec#31: as above, written. Step 6 writes and reads nothing back,

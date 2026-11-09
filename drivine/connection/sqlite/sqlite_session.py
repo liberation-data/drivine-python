@@ -18,7 +18,7 @@ from datetime import date, datetime
 from datetime import time as clock_time
 from decimal import Decimal
 from enum import Enum
-from typing import Any, TypeVar
+from typing import Any, NoReturn, TypeVar
 from uuid import UUID
 
 import apsw
@@ -48,6 +48,9 @@ LOCK_WARNING_SECONDS = 5.0
 """How long a transaction may hold the file's write lock before its end is logged as a warning."""
 
 _POSITIONAL = re.compile(r"\$(\d+)(?![0-9])")
+
+_NO_STATEMENT = re.compile(r"(?:\s+|--[^\n]*|/\*.*?(?:\*/|$)|;)*", re.DOTALL)
+"""What may follow a statement and holds none: blanks, comments and semicolons, as `sqlite3` let one end with."""
 
 
 def sqlite_version() -> tuple[int, ...]:
@@ -169,10 +172,13 @@ class SqliteSession:
     def execute(self, statement: str, parameters: Mapping[str, Any] | Sequence[Any]) -> Rows:
         """
         Runs the statement with its values bound (see `bindable`), and gives its rows to read. A failure inside a
-        function Drivine registered is raised as itself, as apsw raises it.
+        function Drivine registered is raised as itself, as apsw raises it. A text of more than one statement is
+        refused before any runs (see `_one_statement`).
         """
         sql, values = bindable(statement, parameters)
-        return Rows(self.connection.execute(sql, values))
+        cursor = self.connection.cursor()
+        cursor.exec_trace = _one_statement(sql)
+        return Rows(cursor.execute(sql, values))
 
     def fetch(self, statement: str, found: Rows, count: int) -> list[dict[str, Any]]:
         """The next `count` rows at most."""
@@ -244,15 +250,42 @@ class SqliteSession:
             )
 
 
+def _one_statement(statement: str) -> Callable[[apsw.Cursor, str, Any], bool]:
+    """
+    A trace for apsw to call as it runs each statement of `statement`, which refuses it before its first runs where it
+    holds another: apsw runs each in turn, where `sqlite3` refused them, so a text given as one statement runs as one.
+    """
+    first = [True]
+
+    def trace(_cursor: apsw.Cursor, sql: str, _bindings: Any) -> bool:
+        if first:
+            first.clear()
+            if _NO_STATEMENT.fullmatch(statement[len(sql) :]) is None:
+                raise DrivineError(
+                    "SQLite runs one statement at a time, and this one holds another after its first: send each on "
+                    "its own."
+                )
+        return True
+
+    return trace
+
+
+class _Values(dict[str, Any]):
+    """A statement's named values, as apsw looks each up: one it has and isn't given is refused by its name."""
+
+    def __missing__(self, name: str) -> NoReturn:
+        raise DrivineError(f"The statement has a parameter ${name}, and no value is bound to it.")
+
+
 def bindable(statement: str, parameters: Mapping[str, Any] | Sequence[Any]) -> tuple[str, Any]:
     """
     The statement and its values as apsw binds them. SQLite reads `$name` itself, so a statement's named values
-    are bound by name; each positional `$1` becomes SQLite's `?1`. A map or a list is bound as its JSON text, as
-    Drivine's statements take one; a date as ISO 8601 text, an Enum as its value, and so on, as a save writes them (see
-    storable).
+    are bound by name, and one not given is refused by its name; each positional `$1` becomes SQLite's `?1`. A map or
+    a list is bound as its JSON text, as Drivine's statements take one; a date as ISO 8601 text, an Enum as its value,
+    and so on, as a save writes them (see storable).
     """
     if isinstance(parameters, Mapping):
-        return statement, {str(key): _value(value) for key, value in parameters.items()}
+        return statement, _Values({str(key): _value(value) for key, value in parameters.items()})
     if not parameters:
         return statement, ()
     return _POSITIONAL.sub(lambda it: f"?{it.group(1)}", statement), tuple(_value(it) for it in parameters)

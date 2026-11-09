@@ -326,6 +326,24 @@ class TestContention:
         assert not backend.contended(apsw.ConstraintError("UNIQUE constraint failed"))
         assert not backend.contended(ValueError("database is locked"))
 
+    def test_a_file_opened_read_only_will_not_make_the_tables_by_its_code_alone_or_under_another_failure(
+        self, tmp_path: Path
+    ):
+        from drivine.connection.graph_tables import will_not_make
+
+        path = str(tmp_path / "graph.db")
+        apsw.Connection(path).close()
+        connection = apsw.Connection(path, flags=apsw.SQLITE_OPEN_READONLY)
+        try:
+            with pytest.raises(apsw.ReadOnlyError) as raised:
+                connection.execute("CREATE TABLE t (x)")
+        finally:
+            connection.close()
+        wrapped = DrivineError("could not make the tables")
+        wrapped.__cause__ = raised.value
+        assert will_not_make(raised.value) and will_not_make(wrapped)
+        assert not will_not_make(apsw.ConstraintError("UNIQUE constraint failed"))
+
 
 class TestExactJson:
     def test_keeps_a_numbers_text_and_compares_numbers_by_value_and_a_boolean_only_with_a_boolean(self):
@@ -381,3 +399,32 @@ class TestTheSession:
         monkeypatch.setattr(apsw, "sqlite_lib_version", lambda: "3.49.1")
         with pytest.raises(DrivineError, match="SQLite 3.53 or later, and apsw runs SQLite 3.49.1"):
             SqliteSession(str(tmp_path / "graph.db"))
+
+    def test_a_text_of_more_than_one_statement_is_refused_before_any_runs_and_one_ending_in_comments_runs(
+        self, tmp_path: Path
+    ):
+        # apsw runs each statement of a text in turn, where sqlite3 refused it: a value bound to the first can't run a
+        # second, nor can a second hide in a text given as one.
+        session = SqliteSession(str(tmp_path / "graph.db"))
+        try:
+            session.query("CREATE TABLE t (x)", {})
+            for text in ("INSERT INTO t VALUES (1); DROP TABLE t", "INSERT INTO t VALUES ($x);\n-- c\nSELECT 1"):
+                with pytest.raises(DrivineError, match="one statement at a time"):
+                    session.query(text, {"x": 1})
+                with pytest.raises(DrivineError, match="one statement at a time"):
+                    session.execute(text, {"x": 1})
+            assert session.query("SELECT count(*) AS n FROM t", {}) == [{"n": 0}]
+            ended = "INSERT INTO t VALUES ($x) ; ; -- the end\n/* a note; SELECT 2 */ /* unclosed"
+            assert session.query(ended, {"x": 2}) == []
+            assert session.query("SELECT x FROM t; ", ()) == [{"x": 2}]
+        finally:
+            session.close()
+
+    def test_a_named_parameter_not_given_is_refused_by_its_name(self, tmp_path: Path):
+        session = SqliteSession(str(tmp_path / "graph.db"))
+        try:
+            with pytest.raises(DrivineError, match=r"parameter \$b, and no value is bound to it"):
+                session.query("SELECT $a AS a, $b AS b", {"a": 1})
+            assert session.query("SELECT $a AS a", {"a": 1, "unused": 2}) == [{"a": 1}]
+        finally:
+            session.close()

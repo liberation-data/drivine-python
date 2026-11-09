@@ -176,7 +176,8 @@ it, and `pip install drivine` alone no longer opens a SQLite store. Python's own
 longer used, and Drivine no longer warns that floats may lose their last digits, as no SQLite it runs on does. A
 failure inside a function Drivine registers, such as a regular expression that doesn't compile, is raised as itself,
 and SQLite's own failures are apsw's (`apsw.Error`, `apsw.ConstraintError`, `apsw.BusyError` …), not `sqlite3.Error`.
-The SQLite file is the same: one written before reads and writes as it did (#376).
+A named parameter given no value, or a text of more than one statement, is refused with `DrivineError`, not
+`sqlite3.ProgrammingError`. The SQLite file is the same: one written before reads and writes as it did (#376).
 
 ```
 DATABASE_TYPE=SQLITE

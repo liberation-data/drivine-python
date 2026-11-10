@@ -13,7 +13,7 @@ from drivine.query.statement import Statement
 T = TypeVar("T")
 
 RESULT = "result"
-"""The one column of the rows a compiled statement gives: see SqlCypherCompiler."""
+"""The one column of the rows a compiled statement gives, as the shared compiler names it (see shared_compiler)."""
 
 
 def cypher_compiled(

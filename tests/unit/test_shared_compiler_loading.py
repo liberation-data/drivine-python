@@ -1,7 +1,8 @@
 """
-The shared compiler (the drivine-cypher-compiler wheel) is loaded on the first Cypher statement compiled for a SQL store,
-not on import: an application on the graph engines alone never loads it, and runs where it has no wheel, as on an Intel
-Mac or on Alpine (liberation-data/drivine-python#471). There, a statement for a SQL store is refused naming the platform.
+The shared compiler (the drivine-cypher-compiler wheel) is loaded on the first Cypher statement compiled for a SQL
+store, not on import: an application on the graph engines alone never loads it, and runs where it has no wheel, as on an
+Intel Mac or on Alpine (liberation-data/drivine-python#471). There, a statement for a SQL store is refused naming the
+platform.
 """
 
 import subprocess
@@ -56,9 +57,7 @@ def test_a_sql_stores_statement_where_the_compiler_has_no_wheel_is_refused_namin
 
     machine = f"{platform.system()} {platform.machine()}"
     lines = run(script).splitlines()
-    assert lines == [
-        "Cypher is compiled to SQL for Postgres, Oracle and SQLite by drivine-cypher-compiler, which isn't installed "
-        "here"
-    ] * 3
+    refused = "Cypher is compiled to SQL for Postgres, Oracle and SQLite by drivine-cypher-compiler, which isn't "
+    assert lines == [f"{refused}installed here"] * 3
     full = run(script.replace("str(error).split(':')[0]", "str(error)"))
     assert machine in full and "python:3.x-slim" in full and "drivine-cypher-spec" in full

@@ -104,9 +104,14 @@ class CypherSpec:
 _KEYS = {"except": "except_", "unorderedLists": "unordered_lists", "keyOrder": "key_order"}
 
 
+def read(file: str) -> Any:
+    """The spec file of that name, in tests/cypher, as YAML 1.2 reads it: see `_Loader`."""
+    return yaml.load((SPEC / file).read_text(encoding="utf-8"), Loader=_Loader)  # noqa: S506
+
+
 def load(file: str) -> CypherSpec:
     """The spec file of that name, in tests/cypher."""
-    content = yaml.load((SPEC / file).read_text(encoding="utf-8"), Loader=_Loader)  # noqa: S506
+    content = read(file)
     cases = [
         Case(
             it["name"],

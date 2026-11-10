@@ -94,15 +94,16 @@ def compile_cypher(
         allow_nan=False,
         separators=(",", ":"),
     )
-    answer = json.loads(_compiler()(request))
+    answer: dict[str, Any] = json.loads(_compiler()(request))
     if "refusal" in answer:
         raise DrivineError(answer["refusal"])
     if "error" in answer:
         raise DrivineError(f"The Cypher compiler can't read the request: {answer['error']}")
     # What it warns of, such as a RETURN of several items, logged as drivine4j logs it.
-    for warning in answer.get("warnings") or []:
+    warnings: list[str] = answer.get("warnings") or []
+    for warning in warnings:
         logger.warning(warning)
-    stored = answer.get("storedFunctions") or {}
+    stored: dict[str, Any] = answer.get("storedFunctions") or {}
     return CompiledCypher(
         sql=answer["sql"],
         parameters=decoded(answer["parameters"]),
@@ -180,7 +181,7 @@ def written(value: Any) -> Any:
     if isinstance(value, timedelta):
         return {"$temporal": "DURATION", "text": duration(value)}
     if isinstance(value, (bytes, bytearray, memoryview)):
-        return {"$bytes": base64.b64encode(bytes(value)).decode("ascii")}
+        return {"$bytes": base64.b64encode(bytes(value)).decode("ascii")}  # pyright: ignore[reportUnknownArgumentType]
     if isinstance(value, Mapping):
         entries = {str(key): written(it) for key, it in value.items()}  # pyright: ignore[reportUnknownVariableType, reportUnknownArgumentType]
         return {"$map": entries} if any(key.startswith("$") for key in entries) else entries
@@ -231,7 +232,7 @@ def _drained(value: Any) -> Any:
         return {key: _drained(it) for key, it in value.items()}  # pyright: ignore[reportUnknownVariableType]
     if isinstance(value, (list, tuple)) and not isinstance(value, str):
         items = [_drained(it) for it in value]  # pyright: ignore[reportUnknownVariableType]
-        return items if any(a is not b for a, b in zip(items, value, strict=True)) else value  # pyright: ignore[reportUnknownArgumentType]
+        return items if any(a is not b for a, b in zip(items, value, strict=True)) else value  # pyright: ignore[reportUnknownArgumentType, reportUnknownVariableType]
     if isinstance(value, Iterable) and not isinstance(value, (str, bytes, bytearray, memoryview, set, frozenset)):
         return [_drained(it) for it in value]  # pyright: ignore[reportUnknownVariableType]
-    return value
+    return value  # pyright: ignore[reportUnknownVariableType]

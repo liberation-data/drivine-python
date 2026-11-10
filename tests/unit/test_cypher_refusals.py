@@ -6,7 +6,7 @@ tests/cypher/refusals.yaml.
 
 from datetime import datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -14,6 +14,7 @@ from drivine import DrivineError
 from drivine.cypher.ast.clause import Return
 from drivine.cypher.ast.expression import Expression
 from drivine.cypher.cypher_reader import read_cypher
+from drivine.cypher.shared_compiler import SharedStore, compile_cypher
 from drivine.cypher.sql.oracle_cypher_compiler import OracleCypherCompiler
 from drivine.cypher.sql.postgres_cypher_compiler import PostgresCypherCompiler
 from drivine.cypher.sql.sql_cypher_compiler import SqlCypherCompiler, holds_subquery
@@ -29,7 +30,7 @@ COMPILERS: dict[str, type[SqlCypherCompiler]] = {
 }
 
 
-@pytest.mark.parametrize("store", COMPILERS)
+@pytest.mark.parametrize("store", ["postgres", "oracle", "sqlite"])
 @pytest.mark.parametrize("case", SPEC.cases, ids=[it.name for it in SPEC.cases])
 def test_refusals(case: Case, store: str) -> None:
     for index, step in enumerate(case.steps):
@@ -48,11 +49,11 @@ def test_refusals(case: Case, store: str) -> None:
 
 
 def refuses(case: Case, index: int, store: str) -> None:
-    """That the step at `index` of the case is refused on the store, as it says."""
+    """That the step at `index` of the case is refused on the store, as it says, by the shared compiler Drivine runs."""
     step = case.steps[index]
     where = f"{case.name}, step {index + 1}, on {store}: {step.cypher.strip()}"
     with pytest.raises(Exception) as refused:  # noqa: PT011
-        COMPILERS[store]("g").compile(step.cypher, expanded(step.parameters))
+        compile_cypher(step.cypher, expanded(step.parameters), cast(SharedStore, store.upper()), "g")
     assert failure_matches(step, refused.value), f"{where}\nexpected: {step.error}\nactual:   {refused.value}"
 
 

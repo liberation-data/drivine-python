@@ -26,9 +26,10 @@ def test_p99_is_the_nearest_rank():
     assert compile_bench.summary([7.0]) == {"median": 7.0, "mean": 7.0, "p99": 7.0, "max": 7.0}
 
 
-def test_the_corpus_is_every_spec_file_but_the_ddl():
+def test_the_corpus_is_every_spec_file_but_the_ddl_and_the_hosts():
     spec_files = {it.name for it in (Path(__file__).parents[1] / "cypher").glob("*.yaml")}
-    assert set(compile_bench.CORPUS) == spec_files - {"schema.yaml"}
+    # host.yaml holds no Cypher: what the host's functions and row reading do.
+    assert set(compile_bench.CORPUS) == spec_files - {"schema.yaml", "host.yaml"}
 
 
 def test_the_corpus_takes_each_step_on_the_stores_it_runs_on():

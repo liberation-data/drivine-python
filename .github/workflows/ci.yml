@@ -74,6 +74,28 @@ jobs:
       - name: Check the Cypher spec
         run: python scripts/check_cypher_spec.py
 
+  # How long `import drivine` and compiling Cypher to SQL take, on one Python, so runs compare: the bar the shared
+  # compiler is held to (#467, #471). It records them in the run's summary and as an artifact, and fails nothing yet:
+  # the gate against this baseline comes with the switch.
+  compile-bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+      - run: uv sync
+      - name: Time import and compile
+        # bash by name runs with pipefail, so a failing bench fails the step through the tee.
+        shell: bash
+        run: uv run python scripts/compile_bench.py --json compile-bench.json | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: compile-bench
+          path: compile-bench.json
+          if-no-files-found: error
+
   # Every test but Oracle's, in three parts, and the nightly tests in a fourth: on each Python on a full run (picked by
   # the same test as `tree`'s record). A pull request's run takes the database suite on the oldest and the newest
   # Python alone, 3.11 and 3.14, in the three parts, which hold every test but the nightly ones once; on 3.12 and 3.13

@@ -7,11 +7,13 @@ drivine4j's, so a graph written from Python is read alike from the JVM and Node.
 
 The compiler is the one drivine4j and Drivine for TypeScript run, the shared module of the
 [Cypher spec](https://github.com/liberation-data/drivine-cypher-spec), here the native library of the
-`drivine-cypher-compiler` wheel, loaded on the first Cypher statement compiled for a SQL store. It is to be installed
-with drivine, on the platforms it has a wheel for: Linux with glibc (x86-64 and arm64), macOS on Apple Silicon, and
-Windows x64. Kotlin/Native, which builds it, has no target for Intel Macs or for musl Linux (Alpine), so there is no
-wheel for them. There, Neo4j, Memgraph and FalkorDB work as they do anywhere, and so does plain SQL on a SQL store, but a
-Cypher statement for one is refused with a `DrivineError` naming the platform.
+`drivine-cypher-compiler` wheel, loaded on the first Cypher statement compiled for a SQL store. Each SQL store's extra
+installs it (`pip install "drivine[postgres]"`, `[oracle]`, `[sqlite]`), pinned to the compiler of the spec drivine is
+tested on, on the platforms it has a wheel for: Linux with glibc (x86-64 and arm64), macOS on Apple Silicon, and Windows
+x64. Without it, a Cypher statement for a SQL store is refused with a `DrivineError` that names the extra to install.
+Kotlin/Native, which builds it, has no target for Intel Macs or for musl Linux (Alpine), so there is no wheel for them,
+and a SQL store's extra doesn't install there. Neo4j, Memgraph and FalkorDB work there as they do anywhere, and a Cypher
+statement for a SQL store is refused with a `DrivineError` naming the platform.
 
 Postgres is the quickest to try:
 

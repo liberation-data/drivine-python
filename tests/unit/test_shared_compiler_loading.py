@@ -40,10 +40,13 @@ def test_a_graph_engines_statement_needs_no_compiler_where_it_has_no_wheel():
     assert run(script) == "MATCH (p:Person) RETURN p.name"
 
 
-def test_a_sql_stores_statement_where_the_compiler_has_no_wheel_is_refused_naming_the_platform():
+def refusals(has_wheel: bool) -> list[str]:
+    """What a compile on each SQL store raises with the compiler missing, has_wheel as given, in a fresh interpreter."""
     script = (
         "import sys\n"
         "sys.modules['drivine_cypher_compiler'] = None\n"
+        "import drivine.cypher.shared_compiler as shared\n"
+        f"shared.has_wheel = lambda: {has_wheel}\n"
         "from drivine import DrivineError, QuerySpecification, cypher_statement\n"
         "from drivine.cypher.cypher_specification import cypher_compiled\n"
         "for store in ('POSTGRES', 'ORACLE', 'SQLITE'):\n"
@@ -51,13 +54,44 @@ def test_a_sql_stores_statement_where_the_compiler_has_no_wheel_is_refused_namin
         "        cypher_compiled(QuerySpecification(cypher_statement('RETURN 1')), store, 'g')\n"
         "        print('compiled')\n"
         "    except DrivineError as error:\n"
-        "        print(str(error).split(':')[0])\n"
+        "        print(str(error).splitlines()[0])\n"
     )
+    return run(script).splitlines()
+
+
+def test_a_sql_stores_statement_without_the_compiler_names_the_extra_that_installs_it_where_it_has_a_wheel():
+    assert refusals(True) == [
+        "Cypher on Postgres is compiled to SQL by drivine-cypher-compiler, which drivine[postgres] installs: "
+        'pip install "drivine[postgres]".',
+        "Cypher on Oracle is compiled to SQL by drivine-cypher-compiler, which drivine[oracle] installs: "
+        'pip install "drivine[oracle]".',
+        "Cypher on SQLite is compiled to SQL by drivine-cypher-compiler, which drivine[sqlite] installs: "
+        'pip install "drivine[sqlite]".',
+    ]
+
+
+def test_a_sql_stores_statement_where_the_compiler_has_no_wheel_is_refused_naming_the_platform():
     import platform
 
     machine = f"{platform.system()} {platform.machine()}"
-    lines = run(script).splitlines()
-    refused = "Cypher is compiled to SQL for Postgres, Oracle and SQLite by drivine-cypher-compiler, which isn't "
-    assert lines == [f"{refused}installed here"] * 3
-    full = run(script.replace("str(error).split(':')[0]", "str(error)"))
-    assert machine in full and "python:3.x-slim" in full and "drivine-cypher-spec" in full
+    lines = refusals(False)
+    assert len(lines) == 3 and len(set(lines)) == 1
+    assert lines[0].startswith("Cypher is compiled to SQL for Postgres, Oracle and SQLite by drivine-cypher-compiler,")
+    assert machine in lines[0] and "python:3.x-slim" in lines[0] and "drivine-cypher-spec" in lines[0]
+
+
+def test_the_platforms_with_a_wheel_are_the_ones_the_compiler_is_built_for():
+    from unittest import mock
+
+    from drivine.cypher import shared_compiler
+
+    def on(sys_platform: str, machine: str, libc: str = "glibc") -> bool:
+        with (
+            mock.patch.object(shared_compiler.sys, "platform", sys_platform),
+            mock.patch.object(shared_compiler.platform, "machine", lambda: machine),
+            mock.patch.object(shared_compiler.platform, "libc_ver", lambda: (libc, "2.31")),
+        ):
+            return shared_compiler.has_wheel()
+
+    assert on("darwin", "arm64") and on("linux", "x86_64") and on("linux", "aarch64") and on("win32", "AMD64")
+    assert not on("darwin", "x86_64") and not on("linux", "x86_64", libc="") and not on("win32", "ARM64")

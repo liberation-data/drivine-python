@@ -40,7 +40,7 @@ def shared_compiler_loaded() -> bool:
     return _compile is not None
 
 
-def _compiler() -> Callable[[str], str]:
+def _compiler(store: SharedStore) -> Callable[[str], str]:
     global _compile
     if _compile is None:
         with _lock:
@@ -50,22 +50,49 @@ def _compiler() -> Callable[[str], str]:
                 except ModuleNotFoundError as error:
                     if error.name != PACKAGE:
                         raise
-                    raise DrivineError(unsupported_platform()) from error
+                    raise DrivineError(not_installed(store)) from error
                 _compile = drivine_cypher_compiler.compile
     return _compile
 
 
+def has_wheel() -> bool:
+    """
+    Whether drivine-cypher-compiler has a wheel for this platform: macOS on Apple Silicon, Linux with glibc on x86_64 or
+    aarch64, or Windows x64. Kotlin/Native, which builds it, has no target for Intel Macs or for musl Linux.
+    """
+    machine = platform.machine().lower()
+    if sys.platform == "darwin":
+        return machine == "arm64"
+    if sys.platform.startswith("linux"):
+        return machine in ("x86_64", "aarch64") and bool(platform.libc_ver()[0])
+    return sys.platform == "win32" and machine in ("amd64", "x86_64")
+
+
+def not_installed(store: SharedStore) -> str:
+    """
+    Why Cypher can't be compiled to SQL here: drivine-cypher-compiler isn't installed. Where it has a wheel, the store's
+    extra installs it; where it has none, it can't be, and the graph engines are what work here.
+    """
+    if has_wheel():
+        extra = store.lower()
+        return (
+            f"Cypher on {store.capitalize() if store != 'SQLITE' else 'SQLite'} is compiled to SQL by "
+            f'drivine-cypher-compiler, which drivine[{extra}] installs: pip install "drivine[{extra}]".'
+        )
+    return unsupported_platform()
+
+
 def unsupported_platform() -> str:
-    """Why Cypher can't be compiled to SQL here: the compiler's wheel isn't installed, as none is built for it."""
+    """Why Cypher can't be compiled to SQL here: drivine-cypher-compiler has no wheel for this platform."""
     machine = f"{platform.system()} {platform.machine()}".strip()
     if sys.platform.startswith("linux") and not platform.libc_ver()[0]:
         machine += " (musl, as Alpine has)"
     return (
-        f"Cypher is compiled to SQL for Postgres, Oracle and SQLite by drivine-cypher-compiler, which isn't installed "
-        f"here: it has no wheel for {machine}, as Kotlin/Native, which builds it, has no target for Intel Macs or for "
-        "musl Linux. Neo4j, Memgraph and FalkorDB work here as they are. For the SQL stores, run on Linux with glibc "
-        "(a Debian image such as python:3.x-slim), macOS on Apple Silicon or Windows x64, where pip installs the "
-        "wheel with drivine. If you need this platform, open an issue or a pull request at "
+        f"Cypher is compiled to SQL for Postgres, Oracle and SQLite by drivine-cypher-compiler, which has no wheel "
+        f"for {machine}, as Kotlin/Native, which builds it, has no target for Intel Macs or for musl Linux. Neo4j, "
+        "Memgraph and FalkorDB work here as they are. For the SQL stores, run on Linux with glibc (a Debian image such "
+        "as python:3.x-slim), macOS on Apple Silicon or Windows x64, and install the store's extra, "
+        'pip install "drivine[postgres]" for one. If you need this platform, open an issue or a pull request at '
         "https://github.com/liberation-data/drivine-cypher-spec."
     )
 
@@ -94,7 +121,7 @@ def compile_cypher(
         allow_nan=False,
         separators=(",", ":"),
     )
-    answer: dict[str, Any] = json.loads(_compiler()(request))
+    answer: dict[str, Any] = json.loads(_compiler(store)(request))
     if "refusal" in answer:
         raise DrivineError(answer["refusal"])
     if "error" in answer:

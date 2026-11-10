@@ -9,9 +9,7 @@ import pytest
 
 from drivine import DrivineError
 from drivine.connection.database_type import DatabaseType
-from drivine.cypher.sql.oracle_cypher_compiler import OracleCypherCompiler
-from drivine.cypher.sql.postgres_cypher_compiler import PostgresCypherCompiler
-from drivine.cypher.sql.sqlite_cypher_compiler import SqliteCypherCompiler
+from drivine.cypher.shared_compiler import SharedStore, compile_cypher
 from drivine.query.query_specification import QuerySpecification
 from drivine.query.statement import cypher_statement
 from drivine.schema.engine_vector_options import EngineVectorOptions
@@ -331,15 +329,15 @@ def test_comments_a_trailing_semicolon_and_one_statement_to_a_text() -> None:
         assert "runs on its own" in refused(text), text
 
 
-@pytest.mark.parametrize("compiler", [PostgresCypherCompiler, OracleCypherCompiler, SqliteCypherCompiler])
-def test_the_sql_compilers_refuse_a_schema_command_as_the_translator_does_or_as_no_query(compiler: type) -> None:
+@pytest.mark.parametrize("store", ["POSTGRES", "ORACLE", "SQLITE"])
+def test_the_sql_compiler_refuses_a_schema_command_as_the_translator_does_or_as_no_query(store: SharedStore) -> None:
     with pytest.raises(DrivineError) as point:
-        compiler("g").compile("CREATE POINT INDEX FOR (p:Place) ON (p.location)")
+        compile_cypher("CREATE POINT INDEX FOR (p:Place) ON (p.location)", {}, store, "g")
     assert str(point.value) == "A POINT index is Neo4j's, and is not made on a SQL store."
     with pytest.raises(DrivineError) as command:
-        compiler("g").compile("CREATE INDEX FOR (p:Person) ON (p.name)")
+        compile_cypher("CREATE INDEX FOR (p:Person) ON (p.name)", {}, store, "g")
     assert str(command.value).startswith("The statement is a schema command")
-    compiler("g").compile("CREATE (index:Index) RETURN index")
+    compile_cypher("CREATE (index:Index) RETURN index", {}, store, "g")
 
 
 def test_a_schema_command_inside_a_transaction_is_refused_naming_the_store_as_it_is_written() -> None:

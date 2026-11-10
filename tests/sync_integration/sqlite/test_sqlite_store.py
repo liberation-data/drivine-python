@@ -13,7 +13,7 @@ from typing import Annotated, Any
 
 import pytest
 
-from drivine.cypher.sql.sqlite_cypher_compiler import SqliteCypherCompiler
+from drivine.cypher.shared_compiler import compile_cypher
 from drivine.query.statement import cypher_statement
 from drivine.sync import (
     DatabaseRegistry,
@@ -207,7 +207,7 @@ def test_a_nodes_relationships_go_with_it(gom, pm):
 def test_sources_sqlite_may_reorder_still_give_cyphers_rows(pm, cypher: str, expected: list[Any]):
     # Joined ON TRUE rather than by CROSS JOIN (#391): after a LEFT JOIN, by a json_each over the node it may not find,
     # and in a lateral query, SQLite's planner must still give each row Cypher does.
-    assert "CROSS JOIN" not in SqliteCypherCompiler("drivine").compile(cypher, {}).sql
+    assert "CROSS JOIN" not in compile_cypher(cypher, {}, "SQLITE", "drivine").sql
     pm.execute(
         QuerySpecification(
             cypher_statement(

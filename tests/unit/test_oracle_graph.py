@@ -4,7 +4,7 @@ rest by their text.
 """
 
 from drivine.backend.oracle.oracle_graph import OracleGraph, has_labels, holds_label, serialized_label
-from drivine.cypher.sql.oracle_cypher_compiler import OracleCypherCompiler
+from drivine.cypher.shared_compiler import compile_cypher
 
 HELD = "INSTR(',' || LTRIM(RTRIM(JSON_SERIALIZE(n.labels), ']'), '[') || ',\"',"
 """The start of the test of a later label, up to its needle."""
@@ -46,7 +46,7 @@ def test_writes_a_label_as_oracles_json_serialize_writes_it_control_characters_a
 
 
 def test_the_cypher_compiler_tests_a_later_label_as_the_backend_does():
-    sql = OracleCypherCompiler("g").compile('MATCH (n:Crafted:`x","Dog`:`a\tb`) RETURN n.id', {}).sql
+    sql = compile_cypher('MATCH (n:Crafted:`x","Dog`:`a\tb`) RETURN n.id', {}, "ORACLE", "g").sql
     assert "JSON_EXISTS(n1.labels, '$[*]?(@ == \"Crafted\")')" in sql
     assert holds_label("n1.labels", 'x","Dog') in sql
     assert "INSTR(',' || LTRIM(RTRIM(JSON_SERIALIZE(n1.labels), ']'), '[') || ',\"', ',\"a\\tb\",\"') > 0" in sql

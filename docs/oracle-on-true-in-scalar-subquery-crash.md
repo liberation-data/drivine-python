@@ -1,7 +1,7 @@
 # Oracle: a join `ON TRUE` in a scalar subquery is refused, or crashes the session
 
 A standalone repro of an Oracle server bug, in plain SQL, for an Oracle service request or a forum post. Drivine works
-around it (liberation-data/drivine-python#200, ported from liberation-data/drivine4j#338; see
+around it (liberation-data/drivine-python#200, ported from liberation-data/drivine4j#338; see drivine4j's
 `OracleCypherCompiler.lateral`), and the workaround can go once a release of Oracle no longer fails this repro.
 
 ## Summary

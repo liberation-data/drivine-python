@@ -34,8 +34,7 @@ GRAPH = "cy_no_era"
 PLANNED_TOO_SLOWLY = "Temporal values from CALL"
 """
 Renumbered inline, a statement of this case takes Oracle over a minute to plan, and its session keeps the PGA the plan
-grew (#402): on CI the suite then ran out of PGA (ORA-04036). It is left out here: that statement's SQL without the
-functions is the SQL before them, which tests/unit/oracle_era_inline pins (call5); one CALL statement still runs inline
+grew (#402): on CI the suite then ran out of PGA (ORA-04036). It is left out here; one CALL statement still runs inline
 below.
 """
 

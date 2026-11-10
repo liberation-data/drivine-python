@@ -14,12 +14,15 @@ from typing import Any
 
 import pytest
 
-from drivine.cypher.sql.oracle_cypher_compiler import NO_FEEDBACK, OracleCypherCompiler
+from drivine.cypher.shared_compiler import compile_cypher
 from drivine.query.statement import cypher_statement
 from drivine.sync import PersistenceManager, PersistenceManagerFactory, QuerySpecification
 from tests.sync_integration.oracle.oracle_seed import ON_ORACLE, oracle_plan
 
 GRAPH = "drivine"
+
+NO_FEEDBACK = "OPT_PARAM('_optimizer_use_feedback' 'false')"
+"""The hint that plans a statement without statistics feedback, as the shared compiler writes it on Oracle."""
 
 
 def clear(pm: PersistenceManager) -> None:
@@ -50,7 +53,7 @@ pytestmark = [ON_ORACLE, pytest.mark.usefixtures("seeded"), pytest.mark.nightly]
 def assert_joined(pm: PersistenceManager, statement: str, expected: list[Any]) -> None:
     """That the statement gives `expected`, and that Oracle keeps the join of `c`, the later of the two nodes
     compared."""
-    compiled = OracleCypherCompiler(GRAPH).compile(statement, {})
+    compiled = compile_cypher(statement, {}, "ORACLE", GRAPH)
     compared = re.search(r"\b(n(\d+))\.nid = (n(\d+))\.nid \+ 0", compiled.sql)
     assert compared is not None, f"No node equal to a node in:\n{compiled.sql}"
     later = max([(compared[1], int(compared[2])), (compared[3], int(compared[4]))], key=lambda it: it[1])[0].upper()
@@ -84,7 +87,7 @@ def test_a_node_read_by_its_key_in_a_statement_that_writes_is_found_and_written(
     # liberation-data/drivine4j#585).
     pm = factory.get("oracle")
     statement = "MATCH (p {name: 'Keanu'})-[:KNOWS]->(q) MATCH (c:Person) WHERE c = q SET c.seen = true RETURN c.name"
-    sql = OracleCypherCompiler(GRAPH).compile(statement, {}).sql
+    sql = compile_cypher(statement, {}, "ORACLE", GRAPH).sql
     assert NO_FEEDBACK in sql, sql
     try:
         assert pm.query(QuerySpecification[Any](cypher_statement(statement))) == ["Carrie"], statement

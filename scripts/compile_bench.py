@@ -10,7 +10,9 @@ It measures, each in a fresh interpreter where a fresh one is what a user's prog
 - warm compile, per store, over every step of the Cypher spec (tests/cypher) that runs on the store: each statement
   compiled with the parse cache cleared first (uncached), and again with it kept (cached). Each statement's time is the
   median of its runs, and the median, mean and p99 are over the statements. A statement the compiler refuses is timed
-  as well, as a refusal is a compile too, and counted apart.
+  as well, as a refusal is a compile too, and counted apart. "Uncached" clears drivine's parse cache (`read_cypher`)
+  alone: ANTLR's own prediction cache, which its generated parser shares, stays warm over the run, as it is in an
+  application that has been running a while.
 
 The numbers are wall-clock and depend on the machine, so compare runs of one machine only: CI's, for the gate.
 """
@@ -20,6 +22,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import platform
 import statistics
 import subprocess
@@ -97,6 +100,7 @@ def warm_ms(runs: int) -> dict[str, Any]:
     logging.getLogger("drivine").setLevel(logging.ERROR)
     from drivine.cypher.cypher_reader import read_cypher
     from drivine.cypher.cypher_specification import cypher_compiled
+    from drivine.drivine_error import DrivineError
     from drivine.query.query_specification import QuerySpecification
     from drivine.query.statement import Statement
 
@@ -105,7 +109,7 @@ def warm_ms(runs: int) -> dict[str, Any]:
         t = time.perf_counter()
         try:
             _, compiled = cypher_compiled(spec, store, GRAPH)  # pyright: ignore[reportArgumentType]
-        except Exception:  # noqa: BLE001 (a refusal is timed as a compile is)
+        except DrivineError:  # A refusal is timed as a compile is. Anything else is a crash, which fails the bench.
             return (time.perf_counter() - t) * 1000, True
         ms = (time.perf_counter() - t) * 1000
         if compiled is None:  # A bench of nothing compiled would pass any bar: it's a broken bench.
@@ -141,11 +145,12 @@ def warm_ms(runs: int) -> dict[str, Any]:
 
 
 def summary(samples: list[float]) -> dict[str, float]:
+    """The samples' median, mean, p99 (by nearest rank: the least sample at or above 99% of them) and max."""
     ordered = sorted(samples)
     return {
         "median": round(statistics.median(ordered), 3),
         "mean": round(statistics.fmean(ordered), 3),
-        "p99": round(ordered[min(len(ordered) - 1, int(len(ordered) * 0.99))], 3),
+        "p99": round(ordered[math.ceil(len(ordered) * 0.99) - 1], 3),
         "max": round(ordered[-1], 3),
     }
 

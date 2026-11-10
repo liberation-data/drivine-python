@@ -12,6 +12,10 @@ uv run ruff check . && uv run pyright
 counterpart of `drivine/concurrency.py`, is the one sync module written by hand, and a test marked `async_only` (one
 that runs tasks concurrently) is left out of the sync tests.
 
+`uv run python scripts/compile_bench.py` times `import drivine`, each SQL store's first compile and its warm compiles
+over the Cypher spec in `tests/cypher`. CI's `compile-bench` job runs it on Python 3.13 and puts the table in the run's
+summary, so its numbers compare from run to run.
+
 The integration tests run on Neo4j, Memgraph, FalkorDB, Postgres, Oracle and SQLite. A test marked `written_in_cypher`
 seeds and reads back in Cypher with statements of no language, and on the SQL stores those are sent as Cypher, which is
 compiled to SQL (`tests/integration/sql_cypher_fixtures.py`, as drivine4j's `SqlCypherFixtures`). A test marked

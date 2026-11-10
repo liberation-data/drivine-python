@@ -156,6 +156,14 @@ applied whole or not at all.
   the phrase of its words. Neo4j's default analyzer keeps such a name one token, which the whole name finds and
   `example models` doesn't. drivine4j's `FullTextIndexSpec` picks another analyzer there; drivine-python doesn't take
   one yet.
+- An index or a uniqueness constraint, a vector index's HNSW index among them, is built with no parallel workers
+  (`max_parallel_maintenance_workers` 0), and the session's own setting is put back after, whether the build passed or
+  failed. A session that builds an index in parallel keeps a shared memory segment in `/dev/shm` for as long as it
+  lives, and the pool keeps it alive: in a container's 64 MB, Docker's default, enough of them leave too little for a
+  later HNSW build, which asks for nearly all of `maintenance_work_mem` at once and fails with `could not resize shared
+  memory segment ... No space left on device`. A large build takes longer for it. drivine4j closes the session after
+  the build instead, and keeps its parallel workers; psycopg_pool would log a warning for each connection given back
+  closed.
 
 ### SQLite
 

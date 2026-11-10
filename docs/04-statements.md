@@ -139,6 +139,17 @@ people = await pm.query(spec.bind({"city": "Sydney"}))
   leaves them, each row was compared with every row of the table: a `FOREACH` over 20,000 nodes took 19 s where it now
   takes under 1 s. The probe is a scan of the key's index whatever the statistics say. Oracle and SQLite keep the
   plain join.
+- On Postgres, after a graph is emptied by `DELETE` and loaded again, analyze its tables before reading it:
+
+  ```sql
+  ANALYZE <graph>_node, <graph>_edge;
+  ```
+
+  An `ANALYZE` (or an autoanalyze) that ran while the node table was empty leaves statistics that say it holds no rows
+  over the pages its deleted rows left, and a read that joins it twice is then planned as a scan of every node for each
+  node: `MATCH (:A)-[r:R]->(:A) RETURN count(r)` took 470 s over 20,000 nodes, and 18 ms once the table was analyzed
+  ([drivine#680](https://github.com/liberation-data/drivine/issues/680)). Autoanalyze puts it right on its own within
+  about a minute with Postgres's default settings; a read planned before then is slow until it ends.
 - On Oracle a text read out of JSON past 4,000 bytes is read whole where it is measured, cut, changed, searched or
   reversed; an empty text is null; `reduce` doesn't run in a
   statement that writes, in the step of a `reduce`, or where its step reads a path; and `map[key]` reads null where an

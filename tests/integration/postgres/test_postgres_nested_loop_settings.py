@@ -28,7 +28,7 @@ async def settings_after(
     doesn't pass for one inside it.
     """
     compiled = PostgresCypherCompiler(GRAPH).compile(cypher)
-    prelude = compiled.prelude or ""
+    prelude = "\n".join(compiled.setup)
     assert "set_config('enable_seqscan', 'off', true)" in prelude, prelude
     function = re.search(r"pg_temp\.drivine_cypher_[0-9a-f]+", prelude)
     assert function is not None, prelude

@@ -1,0 +1,64 @@
+"""
+The shared compiler (the drivine-cypher-compiler wheel) is loaded on the first Cypher statement compiled for a SQL store,
+not on import: an application on the graph engines alone never loads it, and runs where it has no wheel, as on an Intel
+Mac or on Alpine (liberation-data/drivine-python#471). There, a statement for a SQL store is refused naming the platform.
+"""
+
+import subprocess
+import sys
+
+
+def run(script: str) -> str:
+    """What running the script in a fresh interpreter prints."""
+    return subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, check=True).stdout.strip()
+
+
+def test_importing_drivine_and_every_connection_loads_no_compiler():
+    script = (
+        "import sys\n"
+        "import drivine\n"
+        "import drivine.connection.neo4j.neo4j_connection, drivine.connection.postgres.postgres_connection\n"
+        "import drivine.connection.oracle.oracle_connection, drivine.connection.sqlite.sqlite_connection\n"
+        "from drivine.cypher.shared_compiler import shared_compiler_loaded\n"
+        "print('drivine_cypher_compiler' in sys.modules, 'antlr4' in sys.modules, shared_compiler_loaded())"
+    )
+    assert run(script) == "False False False"
+
+
+def test_a_graph_engines_statement_needs_no_compiler_where_it_has_no_wheel():
+    # A Cypher statement for a graph engine is sent as it is: nothing compiles it, so a missing wheel changes nothing.
+    script = (
+        "import sys\n"
+        "sys.modules['drivine_cypher_compiler'] = None\n"
+        "from drivine import QuerySpecification, cypher_statement\n"
+        "from drivine.connection.neo4j.neo4j_spec_compiler import Neo4jSpecCompiler\n"
+        "spec = QuerySpecification(cypher_statement('MATCH (p:Person) RETURN p.name')).bind({'x': 1})\n"
+        "compiled = Neo4jSpecCompiler(spec.finalized_copy('CYPHER')).compile()\n"
+        "print(compiled.statement)"
+    )
+    assert run(script) == "MATCH (p:Person) RETURN p.name"
+
+
+def test_a_sql_stores_statement_where_the_compiler_has_no_wheel_is_refused_naming_the_platform():
+    script = (
+        "import sys\n"
+        "sys.modules['drivine_cypher_compiler'] = None\n"
+        "from drivine import DrivineError, QuerySpecification, cypher_statement\n"
+        "from drivine.cypher.cypher_specification import cypher_compiled\n"
+        "for store in ('POSTGRES', 'ORACLE', 'SQLITE'):\n"
+        "    try:\n"
+        "        cypher_compiled(QuerySpecification(cypher_statement('RETURN 1')), store, 'g')\n"
+        "        print('compiled')\n"
+        "    except DrivineError as error:\n"
+        "        print(str(error).split(':')[0])\n"
+    )
+    import platform
+
+    machine = f"{platform.system()} {platform.machine()}"
+    lines = run(script).splitlines()
+    assert lines == [
+        "Cypher is compiled to SQL for Postgres, Oracle and SQLite by drivine-cypher-compiler, which isn't installed "
+        "here"
+    ] * 3
+    full = run(script.replace("str(error).split(':')[0]", "str(error)"))
+    assert machine in full and "python:3.x-slim" in full and "drivine-cypher-spec" in full

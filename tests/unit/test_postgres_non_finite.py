@@ -256,7 +256,7 @@ def compiled_as(monkeypatch: pytest.MonkeyPatch, module: Any, non_finite: bool, 
         if spec.statement is None or spec.statement.language != "CYPHER":
             return spec, None
         sql = QuerySpecification[Any](Statement("SELECT 2", "SQL"))
-        return sql, CompiledCypher("SELECT 2", {}, prelude=prelude, non_finite=non_finite)
+        return sql, CompiledCypher("SELECT 2", {}, setup=(prelude,) if prelude else (), non_finite=non_finite)
 
     monkeypatch.setattr(module, "cypher_compiled", compiled)
 

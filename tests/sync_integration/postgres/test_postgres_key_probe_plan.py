@@ -123,7 +123,7 @@ def join_plans(
     """The plans of those of the statement's statements that join its rows to the table, with the statistics stale."""
     stale(pm, relationships)
     statement = PostgresCypherCompiler(GRAPH).compile(text)
-    prelude = compiled(statement.prelude) if statement.prelude is not None else None
+    prelude = compiled(statement.setup[0]) if statement.setup else None
     logged = plans(prelude, compiled(statement.sql), statement.parameters)
     joins = [it for it in logged if "jsonb_array_elements" in it and f" {table} " in it]
     assert joins, f"{text} logged no join of its rows to {table}"

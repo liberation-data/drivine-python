@@ -793,7 +793,7 @@ class PostgresCypherCompiler(SqlCypherCompiler):
             f"AS {quote}\n{text}\n{quote}"
         )
         return CompiledCypher(
-            f"SELECT cy.result FROM {function}(CAST(${OBJECT} AS jsonb)) AS cy (result)", parameters, prelude
+            f"SELECT cy.result FROM {function}(CAST(${OBJECT} AS jsonb)) AS cy (result)", parameters, (prelude,)
         )
 
     def _planned_as_nested_loops(self, step: ProcedureStep) -> bool:

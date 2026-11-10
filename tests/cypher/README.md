@@ -7,6 +7,9 @@ These files say what a statement in Drivine's flavour of Cypher gives on each st
 - `temporal.yaml`: openCypher's temporal values (dates, times, moments and durations), run from an empty graph. A graph engine's driver gives a temporal value as a value of its own, and a SQL store gives its ISO text, so the cases read a value's fields.
 - `refusals.yaml`: statements each SQL store's compiler refuses, and its message. They are compiled with no store.
 - `schema.yaml`: Neo4j's schema commands (`CREATE INDEX`, `CREATE CONSTRAINT`, `DROP …`, `CALL db.awaitIndexes`), and the schema spec a SQL store applies each as, or its refusal. They are read with no store. See [Schema commands](#schema-commands).
+- `store.yaml`: the store layout's DDL: the tables, the probe that finds them made, and each index and constraint as each store makes, drops and lists it, for the graph `drivine` and a set of schema specs, with a read for each index that the compiler must answer from it. Read with no store. See [The store layout](#the-store-layout).
+- `host.yaml`: what each library's own code does with the values compiled SQL hands it: the functions it registers on SQLite, and how it reads a column of a statement's rows. Read with no store. See [Host functions and readers](#host-functions-and-readers).
+- `cli/`: the `drivine` CLI's contract, which runs Cypher on every store and prints its results as cypher-shell does, and `cli.yaml`, the cases each build of it runs. See `cli/README.md`.
 - `model/`: the model file each library writes of an application's fragments, views and how they are stored, which Drivine Studio reads. See `model/README.md`.
 
 A runner empties the whole graph before each case, not just the nodes that carry the file's `label`. The statements match plain labels, such as `MATCH (p:Person)`, so a node another test left behind would show up in their rows.
@@ -72,6 +75,88 @@ A step has `ddl`, the statement, an optional `note`, and one of these, which say
 | `reserved` | Drivine's own uniqueness constraint, of the schema marker's `scope` or the store stamp's `key`, by any name: its `label` and `properties`. It is made as the library makes it for itself, and recorded in no owner's inventory. |
 | `cypher` | `true`: not a schema command, but Cypher, compiled as any other statement. |
 | `error` | The message it is refused with. A SQL store's compiler refuses it with the same message (see `refusals.yaml`). |
+
+## The store layout
+
+Each library makes the same tables, indexes and constraints on a SQL store, and the same schema statements on a graph engine, so a store one library made is read alike by another. `store.yaml` pins them: drivine4j's statements, the reference, as its schema grammars gave them when they were captured, for the graph `drivine`. The compiler's module (`compiler/`, `org.drivine.cypher.store.ddl`) writes them, and its tests check it gives these, byte for byte, on every target.
+
+```yaml
+graph: "drivine"
+tables:
+  postgres: {ddl: [...], ensuring: "DO $ensure$ ..."}
+  oracle: {ddl: [...], functions: [...], ensuring: "DECLARE ..."}
+  sqlite: {ddl: [...], made: "SELECT CASE WHEN ...", file: "SELECT file FROM pragma_database_list ..."}
+catalog: {item: {...}, aliases: [...], stores: {postgres: {indexes: {RANGE_INDEX: "...", ...}, constraints: "...", aliased: "...", unaliased: "..."}, ...}}
+names:
+  - {store: "postgres", graph: "drivine", kind: "ix", parts: ["Person", "name"], name: "drivine_ix_Personname_44ce5436"}
+refusals:
+  - {store: "postgres", graph: "1graph", refusal: "'1graph' cannot name a graph on Postgres: ..."}
+cases:
+  - name: "Range index"
+    description: "A range index over one property."
+    spec: {kind: "RANGE_INDEX", label: "Person", properties: ["name"]}
+    stores:
+      postgres:
+        create: ["CREATE INDEX IF NOT EXISTS drivine_ix_Personname_44ce5436 ON drivine_node (((props ->> 'name'))) WHERE labels @> '[\"Person\"]'", "INSERT INTO drivine_schema ..."]
+        drop: ["DO $forget$ ..."]
+      neo4j:
+        create: ["CREATE INDEX `Person_name_range` IF NOT EXISTS FOR (n:`Person`) ON (n.`name`)"]
+        drop: ["DROP INDEX `Person_name_range` IF EXISTS"]
+        dropUnnamed: {error: "Cannot drop index on Person[name]: ..."}
+    read:
+      cypher: "MATCH (n:Person {name: $x}) RETURN n"
+      parameters: {x: "Ada"}
+      indexedProperties: [["Person", "name"]]
+      holds:
+        postgres: ["(props ->> 'name')", "labels @> '[\"Person\"]'"]
+```
+
+| Key | What it is |
+|---|---|
+| `tables` | What makes each SQL store's tables, base indexes and functions (`ddl`, and Oracle's `functions`), each statement safe to run again, and how a library finds them made. On Postgres, `ensuring` is one block: the probe of the node table's comment, which holds the version token (`drivine:7`), the graph's advisory lock, and the `ddl`. On Oracle, `ensuring` probes the property graph's `doc` property and each function, and makes what is missing. On SQLite, `made` counts what of the `ddl` is there, or is -1 for tables made without `AUTOINCREMENT`, and `file` names the database's file. |
+| `catalog` | Each store's queries that list its indexes of each kind and its constraints; on a SQL store, the statements that set and take away the `aliases` of the record of `item`; and Oracle's `labelled`, the labelled indexes a library tells the compiler of as `indexedProperties`. |
+| `names` | The name a SQL store gives an object of `kind` made for `parts`, a label and properties, for a `graph`: `<graph>_<kind>_<readable>_<hash>`. `readable` is the parts' ASCII letters and digits run together, cut to at most 40 and to what leaves room, within the store's longest name (63 on Postgres and SQLite, 128 on Oracle), for the rest and a `_t`. `hash` is Java's `String.hashCode` of the parts joined by U+0000, over their UTF-16 code units, as `Integer.toHexString` writes it: unsigned, in lower case, with no leading zeros (`drivine_ix_name_337a8b`). |
+| `refusals` | Why a store refuses a graph's name, or null where it takes it. |
+| `cases` | An index or a constraint: its `spec`, as `schema.yaml` writes one, with `ignoreCase` and the engines' vector options (`quantizationEnabled`, Neo4j's; `efRuntime`, FalkorDB's) among its `options`. A spec that ignores case is made over the lowercased copies of its properties, under a name of its own, as the schema API makes it. `existing` is what the store has of the same kind on the label already, which only FalkorDB reads. |
+
+Each case's `stores` hold, for `postgres`, `oracle`, `sqlite`, `neo4j`, `memgraph` and `falkordb`, what makes the item (`create`), what drops it by its name (`drop`), and, where it differs, what drops it with no name known (`dropUnnamed`). Each is a list of statements, or `{error}`, the message the store refuses it with. A statement is its text, or on FalkorDB `{native: [...]}`, a command of its driver (`GRAPH.CONSTRAINT`), where `{graphName}` stands for the graph. A constraint's `falkordb` has `constrainable`, `{error}`, where FalkorDB refuses it before its `create`: `GRAPH.CONSTRAINT` takes only a plain name for a property. On a SQL store, a `create` follows the statements that make the store, which the case leaves out: Postgres's and Oracle's `ensuring`, and SQLite's `ddl`.
+
+**Reads.** A range index and a uniqueness constraint are only worth their DDL if a statement is read through them, so each such case has a `read`: a statement, its `parameters`, and the `indexedProperties` a library gives the compiler on Oracle. Compiled on each SQL store, its SQL holds each of `holds`, the expressions the index is made over as its `create` writes them, with each column a statement reads of the node, `props`, `labels` or `stamp`, as its alias's (Oracle's index names them as `n`'s). A runner checks each expression is in the case's `create`, as it is or within a PL/SQL literal, quotes doubled, and that the compiled SQL tests it where a planner reads an index by it: as a conjunct of its `WHERE`, a label's test, or as the left side of a conjunct's `=`, and not only within a `CASE` or beside an `OR`. A vector and a full-text index have none: their searches are each library's, not compiled Cypher.
+
+## Host functions and readers
+
+Compiled SQL calls functions each library registers on SQLite (`drivine_equal`, `drivine_add` …, and `regexp`, which SQLite calls for its `REGEXP` operator), and each library reads the rows itself, where a store's JSON holds no NaN or infinity: SQLite writes NaN as the tag `{"$numberDouble":"NaN"}` and an infinity as `9e999`, and Postgres, in the rows of a statement given NaN or an infinity, writes stand-in numbers past any double's. That code is each library's, not the compiler's, so `host.yaml` pins it, run by each library's unit suite with no container: on an in-memory SQLite with its functions registered, and on its row reader.
+
+```yaml
+- name: "drivine_add"
+  description: "drivine_add(a, b) is Cypher's a + b of two JSON values, as JSON text: NaN adds as a number …"
+  pairs:
+    writes.yaml: ["NaN worked out from stored infinities", "NaN and the infinities written"]
+  steps:
+    - function: "drivine_add"
+      args: ['9e999', '-9e999']
+      result: '{"$numberDouble":"NaN"}'
+```
+
+A case has a `name`, unique in the file, a `description`, `pairs`, and its steps. A step has an optional `note` and is one of these:
+
+| Keys | What it checks |
+|---|---|
+| `function`, `args`, `result` | The SQLite function, called with `args`, gives `result`. Each argument and the result is a SQL value: a text (the JSON text a function of JSON values takes, a rounding mode, or a regular expression), a whole number, a float, or null. A text result is compared exactly. `regexp` is called as SQLite calls it for `text REGEXP pattern`: `regexp(pattern, text)`, the pattern first. |
+| `function`, `ascending` | The function of one argument, called on each of `ascending` in turn, gives values that ascend as SQLite orders them, each before the next. For `drivine_sort_key` of a list, whose text is each library's own: only its order is pinned. |
+| `read`, `value` | A column of a compiled statement's rows reads as `value`, as `PersistenceManager.query` gives it. `read` has the `store` (`postgres` or `sqlite`), `nonFinite` (whether the statement was given NaN or an infinity, which the compiled statement says), and the `column`'s raw JSON text: a text, or a list of texts and `$repeat`s written one after the other. |
+
+Values are written as in the other files: `{$float: "NaN"}` is NaN, `{$repeat: …}` a text repeated, and any other map, `{$numberDouble: "2.0"}` among them, is the map it is.
+
+**Pairs.** A host function and the compiled statements that call it are one contract: a change to one alone changes what a statement gives. So each case's `pairs` names, by file, the store cases in `queries.yaml`, `writes.yaml` and `temporal.yaml` that rely on its steps, and a runner checks, before the case passes:
+
+- that each case named is in its file;
+- for each function its steps call, that a step of a paired case, run on SQLite, compiles to SQL that calls it: for `regexp`, SQL that holds the operator `REGEXP`;
+- for each `store` and `nonFinite` its steps read, that a step of a paired case, run on that store, compiles with that `nonFinite`.
+
+A change to a host vector names the store cases it moves, and a change to a paired store case shows which host vectors it leans on. A host case with no pairs, or whose pairs no longer rely on it, fails.
+
+**Regular expressions.** On SQLite a regular expression the compiler writes, given to `REGEXP`, `drivine_regex_group` or `drivine_regexp_replace`, is read by each library's own language: Java's, JavaScript's or Python's, each rewritten from Java's as its library rewrites it. So the compiler writes them only with what `host.yaml`'s `regexp` case pins every library reads alike: `^` for the text's start and `\z` for its end; each class written out, with `\t`, `\n`, `\f`, `\r`, `\xNN` and `\uNNNN` and ranges of them, and `[0-9]` for a digit; a backslash before a character of the syntax (`^$\.*+?()[]{}|/`) for the character; groups, `(?:…)`, alternatives, and `?`, `*`, `+` and `{m,n}`. It writes none of what the libraries read otherwise: `\s`, `\d`, `\w`, `\b` or any other class escape, which are Unicode's on drivine4j and partly ASCII's on Drivine for TypeScript; `$`, which in Java matches before a line break that ends the text too; `\Z`; `.`, which in Java matches no U+0085; a class within a class, or `&&` in one, which Java reads as their union and intersection; a POSIX class (`[:alnum:]`) or `\p{…}`; or a flag group. A pattern a statement gives `=~` is its own, read as Java reads it: the compiler's group around it, `^(?:…)\z`, is written as above, and a leading `(?i)` in it is pinned. The compiler's tests check every pattern it writes on SQLite over the whole spec.
 
 ## Changing the spec
 

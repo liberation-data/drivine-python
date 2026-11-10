@@ -19,7 +19,7 @@ NESTED = (
 
 
 def postgres(cypher: str) -> str:
-    return PostgresCypherCompiler("g").compile(cypher).prelude or ""
+    return "\n".join(PostgresCypherCompiler("g").compile(cypher).setup)
 
 
 def oracle(cypher: str) -> str:

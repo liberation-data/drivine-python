@@ -193,64 +193,7 @@ def _steps(first: int, last: int) -> tuple[int, ...]:
     return tuple(range(first, last + 1))
 
 
-HELD: dict[str, dict[str, list[Hold]]] = {
-    "queries.yaml": {
-        # v0.21.0, liberation-data/drivine-cypher-spec#31: a NaN or infinite parameter is bound as a text
-        # (drivine4j#295), and Oracle compares NaN equal to NaN (drivine4j#409, also #327); drivine4j#452 fixes both.
-        # drivine4j holds the case on SQLite too, for drivine4j#295.
-        "NaN and the infinities as parameters": [Hold(164, ("sql",))],
-        # v0.25.0, liberation-data/drivine-cypher-spec#52: Postgres works a float divided or taken % by zero out as
-        # numeric, and fails, and SQLite gives null (drivine4j#408, whose fix, drivine4j#563, covers both).
-        # toFloat() of Java's names gives null on Postgres and SQLite (drivine4j#545), and on Oracle NaN compares equal
-        # to NaN (drivine4j#409).
-        "NaN worked out": [
-            Hold(164, ("oracle",), (2, 3)),
-            Hold(327, ("oracle",), (18,)),
-            Hold(351, ("postgres",), (*_steps(1, 6), 13)),
-            Hold(351, ("sqlite",), (1, 2, 4, 5, 6, 13)),
-            Hold(382, ("postgres", "sqlite"), (16, 18, 19)),
-        ],
-        # v0.25.0, liberation-data/drivine-cypher-spec#52: as above, written by toString().
-        "Floats written as text": [Hold(351, ("postgres", "sqlite"), (5,))],
-        # v0.25.0, liberation-data/drivine-cypher-spec#49: a float the statement makes is taken as a text function's
-        # start or length, not refused (drivine4j#285).
-        "Start and length of a text function": [Hold(353, ("sql",), _steps(6, 13))],
-        # v0.25.0, liberation-data/drivine-cypher-spec#48: on Oracle a path a WITH passes on gives the first row's
-        # nodes and relationships on every row (drivine4j#537).
-        "A path a WITH passes on": [Hold(371, ("oracle",), (*_steps(1, 10), 12, 13, 16))],
-        # v0.22.0, liberation-data/drivine-cypher-spec#47: a float literal past a double's range is read as an
-        # infinity, not refused (drivine4j#295). Step 4, too small to tell from 0, passes.
-        # On SQLite step 1 is read as an infinity too, as on Postgres and Oracle here.
-        "Float bounds": [Hold(323, ("sql",), (1, 2, 3))],
-        # v0.22.0, liberation-data/drivine-cypher-spec#32: an integer sum past a long's range is summed exactly, not
-        # given as a float as on Neo4j (drivine4j#339, fixed by drivine4j#455).
-        "Aggregates of floats": [Hold(293, ("postgres", "oracle"), _steps(13, 16))],
-    },
-    "writes.yaml": {
-        # v0.21.0, liberation-data/drivine-cypher-spec#31: as above, written. Step 6 writes and reads nothing back,
-        # so it passes. On SQLite step 7 needs drivine4j#544's fix too, once infinities are stored.
-        "NaN and the infinities written": [
-            Hold(164, ("oracle",), (1, 2, 3, 7)),
-            Hold(164, ("postgres",), (4,)),
-            Hold(164, ("sqlite",), (1, 2, 5, 7)),
-        ],
-        # v0.25.0, liberation-data/drivine-cypher-spec#53: a MERGE of a null property makes a new node each run, where
-        # Neo4j fails (drivine4j#543); its NaN part waits for NaN to be carried (#164). Steps 8 and 13 count what the
-        # MERGEs made, so on Oracle and SQLite step 13 waits for #164 too.
-        "MERGE of a null or NaN property": [
-            Hold(380, ("sql",), (1, 2, 4, 5, 6, 8, 13)),
-            Hold(164, ("oracle",), (9, 10, 12, *_steps(14, 17))),
-            Hold(164, ("sqlite",), (12,)),
-        ],
-    },
-    "refusals.yaml": {
-        # v0.22.0, liberation-data/drivine-cypher-spec#47: a float literal past a double's range is read as an infinity,
-        # not refused (drivine4j#295).
-        "Float too large": [Hold(323, ("sql",))],
-        # v0.25.0, liberation-data/drivine-cypher-spec#49: as in queries.yaml.
-        "Start or length of a text function": [Hold(353, ("sql",), _steps(6, 13))],
-    },
-}
+HELD: dict[str, dict[str, list[Hold]]] = {}
 """
 The steps of a spec tag past what drivine-python runs that a port here has yet to make pass, by file and case. Each is
 run, and must fail; one that passes fails, so that its hold is taken out when its port lands. As Drivine for

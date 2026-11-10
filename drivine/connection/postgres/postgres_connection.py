@@ -50,14 +50,14 @@ class PostgresConnection(Connection):
     async def query(self, spec: QuerySpecification[T]) -> list[T]:
         finalized = spec.finalized_copy("SQL")
         sql, cypher = cypher_compiled(finalized, "POSTGRES", self.graph)
-        prelude = cypher.prelude if cypher else None
+        setup = cypher.setup if cypher else ()
         compiled = PostgresSpecCompiler(sql).compile()
         start = time.perf_counter()
         async with self.connection.cursor() as cursor:
             if cypher is not None and cypher.non_finite:
                 read_non_finite(cursor)
-            if prelude is not None:
-                await cursor.execute(prelude)
+            for statement in setup:
+                await cursor.execute(statement)
             await cursor.execute(compiled.statement, _bindable(compiled.parameters))
             rows: list[Any] = await cursor.fetchall() if cursor.description is not None else []
         log_statement(self.session_id, finalized, start)
@@ -75,10 +75,11 @@ class PostgresConnection(Connection):
         """
         finalized = spec.finalized_copy("SQL")
         sql, cypher = cypher_compiled(finalized, "POSTGRES", self.graph)
-        prelude = cypher.prelude if cypher else None
+        setup = cypher.setup if cypher else ()
         compiled = PostgresSpecCompiler(sql).compile()
-        if prelude is not None:
-            await self.connection.execute(prelude)
+        if setup:
+            for statement in setup:
+                await self.connection.execute(statement)
             cursor = self.connection.cursor()
         else:
             cursor = self.connection.cursor(name=f"drivine_{next(_CURSORS)}", withhold=not self._in_transaction)

@@ -49,7 +49,7 @@ def compiled_as(monkeypatch: pytest.MonkeyPatch, non_finite: bool, prelude: str 
         sql = copy.copy(spec)
         sql.statement = Statement(spec.statement.text, "SQL")
         sql.parameters = {}
-        return sql, CompiledCypher(spec.statement.text, {}, prelude=prelude, non_finite=non_finite)
+        return sql, CompiledCypher(spec.statement.text, {}, setup=(prelude,) if prelude else (), non_finite=non_finite)
 
     monkeypatch.setattr(sys.modules[PostgresConnection.__module__], "cypher_compiled", compiled)
 

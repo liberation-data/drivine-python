@@ -114,8 +114,8 @@ def own_neo4j(request: pytest.FixtureRequest) -> Iterator[ContainerConnection]:
     of a write's index entries before it logs the write, but not against an index still populating: a write checked
     while a new index populates, and applied once it is online, is refused only after it is in the log. Neo4j 2026.10
     then fails to apply it and panics ("The database has encountered a critical error, and needs to be restarted"), and
-    every later test on that Neo4j fails. TODO(upstream): link the Neo4j report. Started only when that test runs on
-    Neo4j, and stopped after the module.
+    every later test on that Neo4j fails. Reported as https://github.com/neo4j/neo4j/issues/14035. Started only when
+    that test runs on Neo4j, and stopped after the module.
     """
     if not request.config.getini("drivine_test_containers") or DrivineTestContainers.use_local(
         DatabaseType.NEO4J, os.environ

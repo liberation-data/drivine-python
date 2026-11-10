@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import re
 import time
+from collections.abc import Mapping
 from typing import Any, TypeVar
 
 from drivine.backend.oracle.oracle_stored_functions import OracleStoredFunctions, is_missing
@@ -13,6 +14,7 @@ from drivine.connection.oracle.oracle_result_mapper import OracleResultMapper
 from drivine.connection.oracle.oracle_spec_compiler import OracleSpecCompiler
 from drivine.cursor.cursor_specification import CursorSpecification
 from drivine.cypher.cypher_specification import cypher_compiled
+from drivine.cypher.shared_compiler import drained
 from drivine.drivine_error import DrivineError
 from drivine.logger import log_statement
 from drivine.query.query_specification import QuerySpecification
@@ -29,7 +31,7 @@ class OracleConnection(Connection):
     """
     A connection to Oracle. Outside a transaction each statement commits itself, as a statement does on the graph
     engines. A PL/SQL block hands its rows back with `DBMS_SQL.RETURN_RESULT`; the first such set is its result. A
-    Cypher statement is compiled to SQL over the graph's tables (see SqlCypherCompiler): a read to a query, and a write
+    Cypher statement is compiled to SQL over the graph's tables (see shared_compiler): a read to a query, and a write
     to a block.
     """
 
@@ -107,6 +109,9 @@ class OracleConnection(Connection):
         """
         if self.cypher_refusal and finalized.statement is not None and finalized.statement.language == "CYPHER":
             raise DrivineError(self.cypher_refusal, finalized)
+        if isinstance(finalized.parameters, Mapping):
+            # Read once, so a compile again binds an iterator in them as its items too, not as none.
+            finalized.parameters = drained(finalized.parameters)
         sql, compiled = cypher_compiled(finalized, "ORACLE", self.graph)
         if compiled is None:
             return sql

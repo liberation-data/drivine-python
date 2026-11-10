@@ -33,7 +33,7 @@ class SqliteConnection(Connection):
     statement commits itself, as a statement does on the graph engines. A transaction takes the file's write lock as it
     begins, so one writer works at a time. Rows are dicts of their columns, as on Postgres; a statement that opens with
     `/* drivine:json */` has its text values read as JSON. A Cypher statement is compiled to SQL over the graph's tables
-    (see SqliteCypherCompiler), and gives a row as a graph engine gives it: its one item, or a list of its items.
+    (see shared_compiler), and gives a row as a graph engine gives it: its one item, or a list of its items.
 
     Each call on the file blocks, so it runs on a thread of its own and the event loop goes on meanwhile (see
     concurrency.blocking); the sync API runs it where it is.

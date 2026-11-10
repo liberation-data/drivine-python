@@ -33,7 +33,7 @@ class PostgresConnection(Connection):
     """
     A connection to Postgres, through psycopg. Outside a transaction each statement commits itself, as a statement does
     on the graph engines. A statement without parameters is sent as it is, so it may hold several statements, or a
-    block. A Cypher statement is compiled to SQL over the graph's tables (see SqlCypherCompiler), and gives a row as a
+    block. A Cypher statement is compiled to SQL over the graph's tables (see shared_compiler), and gives a row as a
     graph engine gives it: its one item, or a list of its items. A compiled statement's cursor reads its JSON as
     postgres_non_finite says: the numbers that stand for NaN and the infinities, where it says it was given one, and a
     whole number past a long's range as a float. Every other statement is read as psycopg reads it.

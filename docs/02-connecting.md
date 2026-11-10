@@ -170,7 +170,7 @@ applied whole or not at all.
 SQLite keeps a graph in a file, with no server: drivine4j's store, in the same tables as Postgres, so a file one library
 wrote, drivine4j, Drivine for TypeScript or this one, the others read and write as it is. `pip install "drivine[sqlite]"`
 installs what it takes: [apsw](https://github.com/rogerbinns/apsw), whose wheels bundle a SQLite of their own (3.53.2 or
-later), and the runtime of the Cypher compiler. So the store runs on the same SQLite whatever SQLite Python was built
+later). So the store runs on the same SQLite whatever SQLite Python was built
 with, as drivine4j's and Drivine for TypeScript's run on the one their drivers bundle. Models, the query DSL and the
 object manager are the same as on the other stores; the persistence manager runs plain SQL, with cursors and
 transactions, and Cypher you write is compiled to SQLite's SQL, as on Postgres and Oracle: see

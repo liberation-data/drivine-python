@@ -167,6 +167,8 @@ def written(value: Any) -> Any:
     if isinstance(value, float):
         return _float(value)
     if isinstance(value, Decimal):
+        if value.is_nan():  # A signalling NaN too, which float() refuses.
+            return {"$float": "NaN"}
         if value.is_finite() and value == value.to_integral_value():
             return int(value)
         return _float(float(value))

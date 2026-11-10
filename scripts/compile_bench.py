@@ -169,6 +169,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=(__doc__ or "").strip().split("\n\n")[0])
     parser.add_argument("--json", type=Path, help="write the results here as well")
     parser.add_argument("--runs", type=int, default=5, help="runs of each measurement (default 5)")
+    parser.add_argument(
+        "--against",
+        type=Path,
+        help="a baseline's results (as --json writes them): fail where a measure the gate takes is worse past NOISE",
+    )
     args = parser.parse_args()
     if args.runs < 1:  # A median of no runs is none: say so before the bench, not as a StatisticsError after it.
         parser.error("--runs takes 1 or more")
@@ -183,7 +188,45 @@ def main() -> int:
     print(report(results))
     if args.json:
         args.json.write_text(json.dumps(results, indent=2) + "\n", encoding="utf-8")
+    if args.against:
+        worse = regressions(json.loads(args.against.read_text(encoding="utf-8")), results)
+        print("\n" + ("\n".join(f"- worse: {it}" for it in worse) or f"No measure is worse than {args.against}'s."))
+        return 1 if worse else 0
     return 0
+
+
+NOISE = 0.10
+"""How much worse than the baseline a measure may be and still pass: a run's own noise, on CI's machines."""
+
+
+def regressions(baseline: dict[str, Any], results: dict[str, Any]) -> list[str]:
+    """
+    Each measure the gate takes that is worse than the baseline's by more than NOISE (#467): `import drivine`'s median,
+    and per store the first compile's median and the uncached compile's median and p99. The cached figures are for the
+    record: the shared compiler keeps no parse of its own, so uncached is the fair comparison.
+    """
+    measures = [("import drivine, median", baseline["import"]["median"], results["import"]["median"])]
+    for store in STORES:
+        measures.append(
+            (
+                f"{store} first compile, median",
+                baseline["first_compile"][store]["median"],
+                results["first_compile"][store]["median"],
+            )
+        )
+        for stat in ("median", "p99"):
+            measures.append(
+                (
+                    f"{store} uncached compile, {stat}",
+                    baseline["warm"][store]["uncached"][stat],
+                    results["warm"][store]["uncached"][stat],
+                )
+            )
+    return [
+        f"{name}: {now} ms against the baseline's {then} ms (+{(now / then - 1) * 100:.0f}%)"
+        for name, then, now in measures
+        if now > then * (1 + NOISE)
+    ]
 
 
 def report(results: dict[str, Any]) -> str:

@@ -13,8 +13,10 @@ counterpart of `drivine/concurrency.py`, is the one sync module written by hand,
 that runs tasks concurrently) is left out of the sync tests.
 
 `uv run python scripts/compile_bench.py` times `import drivine`, each SQL store's first compile and its warm compiles
-over the Cypher spec in `tests/cypher`. CI's `compile-bench` job runs it on Python 3.13 and puts the table in the run's
-summary, so its numbers compare from run to run.
+over the Cypher spec in `tests/cypher`. CI's `compile-bench` job runs it on Python 3.13, puts the table in the run's
+summary, and fails where `import drivine`, a store's first compile, or its uncached compile's median or p99 is worse
+than the baseline by more than 10% (`--against tests/bench/compile-baseline.json`): the baseline is the compiler Drivine
+had before the shared one, measured by CI before the switch (#467).
 
 The integration tests run on Neo4j, Memgraph, FalkorDB, Postgres, Oracle and SQLite. A test marked `written_in_cypher`
 seeds and reads back in Cypher with statements of no language, and on the SQL stores those are sent as Cypher, which is

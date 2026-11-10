@@ -6,6 +6,7 @@ import importlib.util
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -78,3 +79,21 @@ def test_a_fresh_run_that_fails_says_why(capfd: pytest.CaptureFixture[str]):
     with pytest.raises(subprocess.CalledProcessError):
         compile_bench._fresh("raise SystemExit('the reason it failed')", 1)
     assert "the reason it failed" in capfd.readouterr().err
+
+
+def test_the_gate_fails_a_measure_worse_than_the_baseline_past_the_noise_alone():
+    def results(imported: float, first: float, median: float, p99: float) -> dict[str, Any]:
+        warm = {"uncached": {"median": median, "p99": p99}, "cached": {"median": 0.0, "p99": 0.0}}
+        return {
+            "import": {"median": imported},
+            "first_compile": {store: {"median": first} for store in compile_bench.STORES},
+            "warm": {store: warm for store in compile_bench.STORES},
+        }
+
+    baseline = results(100.0, 100.0, 1.0, 10.0)
+    assert compile_bench.regressions(baseline, results(110.0, 50.0, 1.1, 11.0)) == []
+    worse = compile_bench.regressions(baseline, results(111.0, 100.0, 1.0, 12.0))
+    assert worse[0].startswith("import drivine, median: 111.0 ms against the baseline's 100.0 ms")
+    assert [it.split(":")[0] for it in worse[1:]] == [
+        f"{store} uncached compile, p99" for store in compile_bench.STORES
+    ]

@@ -29,8 +29,12 @@ NUMBERS = (
 
 STATEMENT = f"SELECT {NUMBERS} AS result"
 
-AS_TODAY = [math.inf, math.inf, -math.inf, 10**308, 2.5, "2" + "0" * 309 + ".5"]
-"""As json.loads reads them: Postgres writes `numeric` 1e308 as its digits, a whole number."""
+AS_TODAY = [math.inf, math.inf, -math.inf, 1e308, 2.5, "2" + "0" * 309 + ".5"]
+"""
+As a compiled statement's rows are read: Postgres writes `numeric` 1e308 as its digits, a whole number past a long's
+range, which is read as the float nearest it, as drivine4j reads it (the spec's host.yaml, "Postgres rows of a statement
+given NaN or an infinity").
+"""
 
 
 def compiled_as(monkeypatch: pytest.MonkeyPatch, non_finite: bool, prelude: str | None = None) -> None:

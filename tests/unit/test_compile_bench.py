@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 import sys
 from pathlib import Path
 
@@ -70,3 +71,9 @@ def test_no_runs_is_refused_before_the_bench(monkeypatch: pytest.MonkeyPatch, ca
         compile_bench.main()
     assert exit_.value.code == 2
     assert "--runs takes 1 or more" in capsys.readouterr().err
+
+
+def test_a_fresh_run_that_fails_says_why(capfd: pytest.CaptureFixture[str]):
+    with pytest.raises(subprocess.CalledProcessError):
+        compile_bench._fresh("raise SystemExit('the reason it failed')", 1)
+    assert "the reason it failed" in capfd.readouterr().err

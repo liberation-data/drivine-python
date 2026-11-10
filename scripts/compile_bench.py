@@ -47,13 +47,16 @@ FIRST = "MATCH (p:Person {name: $name})-[:KNOWS]->(f) RETURN f.name AS name ORDE
 
 
 def _fresh(code: str, runs: int) -> list[float]:
-    """The milliseconds `code` prints, each run in an interpreter of its own (-I: no user site, no cwd on sys.path)."""
+    """
+    The milliseconds `code` prints, each run in an interpreter of its own (-I: no user site, no cwd on sys.path). Its
+    stderr is the bench's, so a run that fails says why in the log.
+    """
     samples: list[float] = []
     for _ in range(runs):
         out = subprocess.run(
             [sys.executable, "-I", "-c", f"import sys; sys.path.insert(0, {str(ROOT)!r})\n{code}"],
             check=True,
-            capture_output=True,
+            stdout=subprocess.PIPE,
             text=True,
         ).stdout
         samples.append(float(out.strip().splitlines()[-1]))

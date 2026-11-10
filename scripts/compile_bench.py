@@ -1,7 +1,7 @@
 """
 How long drivine takes to import and to compile Cypher to SQL: the bar the shared compiler is held to (#467, #471).
 
-    python scripts/compile_bench.py [--json results.json] [--runs N]
+    python scripts/compile_bench.py [--json results.json] [--runs N] [--against baseline.json]
 
 It measures, each in a fresh interpreter where a fresh one is what a user's program starts with:
 
@@ -10,9 +10,11 @@ It measures, each in a fresh interpreter where a fresh one is what a user's prog
 - warm compile, per store, over every step of the Cypher spec (tests/cypher) that runs on the store: each statement
   compiled with the parse cache cleared first (uncached), and again with it kept (cached). Each statement's time is the
   median of its runs, and the median, mean and p99 are over the statements. A statement the compiler refuses is timed
-  as well, as a refusal is a compile too, and counted apart. "Uncached" clears drivine's parse cache (`read_cypher`)
-  alone: ANTLR's own prediction cache, which its generated parser shares, stays warm over the run, as it is in an
-  application that has been running a while.
+  as well, as a refusal is a compile too, and counted apart. The shared compiler keeps no parse cache, so the two
+  differ only by noise: "uncached" clears the parse cache of the compiler Drivine had before (`read_cypher`), which the
+  baseline (tests/bench/compile-baseline.json) was measured on, and which no compile calls now.
+
+With `--against`, it fails where a measure is worse than the baseline's by more than NOISE (see regressions).
 
 The numbers are wall-clock and depend on the machine, so compare runs of one machine only: CI's, for the gate.
 """

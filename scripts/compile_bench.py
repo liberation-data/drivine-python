@@ -119,6 +119,13 @@ def warm_ms(runs: int) -> dict[str, Any]:
     steps = corpus()
     for store in STORES:  # The compiler's modules, loaded before anything is timed.
         once(store, FIRST, {"name": "Ann"})
+    # ANTLR's prediction cache, warmed on the whole corpus before anything is timed: else the first store timed would
+    # pay for warming it, and with few runs its numbers would be that, not its compile.
+    for cypher in dict.fromkeys(cypher for _, cypher, _ in steps):
+        try:
+            read_cypher(cypher)
+        except DrivineError:
+            pass
     result: dict[str, Any] = {}
     for store in STORES:
         mine = [it for it in steps if it[0] == store]

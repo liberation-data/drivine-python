@@ -95,6 +95,7 @@ jobs:
           name: compile-bench
           path: compile-bench.json
           if-no-files-found: error
+          overwrite: true
 
   # Every test but Oracle's, in three parts, and the nightly tests in a fourth: on each Python on a full run (picked by
   # the same test as `tree`'s record). A pull request's run takes the database suite on the oldest and the newest

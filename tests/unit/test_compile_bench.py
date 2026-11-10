@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import importlib.util
+import sys
 from pathlib import Path
+
+import pytest
 
 from tests.cypher.cypher_spec import load
 
@@ -59,3 +62,11 @@ def test_the_report_has_a_row_per_store():
     assert "- import drivine: median 1.0, max 4.0" in lines
     for store in compile_bench.STORES:
         assert f"| {store} | 1.0 | 10 (2) | 1.0 / 2.0 / 3.0 | 1.0 / 2.0 / 3.0 |" in lines
+
+
+def test_no_runs_is_refused_before_the_bench(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):
+    monkeypatch.setattr(sys, "argv", ["compile_bench.py", "--runs", "0"])
+    with pytest.raises(SystemExit) as exit_:
+        compile_bench.main()
+    assert exit_.value.code == 2
+    assert "--runs takes 1 or more" in capsys.readouterr().err

@@ -167,6 +167,8 @@ def main() -> int:
     parser.add_argument("--json", type=Path, help="write the results here as well")
     parser.add_argument("--runs", type=int, default=5, help="runs of each measurement (default 5)")
     args = parser.parse_args()
+    if args.runs < 1:  # A median of no runs is none: say so before the bench, not as a StatisticsError after it.
+        parser.error("--runs takes 1 or more")
     results = {
         "python": platform.python_version(),
         "machine": f"{platform.system()} {platform.machine()}",

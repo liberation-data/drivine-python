@@ -3,7 +3,7 @@ from __future__ import annotations
 import itertools
 import logging
 import time
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, TypeVar, cast
 
 from drivine.backend.sql.sql_graph import DEFAULT_GRAPH
@@ -21,6 +21,9 @@ from drivine.query.query_specification import QuerySpecification
 T = TypeVar("T")
 
 logger = logging.getLogger("drivine.connection")
+
+_PARALLEL_WORKERS = "max_parallel_maintenance_workers"
+"""The setting an index build turns to 0 (see PostgresConnection.building_index)."""
 
 _CURSORS = itertools.count(1)
 """Numbers the server-side cursors, which a connection names."""
@@ -95,6 +98,44 @@ class PostgresConnection(Connection):
     async def rollback_transaction(self) -> None:
         self._in_transaction = False
         await self.connection.execute("ROLLBACK")
+
+    async def building_index(self, build: Callable[[], Awaitable[T]]) -> T:
+        """
+        Runs `build`, an index build, with no parallel workers (`max_parallel_maintenance_workers` 0), and sets the
+        session's setting back after to what it was (liberation-data/drivine-python#435). A backend that has run
+        anything in parallel, as a `CREATE INDEX` over a table past `min_parallel_table_scan_size` is, keeps a dynamic
+        shared memory segment for as long as it lives, and the pool keeps it alive: enough of them left too little of a
+        64 MB `/dev/shm` for an HNSW build, which asks for nearly all of `maintenance_work_mem` as one segment.
+
+        A setting the session didn't set itself, as one of `postgresql.conf`, is reset rather than set, so the session
+        goes on following the server's.
+
+        drivine4j closes the session after the build instead, which keeps its parallel workers. psycopg_pool can't be
+        asked to: a connection given back closed is dropped and replaced, but logged as
+        a warning each time, and a warning for each index built would teach a reader to pass over warnings.
+        """
+        async with self.connection.cursor() as cursor:
+            await cursor.execute(
+                "SELECT setting AS workers, source = 'session' AS own FROM pg_settings "
+                f"WHERE name = '{_PARALLEL_WORKERS}'"
+            )
+            # The pool's connections give a row as a dict (dict_row).
+            row: Any = await cursor.fetchone()
+        previous = str(row["workers"]) if row["own"] else None
+        await self._parallel_workers("0")
+        try:
+            return await build()
+        finally:
+            try:
+                if previous is None:
+                    await self.connection.execute(f"RESET {_PARALLEL_WORKERS}")
+                else:
+                    await self._parallel_workers(previous)
+            except Exception as error:  # noqa: BLE001 - the build's own failure, if any, is the one raised
+                logger.debug("Could not set %s back on %s: %s", _PARALLEL_WORKERS, self.session_id, error)
+
+    async def _parallel_workers(self, value: str) -> None:
+        await self.connection.execute(f"SELECT set_config('{_PARALLEL_WORKERS}', %s, false)", (value,))
 
     async def release(self, error: BaseException | None = None) -> None:
         if error is not None:

@@ -10,6 +10,7 @@ from drivine.backend.postgres.postgres_statement import value_of
 from drivine.backend.sqlite.sqlite_contention import locked
 from drivine.connection.connection_provider import ConnectionProvider
 from drivine.connection.database_type import DatabaseType
+from drivine.connection.postgres.postgres_connection import PostgresConnection
 from drivine.drivine_error import DrivineError
 from drivine.manager.contention import any_cause, ddl_contended, ddl_deadlocked, when_not_contended
 from drivine.query.query_specification import QuerySpecification
@@ -19,6 +20,9 @@ _ORACLE_SERIAL = re.compile(r"ORA-08177\b")
 
 _RECORD_ROWS = (DatabaseType.POSTGRES, DatabaseType.SQLITE)
 """The stores that give a row as a record of its columns."""
+
+_INDEX_BUILD = re.compile(r"\s*CREATE\s+(UNIQUE\s+)?INDEX\b", re.IGNORECASE)
+"""A Postgres statement that builds an index, as PostgresSchemaGrammar writes one: a uniqueness constraint's too."""
 
 
 def _contended(failure: BaseException, waited_out_busy: bool) -> bool:
@@ -63,7 +67,12 @@ class SchemaExecutor:
             return await self._native(statement)
         connection = await self.provider.connect()
         try:
-            rows = await connection.query(QuerySpecification[Any](statement).bind(bindings))
+            spec = QuerySpecification[Any](statement).bind(bindings)
+            if isinstance(connection, PostgresConnection) and _INDEX_BUILD.match(statement):
+                # A build in parallel leaves its session holding shared memory: see PostgresConnection.building_index.
+                rows = await connection.building_index(lambda: connection.query(spec))
+            else:
+                rows = await connection.query(spec)
         except Exception as error:
             await connection.release(error)
             raise DrivineError.with_root_cause(error) from error

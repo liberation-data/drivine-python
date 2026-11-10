@@ -27,7 +27,11 @@ pip install "drivine[neo4j]"      # Neo4j, Memgraph, Neptune
 pip install "drivine[falkordb]"   # FalkorDB
 pip install "drivine[oracle]"     # Oracle 23.9 or later, through python-oracledb in thin mode
 pip install "drivine[postgres]"   # Postgres 14 or later, through psycopg 3
+pip install "drivine[sqlite]"     # SQLite, a graph in a file, through apsw and the SQLite it bundles
 ```
+
+The SQL stores' extras also install `drivine-cypher-compiler`, the shared Cypher compiler, which has no wheel for an
+Intel Mac or musl Linux (Alpine): see [Cypher on a relational database](03-cypher-on-a-relational-database.md).
 
 Python 3.11 or newer. [pi-pilgrim](https://github.com/liberation-data/pi-pilgrim), which `DrivineAssembly` is
 written with, comes with each; `drivine[pilgrim]` still installs, as it did when pi-pilgrim was an extra.

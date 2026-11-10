@@ -85,9 +85,10 @@ def test_the_platforms_with_a_wheel_are_the_ones_the_compiler_is_built_for():
 
     from drivine.cypher import shared_compiler
 
-    def on(sys_platform: str, machine: str, libc: str = "glibc") -> bool:
+    def on(sys_platform: str, machine: str, libc: str = "glibc", maxsize: int = 2**63 - 1) -> bool:
         with (
             mock.patch.object(shared_compiler.sys, "platform", sys_platform),
+            mock.patch.object(shared_compiler.sys, "maxsize", maxsize),
             mock.patch.object(shared_compiler.platform, "machine", lambda: machine),
             mock.patch.object(shared_compiler.platform, "libc_ver", lambda: (libc, "2.31")),
         ):
@@ -95,3 +96,4 @@ def test_the_platforms_with_a_wheel_are_the_ones_the_compiler_is_built_for():
 
     assert on("darwin", "arm64") and on("linux", "x86_64") and on("linux", "aarch64") and on("win32", "AMD64")
     assert not on("darwin", "x86_64") and not on("linux", "x86_64", libc="") and not on("win32", "ARM64")
+    assert not on("win32", "AMD64", maxsize=2**31 - 1) and not on("linux", "x86_64", maxsize=2**31 - 1)

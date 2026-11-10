@@ -58,9 +58,12 @@ def _compiler(store: SharedStore) -> Callable[[str], str]:
 def has_wheel() -> bool:
     """
     Whether drivine-cypher-compiler has a wheel for this platform: macOS on Apple Silicon, Linux with glibc on x86_64 or
-    aarch64, or Windows x64. Kotlin/Native, which builds it, has no target for Intel Macs or for musl Linux.
+    aarch64, or Windows x64. Kotlin/Native, which builds it, has no target for Intel Macs or for musl Linux. The machine
+    is the system's, so a 32-bit Python on a 64-bit system, which takes no 64-bit wheel, has none.
     """
     machine = platform.machine().lower()
+    if sys.maxsize <= 2**32:
+        return False
     if sys.platform == "darwin":
         return machine == "arm64"
     if sys.platform.startswith("linux"):

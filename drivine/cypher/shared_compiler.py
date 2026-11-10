@@ -149,8 +149,11 @@ def _graph(store: SharedStore, graph: str, nulls_equal_stored: bool, era_stored:
     if store != "ORACLE":
         return {"name": graph}
     # A write's rows as a row of JSON each (oracleRowsAsText left false), as python-oracledb reads an implicit result's
-    # JSON rows whole, as the compiler Drivine had before did (liberation-data/drivine-python#468).
-    return {"name": graph, "nullsEqualStored": nulls_equal_stored, "eraStored": era_stored}
+    # JSON rows whole, as the compiler Drivine had before did (liberation-data/drivine-python#468). Each value returned is
+    # encoded again (oracleReencodeJson): a document updated in place comes back as OSON version 2, which python-oracledb's
+    # thin mode can't read (oracle/python-oracledb#622, liberation-data/drivine-cypher-spec#165), as the compiler Drivine had
+    # before encoded it again too.
+    return {"name": graph, "nullsEqualStored": nulls_equal_stored, "eraStored": era_stored, "oracleReencodeJson": True}
 
 
 def decoded(value: Any) -> Any:

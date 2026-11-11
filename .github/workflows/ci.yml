@@ -74,10 +74,11 @@ jobs:
       - name: Check the Cypher spec
         run: python scripts/check_cypher_spec.py
 
-  # How long `import drivine` and compiling Cypher to SQL take, on one Python, so runs compare, against the baseline of
-  # the compiler Drivine had before the shared one (tests/bench/compile-baseline.json, #467's CI run): the job fails
-  # where the least of at least 7 fresh imports, a first compile's median, or an uncached compile's median or p99 is
-  # worse than it by more than 10% (#471, #495). It records them in the run's summary and as an artifact.
+  # How long `import drivine` and compiling Cypher to SQL take, on one Python, so runs compare. The job fails where the
+  # least of at least 7 fresh imports is worse by more than 10% than main's, timed in turn on the same runner (#496),
+  # or where a first compile's median, or an uncached compile's median or p99, is worse by more than 10% than the
+  # baseline of the compiler Drivine had before the shared one (tests/bench/compile-baseline.json, #467's CI run; its
+  # import is printed for reference only). It records them in the run's summary and as an artifact.
   compile-bench:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -87,10 +88,17 @@ jobs:
         with:
           python-version: "3.13"
       - run: uv sync
+      # main, beside this tree in an environment of its own, whose import is timed in turn with this tree's on the one
+      # runner: a runner's CPU type moved import by a quarter where the code didn't (#496).
+      - name: Check out main to time its import beside this tree's
+        run: |
+          git fetch --depth 1 origin main
+          git worktree add ../main-tree FETCH_HEAD
+          (cd ../main-tree && uv sync)
       - name: Time import and compile
         # bash by name runs with pipefail, so a failing bench fails the step through the tee.
         shell: bash
-        run: uv run python scripts/compile_bench.py --json compile-bench.json --against tests/bench/compile-baseline.json | tee -a "$GITHUB_STEP_SUMMARY"
+        run: uv run python scripts/compile_bench.py --json compile-bench.json --against tests/bench/compile-baseline.json --import-against ../main-tree | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         with:
           name: compile-bench

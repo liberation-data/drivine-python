@@ -48,15 +48,15 @@ FIRST = "MATCH (p:Person {name: $name})-[:KNOWS]->(f) RETURN f.name AS name ORDE
 """The statement a first compile is timed on: one an application would run."""
 
 
-def _fresh(code: str, runs: int) -> list[float]:
+def _fresh(code: str, runs: int, root: Path = ROOT, python: str = sys.executable) -> list[float]:
     """
-    The milliseconds `code` prints, each run in an interpreter of its own (-I: no user site, no cwd on sys.path). Its
-    stderr is the bench's, so a run that fails says why in the log.
+    The milliseconds `code` prints, each run in an interpreter of its own (-I: no user site, no cwd on sys.path), with
+    `root` first on sys.path. Its stderr is the bench's, so a run that fails says why in the log.
     """
     samples: list[float] = []
     for _ in range(runs):
         out = subprocess.run(
-            [sys.executable, "-I", "-c", f"import sys; sys.path.insert(0, {str(ROOT)!r})\n{code}"],
+            [python, "-I", "-c", f"import sys; sys.path.insert(0, {str(root)!r})\n{code}"],
             check=True,
             stdout=subprocess.PIPE,
             text=True,
@@ -65,8 +65,50 @@ def _fresh(code: str, runs: int) -> list[float]:
     return samples
 
 
+IMPORT = "import time\nt = time.perf_counter()\nimport drivine\nprint((time.perf_counter() - t) * 1000)"
+"""What an import is timed by: `import drivine` alone, which doesn't load the compiler."""
+
+
 def import_ms(runs: int) -> list[float]:
-    return _fresh("import time\nt = time.perf_counter()\nimport drivine\nprint((time.perf_counter() - t) * 1000)", runs)
+    return _fresh(IMPORT, runs)
+
+
+def tree_python(tree: Path) -> str:
+    """The interpreter of another checkout's own environment, as `uv sync` makes it there."""
+    for candidate in (tree / ".venv" / "bin" / "python", tree / ".venv" / "Scripts" / "python.exe"):
+        if candidate.exists():
+            return str(candidate)
+    raise SystemExit(f"{tree} has no .venv: run `uv sync` there first")
+
+
+def paired_import_ms(runs: int, other: Path) -> tuple[list[float], list[float]]:
+    """
+    This tree's imports and `other`'s, each in its own environment, taken in turn on the one machine: so a runner that
+    is slower all through (a CI runner's CPU type) slows both alike, and the gate compares the code, not the runner.
+    """
+    python = tree_python(other)
+    ours: list[float] = []
+    theirs: list[float] = []
+    for _ in range(runs):
+        theirs += _fresh(IMPORT, 1, other, python)
+        ours += _fresh(IMPORT, 1)
+    return ours, theirs
+
+
+def cpu_model() -> str:
+    """The machine's CPU, for the record: CI runners of one label differ, and their speed with them."""
+    try:
+        if platform.system() == "Linux":
+            for line in Path("/proc/cpuinfo").read_text(encoding="utf-8").splitlines():
+                if line.startswith("model name"):
+                    return line.split(":", 1)[1].strip()
+        if platform.system() == "Darwin":
+            return subprocess.run(
+                ["sysctl", "-n", "machdep.cpu.brand_string"], check=True, stdout=subprocess.PIPE, text=True
+            ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        pass
+    return platform.processor() or "unknown"
 
 
 def first_compile_ms(store: str, runs: int) -> list[float]:
@@ -173,6 +215,11 @@ def main() -> int:
     parser.add_argument("--json", type=Path, help="write the results here as well")
     parser.add_argument("--runs", type=int, default=5, help="runs of each measurement (default 5)")
     parser.add_argument(
+        "--import-against",
+        type=Path,
+        help="another checkout, `uv sync`ed (CI's: main): time its imports in turn with this tree's, and gate on them",
+    )
+    parser.add_argument(
         "--against",
         type=Path,
         help="a baseline's results (as --json writes them): fail where a measure the gate takes is worse past NOISE",
@@ -180,11 +227,20 @@ def main() -> int:
     args = parser.parse_args()
     if args.runs < 1:  # A median of no runs is none: say so before the bench, not as a StatisticsError after it.
         parser.error("--runs takes 1 or more")
-    results = {
+    imports = max(IMPORT_RUNS, args.runs * 2)
+    results: dict[str, Any] = {
         "python": platform.python_version(),
         "machine": f"{platform.system()} {platform.machine()}",
+        "cpu": cpu_model(),
         "runs": args.runs,
-        "import": summary(import_ms(max(IMPORT_RUNS, args.runs * 2))),
+    }
+    if args.import_against:
+        ours, theirs = paired_import_ms(imports, args.import_against)
+        results["import"] = summary(ours)
+        results["import_against"] = {"tree": str(args.import_against), **summary(theirs)}
+    else:
+        results["import"] = summary(import_ms(imports))
+    results |= {
         "first_compile": {store: summary(first_compile_ms(store, args.runs)) for store in STORES},
         "warm": warm_ms(args.runs),
     }
@@ -192,7 +248,9 @@ def main() -> int:
     if args.json:
         args.json.write_text(json.dumps(results, indent=2) + "\n", encoding="utf-8")
     if args.against:
-        worse = regressions(json.loads(args.against.read_text(encoding="utf-8")), results)
+        baseline = json.loads(args.against.read_text(encoding="utf-8"))
+        print(f"\n- import drivine, for reference only: the baseline's median {baseline['import']['median']} ms")
+        worse = regressions(baseline, results)
         print("\n" + ("\n".join(f"- worse: {it}" for it in worse) or f"No measure is worse than {args.against}'s."))
         return 1 if worse else 0
     return 0
@@ -211,14 +269,17 @@ another, #495), where their least is the import's own cost, as the code makes it
 
 def regressions(baseline: dict[str, Any], results: dict[str, Any]) -> list[str]:
     """
-    Each measure the gate takes that is worse than the baseline's by more than NOISE (#467): `import drivine`'s least
-    over at least IMPORT_RUNS, and per store the first compile's median and the uncached compile's median and p99. The
-    cached figures are for the record: the shared compiler keeps no parse of its own, so uncached is the fair
-    comparison. A baseline with no least import, as one written before it was kept, is held to its median, which is no
-    less than it.
+    Each measure the gate takes that is worse than its bar by more than NOISE (#467, #496). `import drivine`'s least,
+    over at least IMPORT_RUNS, is held to the least of the tree it was timed in turn with on the one machine
+    (`import_against`, CI's main), as a runner's type moved it by a quarter where the code didn't; with no such tree it
+    isn't gated, and the baseline's is printed for reference. Per store, the first compile's median and the uncached
+    compile's median and p99 are held to the baseline's. The cached figures are for the record: the shared compiler
+    keeps no parse of its own, so uncached is the fair comparison.
     """
-    imported = baseline["import"]
-    measures = [("import drivine, min", imported.get("min", imported["median"]), results["import"]["min"])]
+    measures: list[tuple[str, float, float]] = []
+    if "import_against" in results:
+        against = results["import_against"]
+        measures.append((f"import drivine, min against {against['tree']}", against["min"], results["import"]["min"]))
     for store in STORES:
         measures.append(
             (
@@ -236,20 +297,32 @@ def regressions(baseline: dict[str, Any], results: dict[str, Any]) -> list[str]:
                 )
             )
     return [
-        f"{name}: {now} ms against the baseline's {then} ms (+{(now / then - 1) * 100:.0f}%)"
+        f"{name}: {now} ms against {then} ms (+{(now / then - 1) * 100:.0f}%)"
         for name, then, now in measures
         if now > then * (1 + NOISE)
+    ]
+
+
+def _against_line(results: dict[str, Any]) -> list[str]:
+    """The import of the tree timed in turn with this one, where one was."""
+    against = results.get("import_against")
+    if against is None:
+        return []
+    return [
+        f"- import drivine in {against['tree']}, in turn: min {against['min']}, median {against['median']}, "
+        f"max {against['max']}"
     ]
 
 
 def report(results: dict[str, Any]) -> str:
     """The results as a Markdown table, for a run's log and its summary."""
     lines = [
-        f"Compile bench: Python {results['python']} on {results['machine']}, {results['runs']} runs each, "
-        "in milliseconds.",
+        f"Compile bench: Python {results['python']} on {results['machine']} ({results.get('cpu', 'unknown')}), "
+        f"{results['runs']} runs each, in milliseconds.",
         "",
         f"- import drivine: min {results['import']['min']}, median {results['import']['median']}, "
         f"max {results['import']['max']}",
+        *_against_line(results),
         "",
         "| Store | First compile | Statements (refused) | Uncached median / mean / p99 | Cached median / mean / p99 |",
         "|---|---|---|---|---|",

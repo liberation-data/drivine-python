@@ -102,6 +102,19 @@ def test_each_value_is_written_as_the_compilers_readme_tags_it(value: Any, expec
         assert math.copysign(1, given) == math.copysign(1, expected)
 
 
+def test_a_temporal_is_tagged_at_any_depth_of_lists_and_maps():
+    day = date(2026, 11, 11)
+    tagged = {"$temporal": "DATE", "text": "2026-11-11"}
+    assert written({"a": [day, {"b": (day,)}], "c": {"d": {day}}}) == {
+        "a": [tagged, {"b": [tagged]}],
+        "c": {"d": [tagged]},
+    }
+    # Beside a text that reads as one, the temporal is tagged and the text is left a text.
+    assert written(["2026-11-11", day]) == ["2026-11-11", tagged]
+    # In a map with a key starting with `$`, which is wrapped so it isn't read as a tag, its values are tagged still.
+    assert written({"$k": day}) == {"$map": {"$k": tagged}}
+
+
 def test_a_value_of_another_type_is_refused_naming_it():
     with pytest.raises(DrivineError, match="A parameter of type object can't be bound to a Cypher statement."):
         written({"a": [object()]})
@@ -146,6 +159,14 @@ def test_a_statement_given_nan_or_an_infinity_says_so():
     assert compile_cypher("RETURN $x AS x", {"x": math.nan}, "SQLITE", "g").non_finite
     assert compile_cypher("RETURN $x AS x", {"x": Decimal("-Infinity")}, "POSTGRES", "g").non_finite
     assert not compile_cypher("RETURN $x AS x", {"x": 1.5}, "POSTGRES", "g").non_finite
+
+
+def test_each_value_oracle_returns_is_encoded_again_and_no_other_stores_is():
+    # python-oracledb's thin mode can't read OSON version 2, as a document updated in place comes back as
+    # (liberation-data/drivine-cypher-spec#165).
+    assert "KEEP '$')" in compile_cypher("MATCH (n:A) RETURN n", {}, "ORACLE", "g").sql
+    for store in ("POSTGRES", "SQLITE"):
+        assert "JSON_TRANSFORM" not in compile_cypher("MATCH (n:A) RETURN n", {}, store, "g").sql
 
 
 def test_a_refusal_is_a_drivine_error_with_the_compilers_message_and_the_statements_spec():

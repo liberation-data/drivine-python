@@ -30,7 +30,13 @@ NUMBERS = (
 STATEMENT = f"SELECT {NUMBERS} AS result"
 
 AS_TODAY = [math.inf, math.inf, -math.inf, 10**308, 2.5, "2" + "0" * 309 + ".5"]
-"""As json.loads reads them: Postgres writes `numeric` 1e308 as its digits, a whole number."""
+"""As json.loads reads them, as plain SQL's rows are: Postgres writes `numeric` 1e308 as its digits, a whole number."""
+
+COMPILED = [*AS_TODAY[:3], 1e308, *AS_TODAY[4:]]
+"""
+As a compiled statement's rows are read: the whole number past a long's range is the float nearest it, as drivine4j
+reads it (the spec's host.yaml, "Postgres rows of a statement given NaN or an infinity").
+"""
 
 
 def compiled_as(monkeypatch: pytest.MonkeyPatch, non_finite: bool, prelude: str | None = None) -> None:
@@ -47,7 +53,7 @@ def compiled_as(monkeypatch: pytest.MonkeyPatch, non_finite: bool, prelude: str 
         sql = copy.copy(spec)
         sql.statement = Statement(spec.statement.text, "SQL")
         sql.parameters = {}
-        return sql, CompiledCypher(spec.statement.text, {}, prelude=prelude, non_finite=non_finite)
+        return sql, CompiledCypher(spec.statement.text, {}, setup=(prelude,) if prelude else (), non_finite=non_finite)
 
     monkeypatch.setattr(sys.modules[PostgresConnection.__module__], "cypher_compiled", compiled)
 
@@ -78,11 +84,11 @@ async def test_reads_the_stand_ins_as_nan_and_the_infinities_where_the_statement
 ):
     compiled_as(monkeypatch, True, prelude)
     [row] = await connection.query(QuerySpecification[Any](Statement(STATEMENT, "CYPHER")))
-    assert same(row, [math.nan, math.inf, -math.inf, 10**308, 2.5, "2" + "0" * 309 + ".5"])
-    # The cursor's alone: the next statement, not given NaN, reads as today.
+    assert same(row, [math.nan, math.inf, -math.inf, 1e308, 2.5, "2" + "0" * 309 + ".5"])
+    # The cursor's alone: the next statement, not given NaN, reads its stand-ins as numbers.
     compiled_as(monkeypatch, False, prelude)
     [row] = await connection.query(QuerySpecification[Any](Statement(STATEMENT, "CYPHER")))
-    assert same(row, AS_TODAY)
+    assert same(row, COMPILED)
 
 
 @pytest.mark.parametrize("prelude", [None, "SELECT 1"])
@@ -91,7 +97,7 @@ async def test_reads_the_stand_ins_as_today_where_the_statement_doesnt_say_so(
 ):
     compiled_as(monkeypatch, False, prelude)
     [row] = await connection.query(QuerySpecification[Any](Statement(STATEMENT, "CYPHER")))
-    assert same(row, AS_TODAY)
+    assert same(row, COMPILED)
 
 
 @pytest.mark.parametrize(("non_finite", "expected"), [(True, [math.nan, math.inf, -math.inf]), (False, AS_TODAY[:3])])

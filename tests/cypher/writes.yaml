@@ -27,6 +27,14 @@ cases:
       - cypher: "MATCH (n:CyWrite) RETURN properties(n)"
         rows: [{name: "Ada", age: 36}]
 
+  - name: "coalesce() of one argument in a write"
+    description: "coalesce() of one argument sets and returns that argument, null where it is null."
+    steps:
+      - cypher: "CREATE (n:CyWrite {a: 1, t: 'x'}) SET n.b = coalesce(n.a), n.c = coalesce(n.missing), n.u = toUpper(coalesce(n.t)) RETURN [coalesce(n.b), n.c IS NULL, n.u]"
+        rows: [[1, true, "X"]]
+      - cypher: "MATCH (n:CyWrite) RETURN properties(n)"
+        rows: [{a: 1, t: "x", b: 1, u: "X"}]
+
   - name: "A null in a written row and a missing key are one null"
     description: "A write's rows, read after it, group a map's null and a missing key as one null, and keep it once by DISTINCT."
     steps:
@@ -74,6 +82,10 @@ cases:
         rows: [{id: "t1", title: "Write", tags: ["a"], done: false}]
       - cypher: "MERGE (t:CyWrite {id: $task.id}) SET t += $task RETURN properties(t)"
         parameters: {task: {id: "t1", title: "Written", done: true}}
+        rows: [{id: "t1", title: "Written", tags: ["a"], done: true}]
+      # Read on its own, the node the MERGE updated in place: Oracle keeps it as OSON version 2, which a thin driver reads
+      # only where the host asks for oracleReencodeJson (#165).
+      - cypher: "MATCH (t:CyWrite) RETURN properties(t)"
         rows: [{id: "t1", title: "Written", tags: ["a"], done: true}]
       - cypher: "MATCH (t:CyWrite) RETURN count(t)"
         rows: [1]
@@ -213,6 +225,58 @@ cases:
       - cypher: "MATCH (:CyWrite)-[r]-() RETURN r"
         rows: []
 
+  - name: "A write after a DELETE"
+    description: "What a statement makes after it deletes is made anew, with no id of what it deleted, and a read after the DELETE finds none of it."
+    steps:
+      - cypher: "CREATE (:CyWrite {num: 1}), (:CyWrite {num: 2})"
+      - note: A MERGE after a DELETE finds nothing it deleted, and makes its node with an id of its own (drivine4j#713).
+        cypher: "MATCH (a:CyWrite) WITH a, elementId(a) AS old DELETE a MERGE (a2:CyWrite) RETURN a2.num, old = elementId(a2)"
+        only: [neo4j, sql]
+        rows: [[null, false], [null, false]]
+      - cypher: "MATCH (a:CyWrite) RETURN count(a)"
+        rows: [1]
+      - note: So too in a later part of the statement.
+        cypher: "MATCH (a:CyWrite) WITH a, elementId(a) AS old DELETE a WITH collect(old) AS olds MERGE (b:CyWrite {num: 4}) RETURN b.num, elementId(b) IN olds"
+        only: [neo4j, sql]
+        rows: [[4, false]]
+      - note: And inside a FOREACH.
+        cypher: "MATCH (a:CyWrite) WITH a, elementId(a) AS old DELETE a FOREACH (x IN [1] | MERGE (:CyWrite {num: 5})) WITH old MATCH (b:CyWrite) RETURN b.num, old = elementId(b)"
+        only: [neo4j, sql]
+        rows: [[5, false]]
+      - note: A match after the DELETE finds none of what it deleted.
+        cypher: "MATCH (a:CyWrite) DELETE a WITH count(*) AS c OPTIONAL MATCH (b:CyWrite) RETURN c, count(b)"
+        rows: [[1, 0]]
+
+  - name: "A relationship written after a DELETE"
+    description: "A relationship a statement makes after it deletes one, or a node with its relationships, takes no id of what it deleted."
+    steps:
+      - cypher: "CREATE (a:CyWrite {k: 'a'}), (b:CyWrite {k: 'b'}) CREATE (a)-[:T {name: 'rel1'}]->(b), (a)-[:T {name: 'rel2'}]->(b)"
+      - note: A MERGE after a DELETE of relationships finds neither, and makes one (drivine4j#713).
+        cypher: "MATCH (a:CyWrite)-[t:T]->(b:CyWrite) WITH a, b, t, elementId(t) AS old DELETE t MERGE (a)-[t2:T {name: 'rel3'}]->(b) RETURN t2.name, old = elementId(t2)"
+        only: [neo4j, sql]
+        rows: [["rel3", false], ["rel3", false]]
+      - cypher: "MATCH (:CyWrite)-[t:T]->(:CyWrite) RETURN t.name"
+        rows: ["rel3"]
+      - note: A node and a relationship made after a DETACH DELETE take neither the node's id nor its relationship's.
+        cypher: "MATCH (a:CyWrite)-[t:T]->(b:CyWrite {k: 'b'}) WITH a, b, elementId(b) AS nb, elementId(t) AS nt DETACH DELETE b CREATE (a)-[s:T]->(c:CyWrite {k: 'c'}) RETURN nb = elementId(c), nt = elementId(s)"
+        only: [neo4j, sql]
+        rows: [[false, false]]
+      - cypher: "MATCH (:CyWrite {k: 'a'})-[:T]->(c:CyWrite) RETURN c.k"
+        rows: ["c"]
+
+  - name: "An id is not used again by a later statement"
+    description: "On the SQL stores, a node or relationship made after another was deleted, in a later statement, never takes the deleted one's id."
+    steps:
+      - note: The node that keeps the ids is made first, so the deleted node is the last one made, the one whose id a store that hands out the next id after the greatest would give again.
+        cypher: "CREATE (:CyWrite:CyKeep) CREATE (a:CyWrite {k: 'a'})-[:T]->(b:CyWrite {k: 'b'})"
+      - note: The deleted node's and relationship's ids are kept on the node that stays (drivine4j#713).
+        cypher: "MATCH (k:CyKeep), (a:CyWrite {k: 'a'})-[t:T]->(b:CyWrite {k: 'b'}) SET k.node = elementId(b), k.rel = elementId(t) DETACH DELETE b"
+      - cypher: "MATCH (a:CyWrite {k: 'a'}) CREATE (a)-[:T]->(:CyWrite {k: 'c'})"
+      - note: "Neo4j doesn't promise this across statements: its ids may be used again once a delete is committed. Drivine's SQL stores never hand an id out twice."
+        only: [sql]
+        cypher: "MATCH (k:CyKeep), (:CyWrite {k: 'a'})-[t:T]->(c:CyWrite {k: 'c'}) RETURN k.node = elementId(c), k.rel = elementId(t)"
+        rows: [[false, false]]
+
   - name: "Read after write"
     description: "A read later in the statement sees what the write made."
     steps:
@@ -304,12 +368,93 @@ cases:
       - cypher: "MATCH (n:CyWrite {id: 1}) RETURN n.`__drivine.stamp`"
         rows: [null]
 
+  - name: "A key worked out at run time in a write"
+    description: "A node or a relationship a write makes, matches or merges is read by a key an expression gives, the stamp's too, and a text past 32 KB read so is read whole, over two rows (drivine4j#417)."
+    steps:
+      - note: "Graph7 [2] and [3]."
+        cypher: "CREATE (n:CyWrite {name: 'Apa'}) RETURN n['nam' + 'e']"
+        rows: ["Apa"]
+      - cypher: "CREATE (n:CyWrite {name: 'Bea'}) RETURN n[$idx]"
+        parameters: {idx: "name"}
+        rows: ["Bea"]
+      - cypher: "MATCH (n:CyWrite) WITH n, 'name' AS k SET n.copy = n[k] + '!' RETURN n.copy ORDER BY n.copy"
+        rows: ["Apa!", "Bea!"]
+      - cypher: "MERGE (n:CyWrite {name: 'Apa'}) WITH n, 'copy' AS k RETURN n[k]"
+        rows: ["Apa!"]
+      - note: "Merge6 [3]."
+        cypher: "MATCH (a:CyWrite {name: 'Apa'}), (b:CyWrite {name: 'Bea'}) MERGE (a)-[r:TYPE]->(b) ON CREATE SET r.name = 'foo'"
+      - cypher: "MATCH (:CyWrite)-[r:TYPE]->(:CyWrite) RETURN [key IN keys(r) | key + '->' + r[key]]"
+        rows: [["name->foo"]]
+      - cypher: "MATCH (:CyWrite)-[r:TYPE]->(:CyWrite) DELETE r"
+      - note: "Merge6 [6], from the node's properties, as Cypher 25 has it."
+        cypher: "MATCH (a:CyWrite {name: 'Apa'}), (b:CyWrite {name: 'Bea'}) MERGE (a)-[r:TYPE]->(b) ON CREATE SET r = properties(a)"
+      - cypher: "MATCH (:CyWrite)-[r:TYPE]->(:CyWrite) RETURN [key IN keys(r) | key + '->' + r[key]]"
+        unorderedLists: true
+        rows: [["copy->Apa!", "name->Apa"]]
+      - cypher: "MATCH (:CyWrite)-[r:TYPE]->(:CyWrite) DELETE r"
+      - note: "Merge6 [7]."
+        cypher: "MATCH (a:CyWrite {name: 'Apa'}), (b:CyWrite {name: 'Bea'}) MERGE (a)-[r:TYPE]->(b) ON CREATE SET r += {name: 'bar', name2: 'baz'}"
+      - cypher: "MATCH (:CyWrite)-[r:TYPE]->(:CyWrite) RETURN [key IN keys(r) | key + '->' + r[key]]"
+        unorderedLists: true
+        rows: [["name->bar", "name2->baz"]]
+      - cypher: "MATCH (a:CyWrite {name: 'Apa'}) MERGE (a)-[:TYPE2 {k: a['na' + 'me']}]->(c:CyWrite {made: true}) RETURN c.made"
+        rows: [true]
+      - cypher: "MATCH (:CyWrite)-[r:TYPE2]->(:CyWrite) RETURN r.k"
+        rows: ["Apa"]
+      - cypher: "UNWIND $rows AS row MERGE (n:CyWrite {id: row['i' + 'd']}) SET n.v = row[$k] RETURN [n.id, n.v] ORDER BY n.id"
+        parameters: {rows: [{id: 1, v: "a"}, {id: 2, v: "b"}], k: "v"}
+        rows: [[1, "a"], [2, "b"]]
+      - note: "The stamp is a property as any other, read by a key worked out too."
+        cypher: "CREATE (n:CyWrite $props) WITH n, '__drivine.stamp' AS k RETURN [n[k], n.`__drivine.stamp`]"
+        parameters: {props: {id: 3, "__drivine.stamp": "a:b"}}
+        rows: [["a:b", "a:b"]]
+      - cypher: "MATCH (n:CyWrite {id: 3}) WITH n, '__drivine.stamp' AS k RETURN [n[k], properties(n)[k]]"
+        rows: [["a:b", "a:b"]]
+      - cypher: "UNWIND [1, 2] AS i CREATE (:CyWrite {i: i, long: $big})"
+        parameters: {big: {$repeat: "x", times: 40000}}
+      - cypher: "MATCH (n:CyWrite) WHERE n.long IS NOT NULL WITH n, 'long' AS k RETURN [size(n[k]), n[k] = n.long, n[k] STARTS WITH 'xx'] ORDER BY n.i"
+        rows: [[40000, true, true], [40000, true, true]]
+      - cypher: "MATCH (n:CyWrite) WHERE n.long IS NOT NULL WITH n, 'long' AS k RETURN n[k] ORDER BY n.i"
+        rows: [{$repeat: "x", times: 40000}, {$repeat: "x", times: 40000}]
+      - cypher: "MATCH (n:CyWrite) WHERE n.long IS NOT NULL RETURN [k IN keys(n) | n[k]] ORDER BY n.i"
+        unorderedLists: true
+        rows: [[1, {$repeat: "x", times: 40000}], [2, {$repeat: "x", times: 40000}]]
+      - cypher: "MATCH (n:CyWrite) WHERE n.long IS NOT NULL WITH properties(n) AS m, 'long' AS k RETURN size(m[k]) ORDER BY m.i"
+        rows: [40000, 40000]
+      - cypher: "MATCH (n:CyWrite) WHERE n.long IS NOT NULL WITH n, 'long' AS k SET n.copy = n[k] RETURN size(n.copy) ORDER BY n.i"
+        rows: [40000, 40000]
+      - cypher: "UNWIND $ms AS m WITH m, 'long' AS k RETURN size(m[k])"
+        parameters: {ms: [{long: {$repeat: "x", times: 40000}}, {long: {$repeat: "y", times: 40000}}]}
+        rows: [40000, 40000]
+      - note: "A text read so beside NaN and an infinity: the node's other entries are written out with it."
+        only: [neo4j, oracle]
+        cypher: "CREATE (n:CyWrite {nan: $nan, inf: $inf, s: 'x', d: 2.0}) WITH n, 's' AS k RETURN [n[k], n['na' + 'n'], n['in' + 'f'], n['d' + '']]"
+        parameters: {nan: {$float: "NaN"}, inf: {$float: "Infinity"}}
+        rows: [["x", {$float: "NaN"}, {$float: "Infinity"}, 2.0]]
+      - note: "In a FOREACH."
+        cypher: "MATCH (n:CyWrite {name: 'Apa'}) FOREACH (k IN ['name'] | SET n.each = n[k]) RETURN n.each"
+        rows: ["Apa"]
+
   - name: "SET from COUNT and EXISTS"
     description: "COUNT { } and EXISTS { } in a SET read the row being written."
     steps:
       - cypher: "CREATE (a:CyWrite {id: 'a'})-[:NEXT]->(b:CyWrite {id: 'b'})-[:NEXT]->(:CyWrite {id: 'c'}), (a)-[:NEXT]->(:CyWrite {id: 'd'})"
       - cypher: "MATCH (n:CyWrite) SET n.degree = COUNT { (n)--() }, n.leaf = NOT EXISTS { MATCH (n)-[:NEXT]->() } RETURN [n.id, n.degree, n.leaf] ORDER BY n.id"
         rows: [["a", 2, false], ["b", 2, false], ["c", 1, true], ["d", 1, true]]
+
+  - name: "SET and MERGE with EXISTS { } over UNWIND"
+    description: "An EXISTS { } whose body unwinds a list, in a write's WHERE, SET or MERGE, reads the row being written (drivine4j#449)."
+    steps:
+      - cypher: "CREATE (:CyWrite {id: 1, a: 1}), (:CyWrite {id: 2})"
+      - cypher: "MATCH (n:CyWrite) WHERE EXISTS { UNWIND keys(n) AS k WITH k WHERE k = 'a' RETURN k } SET n.hasA = true RETURN n.id ORDER BY n.id"
+        rows: [1]
+      - cypher: "MATCH (n:CyWrite) SET n.e = EXISTS { UNWIND [3, 2] AS j WITH j ORDER BY j LIMIT 1 WITH j WHERE j = n.id RETURN j } RETURN [n.id, n.hasA, n.e] ORDER BY n.id"
+        rows: [[1, true, false], [2, null, true]]
+      - note: "Neo4j refuses a subquery in the MERGE itself, its ON CREATE SET among it, so the SET follows it (drivine4j#697)."
+        cypher: "MERGE (n:CyWrite {id: 3}) SET n.e = EXISTS { UNWIND [1, 3] AS j WITH j WHERE j = n.id RETURN j ORDER BY j } RETURN n.e"
+        rows: [true]
+      - cypher: "MATCH (n:CyWrite) RETURN [n.id, n.e] ORDER BY n.id"
+        rows: [[1, false], [2, true], [3, true]]
 
   - name: "SET from a subquery inside a list expression"
     description: "A COUNT { } or EXISTS { } inside any(), a list comprehension or reduce() in a write reads the row being written."
@@ -605,6 +750,135 @@ cases:
       - cypher: "MATCH (n:CyWrite) WITH n.id AS id, n.text AS text RETURN [id, text] ORDER BY id"
         rows: [[1, {$repeat: "x", times: 40000}], [2, {$repeat: "x", times: 40000}]]
 
+  - name: "A write that returns more rows than a driver fetches at once"
+    description: "A statement that writes returns every row it gives, in order, however many: more than any driver fetches in one round trip. On Oracle a compiled write's block returns its rows as a cursor, which a driver may read only a first fetch of, and give no error."
+    steps:
+      - cypher: "UNWIND range(1, 250) AS i CREATE (:CyWrite {i: i}) RETURN i ORDER BY i"
+        rows: [
+          1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
+          26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50,
+          51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75,
+          76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100,
+          101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125,
+          126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150,
+          151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 174, 175,
+          176, 177, 178, 179, 180, 181, 182, 183, 184, 185, 186, 187, 188, 189, 190, 191, 192, 193, 194, 195, 196, 197, 198, 199, 200,
+          201, 202, 203, 204, 205, 206, 207, 208, 209, 210, 211, 212, 213, 214, 215, 216, 217, 218, 219, 220, 221, 222, 223, 224, 225,
+          226, 227, 228, 229, 230, 231, 232, 233, 234, 235, 236, 237, 238, 239, 240, 241, 242, 243, 244, 245, 246, 247, 248, 249, 250
+        ]
+      - cypher: "MATCH (n:CyWrite) SET n.j = n.i RETURN count(*)"
+        rows: [250]
+      - cypher: "MATCH (n:CyWrite) RETURN [count(n), sum(n.j)]"
+        rows: [[250, 31375]]
+
+  - name: "A write that returns a row past 32 KB"
+    description: "A statement that writes returns a row past 32 KB whole: a text of 40,000 characters it stores, alone, and one it works out of 80,000, in a list. On Oracle a compiled write's block returns each row as JSON, which a driver may read in parts of 32 KB. Two rows are covered once an Oracle fix ships (drivine4j#670)."
+    steps:
+      - cypher: "CREATE (n:CyWrite {i: 1, t: $t}) RETURN n.t"
+        parameters: {t: {$repeat: "x", times: 40000}}
+        rows: [{$repeat: "x", times: 40000}]
+      - cypher: "MATCH (n:CyWrite {i: 1}) SET n.t = n.t + n.t RETURN [n.i, n.t]"
+        rows: [[1, {$repeat: "x", times: 80000}]]
+      - cypher: "MATCH (n:CyWrite) RETURN [n.i, size(n.t)] ORDER BY n.i"
+        rows: [[1, 80000]]
+
+  - name: "A text literal past 4000 bytes written"
+    description: "A text written in the statement past 4000 bytes is stored whole, as a property's value, as one given as a parameter is (drivine4j#419)."
+    steps:
+      - cypher: "CREATE (n:Long {t: 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'}) RETURN size(n.t)"
+        rows: [4001]
+      - cypher: "MATCH (n:Long) RETURN n.t = $t"
+        parameters: {t: {$repeat: "x", times: 4001}}
+        rows: [true]
+      - cypher: 'MATCH (n:Long) SET n.u = "😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx😀''éx" RETURN n.u = $u'
+        parameters: {u: {$repeat: "😀'éx", times: 1000}}
+        rows: [true]
+      - cypher: "MATCH (n:Long) RETURN n.u"
+        rows: [{$repeat: "😀'éx", times: 1000}]
+      - note: "Oracle measures a text past 4000 bytes as a CLOB, by its UTF-16 units, so a character past U+FFFF counts twice there: 5000 (drivine4j#729)."
+        except: [oracle]
+        cypher: "MATCH (n:Long) RETURN size(n.u)"
+        rows: [4000]
+
+  - name: "A write that compiles to a long statement"
+    description: "A statement that writes runs whatever the length of what it compiles to: 561 MERGEs, which compile to over a megabyte of SQL on SQLite, past the 1,000,000 bytes of a statement a connection of xerial's sqlite-jdbc takes (drivine4j#427, as the openCypher TCK's Create4 [2], 731 nodes made by one statement, does)."
+    steps:
+      - cypher: |
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite) MERGE (:CyWrite)
+          MERGE (n:CyWrite) RETURN count(n)
+        rows: [1]
+      - cypher: "MATCH (n:CyWrite) RETURN count(n)"
+        rows: [1]
+
   - name: "A float with no fraction"
     description: "A float that is a whole number, such as 2.0, is written and read back as a float, from a parameter nested or past 32 KB too, and toString() of it keeps its fraction."
     steps:
@@ -739,6 +1013,10 @@ cases:
       - note: "A node OPTIONAL MATCH finds none of is null in the list that holds it."
         cypher: "OPTIONAL MATCH (x:Nope) CREATE (n:CyWrite) WITH n, [x] AS a, [n] AS b RETURN [a = b, a = a]"
         rows: [[null, null]]
+      - note: "A value of another kind than the one that holds a null is not equal to it, where a column holds values of several kinds (drivine4j#518)."
+        cypher: "UNWIND [1, [1], 'x', 1.5, true, {a: 1}] AS v CREATE (:CyWrite) RETURN [v = [null], v = {a: null}, v IN [[null]], v <> [1, null]] AS r"
+        only: [neo4j, sql]
+        rows: [[false, false, false, true], [null, false, null, true], [false, false, false, true], [false, false, false, true], [false, false, false, true], [false, null, false, true]]
 
   - name: "A property stored as several kinds sorts in Cypher's order of kinds"
     description: "A property read from the store may be of any kind: ORDER BY sorts a list, then a text, a truth value, a number, and a missing property last."
@@ -814,9 +1092,13 @@ cases:
       - only: [neo4j, oracle, sqlite]
         cypher: "MATCH (n:CyWrite) RETURN [min(n.b), max(n.b), sum(n.b), avg(n.b)]"
         rows: [[{$float: "-Infinity"}, {$float: "Infinity"}, {$float: "NaN"}, {$float: "NaN"}]]
+      - note: "Each NaN worked out of a stored infinity is kept apart by count(DISTINCT …) and collect(DISTINCT …), as ∞ - ∞ is (drivine4j#558)."
+        only: [neo4j, oracle, sqlite]
+        cypher: "MATCH (n:CyWrite) WHERE n.b IS NOT NULL RETURN count(DISTINCT n.b - n.b), size(collect(DISTINCT n.b - n.b))"
+        rows: [[2, 2]]
 
   - name: "MERGE of a null or NaN property"
-    description: "A MERGE fails where it makes a node or relationship whose pattern gives a property that is null or NaN, which is equal to nothing, which no MERGE would find again; over no rows it does not fail. ON CREATE SET and ON MATCH SET write NaN, and a list that holds NaN is merged, and made again each time."
+    description: "A MERGE fails where it makes a node or relationship whose pattern gives a property that is null or NaN, which is equal to nothing, which no MERGE would find again; over no rows it does not fail. ON CREATE SET and ON MATCH SET write NaN, and a list that holds NaN is merged, and made again each time, though DISTINCT keeps two such lists once, and Neo4j two stored NaNs apart."
     steps:
       - note: "A SQL store made a new node on every run (drivine4j#543)."
         except: [neptune]
@@ -872,6 +1154,60 @@ cases:
       - only: [neo4j, oracle]
         cypher: "MATCH (n:CyWrite) WHERE n.l IS NOT NULL RETURN count(n)"
         rows: [2]
+      - note: "Two stored lists that hold NaN are one value to count(DISTINCT …) and collect(DISTINCT …), and the NaNs in them two, as Neo4j has it (drivine4j#558)."
+        only: [neo4j, oracle]
+        cypher: "MATCH (n:CyWrite) WHERE n.l IS NOT NULL RETURN count(DISTINCT n.l), size(collect(DISTINCT n.l))"
+        rows: [[1, 1]]
+      - note: "Neo4j keeps two stored NaNs apart. Oracle keeps them once where the statement works out no NaN: testing every value it reads for NaN made count(DISTINCT …) 2.6 times as slow (drivine4j#558)."
+        only: [neo4j]
+        cypher: "MATCH (n:CyWrite) WHERE n.l IS NOT NULL RETURN count(DISTINCT n.l[0]), size(collect(DISTINCT n.l[0]))"
+        rows: [[2, 2]]
+      - only: [oracle]
+        cypher: "MATCH (n:CyWrite) WHERE n.l IS NOT NULL RETURN count(DISTINCT n.l[0]), size(collect(DISTINCT n.l[0]))"
+        rows: [[1, 1]]
+
+  - name: "NaN worked out from stored infinities"
+    description: "NaN that a statement given no NaN or infinity works out, from infinities stored, is the float it is, as NaN given is: equal to nothing and ordered with nothing, kept by `+`, written by toString() as Java writes it, no map, sorted after every number, and NaN in a sum and a max(). SQLite's JSON holds no NaN, so its rows give it back from the value it stands in for it (see host.yaml), and it refuses a write of it. Postgres stores no infinity to start from."
+    steps:
+      - only: [neo4j, oracle, sqlite]
+        cypher: "CREATE (:CyWrite {b: $i, c: [$n], s: 'a'})"
+        parameters: {i: {$float: "Infinity"}, n: {$float: "-Infinity"}}
+      - only: [neo4j, oracle, sqlite]
+        cypher: "MATCH (n:CyWrite) WITH n.b + n.c[0] AS x RETURN [x, x = x, x <> x, x > 1.0, x IN [x], [x] = [x], {k: x} = {k: x}, [x, 1] < [x, 2], [1, x] < [2, x]]"
+        rows: [[{$float: "NaN"}, false, true, false, false, false, false, null, true]]
+      - only: [neo4j, oracle, sqlite]
+        cypher: "MATCH (n:CyWrite) WITH n, n.b + n.c[0] AS x RETURN [x + 1, n.s + x, x + n.s, n.b + 1, [x] + x, toString(x), toString(n.b)]"
+        rows: [[{$float: "NaN"}, "aNaN", "NaNa", {$float: "Infinity"}, [{$float: "NaN"}, {$float: "NaN"}], "NaN", "Infinity"]]
+      - note: "keys() of a float fails, as of any value that is no map, node or relationship."
+        only: [neo4j, oracle, sqlite]
+        cypher: "MATCH (n:CyWrite) WITH n.b + n.c[0] AS x RETURN keys(x)"
+        error: true
+      - only: [neo4j, oracle, sqlite]
+        cypher: "MATCH (n:CyWrite) UNWIND [n.b + n.c[0], n.b, 1.0, n.c[0]] AS x RETURN x ORDER BY x"
+        rows: [{$float: "-Infinity"}, 1.0, {$float: "Infinity"}, {$float: "NaN"}]
+      - only: [neo4j, oracle, sqlite]
+        cypher: "MATCH (n:CyWrite) UNWIND [[n.b + n.c[0]], [n.b], [1.0], [n.c[0]], [1.0, n.b + n.c[0]]] AS l RETURN l ORDER BY l"
+        rows: [[{$float: "-Infinity"}], [1.0], [1.0, {$float: "NaN"}], [{$float: "Infinity"}], [{$float: "NaN"}]]
+      - only: [neo4j, oracle, sqlite]
+        cypher: "MATCH (n:CyWrite) UNWIND [n.b + n.c[0], 1.0, 2.0] AS x RETURN [min(x), max(x), sum(x), count(x)]"
+        rows: [[1.0, {$float: "NaN"}, {$float: "NaN"}, 3]]
+      - only: [neo4j, oracle, sqlite]
+        cypher: "MATCH (n:CyWrite) RETURN [round(n.b, 2, 'HALF_DOWN'), round(n.c[0], 0, 'UP')]"
+        rows: [[{$float: "Infinity"}, {$float: "-Infinity"}]]
+      - only: [neo4j, oracle]
+        cypher: "MATCH (n:CyWrite) SET n.x = n.b + n.c[0] RETURN [n.x, n.x = n.x]"
+        rows: [[{$float: "NaN"}, false]]
+      - note: "The store fails as the statement runs: \"A statement that writes works out NaN, which SQLite's JSON holds as no number: it would store another value in its place.\""
+        only: [sqlite]
+        cypher: "MATCH (n:CyWrite) SET n.x = n.b + n.c[0]"
+        error: true
+      - note: "As above."
+        only: [sqlite]
+        cypher: "MATCH (n:CyWrite) CREATE (:CyWrite {l: [n.b + n.c[0]]})"
+        error: true
+      - only: [sqlite]
+        cypher: "MATCH (n) RETURN [count(n), collect(n.x)]"
+        rows: [[1, []]]
 
   - name: "Relationships as APOC's export writes them"
     description: "apoc.export.cypher writes each batch of relationships as an UNWIND of rows that names its nodes start and end by a key of spaces, and the stores make them (drivine4j#635, drivine4j#617)."
@@ -974,3 +1310,323 @@ cases:
       - only: [neo4j, sql]
         cypher: "DROP CONSTRAINT `cy ddl ``quoted`` key` IF EXISTS"
         rows: []
+
+  - name: "NaN and the infinities worked out and written"
+    description: "Neo4j and Oracle store NaN and the infinities a statement works out, as the floats they are, and MERGE of NaN fails as of NaN given. SQLite's JSON holds no NaN, so SQLite refuses a statement that writes NaN it works out, and stores nothing in its place; it stores an infinity."
+    steps:
+      - only: [neo4j, oracle]
+        cypher: "CREATE (n:CyWrite {a: 0.0 / 0.0, b: 1.0 / 0.0, l: [0.0 / 0.0]}) RETURN [n.a, n.b, n.l]"
+        rows: [[{$float: "NaN"}, {$float: "Infinity"}, [{$float: "NaN"}]]]
+      - note: "Oracle held a stored NaN equal to NaN."
+        only: [neo4j, oracle]
+        cypher: "MATCH (n:CyWrite) RETURN [n.a = n.a, n.a <> n.a, n.a > 1.0, n.a < 1.0, n.b > 1e308, n.a + 1, n.b - 1, n.l = n.l, n.a IN n.l]"
+        rows: [[false, true, false, false, true, {$float: "NaN"}, {$float: "Infinity"}, false, false]]
+      - note: "Neo4j: 22N31."
+        only: [neo4j, oracle]
+        cypher: "MATCH (n:CyWrite) MERGE (:CyWrite {x: n.a})"
+        error: true
+      - only: [neo4j, oracle]
+        cypher: "MATCH (n) RETURN count(n)"
+        rows: [1]
+      - note: "The store fails as the statement runs: \"A statement that writes works out NaN, which SQLite's JSON holds as no number: it would store another value in its place.\""
+        only: [sqlite]
+        cypher: "CREATE (n:CyWrite {a: 0.0 / 0.0})"
+        error: true
+      - only: [sqlite]
+        cypher: "MATCH (n) RETURN count(n)"
+        rows: [0]
+      - only: [sqlite]
+        cypher: "CREATE (n:CyWrite {b: 1.0 / 0.0, l: [-1.0 / 0.0]}) RETURN [n.b, n.l]"
+        rows: [[{$float: "Infinity"}, [{$float: "-Infinity"}]]]
+      - only: [sqlite]
+        cypher: "MATCH (n:CyWrite) SET n.a = n.b + n.l[0]"
+        error: true
+      - only: [sqlite]
+        cypher: "MATCH (n:CyWrite) RETURN [n.a, n.b + n.l[0]]"
+        rows: [[null, {$float: "NaN"}]]
+
+  - name: "NaN and the infinities given to SET and MERGE"
+    description: "Postgres's JSON holds neither NaN nor an infinity, and SQLite's no NaN, so each refuses a statement given one that SET, ON CREATE SET or a MERGE's pattern would write, as it refuses a CREATE given one, and stores nothing."
+    steps:
+      - only: [postgres, sqlite]
+        cypher: "CREATE (:CyWrite {id: 1})"
+      - only: [postgres]
+        cypher: "MATCH (n:CyWrite {id: 1}) SET n.a = $p"
+        parameters: {p: {$float: "NaN"}}
+        error: "A statement that writes is given NaN or an infinity, which Postgres's `jsonb` holds as no number: it would store another value in its place."
+      - only: [postgres]
+        cypher: "MERGE (n:CyWrite {id: 2}) ON CREATE SET n.a = [$i]"
+        parameters: {i: {$float: "-Infinity"}}
+        error: "A statement that writes is given NaN or an infinity, which Postgres's `jsonb` holds as no number: it would store another value in its place."
+      - only: [sqlite]
+        cypher: "MATCH (n:CyWrite {id: 1}) SET n.a = $p"
+        parameters: {p: {$float: "NaN"}}
+        error: "A statement that writes is given NaN, which SQLite's JSON holds as no number: it would store another value in its place."
+      - only: [sqlite]
+        cypher: "MERGE (n:CyWrite {id: 2}) ON CREATE SET n.a = [$p]"
+        parameters: {p: {$float: "NaN"}}
+        error: "A statement that writes is given NaN, which SQLite's JSON holds as no number: it would store another value in its place."
+      - only: [postgres]
+        cypher: "MERGE (n:CyWrite {id: 3, a: $p})"
+        parameters: {p: {$float: "Infinity"}}
+        error: "A statement that writes is given NaN or an infinity, which Postgres's `jsonb` holds as no number: it would store another value in its place."
+      - only: [sqlite]
+        cypher: "MERGE (n:CyWrite {id: 3, a: $p})"
+        parameters: {p: {$float: "NaN"}}
+        error: "A statement that writes is given NaN, which SQLite's JSON holds as no number: it would store another value in its place."
+      - only: [postgres, sqlite]
+        cypher: "MATCH (n:CyWrite) RETURN [count(n), collect(n.a)]"
+        rows: [[1, []]]
+
+  - name: "A long text a function gives a property of"
+    description: "A text past 32 KB that is a property of a node a function or an index gives, or of its properties() map, is read whole, on each of several rows."
+    steps:
+      - cypher: "UNWIND [1, 2] AS i CREATE (:CyWrite {i: i, t: $t})"
+        parameters: {t: {$repeat: "x", times: 40001}}
+      - note: "Oracle closed the session (drivine4j#531)."
+        cypher: "MATCH (n:CyWrite) WITH n ORDER BY n.i RETURN [n.i, size(head([n]).t), size([n][0].t), size(properties(n).t)]"
+        rows: [[1, 40001, 40001, 40001], [2, 40001, 40001, 40001]]
+      - cypher: "MATCH (n:CyWrite) WHERE head([n]).t ENDS WITH 'x' RETURN count(*)"
+        rows: [2]
+
+  - name: "A stored empty text searched for and measured"
+    description: "A stored empty text starts with, ends with and holds the empty text, and no other; its size is 0. Oracle's empty text is null as SQL text (drivine4j#416)."
+    steps:
+      - cypher: "CREATE (:CyWrite {k: 0, name: 'ab'}), (:CyWrite {k: 1, name: ''}), (:CyWrite {k: 2, name: 'xy'}), (:CyWrite {k: 3, name: 5})"
+      - only: [neo4j, sql]
+        cypher: "MATCH (a:CyWrite) WHERE a.name STARTS WITH '' RETURN a.name ORDER BY a.k"
+        rows: ["ab", "", "xy"]
+      - only: [neo4j, sql]
+        cypher: "MATCH (a:CyWrite) WHERE a.name ENDS WITH $e RETURN a.name ORDER BY a.k"
+        parameters: {e: ""}
+        rows: ["ab", "", "xy"]
+      - only: [neo4j, sql]
+        cypher: "MATCH (a:CyWrite) WHERE a.name CONTAINS '' RETURN a.name ORDER BY a.k"
+        rows: ["ab", "", "xy"]
+      - only: [neo4j, sql]
+        cypher: "MATCH (a:CyWrite) WHERE NOT a.name CONTAINS 'b' RETURN a.name ORDER BY a.k"
+        rows: ["", "xy"]
+      - only: [neo4j, sql]
+        cypher: "MATCH (a:CyWrite), (b:CyWrite {k: 1}) WHERE a.name STARTS WITH b.name RETURN a.name ORDER BY a.k"
+        rows: ["ab", "", "xy"]
+      - only: [neo4j, sql]
+        cypher: "MATCH (a:CyWrite {k: 1}), (b:CyWrite) WHERE a.name ENDS WITH b.name RETURN b.name ORDER BY b.k"
+        rows: [""]
+      - only: [neo4j, sql]
+        cypher: "MATCH (a:CyWrite) WHERE a.k < 3 RETURN a.name, size(a.name) ORDER BY a.k"
+        rows: [["ab", 2], ["", 0], ["xy", 2]]
+      - note: "Written by SET, as a statement that writes reads it."
+        only: [neo4j, sql]
+        cypher: "MATCH (a:CyWrite {k: 1}) SET a.s = size(a.name), a.c = 'ab' CONTAINS a.name RETURN [a.s, a.c]"
+        rows: [[0, true]]
+
+  - name: "A walk of 1,100 hops"
+    description: "A variable-length relationship or a quantified path pattern walks a chain of 1,100 relationships, its path's nodes and relationships each in order. Oracle held a walk's ids as text of 4,000 bytes at most, and failed past them (ORA-01489, drivine4j#177)."
+    steps:
+      - note: "1,100 hops: a walk's ids pass 4,000 bytes as text, even where the ids start from 1."
+        cypher: "UNWIND range(0, 1100) AS i CREATE (:CyWrite {i: i})"
+      - note: "Each node linked to the next, by its place in a list, not by a probe of every node for each."
+        cypher: "MATCH (n:CyWrite) WITH n ORDER BY n.i WITH collect(n) AS ns UNWIND range(1, size(ns) - 1) AS k WITH ns[k - 1] AS a, ns[k] AS b CREATE (a)-[:NEXT]->(b) RETURN count(*)"
+        rows: [1100]
+      - cypher: "MATCH p = (:CyWrite {i: 0})-[rs:NEXT*]->(:CyWrite {i: 1100}) RETURN [length(p), size(nodes(p)), size(relationships(p)), size(rs), head(nodes(p)).i, last(nodes(p)).i]"
+        rows: [[1100, 1101, 1100, 1100, 0, 1100]]
+      - note: "Two equal paths are one, in a DISTINCT and as a key grouped by: on Oracle their lists are JSON lists, compared as JSON."
+        cypher: "MATCH p = (:CyWrite {i: 0})-[:NEXT*]->(:CyWrite {i: 1100}) UNWIND [1, 2] AS k WITH DISTINCT p UNWIND [1, 2] AS j WITH p, count(*) AS c RETURN [length(p), c]"
+        rows: [[1100, 2]]
+      - cypher: "MATCH p = (b:CyWrite {i: 1100})<-[:NEXT*]-(:CyWrite {i: 0}) RETURN [length(p), head(nodes(p)).i, last(nodes(p)).i, size([n IN nodes(p) WHERE n.i % 2 = 0])]"
+        rows: [[1100, 1100, 0, 551]]
+      - cypher: "MATCH (:CyWrite {i: 0}) ((x)-[:NEXT]->(y))+ (b:CyWrite {i: 1100}) RETURN [size(x), size(y), head(x).i, last(y).i]"
+        rows: [[1100, 1100, 0, 1100]]
+      - note: "A write over the walk, its path read back from the row the write carries it in."
+        cypher: "MATCH p = (:CyWrite {i: 0})-[:NEXT*]->(b:CyWrite {i: 1100}) SET b.hops = length(p) RETURN [b.hops, size(nodes(p)), size(relationships(p)), head(nodes(p)).i, last(nodes(p)).i]"
+        rows: [[1100, 1101, 1100, 0, 1100]]
+      - note: "Bounds either side of the longest walk Oracle holds as text: 136 hops."
+        cypher: "MATCH p = (:CyWrite {i: 0})-[:NEXT*..136]->(b) RETURN [count(p), max(length(p))]"
+        rows: [[136, 136]]
+      - cypher: "MATCH p = (:CyWrite {i: 0})-[:NEXT*..137]->(b) RETURN [count(p), max(length(p))]"
+        rows: [[137, 137]]
+
+  - name: "A UNION keeps different nodes with equal properties apart"
+    description: "A UNION keeps each row once as Cypher compares it: two nodes are one row only where they are the same node, not where their properties are equal (drivine4j#213)."
+    steps:
+      - only: [neo4j, sql]
+        cypher: "CREATE (:CyWrite:A), (:CyWrite:B), (:CyWrite:C {x: 1}), (:CyWrite:D {x: 1})"
+      - note: "openCypher's TCK, Union1 #4."
+        only: [neo4j, sql]
+        cypher: "MATCH (a:A) RETURN a AS n UNION MATCH (b:B) RETURN b AS n"
+        rows: [{}, {}]
+      - only: [neo4j, sql]
+        cypher: "MATCH (c:C) RETURN c AS n UNION MATCH (d:D) RETURN d AS n"
+        rows: [{x: 1}, {x: 1}]
+      - note: "In a row of several items."
+        only: [neo4j, sql]
+        cypher: "MATCH (c:C) RETURN c AS n, c.x AS k UNION MATCH (d:D) RETURN d AS n, d.x AS k"
+        rows: [[{x: 1}, 1], [{x: 1}, 1]]
+      - note: "A node is no map of its properties."
+        only: [neo4j, sql]
+        cypher: "MATCH (c:C) RETURN c AS n UNION RETURN {x: 1} AS n"
+        rows: [{x: 1}, {x: 1}]
+      - note: "The same node from each query is one row."
+        only: [neo4j, sql]
+        cypher: "MATCH (c:C) RETURN c AS n UNION MATCH (c:C) RETURN c AS n"
+        rows: [{x: 1}]
+      - only: [neo4j, sql]
+        cypher: "MATCH (n:CyWrite) WHERE n:A OR n:B RETURN n UNION MATCH (n:A) RETURN n"
+        rows: [{}, {}]
+      - note: "And where one query gives it by a function the SQL stores keep no identity through."
+        only: [neo4j, sql]
+        cypher: "MATCH (c:C) RETURN c AS n UNION MATCH (c:C) RETURN head(collect(c)) AS n"
+        rows: [{x: 1}]
+      - note: "A map projection holds no node."
+        only: [neo4j, sql]
+        cypher: "MATCH (c:C) RETURN c AS n UNION MATCH (c:C) RETURN c {.x} AS n"
+        rows: [{x: 1}, {x: 1}]
+      - only: [neo4j, sql]
+        cypher: "MATCH (c:C) RETURN c AS n, 1 AS k UNION RETURN {x: 1} AS n, 1 AS k"
+        rows: [[{x: 1}, 1], [{x: 1}, 1]]
+      - note: "A null node, as OPTIONAL MATCH finds none, is the one null."
+        only: [neo4j, sql]
+        cypher: "OPTIONAL MATCH (z:Zed) RETURN z AS n UNION RETURN null AS n"
+        rows: [null]
+      - only: [neo4j, sql]
+        cypher: "OPTIONAL MATCH (z:Zed) RETURN z AS n, 1 AS k UNION RETURN null AS n, 1 AS k"
+        rows: [[null, 1]]
+      - only: [neo4j, sql]
+        cypher: "MATCH (a:A) RETURN a AS n UNION ALL MATCH (a:A) RETURN a AS n"
+        rows: [{}, {}]
+      - note: "As DISTINCT keeps them."
+        only: [neo4j, sql]
+        cypher: "MATCH (n:CyWrite) WHERE n:C OR n:D RETURN DISTINCT n"
+        rows: [{x: 1}, {x: 1}]
+
+  - name: "A UNION keeps different relationships with equal properties apart"
+    description: "A UNION keeps two relationships as one row only where they are the same relationship, not where their properties are equal (drivine4j#213)."
+    steps:
+      - only: [neo4j, sql]
+        cypher: "CREATE (a:CyWrite:A)-[:R]->(b:CyWrite:B), (a)-[:S]->(b), (a)-[:T {w: 1}]->(b), (a)-[:U {w: 1}]->(b)"
+      - only: [neo4j, sql]
+        cypher: "MATCH ()-[r:R]->() RETURN r AS e UNION MATCH ()-[s:S]->() RETURN s AS e"
+        rows: [{}, {}]
+      - only: [neo4j, sql]
+        cypher: "MATCH ()-[t:T]->() RETURN t AS e UNION MATCH ()-[u:U]->() RETURN u AS e"
+        rows: [{w: 1}, {w: 1}]
+      - only: [neo4j, sql]
+        cypher: "MATCH ()-[t:T]->() RETURN t AS e UNION MATCH ()-[t:T]->() RETURN t AS e"
+        rows: [{w: 1}]
+      - only: [neo4j, sql]
+        cypher: "MATCH ()-[t:T]->() RETURN t AS e UNION ALL MATCH ()-[t:T]->() RETURN t AS e"
+        rows: [{w: 1}, {w: 1}]
+
+  - name: "A UNION keeps maps and lists holding different entities apart"
+    description: "A UNION compares a map or a list that holds a node or a relationship by what it holds, as Cypher compares them, not by their properties (drivine4j#213)."
+    steps:
+      - only: [neo4j, sql]
+        cypher: "CREATE (a:CyWrite:A)-[:R]->(b:CyWrite:B), (a)-[:S]->(b), (:CyWrite:C {x: 1}), (:CyWrite:D {x: 1})"
+      - only: [neo4j, sql]
+        cypher: "MATCH (a:A) RETURN {x: a} AS m UNION MATCH (b:B) RETURN {x: b} AS m"
+        rows: [{x: {}}, {x: {}}]
+      - only: [neo4j, sql]
+        cypher: "MATCH ()-[r:R]->() RETURN {x: r} AS m UNION MATCH ()-[s:S]->() RETURN {x: s} AS m"
+        rows: [{x: {}}, {x: {}}]
+      - only: [neo4j, sql]
+        cypher: "MATCH (c:C) RETURN {k: 1, x: c} AS m UNION MATCH (d:D) RETURN {k: 1, x: d} AS m"
+        rows: [{k: 1, x: {x: 1}}, {k: 1, x: {x: 1}}]
+      - note: "Nested in maps and lists."
+        only: [neo4j, sql]
+        cypher: "MATCH (c:C) RETURN [{x: [c]}] AS m UNION MATCH (d:D) RETURN [{x: [d]}] AS m"
+        rows: [[{x: [{x: 1}]}], [{x: [{x: 1}]}]]
+      - only: [neo4j, sql]
+        cypher: "MATCH (a:A) RETURN [a] AS m UNION MATCH (b:B) RETURN [b] AS m"
+        rows: [[{}], [{}]]
+      - only: [neo4j, sql]
+        cypher: "MATCH (c:C) RETURN collect(c) AS m UNION MATCH (d:D) RETURN collect(d) AS m"
+        rows: [[{x: 1}], [{x: 1}]]
+      - note: "A map holding a node is no map holding its properties."
+        only: [neo4j, sql]
+        cypher: "MATCH (c:C) RETURN {x: c} AS m UNION RETURN {x: {x: 1}} AS m"
+        rows: [{x: {x: 1}}, {x: {x: 1}}]
+      - note: "A map holding the same node from each query is one row."
+        only: [neo4j, sql]
+        cypher: "MATCH (c:C) RETURN {x: c} AS m UNION MATCH (c:C) RETURN {x: c} AS m"
+        rows: [{x: {x: 1}}]
+      - only: [neo4j, sql]
+        cypher: "MATCH (c:C) RETURN [{x: [c]}] AS m UNION MATCH (c:C) RETURN [{x: [c]}] AS m"
+        rows: [[{x: [{x: 1}]}]]
+      - only: [neo4j, sql]
+        cypher: "MATCH (c:C) RETURN {x: c} AS m UNION ALL MATCH (c:C) RETURN {x: c} AS m"
+        rows: [{x: {x: 1}}, {x: {x: 1}}]
+
+  - name: "A UNION in CALL keeps different entities apart"
+    description: "A UNION in CALL { … }, importing variables or not, keeps two nodes or relationships, bare or in a map, as one row only where they are the same (drivine4j#213)."
+    steps:
+      - only: [neo4j, sql]
+        cypher: "CREATE (a:CyWrite:A)-[:R]->(b:CyWrite:B), (a)-[:S]->(b), (:CyWrite:C {x: 1}), (:CyWrite:D {x: 1})"
+      - only: [neo4j, sql]
+        cypher: "CALL { MATCH (a:A) RETURN a AS n UNION MATCH (b:B) RETURN b AS n } RETURN count(*)"
+        rows: [2]
+      - only: [neo4j, sql]
+        cypher: "CALL { MATCH (c:C) RETURN {x: c} AS m UNION MATCH (d:D) RETURN {x: d} AS m } RETURN count(*)"
+        rows: [2]
+      - only: [neo4j, sql]
+        cypher: "MATCH (c:C), (d:D) CALL (c, d) { RETURN c AS n UNION RETURN d AS n } RETURN count(*)"
+        rows: [2]
+      - only: [neo4j, sql]
+        cypher: "MATCH (c:C), (d:D) CALL (c, d) { RETURN {x: c} AS m UNION RETURN {x: d} AS m } RETURN count(*)"
+        rows: [2]
+      - only: [neo4j, sql]
+        cypher: "MATCH ()-[r:R]->(), ()-[s:S]->() CALL (r, s) { RETURN {x: r} AS m UNION RETURN {x: s} AS m } RETURN count(*)"
+        rows: [2]
+      - only: [neo4j, sql]
+        cypher: "MATCH (c:C) CALL (c) { RETURN c AS n UNION RETURN c AS n } RETURN count(*)"
+        rows: [1]
+      - only: [neo4j, sql]
+        cypher: "MATCH (c:C) CALL (c) { RETURN {x: c} AS m UNION RETURN {x: c} AS m } RETURN count(*)"
+        rows: [1]
+      - only: [neo4j, sql]
+        cypher: "MATCH (c:C) CALL (c) { RETURN {x: c} AS m UNION ALL RETURN {x: c} AS m } RETURN count(*)"
+        rows: [2]
+      - only: [neo4j, sql]
+        cypher: "MATCH (c:C) CALL (c) { RETURN {x: c} AS m UNION RETURN {x: head(collect(c))} AS m } RETURN count(*)"
+        rows: [1]
+      - note: "A query whose map holds no node beside one whose map holds one."
+        only: [neo4j, sql]
+        cypher: "MATCH (c:C) CALL (c) { RETURN {x: c} AS m UNION RETURN {x: {x: 1}} AS m } RETURN count(*)"
+        rows: [2]
+      - only: [neo4j, sql]
+        cypher: "MATCH (c:C), (d:D) CALL (c, d) { RETURN {x: c} AS m UNION RETURN {x: d} AS m UNION RETURN {x: 1} AS m } RETURN count(*)"
+        rows: [3]
+      - only: [neo4j, sql]
+        cypher: "MATCH (c:C) CALL (c) { RETURN {x: 1} AS m UNION RETURN {x: c} AS m UNION RETURN {x: 1} AS m } RETURN count(*)"
+        rows: [2]
+      - note: "Compared by identity after the CALL too."
+        only: [neo4j, sql]
+        cypher: "MATCH (c:C), (d:D) CALL (c, d) { RETURN {x: c} AS m UNION ALL RETURN {x: d} AS m UNION ALL RETURN {x: {x: 1}} AS m UNION ALL RETURN {x: c} AS m } RETURN count(DISTINCT m)"
+        rows: [3]
+
+  - name: "A UNION in COUNT keeps different entities apart"
+    description: "A UNION in a COUNT { … } keeps two nodes or relationships, bare or in a map, as one row only where they are the same (drivine4j#213)."
+    steps:
+      - only: [neo4j, sql]
+        cypher: "CREATE (a:CyWrite:A)-[:R]->(b:CyWrite:B), (a)-[:S]->(b), (:CyWrite:C {x: 1}), (:CyWrite:D {x: 1})"
+      - only: [neo4j, sql]
+        cypher: "MATCH (c:C), (d:D) RETURN COUNT { RETURN c AS n UNION RETURN d AS n }"
+        rows: [2]
+      - only: [neo4j, sql]
+        cypher: "MATCH (c:C), (d:D) RETURN COUNT { RETURN {x: c} AS n UNION RETURN {x: d} AS n }"
+        rows: [2]
+      - only: [neo4j, sql]
+        cypher: "MATCH ()-[r:R]->(), ()-[s:S]->() RETURN COUNT { RETURN r AS e UNION RETURN s AS e }"
+        rows: [2]
+      - note: "The same node from each query, and from two rows of one, is one row."
+        only: [neo4j, sql]
+        cypher: "MATCH (c:C) RETURN COUNT { RETURN c AS n UNION RETURN c AS n }"
+        rows: [1]
+      - only: [neo4j, sql]
+        cypher: "MATCH (a:A) RETURN COUNT { MATCH (a)-->(b) RETURN b AS n UNION MATCH (a)-[:R]->(b) RETURN b AS n }"
+        rows: [1]
+      - only: [neo4j, sql]
+        cypher: "MATCH (c:C) RETURN COUNT { RETURN c AS n UNION RETURN coalesce(c, c) AS n }"
+        rows: [1]
+      - only: [neo4j, sql]
+        cypher: "MATCH (c:C) RETURN COUNT { RETURN c AS n UNION ALL RETURN c AS n }"
+        rows: [2]

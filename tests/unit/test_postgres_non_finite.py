@@ -1,6 +1,7 @@
 """
 How the rows of a statement given NaN or an infinity are read on Postgres, as drivine4j's `PostgresCypherCompiler.read`
 reads them, and which statements are read so: those that say they were given one, alone (liberation-data/drivine#673).
+Every compiled statement reads a whole number past a long's range as a float, as drivine4j does.
 """
 
 import json
@@ -13,7 +14,12 @@ from psycopg.adapt import AdaptersMap
 from psycopg.pq import Format
 
 from drivine.connection.postgres import postgres_connection
-from drivine.connection.postgres.postgres_non_finite import non_finite_of, read_non_finite, read_non_finite_json
+from drivine.connection.postgres.postgres_non_finite import (
+    non_finite_of,
+    read_compiled,
+    read_compiled_json,
+    read_non_finite_json,
+)
 from drivine.cursor.cursor_specification import CursorSpecification
 from drivine.cypher.cypher_specification import cypher_compiled
 from drivine.cypher.sql.compiled_cypher import CompiledCypher
@@ -71,14 +77,13 @@ def test_reads_a_stand_in_as_the_double_it_stands_for(text: str, number: float):
         "-1e308",
         "1.7976931348623157e308",
         "1.8e308",
-        "9" * 309,
-        "-" + "9" * 309,
         f"{'9' * 309}.9",
         "0",
         "-0",
         "-0.0",
         "2.5",
-        "12345678901234567890123",
+        "9223372036854775807",
+        "-9223372036854775808",
         "0.0000000000000000000000000000000000000000000000000001",
     ],
 )
@@ -89,6 +94,26 @@ def test_reads_any_other_number_as_json_loads_does(text: str):
     assert type(read) is type(today)
     if isinstance(today, float):
         assert math.copysign(1, read) == math.copysign(1, today)
+
+
+@pytest.mark.parametrize(
+    ("text", "number"),
+    [
+        ("9223372036854775808", 9223372036854775808.0),
+        ("-9223372036854775809", -9223372036854775808.0),
+        ("100000000000000000000", 1e20),
+        ("12345678901234567890123", 1.2345678901234568e22),
+        ("1" + "0" * 308, 1e308),
+        # Under the stand-ins, and past a double's range, as a double reads it.
+        ("9" * 309, math.inf),
+        ("-" + "9" * 309, -math.inf),
+    ],
+)
+@pytest.mark.parametrize("read", [read_compiled_json, read_non_finite_json])
+def test_reads_a_whole_number_past_a_longs_range_as_the_float_nearest_it(read: Any, text: str, number: float):
+    [found] = read(f"[{text}]")
+    assert type(found) is float
+    assert found == number
 
 
 @pytest.mark.parametrize(
@@ -140,8 +165,11 @@ def loaded(adapters: AdaptersMap, oid: int, format: Format, text: str) -> Any:
 @pytest.mark.parametrize("format", [Format.TEXT, Format.BINARY])
 def test_has_a_cursor_read_json_and_jsonb_for_nan_and_nothing_else(oid: int, format: Format):
     cursor = Cursor()
-    read_non_finite(cursor)
+    read_compiled(cursor, True)
     assert is_nan(loaded(cursor.adapters, oid, format, f"[{NAN}]")[0])
+    given_none = Cursor()
+    read_compiled(given_none, False)
+    assert loaded(given_none.adapters, oid, format, f"[{NAN}, 100000000000000000000]") == [math.inf, 1e20]
     # Nothing is set for the process, nor for another cursor.
     assert loaded(psycopg.adapters, oid, format, f"[{NAN}]") == [math.inf]
     assert loaded(Cursor().adapters, oid, format, f"[{NAN}]") == [math.inf]
@@ -256,7 +284,7 @@ def compiled_as(monkeypatch: pytest.MonkeyPatch, module: Any, non_finite: bool, 
         if spec.statement is None or spec.statement.language != "CYPHER":
             return spec, None
         sql = QuerySpecification[Any](Statement("SELECT 2", "SQL"))
-        return sql, CompiledCypher("SELECT 2", {}, prelude=prelude, non_finite=non_finite)
+        return sql, CompiledCypher("SELECT 2", {}, setup=(prelude,) if prelude else (), non_finite=non_finite)
 
     monkeypatch.setattr(module, "cypher_compiled", compiled)
 
@@ -284,9 +312,11 @@ async def test_a_connection_reads_for_nan_only_a_statement_that_says_it_was_give
     compiled_as(monkeypatch, module, False, prelude)
     rows, client = await run(sync, how, Statement("RETURN 1", "CYPHER"))
     assert rows == [1]
-    # Not given NaN, its cursor is left as psycopg made it: never even asked for its adapters.
-    assert "adapters" not in client.record
-    assert client.record == [it for it in [prelude, "SELECT 2"] if it is not None]
+    # Not given NaN, its cursor reads the stand-in as json.loads does, and a whole number past a long as a float.
+    [cursor] = client.cursors
+    assert cursor._adapters is not None
+    assert loaded(cursor._adapters, JSONB_OID, Format.TEXT, f"[{NAN}, 100000000000000000000]") == [math.inf, 1e20]
+    assert [it for it in client.record if it != "adapters"] == [it for it in [prelude, "SELECT 2"] if it is not None]
 
     compiled_as(monkeypatch, module, True, prelude)
     rows, client = await run(sync, how, Statement("RETURN 1", "CYPHER"))
@@ -300,7 +330,8 @@ async def test_a_connection_reads_for_nan_only_a_statement_that_says_it_was_give
 
 @pytest.mark.parametrize("sync", [False, True])
 @pytest.mark.parametrize("how", ["query", "cursor"])
-async def test_a_connection_reads_plain_sql_and_drivines_own_compiled_statements_as_psycopg_does(sync: bool, how: str):
-    for spec in [Statement("SELECT 1", "SQL"), Statement("RETURN 1 AS x", "CYPHER")]:
-        _, client = await run(sync, how, spec)
-        assert "adapters" not in client.record
+async def test_a_connection_reads_plain_sql_as_psycopg_does(sync: bool, how: str):
+    _, client = await run(sync, how, Statement("SELECT 1", "SQL"))
+    assert "adapters" not in client.record
+    _, client = await run(sync, how, Statement("RETURN 1 AS x", "CYPHER"))
+    assert "adapters" in client.record

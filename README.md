@@ -39,6 +39,11 @@ pip install "drivine[sqlite]"     # SQLite, a graph in a file, through apsw and 
 Python 3.11 or newer. A SQLite store and what a transaction gives there are in
 [Connecting](docs/02-connecting.md#sqlite).
 
+The SQL stores' extras also install `drivine-cypher-compiler`, the shared Cypher compiler, a native wheel for Linux with
+glibc (x86-64 and arm64), macOS on Apple Silicon and Windows x64. On an Intel Mac or musl Linux (Alpine) there is no
+wheel, so a SQL store's extra doesn't install there; the graph engines' do. See
+[Cypher on a relational database](docs/03-cypher-on-a-relational-database.md).
+
 ## Quick start
 
 Describe the database in the environment (`DATABASE_TYPE=NEO4J`, `DATABASE_HOST=localhost`, `DATABASE_USER`,

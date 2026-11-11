@@ -282,7 +282,9 @@ people = await pm.query(spec.bind({"city": "Sydney"}))
 - What each statement gives is the [Cypher spec](https://github.com/liberation-data/drivine-cypher-spec), which the
   three Drivine libraries run alike.
 
-The parser runs on ANTLR's runtime, which `drivine[postgres]`, `drivine[oracle]` and `drivine[sqlite]` install.
+The compiler is the shared one drivine4j and Drivine for TypeScript run, the native library of the
+`drivine-cypher-compiler` wheel, on the platforms it has a wheel for: see
+[Cypher on a relational database](03-cypher-on-a-relational-database.md).
 
 ### Cursors
 

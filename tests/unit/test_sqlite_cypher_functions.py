@@ -111,8 +111,8 @@ class TestEqualAndContains:
         )
         for run_on in ("1x", "01", "truex"):
             assert isinstance(db.fails(f"SELECT drivine_equal('{run_on}', '1')"), ValueError)
-        # Jackson's BigDecimal has no value of an infinity.
-        assert "Infinite" in str(db.fails("SELECT drivine_equal('1e400', '1')"))
+        # An infinity, as SQLite's JSON writes one, is the float it is (host.yaml).
+        assert db.row("SELECT drivine_equal('1e400', '1'), drivine_equal('1e400', '9e999')") == (0, 1)
 
     def test_contains_holds_a_maps_every_entry_with_an_equal_value(self, db: Database):
         assert db.row(
@@ -152,11 +152,11 @@ class TestAdd:
         assert db.one("drivine_add('123456789012345678901234567890', '1')") == "123456789012345678901234567891"
         assert db.one("drivine_add('18446744073709551617', '1')") == "18446744073709551618"
 
-    def test_writes_a_text_as_jackson_escapes_one_and_an_infinity_as_a_text(self, db: Database):
+    def test_writes_a_text_as_jackson_escapes_one_and_an_infinity_as_sqlites_json_does(self, db: Database):
         assert db.one('drivine_add(\'"\\u001f\\b\\t\\n\\f\\r\\"\\\\/\\u007f\\u2028😀"\', \'""\')') == (
             '"\\u001F\\b\\t\\n\\f\\r\\"\\\\/\x7f\u2028😀"'
         )
-        assert db.one("drivine_add('1e308', '1e308')") == '"Infinity"'
+        assert db.one("drivine_add('1e308', '1e308')") == "9e999"
 
 
 def test_canonical_puts_a_maps_keys_in_order_at_any_depth_by_their_utf16_units(db: Database):

@@ -290,10 +290,13 @@ def round_by(number: Any, precision: Any, mode: Any) -> float | None:
     `drivine_round(number, precision, mode)`: the number rounded to as many decimal places by the mode, a name of Java's
     `RoundingMode`, as Java's `BigDecimal` rounds it, as Neo4j's `round(value, precision, mode)` does: in decimal, so
     2.345 is halfway between 2.34 and 2.35, where SQLite's binary arithmetic finds it just below. A real number, as
-    `BigDecimal.valueOf` reads a double, of the digits Java writes it with. Null where the number or the precision is.
+    `BigDecimal.valueOf` reads a double, of the digits Java writes it with. An infinity, which SQLite stores, is itself.
+    Null where the number or the precision is.
     """
     if number is None or precision is None:
         return None
+    if isinstance(number, float) and math.isinf(number):
+        return number
     exact = (
         Decimal(int(number)) if arguments.is_integer(number) else Decimal(arguments.java_double(arguments.real(number)))
     )

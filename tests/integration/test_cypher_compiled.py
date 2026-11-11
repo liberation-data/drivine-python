@@ -1710,9 +1710,6 @@ async def test_contains_finds_a_text_past_32_kb_in_a_text_of_any_length_given_st
     def expected(t: str | None, x: str | None) -> bool | None:
         if t is None or x is None:
             return None
-        # Oracle's empty text is null, so CONTAINS of one is null there.
-        if cypher_pm.type is DatabaseType.ORACLE and (not t or not x):
-            return None
         return x in t
 
     parameters = {f"{side}{i}": text for i, case in enumerate(cases) for side, text in zip("tx", case, strict=True)}
@@ -3843,6 +3840,12 @@ async def test_a_start_or_length_from_data_is_cut_toward_zero_and_one_out_of_ran
     # Bound past what a long holds, beside a text from data: cut to the greatest or least long, as Java casts a double,
     # so no store is given a literal past its number (#169). A Decimal, which the Neo4j driver does not send, is too.
     for n in [1.0e300, -1.0e300, 10**400, -(10**400), *([Decimal("Infinity")] if compiles else [])]:
+        if cypher_pm.type is DatabaseType.ORACLE and isinstance(n, int):
+            # Held for liberation-data/drivine-cypher-spec#148: on Oracle the shared compiler gives null for a whole
+            # number past a long's range. Checked to be so, so the hold comes out once it is fixed.
+            given = await cypher_pm.query(spec("MATCH (n:Count) RETURN left(n.t, $n)", {"n": n}))
+            assert given and all(it is None for it in given), f"spec#148 is fixed for {n}: take its hold out"
+            continue
         with pytest.raises(Exception, match=_count_out_of_range("left", "length") if compiles else None):  # noqa: PT011
             await cypher_pm.query(spec("MATCH (n:Count) RETURN left(n.t, $n)", {"n": n}))
     assert await cypher_pm.query(

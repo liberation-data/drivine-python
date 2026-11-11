@@ -4,6 +4,12 @@ that SQLite's JSON functions do not: compare them, add them, and order them. dri
 reads and writes them with Jackson, and so does this: a whole number is an int of any size, one written with a point
 or an exponent a double (`1.50` is 1.5), a map keeps its keys in the order written, and a double is written as Java
 writes one (`1.0E7`). A text a function is given that is SQL's null, or JSON's, is no value.
+
+An infinity is the number SQLite writes for one, `9e999`, which reads as the infinity. NaN, which SQLite's JSON holds as
+no number, is NAN_TEXT, `{"$numberDouble":"NaN"}`, as the shared compiler's statements write it: a number equal to
+nothing, itself included, and ordered with nothing. Only that one map is NaN: a map with another key beside it, or
+another text, as Extended JSON's `{"$numberDouble": "2.0"}`, is a map as any is. As the spec's host.yaml pins it, and
+Drivine for TypeScript's `SqliteCypherValues`.
 """
 
 from __future__ import annotations
@@ -11,7 +17,6 @@ from __future__ import annotations
 import json
 import math
 import struct
-from decimal import Decimal
 from typing import Any, cast
 
 from drivine.backend.sqlite.sqlite_arguments import as_double, java_double
@@ -23,6 +28,33 @@ def _refused(constant: str) -> Any:
 
 _DECODER = json.JSONDecoder(parse_constant=_refused)
 _SPACES = " \t\n\r"
+
+NAN_KEY = "$numberDouble"
+NAN_VALUE = "NaN"
+NAN_TEXT = '{"$numberDouble":"NaN"}'
+"""NaN as SQLite's JSON text holds it, where its JSON holds no NaN: the one map that is NaN."""
+
+INFINITY = "9e999"
+"""An infinity as SQLite's JSON writes it, a number past any double's, which reads as the infinity."""
+
+
+def is_nan(value: Any) -> bool:
+    """Whether the JSON value is NaN: the map of NAN_TEXT, and no other."""
+    if not isinstance(value, dict):
+        return False
+    entries = cast(dict[str, Any], value)
+    return len(entries) == 1 and entries.get(NAN_KEY) == NAN_VALUE
+
+
+def with_nan(value: Any) -> Any:
+    """The JSON value with each map in it, at any depth, that is exactly NAN_TEXT's, NaN."""
+    if isinstance(value, list):
+        return [with_nan(it) for it in cast(list[Any], value)]
+    if isinstance(value, dict):
+        if is_nan(value):
+            return math.nan
+        return {key: with_nan(it) for key, it in cast(dict[str, Any], value).items()}
+    return value
 
 
 def read(text: str | None) -> Any:
@@ -63,8 +95,13 @@ def _write(value: Any, out: list[str]) -> None:
     elif isinstance(value, int):
         out.append(str(value))
     elif isinstance(value, float):
-        # Jackson writes NaN and the infinities as texts, which JSON holds.
-        out.append(java_double(value) if math.isfinite(value) else quoted(java_double(value)))
+        # NaN and the infinities as SQLite's JSON holds them, so a value written is read back as the number it is.
+        if math.isnan(value):
+            out.append(NAN_TEXT)
+        elif math.isinf(value):
+            out.append(INFINITY if value > 0 else f"-{INFINITY}")
+        else:
+            out.append(java_double(value))
     elif isinstance(value, dict):
         out.append("{")
         for i, (key, item) in enumerate(cast(dict[str, Any], value).items()):
@@ -104,21 +141,31 @@ def is_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
-def _number(value: int | float) -> Decimal:
-    """The number's exact value, as drivine4j compares two as `BigDecimal`s: an infinity has none."""
-    if isinstance(value, float) and not math.isfinite(value):
-        raise ValueError("Infinite or NaN")
-    return Decimal(value)
+def _numeric(value: Any) -> bool:
+    """Whether the value is a number, NaN among them."""
+    return is_number(value) or is_nan(value)
+
+
+def _number_order(a: int | float, b: int | float) -> int:
+    """
+    Where the number `a` comes beside `b`, by their exact values, as drivine4j compares them as `BigDecimal`s: a whole
+    number past 2^53 beside a double by every digit, as Python compares an int and a float. An infinity is the float
+    it is.
+    """
+    return 0 if a == b else -1 if a < b else 1
 
 
 def equal(a: Any, b: Any) -> bool:
     """
     Whether `a` and `b` are equal as Cypher compares them: a number equal to a number of the same value whatever its
     kind (`1` and `1.0`), a list to a list of equal items in the same order, a map to a map of the same keys with equal
-    values in any order, and nothing to a value of another kind. JSON's null is equal to itself here: see compare.
+    values in any order, and nothing to a value of another kind: NaN to nothing, itself included. JSON's null is equal
+    to itself here: see compare.
     """
+    if is_nan(a) or is_nan(b):
+        return False
     if is_number(a) and is_number(b):
-        return _number(a) == _number(b)
+        return _number_order(a, b) == 0
     if isinstance(a, list) and isinstance(b, list):
         x, y = cast(list[Any], a), cast(list[Any], b)
         return len(x) == len(y) and all(equal(i, j) for i, j in zip(x, y, strict=True))
@@ -136,11 +183,13 @@ def compare(a: Any, b: Any) -> bool | None:
     """
     Whether `a` and `b` are equal as Cypher compares values that may be or hold a null: None where either is null; a
     list to a list, and a map to a map, item by item and key by key, False where a pair is False (lists of different
-    lengths and maps of different keys among them), else None where a pair is None, else True; any other two as equal
-    compares them.
+    lengths and maps of different keys among them), else None where a pair is None, else True; NaN False beside any;
+    any other two as equal compares them.
     """
     if a is None or b is None:
         return None
+    if is_nan(a) or is_nan(b):
+        return False
     if isinstance(a, list) and isinstance(b, list):
         x, y = cast(list[Any], a), cast(list[Any], b)
         return False if len(x) != len(y) else _all(list(zip(x, y, strict=True)))
@@ -175,24 +224,35 @@ _NOTHING = object()
 
 def add(a: Any, b: Any) -> Any:
     """
-    `a + b`, as Cypher adds two values: numbers summed, a whole number where both are, of any size, exactly; lists
-    joined, or an item put at a list's end or start; a text and a text or a number written one after the other. The
-    module's NOTHING for any other two.
+    `a + b`, as Cypher adds two values: numbers summed, a whole number where both are, of any size, exactly, NaN among
+    them, and a sum of floats past a double's range an infinity; lists joined, or an item put at a list's end or start;
+    a text and a text or a number written one after the other, NaN and an infinity as Java writes them. The module's
+    NOTHING for any other two.
 
     drivine4j adds two whole numbers in a long, and in a BigInteger where they overflow one; one already past a long it
     adds by its low 64 bits (liberation-data/drivine4j#547). Here, as in Drivine for TypeScript, they are added exactly.
     """
-    if is_number(a) and is_number(b):
+    if _numeric(a) and _numeric(b):
         if isinstance(a, int) and isinstance(b, int):
             return a + b
-        return as_double(a) + as_double(b)
+        return _double(a) + _double(b)
     if isinstance(a, list):
         return [*cast(list[Any], a), *(cast(list[Any], b) if isinstance(b, list) else [b])]
     if isinstance(b, list):
         return [a, *cast(list[Any], b)]
-    if (isinstance(a, str) or is_number(a)) and (isinstance(b, str) or is_number(b)):
-        return as_text(a) + as_text(b)
+    if (isinstance(a, str) or _numeric(a)) and (isinstance(b, str) or _numeric(b)):
+        return _added_text(a) + _added_text(b)
     return NOTHING
+
+
+def _double(value: Any) -> float:
+    """A number as a double: NaN for NaN's map."""
+    return math.nan if is_nan(value) else as_double(value)
+
+
+def _added_text(value: Any) -> str:
+    """The text a text or a number is put together with another as: NaN's map as `NaN`."""
+    return NAN_VALUE if is_nan(value) else as_text(value)
 
 
 NOTHING: Any = _NOTHING
@@ -228,10 +288,10 @@ def order(a: Any, b: Any) -> int | None:
     Where `a` comes beside `b` as Cypher orders two values in a comparison (`<`, `>=` …): -1 before, 0 equal, 1 after.
     A list beside a list item by item, the first pair that is not equal deciding, and a list that the other starts with
     first; a number beside a number, a text beside a text by its code points, and a truth value beside a truth value.
-    None where they are not ordered: a null, values of two kinds, or two maps that differ, which Cypher orders and the
-    compiler does not yet.
+    None where they are not ordered: a null, NaN, values of two kinds, or two maps that differ, which Cypher orders and
+    the compiler does not yet. An infinity is ordered as the float it is.
     """
-    if a is None or b is None:
+    if a is None or b is None or is_nan(a) or is_nan(b):
         return None
     if isinstance(a, list) and isinstance(b, list):
         x, y = cast(list[Any], a), cast(list[Any], b)
@@ -245,8 +305,7 @@ def order(a: Any, b: Any) -> int | None:
     if isinstance(a, bool) and isinstance(b, bool):
         return _sign(int(a) - int(b))
     if is_number(a) and is_number(b):
-        x, y = _number(cast(float, a)), _number(cast(float, b))
-        return 0 if x == y else -1 if x < y else 1
+        return _number_order(cast(float, a), cast(float, b))
     if isinstance(a, str) and isinstance(b, str):
         # A Python text compares by its code points, as Cypher orders texts.
         return 0 if a == b else -1 if a < b else 1
@@ -266,8 +325,9 @@ def sort_key(text: str) -> str | None:
     The JSON text as text that orders, as SQLite orders text, as Cypher orders lists, where it is a list: item by item,
     a list that begins another first, and items of different kinds as Cypher orders kinds (a map, a list, a text, a
     truth value, a number, then null last). Each item is its kind's rank, then itself: a number by the bits of its
-    double, so their text orders as the numbers do; a text up to a mark below any character; a list its own items, then
-    its end, which comes before any item. None where the value is no value; a value that is no list, its text.
+    double, so their text orders as the numbers do, NaN after them all, an infinity's too; a text up to a mark below
+    any character; a list its own items, then its end, which comes before any item. None where the value is no value; a
+    value that is no list, its text.
     """
     value = read(text)
     if value is None:
@@ -286,7 +346,11 @@ def _key_of_list(items: list[Any], out: list[str]) -> None:
 
 
 def _key_of_item(item: Any, out: list[str]) -> None:
-    if isinstance(item, dict):
+    if is_nan(item):
+        # NaN is a number, whose bits come after every other's, an infinity's too.
+        out.append("5")
+        out.append(_key_of_number(math.nan))
+    elif isinstance(item, dict):
         out.append("1")
         _key_of_text(write(canonical(item)), out)
     elif isinstance(item, list):

@@ -26,6 +26,7 @@ import apsw
 from drivine.backend.sql.sql_json import storable, to_json
 from drivine.backend.sqlite import sqlite_functions
 from drivine.backend.sqlite.sqlite_contention import locked
+from drivine.backend.sqlite.sqlite_cypher_values import NAN_TEXT, with_nan
 from drivine.backend.sqlite.sqlite_graph import JSON_ROWS, SqliteGraph
 from drivine.drivine_error import DrivineError
 
@@ -304,7 +305,8 @@ def _value(value: Any) -> Any:
 def rows(statement: str, found: Rows, fetched: list[Any]) -> list[dict[str, Any]]:
     """
     The rows as dicts of their columns. Where the statement opens with JSON_ROWS, each text value is JSON, which is
-    read: SQLite has no JSON type for a column to say so.
+    read: SQLite has no JSON type for a column to say so. NaN, which SQLite's JSON holds as the map NAN_TEXT, is read as
+    NaN where a value's text holds it, in a list or a map too (see json_value); an infinity, `9e999`, reads as one.
     """
     if not fetched:
         return []
@@ -312,8 +314,19 @@ def rows(statement: str, found: Rows, fetched: list[Any]) -> list[dict[str, Any]
     documents = statement.lstrip().startswith(JSON_ROWS)
     return [
         {
-            name: (json.loads(value) if documents and isinstance(value, str) else value)
+            name: (json_value(value) if documents and isinstance(value, str) else value)
             for name, value in zip(names, row, strict=True)
         }
         for row in fetched
     ]
+
+
+def json_value(text: str) -> Any:
+    """
+    The JSON text as the value it is, with each map in it that is exactly NAN_TEXT NaN, as drivine4j's
+    `JdbcResultMapper.sqliteRows` reads it: a statement given no NaN can still work one out, as `∞ + -∞`. A text value
+    that holds those characters holds each quote escaped, so only a map holds them: the look is a cheap pass over a
+    value that holds no NaN, which most do, and with_nan takes only the exact map.
+    """
+    value = json.loads(text)
+    return with_nan(value) if NAN_TEXT in text else value

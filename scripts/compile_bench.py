@@ -1,7 +1,7 @@
 """
 How long drivine takes to import and to compile Cypher to SQL: the bar the shared compiler is held to (#467, #471).
 
-    python scripts/compile_bench.py [--json results.json] [--runs N]
+    python scripts/compile_bench.py [--json results.json] [--runs N] [--against baseline.json]
 
 It measures, each in a fresh interpreter where a fresh one is what a user's program starts with:
 
@@ -10,9 +10,11 @@ It measures, each in a fresh interpreter where a fresh one is what a user's prog
 - warm compile, per store, over every step of the Cypher spec (tests/cypher) that runs on the store: each statement
   compiled with the parse cache cleared first (uncached), and again with it kept (cached). Each statement's time is the
   median of its runs, and the median, mean and p99 are over the statements. A statement the compiler refuses is timed
-  as well, as a refusal is a compile too, and counted apart. "Uncached" clears drivine's parse cache (`read_cypher`)
-  alone: ANTLR's own prediction cache, which its generated parser shares, stays warm over the run, as it is in an
-  application that has been running a while.
+  as well, as a refusal is a compile too, and counted apart. The shared compiler keeps no parse cache, so the two
+  differ only by noise: "uncached" clears the parse cache of the compiler Drivine had before (`read_cypher`), which the
+  baseline (tests/bench/compile-baseline.json) was measured on, and which no compile calls now.
+
+With `--against`, it fails where a measure is worse than the baseline's by more than NOISE (see regressions).
 
 The numbers are wall-clock and depend on the machine, so compare runs of one machine only: CI's, for the gate.
 """
@@ -169,6 +171,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=(__doc__ or "").strip().split("\n\n")[0])
     parser.add_argument("--json", type=Path, help="write the results here as well")
     parser.add_argument("--runs", type=int, default=5, help="runs of each measurement (default 5)")
+    parser.add_argument(
+        "--against",
+        type=Path,
+        help="a baseline's results (as --json writes them): fail where a measure the gate takes is worse past NOISE",
+    )
     args = parser.parse_args()
     if args.runs < 1:  # A median of no runs is none: say so before the bench, not as a StatisticsError after it.
         parser.error("--runs takes 1 or more")
@@ -183,7 +190,45 @@ def main() -> int:
     print(report(results))
     if args.json:
         args.json.write_text(json.dumps(results, indent=2) + "\n", encoding="utf-8")
+    if args.against:
+        worse = regressions(json.loads(args.against.read_text(encoding="utf-8")), results)
+        print("\n" + ("\n".join(f"- worse: {it}" for it in worse) or f"No measure is worse than {args.against}'s."))
+        return 1 if worse else 0
     return 0
+
+
+NOISE = 0.10
+"""How much worse than the baseline a measure may be and still pass: a run's own noise, on CI's machines."""
+
+
+def regressions(baseline: dict[str, Any], results: dict[str, Any]) -> list[str]:
+    """
+    Each measure the gate takes that is worse than the baseline's by more than NOISE (#467): `import drivine`'s median,
+    and per store the first compile's median and the uncached compile's median and p99. The cached figures are for the
+    record: the shared compiler keeps no parse of its own, so uncached is the fair comparison.
+    """
+    measures = [("import drivine, median", baseline["import"]["median"], results["import"]["median"])]
+    for store in STORES:
+        measures.append(
+            (
+                f"{store} first compile, median",
+                baseline["first_compile"][store]["median"],
+                results["first_compile"][store]["median"],
+            )
+        )
+        for stat in ("median", "p99"):
+            measures.append(
+                (
+                    f"{store} uncached compile, {stat}",
+                    baseline["warm"][store]["uncached"][stat],
+                    results["warm"][store]["uncached"][stat],
+                )
+            )
+    return [
+        f"{name}: {now} ms against the baseline's {then} ms (+{(now / then - 1) * 100:.0f}%)"
+        for name, then, now in measures
+        if now > then * (1 + NOISE)
+    ]
 
 
 def report(results: dict[str, Any]) -> str:

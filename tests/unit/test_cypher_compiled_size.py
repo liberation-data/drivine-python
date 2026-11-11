@@ -307,7 +307,7 @@ def test_a_value_that_holds_no_null_carried_past_a_write_compiles_with_no_test_f
     compiled = compiler("g").compile(
         "MATCH (c:Claim) WITH c, c.list AS l SET c.b = 1 WITH c, l WHERE l = c.other RETURN c.id"
     )
-    assert not any(test in it for it in (compiled.sql, compiled.prelude or "")), compiled.sql
+    assert not any(test in it for it in (compiled.sql, *compiled.setup)), compiled.sql
 
 
 @COMPILERS

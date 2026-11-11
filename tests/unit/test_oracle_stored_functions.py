@@ -144,6 +144,7 @@ class Cursor:
 
     async def execute(self, statement: str, parameters: Any = None, **_: Any) -> None:
         self.session.run.append(statement)
+        self.session.bound.append(parameters)
         if statement.startswith("SELECT ") and "_nulls_equal(JSON('[1]'), JSON('[1]')) FROM DUAL" in statement:
             outcome = self.session.outcomes.pop(0)
             if outcome != "found":
@@ -169,6 +170,7 @@ class Session:
     def __init__(self, *outcomes: int | str) -> None:
         self.outcomes = list(outcomes)
         self.run: list[str] = []
+        self.bound: list[Any] = []
         self.autocommit = True
 
     def cursor(self) -> Cursor:
@@ -304,6 +306,17 @@ async def test_a_statement_is_compiled_to_call_the_function_where_the_session_ma
     plain = Session()
     await OracleConnection(plain, None, "s", a_graph(), "db|me").query(QuerySpecification[Any]("UPDATE t SET v = 1"))
     assert plain.checks == [] and plain.statements == ["UPDATE t SET v = 1"], plain.run
+
+
+async def test_an_iterator_in_a_parameter_is_bound_as_its_items_by_the_compile_again_to_call_no_function(now):
+    # The statement is compiled once, then again where the session may not call the function: the second compile reads
+    # the items the first did, not the iterator it emptied.
+    absent = Session(904)
+    spec = QuerySpecification[Any](cypher_statement(f"{WRITE}, c.f = $p"))
+    await OracleConnection(absent, None, "s", a_graph(), "db|me").query(spec.bind({"p": iter([1, None])}))
+    (written,) = absent.statements
+    assert "nulls_equal" not in written, written
+    assert [it for it in absent.bound if it] == [{"b0": '{"p":[1,null]}'}], absent.bound
 
 
 async def test_a_cursor_is_compiled_to_call_the_function_where_the_session_may_and_to_declare_it_where_it_may_not(now):

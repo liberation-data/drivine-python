@@ -504,16 +504,19 @@ neo4j = [
 ]
 oracle = [
     { name = "antlr4-python3-runtime" },
+    { name = "drivine-cypher-compiler" },
     { name = "oracledb" },
 ]
 postgres = [
     { name = "antlr4-python3-runtime" },
+    { name = "drivine-cypher-compiler" },
     { name = "psycopg", extra = ["binary"] },
     { name = "psycopg-pool" },
 ]
 sqlite = [
     { name = "antlr4-python3-runtime" },
     { name = "apsw" },
+    { name = "drivine-cypher-compiler" },
 ]
 testing = [
     { name = "pytest" },
@@ -536,6 +539,9 @@ requires-dist = [
     { name = "antlr4-python3-runtime", marker = "extra == 'postgres'", specifier = ">=4.13.2,<4.14" },
     { name = "antlr4-python3-runtime", marker = "extra == 'sqlite'", specifier = ">=4.13.2,<4.14" },
     { name = "apsw", marker = "extra == 'sqlite'", specifier = ">=3.53.2" },
+    { name = "drivine-cypher-compiler", marker = "extra == 'oracle'", specifier = "==0.41.0" },
+    { name = "drivine-cypher-compiler", marker = "extra == 'postgres'", specifier = "==0.41.0" },
+    { name = "drivine-cypher-compiler", marker = "extra == 'sqlite'", specifier = "==0.41.0" },
     { name = "falkordb", marker = "extra == 'falkordb'", specifier = ">=1.2" },
     { name = "neo4j", marker = "extra == 'neo4j'", specifier = ">=5.20" },
     { name = "oracledb", marker = "extra == 'oracle'", specifier = ">=3.0" },
@@ -556,6 +562,17 @@ dev = [
     { name = "pytest-asyncio", specifier = ">=0.24" },
     { name = "pyyaml", specifier = ">=6" },
     { name = "ruff", specifier = ">=0.6" },
+]
+
+[[package]]
+name = "drivine-cypher-compiler"
+version = "0.41.0"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/be/d2/87295319c6bf8fa6d81ae266e5c522c30b13c63ccbaabf521e3de8896053/drivine_cypher_compiler-0.41.0-py3-none-macosx_11_0_arm64.whl", hash = "sha256:1156ad5519591d5bdb256256e7221a3bc32e70760fb80eab5025fb56500fb749", size = 3178998, upload-time = "2026-11-10T23:12:20.439Z" },
+    { url = "https://files.pythonhosted.org/packages/dd/ce/5f3c52e8f89fecbb11ce368a2a38aede6392bd06b4320c5254984d88d160/drivine_cypher_compiler-0.41.0-py3-none-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:cb6de23df831a641e342189586fa256b17ba82dc460ae263e36577105c5d9b66", size = 3345375, upload-time = "2026-11-10T23:12:22.288Z" },
+    { url = "https://files.pythonhosted.org/packages/07/c7/1b13a75b29feddf2be95d99e0728d0276e585be3b1f3af09a476f05d4967/drivine_cypher_compiler-0.41.0-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:df8e68a7804d6cd7354cd8598dfe67e4793fed41f59e33857fb987267b6218d2", size = 3718476, upload-time = "2026-11-10T23:12:23.991Z" },
+    { url = "https://files.pythonhosted.org/packages/a8/42/87429efa11c8fb38b8bf6f1d40719be66a79f0fd32fdd88dd28069c20249/drivine_cypher_compiler-0.41.0-py3-none-win_amd64.whl", hash = "sha256:ec912f9782faf8728541ba37655026a08c4d27a0a47b52d4d923fd676fe2a50b", size = 3419864, upload-time = "2026-11-10T23:12:25.462Z" },
 ]
 
 [[package]]

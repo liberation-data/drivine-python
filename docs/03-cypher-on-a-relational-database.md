@@ -5,6 +5,16 @@ written. On **Postgres**, **Oracle** and **SQLite**, the SQL stores drivine-pyth
 SQL over the graph's node and edge tables, and the rows come back as a graph engine would give them. The tables are
 drivine4j's, so a graph written from Python is read alike from the JVM and Node.
 
+The compiler is the one drivine4j and Drivine for TypeScript run, the shared module of the
+[Cypher spec](https://github.com/liberation-data/drivine-cypher-spec), here the native library of the
+`drivine-cypher-compiler` wheel, loaded on the first Cypher statement compiled for a SQL store. Each SQL store's extra
+installs it (`pip install "drivine[postgres]"`, `[oracle]`, `[sqlite]`), pinned to the compiler of the spec drivine is
+tested on, on the platforms it has a wheel for: Linux with glibc (x86-64 and arm64), macOS on Apple Silicon, and Windows
+x64. Without it, a Cypher statement for a SQL store is refused with a `DrivineError` that names the extra to install.
+Kotlin/Native, which builds it, has no target for Intel Macs or for musl Linux (Alpine), so there is no wheel for them,
+and a SQL store's extra doesn't install there. Neo4j, Memgraph and FalkorDB work there as they do anywhere, and a Cypher
+statement for a SQL store is refused with a `DrivineError` naming the platform.
+
 Postgres is the quickest to try:
 
 ```
@@ -100,8 +110,8 @@ count of them up to 16, since `numeric` keeps the scale a product makes (`0.25 *
 list or map at the key: a parameter's, or a list written of literals, maps, lists and parameters, as APOC's export
 writes its rows. A row that may hold a list, or a null in a list or a map, is compared as JSON alone, as before, which
 reads every node of the label for each row. Oracle compares such a value as JSON alone for now: the compiler can read
-it through the labelled index where it is told the graph has one (`OracleCypherCompiler(indexed_properties=…)`), and
-the connection doesn't tell it yet ([drivine4j#638](https://github.com/liberation-data/drivine4j/issues/638)).
+it through the labelled index where the request names the graph's indexed properties (`indexedProperties`), and
+the connection doesn't name them yet ([drivine4j#638](https://github.com/liberation-data/drivine4j/issues/638)).
 
 A `DELETE` deletes the nodes and relationships of all its rows at once, a statement for each table, not one for each
 row: the relationships first, then the nodes, a node's relationships going with it where it is `DETACH`. One that ends
@@ -119,7 +129,7 @@ for the 8,168 rows Oracle guesses a `JSON_TABLE` of a variable holds, it read ev
 
 **What compiles.** What each statement gives, on each store, is the
 [Cypher spec](https://github.com/liberation-data/drivine-cypher-spec), shared by the three Drivine libraries;
-drivine-python passes it at v0.30.0 (pinned in [`tests/cypher/VERSION`](../tests/cypher/VERSION)). Reads, writes,
+drivine-python passes it at v0.37.0 (pinned in [`tests/cypher/VERSION`](../tests/cypher/VERSION)). Reads, writes,
 `UNION`, `CALL { … }`, `EXISTS { … }`, variable-length relationships, `shortestPath` and quantified path patterns all
 compile. Cypher the compiler doesn't take yet is refused by name, with a `DrivineError`, before anything is sent to the
 database.
@@ -132,9 +142,7 @@ refuses it.
 **How complete is it?** The [openCypher TCK](https://github.com/opencypher/openCypher/tree/main/tck) is openCypher's
 own test suite: 3,896 scenarios, each a graph, a query, and the rows or the error the query must give.
 [drivine4j](https://github.com/liberation-data/drivine4j) runs all of them through its compiler on each store. The
-scores below are measured on drivine4j; drivine-python's compiler follows it through the shared spec above, though
-`truncate()` with a map of fields, which 221 of these scenarios call, is still refused here
-([#265](https://github.com/liberation-data/drivine-python/issues/265)). They are drivine4j's `main` on 31 October 2026.
+scores below are measured on drivine4j, whose compiler drivine-python runs too. They are drivine4j's `main` on 31 October 2026.
 
 | store | scenarios passed | of all 3,896 | leaving out the 583 refused on purpose |
 |---|---:|---:|---:|

@@ -20,13 +20,57 @@ import pytest
 
 from drivine.backend.oracle.oracle_graph import OracleGraph
 from drivine.connection.oracle.oracle_spec_compiler import OracleSpecCompiler
-from drivine.cypher.sql.oracle_cypher_compiler import OracleCypherCompiler
+from drivine.cypher.shared_compiler import compile_cypher
 from drivine.sync import ConnectionProperties, QuerySpecification
 from drivine.testing.drivine_test_containers import TEST_CONTAINER_PASSWORD
 from tests.sync_integration.oracle.oracle_seed import ON_ORACLE
-from tests.unit.test_cypher_zoned_list_sort import DEEP_REPROS, KEYED, MAY_HOLD_REPROS, UNWOUND_REPROS
 
 pytestmark = ON_ORACLE
+
+LIST = "[i IN range(1, 10) | localdatetime('2024-03-15T10:00:00') + duration({minutes: i})]"
+"""liberation-data/drivine4j#331's list: worked out item by item with temporal arithmetic, by a comprehension."""
+REPRO = f"UNWIND [0, 1] AS k WITH k, {LIST} AS l"
+"""#331's statement: its list, on each of two rows."""
+_SIZE = "RETURN size([x IN l WHERE x IS NOT NULL])"
+UNWOUND_REPROS = (
+    f"UNWIND [0, 1] AS k WITH k, [{{l: {LIST}}}] AS ms UNWIND ms AS t WITH k, t.l AS l {_SIZE}",
+    f"{REPRO} UNWIND [{{l: l}}] AS t WITH k, t.l AS l {_SIZE}",
+    f"UNWIND [0, 1] AS k WITH k, [{{m: {{l: {LIST}}}}}] AS ms UNWIND ms AS t WITH k, t.m AS m WITH k, m.l AS l {_SIZE}",
+    f"UNWIND [0, 1] AS k WITH k, [{{l: {LIST}}}, {{l: {LIST}}}] AS ms UNWIND ms AS t WITH k, t.l AS l {_SIZE}",
+    f"UNWIND [0, 1] AS k WITH k, [{{l: {LIST}}}] AS ms UNWIND ms AS t CREATE (:CyUnwoundTemporals) "
+    f"WITH k, t.l AS l {_SIZE}",
+)
+"""
+#331's list in a map, unwound, and taken out by a `WITH` (liberation-data/drivine4j#369): from a map, one the list was
+put in after it was worked out, a map two levels down, a list of two maps, and after a write.
+"""
+DEEP_REPROS = (
+    f"{REPRO} RETURN collect(DISTINCT [l, l])",
+    f"{REPRO} RETURN collect(DISTINCT [x IN l | [x]])",
+    f"{REPRO} RETURN collect(DISTINCT [x IN l | [x, null]])",
+    f"{REPRO} WITH k, [l, l] AS ll RETURN collect(DISTINCT ll)",
+    f"{REPRO} RETURN collect(DISTINCT [x IN l | {{t: x}}])",
+)
+"""Statements that collect, once each, lists that hold #331's temporal values two levels down, or in maps: see
+liberation-data/drivine4j#347."""
+MAY_HOLD_REPROS = (
+    f"{REPRO} WITH k, [l, l] AS ll RETURN [k, any(x IN ll WHERE size([y IN x WHERE y IS NOT NULL]) > 9)] ORDER BY k",
+    f"{REPRO} WITH k, [l, l] AS ll RETURN reduce(s = 0, x IN ll | s + size([y IN x WHERE y IS NOT NULL])) / 2",
+    "UNWIND [0, 1] AS k WITH k, [i IN range(1, 10) | coalesce(CASE WHEN k > 5 THEN k END, "
+    "localdatetime('2024-03-15T10:00:00') + duration({minutes: i}))] AS l RETURN size([x IN l WHERE x IS NOT NULL])",
+    "UNWIND [0, 1] AS k WITH k, [i IN range(1, 10) | CASE WHEN k > 5 THEN k ELSE "
+    "localdatetime('2024-03-15T10:00:00') + duration({minutes: i}) END] AS l RETURN size([x IN l WHERE x IS NOT NULL])",
+    f"{REPRO} WITH k, reduce(acc = [], x IN l | acc + [x]) AS m RETURN size([y IN m WHERE y IS NOT NULL])",
+    f"{REPRO} WITH k, {{minute: l}} AS m RETURN size([y IN m.minute WHERE y IS NOT NULL])",
+    f"{REPRO} WITH k, [{{minute: l}}] AS ms RETURN size([y IN ms[0].minute WHERE y IS NOT NULL])",
+)
+"""
+Statements whose lists may hold #331's temporal values: a list of lists of them, an item of which a quantifier or reduce
+takes, a list worked out item by item with a coalesce or a CASE that is a temporal value or a number, a list a reduce
+gives of them, and a list of them at a map's key that a temporal value's field is named for.
+"""
+KEYED = f"{REPRO} WITH k, {{l: l}} AS m RETURN size(keys(m))"
+"""#331's list in a map whose keys are taken: Oracle reads them from the map's data guide."""
 
 GRAPH = "drivine_unwound_temporals"
 """The graph the statements are compiled against: its tables are made for the one that writes, and dropped after."""
@@ -82,7 +126,7 @@ def rows(cypher: str, seconds: float = 10) -> list[str]:
     past `seconds`, which is short of the 21 seconds the parse of a `JSON_TABLE` over liberation-data/drivine4j#331's
     list took, and far past the 15 to 200 milliseconds each of these statements takes, so a loaded machine does not fail
     them. A statement that writes is a block that hands its rows back, and what it writes is rolled back."""
-    sql = OracleCypherCompiler(GRAPH).compile(cypher)
+    sql = compile_cypher(cypher, {}, "ORACLE", GRAPH)
     # Its parameters bound as OracleConnection binds them: a write reads them from one, `$_cy_params`.
     spec = QuerySpecification[Any](sql.sql).bind(dict(sql.parameters)).finalized_copy("SQL")
     compiled = OracleSpecCompiler(spec).compile()

@@ -20,7 +20,6 @@ from typing import Any
 import pytest
 from pydantic import BaseModel
 
-from drivine.cypher.sql.sql_cypher_compiler import PRECISION_OUT_OF_RANGE
 from drivine.model import stamps
 from drivine.query.statement import cypher_statement
 from drivine.sync import (
@@ -36,6 +35,9 @@ from drivine.sync import (
 )
 from tests.cypher.cypher_spec import load
 from tests.sync_integration.conftest import ORACLE, POSTGRES, SQL_STORES, SQLITE, end_oracle_sessions
+
+PRECISION_OUT_OF_RANGE = "round() takes a precision from 0 to 2147483647, as in Neo4j."
+"""What `round()` fails with on a SQL store, as Neo4j fails it, a precision below 0 or past 2147483647."""
 
 UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
 """A random version 4 UUID, in lower case, as Neo4j's `randomUUID()` gives one."""
@@ -512,7 +514,7 @@ def test_a_property_past_32_kb_read_on_two_nodes_leaves_the_session_open_on_orac
 ):
     # Oracle crashed the session where a statement took a text past 32 KB from the properties with JSON_QUERY as JSON,
     # and fed it on into further SQL, for each of two rows (#144, drivine4j#255). The compiler reads a property a RETURN
-    # or a WITH gives through its text to work round it: see OracleCypherCompiler.item_property. As above, each
+    # or a WITH gives through its text to work round it: see drivine4j's OracleCypherCompiler. As above, each
     # statement is new, and the session is asked again after it, on one connection: not a transaction's, which a
     # refused statement would make rollback-only.
     clear(factory.get("oracle"))
@@ -566,8 +568,8 @@ def test_a_text_past_32_kb_set_from_an_unwound_parameter_on_two_nodes_leaves_the
 ):
     # Oracle crashed the session where the block took a text past 32 KB from an item of an unwound parameter, as JSON,
     # for each of two rows (#176, drivine4j#309). The compiler reads a text a write takes from its row through the
-    # row's text to work round it: see OracleCypherCompiler.row_value. As above, each statement is new, and the session
-    # is asked again after it, on one connection.
+    # row's text to work round it: see drivine4j's OracleCypherCompiler. As above, each statement is new, and the
+    # session is asked again after it, on one connection.
     clear(factory.get("oracle"))
     provider = registry.connection_provider("oracle")
     assert provider is not None
@@ -624,7 +626,7 @@ def test_a_text_past_32_kb_of_an_unwound_parameter_returned_or_passed_on_for_two
 ):
     # Oracle crashed the session where a statement took a text past 32 KB from an item of an unwound parameter as JSON,
     # and returned it or passed it on, for each of two rows (#186, drivine4j#322). The compiler reads such a value
-    # through the item's text to work round it: see OracleCypherCompiler.item_value. As above, each statement is new,
+    # through the item's text to work round it: see drivine4j's OracleCypherCompiler. As above, each statement is new,
     # and the session is asked again after it, on one connection.
     clear(factory.get("oracle"))
     provider = registry.connection_provider("oracle")
@@ -747,7 +749,7 @@ def test_an_unwound_items_text_short_or_past_32_kb_is_returned_only_for_the_node
     cypher_pm: PersistenceManager,
 ):
     # On Oracle such a text is read in a CASE on its type (#186), and such a CASE on a node's properties made Oracle
-    # drop a label test (see OracleCypherCompiler.item_property): each node a label rules out, on either end of the
+    # drop a label test (see drivine4j's OracleCypherCompiler): each node a label rules out, on either end of the
     # pattern, is left out.
     clear(cypher_pm)
     cypher_pm.query(
@@ -785,7 +787,7 @@ def test_an_unwound_items_text_short_or_past_32_kb_is_written_only_to_the_nodes_
     cypher_pm: PersistenceManager,
 ):
     # On Oracle such a text is read in a CASE on its type (#176), and such a CASE in a read made Oracle drop a label
-    # test (see OracleCypherCompiler.item_property): each node a label rules out, on either end of the pattern, is left
+    # test (see drivine4j's OracleCypherCompiler): each node a label rules out, on either end of the pattern, is left
     # alone.
     for text in ("s", "x" * 40_000):
         clear(cypher_pm)
@@ -5148,7 +5150,7 @@ def test_properties_of_a_node_beside_another_nodes_table_give_the_rows_of_the_pa
 ):
     # Oracle's JSON table transformation lost a node's label test where the query read two of its properties, or one two
     # ways, beside another node's table, and gave a row for each two nodes (#258, liberation-data/drivine4j#415): see
-    # OracleCypherCompiler.planned. drivine4j's CypherQueryContract.
+    # drivine4j's OracleCypherCompiler. drivine4j's CypherQueryContract.
     def rows(cypher: str) -> list[Any]:
         return cypher_pm.query(spec(cypher))
 

@@ -1,8 +1,8 @@
 # Oracle: JSON_QUERY of a string past 32 KB, over two rows, corrupts the session's memory
 
 A standalone repro of an Oracle server bug, in plain SQL, for an Oracle service request or a forum post. Drivine works
-around it (liberation-data/drivine-python#144, ported from liberation-data/drivine4j#255; see
-`OracleCypherCompiler.item_property`), and the workaround can go once a release of Oracle no longer fails this repro.
+around it (liberation-data/drivine-python#144, ported from liberation-data/drivine4j#255; see drivine4j's
+`OracleCypherCompiler.itemProperty`), and the workaround can go once a release of Oracle no longer fails this repro.
 
 ## Summary
 
@@ -118,8 +118,8 @@ SELECT JSON(JSON_QUERY(JSON_SERIALIZE(row_ RETURNING CLOB), '$.v1.a' RETURNING C
 ```
 
 So did serializing it with `EXTENDED` and reading it back as extended JSON. Drivine reads a text so, and a value of any
-other type with the plain `JSON_QUERY`, which didn't crash for a list or a map that holds a long text (see
-`OracleCypherCompiler.row_value`). Unlike the repro above, these were seen only through Drivine's blocks, not in a
+other type with the plain `JSON_QUERY`, which didn't crash for a list or a map that holds a long text (see drivine4j's
+`OracleCypherCompiler.rowValue`). Unlike the repro above, these were seen only through Drivine's blocks, not in a
 standalone script.
 
 ## An item of a list, read by its place
@@ -133,9 +133,10 @@ list's text ran clean in fresh containers, three runs each, and so did `JSON_VAL
 JSON(JSON_QUERY(JSON_SERIALIZE(list RETURNING CLOB), '$[0]' RETURNING CLOB))
 ```
 
-Drivine reads an item so where it is a text, and an item of any other type with the plain `JSON_QUERY` (see
-`OracleCypherCompiler._list_item`). An unwound item, which `JSON_TABLE` takes out, ran clean as it was. A list made of a
-long property, `JSON_ARRAY(JSON_QUERY(props, '$.a' RETURNING JSON), 'y')`, crashes in its making, and isn't worked around.
+Drivine reads an item so where it is a text, and an item of any other type with the plain `JSON_QUERY` (see drivine4j's
+`OracleCypherCompiler.listItem`). An unwound item, which `JSON_TABLE` takes out, ran clean as it was. A list made of a
+long property, `JSON_ARRAY(JSON_QUERY(props, '$.a' RETURNING JSON), 'y')`, crashes in its making, and isn't worked
+around.
 
 ## Two texts, compared
 
@@ -149,8 +150,8 @@ stays open. Read by the property's own path, `JSON_VALUE(props, '$.a' RETURNING 
 DBMS_LOB.COMPARE(JSON_VALUE(n1.props, '$.a' RETURNING CLOB), JSON_VALUE(n2.props, '$.a' RETURNING CLOB))
 ```
 
-Drivine compares two texts so where either is past 4,000 bytes, and as `VARCHAR2`s where neither is (see
-`OracleCypherCompiler.json_equals` and `OracleCypherCompiler.ordered`). A list or a map that holds a long text is still
+Drivine compares two texts so where either is past 4,000 bytes, and as `VARCHAR2`s where neither is (see drivine4j's
+`OracleCypherCompiler.jsonEquals` and `OracleCypherCompiler.ordered`). A list or a map that holds a long text is still
 compared as JSON, and refused. So is a text in a statement that writes, or in the step of a `reduce()`, which run as
 PL/SQL: there a CLOB read from an unwound row's JSON, `UNWIND $items AS t MERGE (n {a: t.a})`, closed the session,
 where the JSON is refused (ORA-40180).
@@ -161,7 +162,7 @@ The same crash comes from `n.t IN $l` where `$l` holds a null beside an empty te
 `nulls_equal` function, so a text past 32 KB was taken out as JSON over two rows. Items the statement writes or is
 given, none a list or a map, are equal to no value that holds a null, and a comparison with one is null only where the
 item is null, so Drivine decides between null and false when it compiles the statement and doesn't read the property
-again (see `SqlCypherCompiler.given_items_decided`).
+again (see drivine4j's `SqlCypherCompiler.givenItemsDecided`).
 
 ## An argument of `coalesce()`
 
@@ -186,5 +187,5 @@ END
 A text of at most 4,000 bytes is read as a `VARCHAR2`, and only a longer one (or an empty one, which a `VARCHAR2` holds
 as null) through its text, which alone cost about twice the plain read on short texts. Read so, 20,000 rows of
 `coalesce($p.q, n.name)` took as long as before, 72 ms, as drivine4j measured. Drivine reads an argument of `coalesce()`
-so where it is a property of a node or a relationship (see `OracleCypherCompiler.coalesced_property`); one of a map is
-read as before.
+so where it is a property of a node or a relationship (see drivine4j's `OracleCypherCompiler.coalescedProperty`); one of
+a map is read as before.

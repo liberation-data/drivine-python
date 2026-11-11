@@ -69,9 +69,9 @@ class OracleGraph(SqlGraph):
     def nulls_equal(self) -> str:
         """
         The function a compiled Cypher statement compares two values that may hold a null by, list item by list item
-        and map key by map key (see `OracleCypherCompiler.nulls_equal`): a statement that writes is a PL/SQL block,
-        whose queries call no function of its own, so the store keeps it. drivine4j and Drivine for TypeScript make it
-        byte for byte alike.
+        and map key by map key (see `nulls_equal_function`): a statement that writes is a PL/SQL block, whose queries
+        call no function of its own, so the store keeps it. drivine4j and Drivine for TypeScript make it byte for byte
+        alike.
         """
         return nulls_equal_name(self.name)
 
@@ -79,8 +79,8 @@ class OracleGraph(SqlGraph):
     def era(self) -> str:
         """
         The function a compiled Cypher statement renumbers a year that may be BC by as it reads an ISO text (see
-        `OracleTemporalSql.era`), and `era_date` the one it renumbers it by as it writes one: each reads its text once,
-        where the SQL it stands for read it three or four times, which Oracle took far longer to plan
+        `CompiledCypher.calls_stored_era`), and `era_date` the one it renumbers it by as it writes one: each reads its
+        text once, where the SQL it stands for read it three or four times, which Oracle took far longer to plan
         (liberation-data/drivine#572). drivine4j and Drivine for TypeScript make them byte for byte alike.
         """
         return era_name(self.name)

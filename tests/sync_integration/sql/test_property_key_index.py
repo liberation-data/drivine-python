@@ -5,26 +5,23 @@
 compared as JSON inside a `CASE` alone, which no index answers, so a batch of relationships read every node of the label
 for each row. Beside it now stands a test the index answers on Postgres, for a value of any kind, that leaves out no row
 the comparison keeps: a text, a number, a float equal to a whole one, a truth value, a list, null and a missing key each
-give the rows they gave. On Oracle the same test is written for the properties `OracleCypherCompiler`'s
-`indexed_properties` names, which a statement the connection runs names none of yet (liberation-data/drivine4j#638): the
-rows here are found as before on it, and its plan is checked with a compiler told of the indexes. drivine4j's
+give the rows they gave. On Oracle the shared compiler is told of no index yet (liberation-data/drivine4j#638): the rows
+here are found as before on it, and its plan is drivine4j's to check, with a compiler told of the indexes. drivine4j's
 PropertyKeyIndexTest is the reference.
 """
 
 import re
 from collections.abc import Iterator
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
+from drivine.cypher.shared_compiler import SharedStore, compile_cypher
 from drivine.cypher.sql.compiled_cypher import CompiledCypher
-from drivine.cypher.sql.oracle_cypher_compiler import OracleCypherCompiler
-from drivine.cypher.sql.postgres_cypher_compiler import PostgresCypherCompiler
 from drivine.sync import (
     DatabaseType,
     PersistenceManager,
     PersistenceManagerFactory,
-    QuerySpecification,
     StatelessGraphObjectManager,
     uniqueness_constraint,
 )
@@ -80,15 +77,8 @@ def seeded(factory: PersistenceManagerFactory, store: str) -> Iterator[None]:
 
 
 def compiled(pm: PersistenceManager, statement: str, parameters: dict[str, Any]) -> CompiledCypher:
-    """
-    The statement as the store compiles it. On Oracle, compiled knowing the indexes the graph has, which a statement
-    the connection runs is not yet: its rows are found as before, without the index, which the tests of rows here check
-    stays so.
-    """
-    if pm.type is DatabaseType.ORACLE:
-        indexed = {("Person", "id"), (IMPORT_LABEL, IMPORT_ID)}
-        return OracleCypherCompiler(GRAPH, indexed_properties=indexed).compile(statement, parameters)
-    return PostgresCypherCompiler(GRAPH).compile(statement, parameters)
+    """The statement as the store compiles it, by the shared compiler, as the connection compiles it."""
+    return compile_cypher(statement, parameters, cast(SharedStore, pm.type.value), GRAPH)
 
 
 def probes_index(pm: PersistenceManager, explained: str) -> bool:
@@ -118,6 +108,14 @@ def read_through_index(pm: PersistenceManager) -> None:
 def plans_checked(pm: PersistenceManager) -> None:
     if pm.type is DatabaseType.SQLITE:
         pytest.skip("SQLite compares a row's value as JSON alone, as before: its plan is not the one drivine4j checks.")
+    if pm.type is DatabaseType.ORACLE:
+        pytest.skip(ORACLE_NAMES_NO_INDEX)
+
+
+ORACLE_NAMES_NO_INDEX = (
+    "On Oracle the shared compiler is told of no index yet (liberation-data/drivine4j#638): a statement reads every "
+    "node of the label, and drivine4j checks the plan of one compiled knowing the indexes."
+)
 
 
 def test_a_rows_value_of_each_kind_finds_the_nodes_it_is_equal_to_as_json_compares_them(
@@ -353,107 +351,20 @@ def test_a_batch_of_relationships_as_apoc_exports_it_finds_each_rows_nodes_throu
     pm: PersistenceManager, seeded: None
 ):
     read_through_index(pm)
+    # Not on Oracle, as in Drivine for TypeScript: a statement there names no index yet, and reads every node of the
+    # label for each end of each row: minutes for 10.
+    if pm.type is DatabaseType.ORACLE:
+        pytest.skip(ORACLE_NAMES_NO_INDEX)
     # Its reads, planned as a query: a write compiles to a procedure, which no EXPLAIN takes.
     explained = plan(pm, compiled(pm, apoc_batch(0, 20, "RETURN start, finish"), {}))
     print(f"apoc\n{explained}\n")
     assert probes_index(pm, explained), f"an APOC batch reads every node of the label for each row:\n{explained}"
-    # Not written on Oracle, as in Drivine for TypeScript: a statement the connection runs there names no index yet
-    # (liberation-data/drivine4j#638), and reads every node of the label for each end of each row: minutes for 10.
-    if pm.type is DatabaseType.ORACLE:
-        return
     query(pm, apoc_batch(0, 5))
     query(pm, apoc_batch(5, 10))
     assert query(pm, f"MATCH (:`{IMPORT_LABEL}`)-[r:NEXT_CHUNK]->(:`{IMPORT_LABEL}`) RETURN count(r)") == [10]
     assert query(
         pm, f"MATCH (a)-[:NEXT_CHUNK]->(b {{`{IMPORT_ID}`: 10}}) RETURN [a.`{IMPORT_ID}`, b.`{IMPORT_ID}`]"
     ) == [[9, 10]]
-
-
-def test_compiled_knowing_the_indexes_oracle_finds_the_rows_it_finds_compiled_as_the_connection_compiles(
-    pm: PersistenceManager, seeded: None
-):
-    # On Postgres the connection compiles as `compiled` does, and the tests above find its rows. On Oracle the
-    # connection names no index (liberation-data/drivine4j#638), so the labelled index's test is run here: no row it
-    # leaves out may be one the JSON comparison keeps, as 1 and 1.0, or a double and a number, are. The labels of these
-    # nodes are named as indexed, whether or not an index is over them: the rows are the test's, not the plan.
-    if pm.type is not DatabaseType.ORACLE:
-        pytest.skip("Only Oracle compiles a statement otherwise knowing the indexes.")
-    query(
-        pm,
-        "CREATE (:KeyOdd {id: 'true', k: 1}), (:KeyOdd {id: true, k: 2}), (:KeyOdd {id: '7', k: 3}), "
-        "(:KeyOdd {id: 7, k: 4})",
-    )
-    query(
-        pm,
-        "CREATE (:KeyScaled {id: 0.25 * 10, k: 1}), (:KeyScaled {id: 0.25 * 4, k: 2}), "
-        "(:KeyScaled {id: 2.0 * 2.0, k: 3}), (:KeyScaled {id: 1.0E-5, k: 4}), (:KeyScaled {id: 8.0, k: 5}), "
-        "(:KeyScaled {id: 1.0e20, k: 6})",
-    )
-    indexed = {("Person", "id"), ("KeyOdd", "id"), ("KeyScaled", "id")}
-
-    def run(compiler: OracleCypherCompiler, cypher: str, parameters: dict[str, Any]) -> list[str]:
-        it = compiler.compile(cypher, parameters)
-        return [str(row) for row in pm.query(QuerySpecification[Any](it.sql).bind(dict(it.parameters)))]
-
-    def rows(*values: Any) -> dict[str, Any]:
-        return {"rows": [{"s": it} for it in values]}
-
-    by_row = "UNWIND $rows AS row MATCH (a:Person {id: row.s}) RETURN a.k ORDER BY a.k"
-    # Each with whether the labelled test is written. Not where a row holds a null, at the key or as the map a key is
-    # read of, nor where a written list holds a negative number, `-7` a negation and no literal: compared as values that
-    # may hold a null, as drivine4j compares them, with no test beside them. Each has a twin without, that writes it.
-    cases: list[tuple[str, dict[str, Any], bool]] = [
-        (by_row, rows("p5", 7, 7.0, 8, True, [1, 2], None, "nobody", "7", ["a", "b"], [], [1], [[1, 2]], 1), False),
-        (by_row, rows("p5", 7, 7.0, 8, True, [1, 2], "nobody", "7", ["a", "b"], [], [1], [[1, 2]], 1), True),
-        (by_row, rows(0.1, 1.0e20, -7, -0.0, BIG, "", LONG), True),
-        (by_row, rows(0.1, 1.0e20, -7, -0.0, BIG, 8.0, 8, 7, 7.0), True),
-        (by_row, rows(0.1, 1.0e20, -7.0, 0.0, 8.0), True),
-        (
-            "UNWIND $ids AS id MATCH (a:Person {id: id}) RETURN a.k ORDER BY a.k",
-            {"ids": ["p5", 7.0, 8, True, BIG, 0.1]},
-            True,
-        ),
-        (
-            "UNWIND ['', 'p5', 8, 7.0, 0.1, 1.0e20, -7, -0.0, 0] AS s MATCH (a:Person {id: s}) RETURN a.k ORDER BY a.k",
-            {},
-            False,
-        ),
-        (
-            "UNWIND ['', 'p5', 8, 7.0, 0.1, 1.0e20, 0] AS s MATCH (a:Person {id: s}) RETURN a.k ORDER BY a.k",
-            {},
-            True,
-        ),
-        (
-            "UNWIND $rows AS row MATCH (a:Person {id: row.a.b}) RETURN a.k ORDER BY a.k",
-            {"rows": [{"a": {"b": "p5"}}, {"a": {"b": 8}}, {"a": None}, {}, {"a": {"c": [1]}}]},
-            False,
-        ),
-        (
-            "UNWIND $rows AS row MATCH (a:Person {id: row.a.b}) RETURN a.k ORDER BY a.k",
-            {"rows": [{"a": {"b": "p5"}}, {"a": {"b": 8}}, {}, {"a": {"c": [1]}}]},
-            True,
-        ),
-        (
-            "UNWIND $rows AS row MATCH (a:KeyOdd {id: row.s}) RETURN a.k ORDER BY a.k",
-            rows(True, "true", 7, "7", 7.0),
-            True,
-        ),
-        (
-            "UNWIND $rows AS row MATCH (a:KeyScaled {id: row.s}) RETURN a.k ORDER BY a.k",
-            rows(2.5, 1, 4, 0.00001, 1.0, 4.0, 8, 8.0, 1.0e20, 10**20),
-            True,
-        ),
-        ("MATCH (a:Person {id: $s}) RETURN a.k", {"s": "p42"}, True),
-    ]
-    for cypher, parameters, writes in cases:
-        plain, knowing = OracleCypherCompiler(GRAPH), OracleCypherCompiler(GRAPH, indexed_properties=indexed)
-        differs = plain.compile(cypher, parameters).sql != knowing.compile(cypher, parameters).sql
-        assert differs is writes, f"{cypher} {parameters}: the labelled test {'not ' if writes else ''}written"
-        bare = run(OracleCypherCompiler(GRAPH), cypher, parameters)
-        assert bare, cypher
-        assert run(OracleCypherCompiler(GRAPH, indexed_properties=indexed), cypher, parameters) == bare, (
-            f"{cypher} {parameters}"
-        )
 
 
 def test_a_parameters_text_finds_its_node_through_the_index(pm: PersistenceManager, seeded: None):

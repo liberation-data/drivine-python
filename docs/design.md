@@ -70,7 +70,7 @@ drivine/
   model/          NodeFragment, RelationshipFragment, GraphView, markers, ModelRegistry, stamps
   dsl/            references, conditions, order expressions, the renderer
   backend/        GraphBackend, CypherBackend and CypherGrammar per engine, sql/, oracle/, postgres/
-  cypher/         Cypher compiled to SQL for Postgres, Oracle and SQLite by the shared compiler (the old one goes, #471)
+  cypher/         Cypher compiled to SQL for Postgres, Oracle and SQLite by the shared compiler
   mapper/         rows to models, per-engine native values
   cursor/         async cursors
   schema/         SchemaCatalog, SchemaManager, IndexManager, ConstraintManager, per-engine DDL

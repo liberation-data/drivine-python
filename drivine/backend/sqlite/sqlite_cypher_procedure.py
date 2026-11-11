@@ -1,10 +1,10 @@
 # apsw's stubs type a bytes value as collections.abc.Buffer, which Python 3.11 lacks: what they give is partly unknown.
 # pyright: reportUnknownMemberType=false, reportUnknownArgumentType=false, reportUnknownVariableType=false
 """
-`drivine_cypher(steps, parameters)`: carries out the procedure a Cypher statement that writes compiles to (see
-`SqliteCypherCompiler.procedure`), as Postgres runs its PL/pgSQL and Oracle its PL/SQL, step by step on the connection
-the statement runs on, in its transaction, and gives back the rows it returns as a JSON list. drivine4j's
-`SqliteCypherFunction`.
+`drivine_cypher(steps, parameters)`: carries out the procedure a Cypher statement that writes compiles to (the shared
+compiler's, as drivine4j's `SqliteCypherCompiler.procedure` writes it), as Postgres runs its PL/pgSQL and Oracle its
+PL/SQL, step by step on the connection the statement runs on, in its transaction, and gives back the rows it returns as
+a JSON list. drivine4j's `SqliteCypherFunction`.
 
 `steps` is `{"steps": [...]}`, each step a map of its `op`, `select`, `loop`, `if`, `raise`, `execute`, `kept`, `keep`
 or `return`;
@@ -37,7 +37,7 @@ from drivine.backend.sqlite import sqlite_arguments as arguments
 from drivine.drivine_error import DrivineError
 
 PARAMS = "cy_params"
-"""The variable the parameters' object is bound to: see `SqlCypherCompiler.PARAMS`."""
+"""The variable the parameters' object is bound to, as the shared compiler names it."""
 
 _SAVEPOINT = "drivine_cypher"
 

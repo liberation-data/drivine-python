@@ -3,8 +3,7 @@ The plans Postgres makes for a write that reads its rows' nodes or relationships
 statistics say it is empty while it still has pages: as an ANALYZE (or an autoanalyze) just after a `DELETE` leaves it,
 before the rows are written again (#446, liberation-data/drivine4j#644). A plain join was planned to compare each row
 with every row of a scan materialized, and a `FOREACH` over 20,000 nodes took 19 s where it takes under one. The probe
-is planned as a scan of the key's index: see `PostgresCypherCompiler.key_join`. drivine4j's PostgresKeyProbePlanTest,
-ported.
+is planned as a scan of the key's index, as the shared compiler writes it. drivine4j's PostgresKeyProbePlanTest, ported.
 
 Each write runs on a connection of its own, as PL/pgSQL keeps a plan for its session: a pooled connection that planned
 the statement before, with the statistics right, keeps that plan. The plans are logged by auto_explain, as notices.
@@ -22,7 +21,7 @@ from psycopg.rows import dict_row
 
 from drivine import ConnectionProperties, DatabaseRegistry, PersistenceManager, PersistenceManagerFactory
 from drivine.connection.postgres.postgres_connection import PostgresConnection
-from drivine.cypher.sql.postgres_cypher_compiler import PostgresCypherCompiler
+from drivine.cypher.shared_compiler import compile_cypher
 from drivine.query.query_specification import QuerySpecification
 from drivine.query.statement import cypher_statement
 from tests.integration.postgres.conftest import ON_POSTGRES
@@ -120,7 +119,7 @@ async def join_plans(
 ) -> list[str]:
     """The plans of those of the statement's statements that join its rows to the table, with the statistics stale."""
     await stale(pm, relationships)
-    statement = PostgresCypherCompiler(GRAPH).compile(text)
+    statement = compile_cypher(text, {}, "POSTGRES", GRAPH)
     prelude = compiled(statement.setup[0]) if statement.setup else None
     logged = await plans(prelude, compiled(statement.sql), statement.parameters)
     joins = [it for it in logged if "jsonb_array_elements" in it and f" {table} " in it]

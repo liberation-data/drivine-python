@@ -15,11 +15,14 @@ from typing import Any
 import pytest
 
 from drivine import DatabaseRegistry, PersistenceManager, PersistenceManagerFactory, QuerySpecification
-from drivine.cypher.sql.oracle_cypher_compiler import NO_FEEDBACK, OracleCypherCompiler
+from drivine.cypher.shared_compiler import compile_cypher
 from drivine.query.statement import cypher_statement
 from tests.integration.oracle.oracle_seed import ON_ORACLE, oracle_last_plan, oracle_plan
 
 GRAPH = "drivine"
+
+NO_FEEDBACK = "OPT_PARAM('_optimizer_use_feedback' 'false')"
+"""The hint that plans a statement without statistics feedback, as the shared compiler writes it on Oracle."""
 NODES = 3000
 SMALL = 750
 RUNS = 5
@@ -80,7 +83,7 @@ def later_compared(sql: str) -> str:
 async def assert_read_by_key(pm: PersistenceManager, statement: str, expected: int) -> None:
     """That the statement counts `expected`, and that Oracle reads `b`, the later of the two nodes compared, by its
     primary key, and keeps its join."""
-    compiled = OracleCypherCompiler(GRAPH).compile(statement, {})
+    compiled = compile_cypher(statement, {}, "ORACLE", GRAPH)
     b = later_compared(compiled.sql)
     plan = await oracle_plan(pm, compiled.sql, compiled.parameters, "BASIC +PREDICATE +OUTLINE")
     assert "INDEX UNIQUE SCAN" in plan and re.search(rf'access\("{b}"\."NID"=', plan), (
@@ -133,7 +136,7 @@ async def test_a_node_read_by_its_key_is_read_so_on_every_run_of_a_new_cursor_no
             ("MATCH (a:Big:Other) MATCH (b:Big:Other) WHERE a = b RETURN count(*)", NODES),
             ("MATCH (x:Small)-[:R]->(a:Big) MATCH (b:Big) WHERE a = b RETURN count(*)", NODES // 2),
         ]:
-            sql = OracleCypherCompiler(GRAPH).compile(statement, {}).sql
+            sql = compile_cypher(statement, {}, "ORACLE", GRAPH).sql
             assert NO_FEEDBACK in sql, sql
             b = later_compared(sql)
             # A new cursor: statistics gathered again invalidate the one an earlier test, or statement, ran.

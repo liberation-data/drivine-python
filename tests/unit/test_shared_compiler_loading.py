@@ -21,9 +21,9 @@ def test_importing_drivine_and_every_connection_loads_no_compiler():
         "import drivine.connection.neo4j.neo4j_connection, drivine.connection.postgres.postgres_connection\n"
         "import drivine.connection.oracle.oracle_connection, drivine.connection.sqlite.sqlite_connection\n"
         "from drivine.cypher.shared_compiler import shared_compiler_loaded\n"
-        "print('drivine_cypher_compiler' in sys.modules, 'antlr4' in sys.modules, shared_compiler_loaded())"
+        "print('drivine_cypher_compiler' in sys.modules, shared_compiler_loaded())"
     )
-    assert run(script) == "False False False"
+    assert run(script) == "False False"
 
 
 def test_a_graph_engines_statement_needs_no_compiler_where_it_has_no_wheel():

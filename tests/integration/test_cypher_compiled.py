@@ -150,10 +150,12 @@ async def test_a_python_temporal_bound_in_a_list_or_map_beside_the_text_that_spe
         spec("RETURN [$v IN [$s], $s IN [$v], [$v] = [$s], {k: $v} = {k: $s}]", {"v": value, "s": text})
     )
     if cypher_pm.type is not DatabaseType.NEO4J:
-        # In a list or a map a SQL store holds a temporal as its ISO text today, so a bound one is equal to the text
-        # that spells it; typed values in the store layout (drivine-cypher-spec#161) make it the temporal it is.
+        # A bound temporal in a list or a map literal doesn't carry its kind into the literal's items yet, so IN and a
+        # list's or map's equality compare it as its ISO text (liberation-data/drivine4j#779).
         if row != [False, False, False, False]:
-            pytest.xfail("a temporal in a list or a map is its ISO text on a SQL store (drivine-cypher-spec#161)")
+            pytest.xfail(
+                "a bound temporal in a list or a map is compared as its ISO text (liberation-data/drivine4j#779)"
+            )
         pytest.fail("A bound temporal in a list or a map is no longer equal to its text here: take out the xfail")
     assert row == [False, False, False, False], (value, text)
 

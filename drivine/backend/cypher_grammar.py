@@ -1,20 +1,15 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
 
 from drivine.backend.cypher import quote_string
 from drivine.connection.database_type import DatabaseType
 from drivine.drivine_error import DrivineError
-from drivine.schema.schema_specs import full_text_index, item_name, vector_index
+from drivine.schema.schema_specs import item_name, vector_index
 from drivine.schema.vector_index_spec import SimilarityFunction
-
-
-def _full_text_index_name(label: str, properties: Sequence[str]) -> str:
-    """The full-text index Drivine makes over a label's properties (see full_text_index), by the name it gives it."""
-    return item_name(full_text_index(label, properties))
 
 
 def _vector_index_name(label: str, property: str) -> str:
@@ -66,31 +61,10 @@ def _plain_vector(expression: str) -> str:
     return expression
 
 
-def _neo4j_full_text_search(label: str, properties: Sequence[str], limit: int) -> str:
-    # Asked for its best `limit` hits, so Lucene collects no more than that.
-    name = quote_string(_full_text_index_name(label, properties))
-    return f"CALL db.index.fulltext.queryNodes({name}, $_text, {{limit: {limit}}}) YIELD node, score"
-
-
 def _neo4j_vector_search(label: str, property: str, similarity: SimilarityFunction) -> tuple[str, str]:
     # Neo4j's score is already (1 + cos) / 2, or 1 / (1 + d²).
     name = quote_string(_vector_index_name(label, property))
     return f"CALL db.index.vector.queryNodes({name}, $_k, $_vector) YIELD node AS n, score AS _raw", "_raw"
-
-
-MEMGRAPH_TEXT_SEARCH_LIMIT_CAP = 1_000_000
-"""
-The most hits a full-text call asks Memgraph's `text_search` for. Memgraph allocates the limit up front: 3.14 accepts
-100,000,000 and aborts at 500,000,000, however few hits there are (memgraph/memgraph#5200). A million is far more than a
-search can scale in memory, and far below where the server fails.
-"""
-
-
-def _memgraph_full_text_search(label: str, properties: Sequence[str], limit: int) -> str:
-    # Given the search's index limit, because without one text_search yields its best 1,000 hits and no more.
-    name = quote_string(_full_text_index_name(label, properties))
-    capped = min(limit, MEMGRAPH_TEXT_SEARCH_LIMIT_CAP)
-    return f"CALL text_search.search_all({name}, $_text, {{limit: {capped}}}) YIELD node, score"
 
 
 def _memgraph_vector_search(label: str, property: str, similarity: SimilarityFunction) -> tuple[str, str]:
@@ -104,12 +78,6 @@ def _memgraph_vector_search(label: str, property: str, similarity: SimilarityFun
         f"CALL vector_search.search({name}, $_k, $_vector) YIELD node AS n, distance AS _raw",
         "1 - _raw / 2.0" if similarity == "COSINE" else "1.0 / (1 + _raw)",
     )
-
-
-def _falkordb_full_text_search(label: str, properties: Sequence[str], limit: int) -> str:
-    # One full-text index to a label, found by the label. The call takes no limit, and has no cap: the hits are cut
-    # after it.
-    return f"CALL db.idx.fulltext.queryNodes({quote_string(label)}, $_text) YIELD node, score"
 
 
 def _falkordb_vector_search(label: str, property: str, similarity: SimilarityFunction) -> tuple[str, str]:
@@ -160,12 +128,14 @@ class CypherGrammar:
     `n`, and the expression of its score as a similarity, higher nearer, on one scale on every engine: (1 + cos) / 2
     for cosine, 1 / (1 + d²) for euclidean.
     """
-    full_text_search: Callable[[str, Sequence[str], int], str]
+    search_store: Literal["NEO4J", "MEMGRAPH", "FALKORDB"]
     """
-    The call that asks the full-text index over a label's properties for nodes matching `$_text`, yielding
-    `node, score`. Where the engine's call takes a limit, it is asked for no more than the limit given, so the index
-    stops rather than yield hits the search would drop; the search cuts them to that many after the call on every
-    engine (see CypherBackend.matching).
+    The engine the shared module writes a full-text search's head for (see CypherBackend.matching): Neo4j's
+    `db.index.fulltext.queryNodes` and Memgraph's `text_search.search_all` find the index Drivine makes over a label's
+    properties by its name, FalkorDB's `db.idx.fulltext.queryNodes` by its label. The module asks Memgraph's
+    `text_search` for no more than 1,000,000 hits: without a limit it yields its best 1,000, and a limit far above that
+    aborts the server, however few hits there are, as Memgraph allocates it up front (memgraph/memgraph#5200).
+    FalkorDB's call takes no limit: the head cuts the hits after it.
     """
     orphan_delete_limit: str | None = None
     """Why the engine can't delete with CascadeType.DELETE_ORPHAN; None when it can."""
@@ -194,7 +164,7 @@ NEO4J_GRAMMAR = CypherGrammar(
     _plain_vector,
     _transient_over_bolt,
     _neo4j_vector_search,
-    _neo4j_full_text_search,
+    "NEO4J",
     reads_without_snapshot=True,
 )
 
@@ -207,7 +177,7 @@ MEMGRAPH_GRAMMAR = CypherGrammar(
     _plain_vector,
     _transient_over_bolt,
     _memgraph_vector_search,
-    _memgraph_full_text_search,
+    "MEMGRAPH",
     orphan_delete_limit="Memgraph takes an existence check only in a WHERE clause, not in the list of nodes to delete",
 )
 
@@ -224,7 +194,7 @@ FALKORDB_GRAMMAR = CypherGrammar(
     # FalkorDB runs one query at a time, but turns a write away while another is in progress.
     lambda failure: bool(_ANOTHER_WRITE.search(str(failure))),
     _falkordb_vector_search,
-    _falkordb_full_text_search,
+    "FALKORDB",
     far_labels_after_match=True,
 )
 """

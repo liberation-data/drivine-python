@@ -11,7 +11,7 @@ from pydantic import BaseModel
 from drivine.backend.backends import backend_for
 from drivine.backend.fragment_group import FragmentGroup
 from drivine.backend.graph_statement import GraphStatement
-from drivine.backend.matching_search import MatchingSearch
+from drivine.backend.matching_search import FullTextIndexLookup, MatchingSearch
 from drivine.backend.nearest_search import NearestSearch
 from drivine.backend.page import Page
 from drivine.backend.save_statement import SaveStatement
@@ -19,6 +19,7 @@ from drivine.backend.save_statement_builder import id_of, items, packed, props_o
 from drivine.backend.vector_writes import split_vectors
 from drivine.connection.database_type import DatabaseType
 from drivine.connection.transaction_mode import TransactionMode
+from drivine.cypher.shared_compiler import SearchIndex
 from drivine.drivine_error import DrivineError
 from drivine.dsl.collection_sorts import sort_collections
 from drivine.dsl.condition import Where
@@ -282,7 +283,7 @@ class StatelessGraphObjectManager:
                 threshold is not None,
                 top_k if search_k is not None else None,
                 _checked(depth) or {},
-                await self._search_table("VECTOR", label, [searched.property], len(vector)),
+                await self._vector_table(label, searched.property, len(vector)),
                 len(vector),
             ),
         )
@@ -317,6 +318,9 @@ class StatelessGraphObjectManager:
 
         `property` names a property of the full-text index searched, needed only when the fragment declares more than
         one.
+
+        The search is the shared module's on every store (drivine-cypher-compiler): on a graph engine, whose extra
+        doesn't install it, it is installed on its own.
         """
         target = self.registry.model_of(type_)
         predicate, values = self._condition(target, where, bindings)
@@ -343,29 +347,32 @@ class StatelessGraphObjectManager:
                 predicate,
                 threshold is not None,
                 _checked(depth) or {},
-                text,
-                await self._search_table("FULLTEXT", root.labels[0], chosen),
+                text=text,
+                index=await self._full_text_index(root.labels[0], chosen),
             ),
         )
-        rows = await self.persistence_manager.query(statement.spec({**values, "_text": text, "_threshold": threshold}))
+        rows = await self.persistence_manager.query(statement.spec({**values, "_threshold": threshold}))
         return [Scored(self._mapped(target, row["value"]), row["score"]) for row in rows]
 
-    async def _search_table(
-        self,
-        kind: Literal["VECTOR", "FULLTEXT"],
-        label: str,
-        properties: Sequence[str],
-        dimensions: int | None = None,
-    ) -> str | None:
+    async def _vector_table(self, label: str, property: str, dimensions: int) -> str | None:
         """
-        Where the store keeps a search index as a table of its own (Oracle), that table; None elsewhere. For a vector
-        search by a vector of `dimensions`, only an index made for embeddings of that size.
+        Where the store keeps a vector index as a table of its own (Oracle), or over its node table (Postgres), what
+        the catalog says of it, for an index made for embeddings of `dimensions`, the size of the vector searched for;
+        None elsewhere.
         """
-        statement = getattr(self.backend, "search_index_table", None)
+        statement = getattr(self.backend, "vector_index_table", None)
         if statement is None:
             return None
-        rows = await self.persistence_manager.query(statement(kind, label, properties, dimensions).spec())
+        rows = await self.persistence_manager.query(statement(label, property, dimensions).spec())
         return rows[0] if rows else None
+
+    async def _full_text_index(self, label: str, properties: Sequence[str]) -> SearchIndex | None:
+        """What the store's catalog records of the full-text index over the label's properties, where it keeps one."""
+        lookup = getattr(self.backend, "full_text_index", None)
+        if lookup is None:
+            return None
+        found: FullTextIndexLookup = lookup(label, properties)
+        return found.found(await self.persistence_manager.query(found.statement.spec()))
 
     def _mapped(self, target_: TargetModel, row: Any) -> Any:
         if isinstance(target_, GraphViewModel):

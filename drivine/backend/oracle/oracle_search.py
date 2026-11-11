@@ -1,16 +1,14 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from typing import Any
 
 from drivine.backend.graph_statement import GraphStatement
-from drivine.backend.matching_search import MatchingSearch
+from drivine.backend.matching_search import MatchingSearch, searched_labels
 from drivine.backend.nearest_search import NearestSearch
 from drivine.backend.oracle.oracle_graph import OracleGraph, has_labels, json_key, node_document
 from drivine.backend.oracle.oracle_views import OracleViews
-from drivine.backend.sql.bm25 import Bm25Dialect, bm25_ranked
-from drivine.backend.sql.text_query import SEPARATOR, TextQuery, counted
-from drivine.drivine_error import DrivineError
+from drivine.cypher.shared_compiler import full_text_search
 from drivine.model.graph_view_model import GraphViewModel
 from drivine.model.target_model import TargetModel
 
@@ -25,9 +23,10 @@ class OracleSearch:
     one, and otherwise reads every node of the label. A vector search goes through an index made for embeddings of the
     vector's size only, and without one measures only the embeddings of that size: Oracle refuses to measure two sizes
     against each other. It scores on Neo4j's scale ((1 + cos) / 2 for cosine, 1 / (1 + d²) for euclidean): approximate
-    through the index, exact without. A full-text query is the core of Lucene's syntax (see TextQuery): Oracle Text
-    scores through the index; without one, each term is counted as a whole word and the counts scored by BM25, as
-    Neo4j's index scores them (see bm25_ranked). Either is scaled by the best hit.
+    through the index, exact without. A full-text search's candidates are the shared module's (`full_text_search`), its
+    query the core of Lucene's syntax: Oracle Text scores through the index, each property's score added, and sees only
+    what has been committed; without one, each term is counted as a whole word and the counts scored by BM25, as Neo4j's
+    index scores them. Either is scaled by the best hit.
     """
 
     def __init__(self, graph: OracleGraph) -> None:
@@ -62,65 +61,17 @@ class OracleSearch:
         return self._scored(target, candidates, search.where, search.threshold, search.limit, search.depth)
 
     def matching(self, target: TargetModel, search: MatchingSearch) -> GraphStatement:
-        if search.text is None:
-            raise DrivineError("A full-text search on Oracle is written with its text.")
-        query = TextQuery.parse(search.text)
-        bindings: dict[str, Any] = {}
-
-        def bind(value: str) -> str:
-            name = f"_term{len(bindings)}"
-            bindings[name] = value
-            return f"${name}"
-
-        # Narrowed by the root's every label before the scale, so the best of it is a hit the search can return.
-        root = target.root if isinstance(target, GraphViewModel) else target
-        labels = [search.label, *(it for it in root.labels if it != search.label)]
-        if search.table:
-            # Through Oracle Text: each property's score added, then scaled by the best. The index holds what has been
-            # committed, so a search does not see what its own transaction wrote.
-            text = bind(query.oracle_text)
-            contains = [
-                f"JSON_TEXTCONTAINS(t.doc, '${json_key(it)}', {text}, {i + 1})"
-                for i, it in enumerate(search.properties)
-            ]
-            scores = " + ".join(f"SCORE({i + 1})" for i in range(len(search.properties)))
-            matched = (
-                f"({' OR '.join(contains)}) AND t.nid IN (SELECT c.nid FROM {self.graph.nodes} c WHERE "
-                f"{has_labels('c', labels)})"
-                if len(labels) > 1
-                else " OR ".join(contains)
-            )
-            candidates = (
-                f"SELECT nid, hit_count / MAX(hit_count) OVER () AS score FROM (SELECT t.nid, {scores} AS hit_count "
-                f"FROM {search.table} t WHERE {matched}) WHERE hit_count > 0"
-            )
-            return self._scored(
-                target, candidates, search.where, search.threshold, search.limit, search.depth, bindings
-            )
-        # Without Oracle Text: each term counted as a whole word in the lower-cased text, scored by BM25 (see
-        # bm25_ranked), each term bound on its own (one bound list named twice gave wrong counts on 23.26, drivine4j
-        # found).
-        values = [f"NVL(JSON_VALUE(c.props, '${json_key(it)}' RETURNING CLOB), '')" for it in search.properties]
-        text = " || ' ' || ".join(f"LOWER({it})" for it in values)
-        joined = " || ' ' || ".join(values)
-        length = f"NVL(LENGTH({joined}), 0)"
-        labelled = f"{self.graph.nodes} c WHERE {has_labels('c', labels)}"
-        candidates = bm25_ranked(
-            f"SELECT c.nid, {text} AS text, {length} AS len FROM {labelled}",
-            f"SELECT {length} AS len FROM {labelled}",
-            query,
-            Bm25Dialect(
-                # Oracle's expressions don't look ahead: the term ending where its last word does, less those a word
-                # goes on from (counted); a phrase an occurrence of which may begin inside another, in the text with
-                # each character between words written twice (SEPARATOR); a prefix term, or one with a character not
-                # measured as [[:alnum:]], by its one expression (drivine4j#607).
-                count=lambda text, term: _oracle_count(text, term, bind),
-                holds=lambda text, term: f"REGEXP_LIKE({text}, {bind(term)})",
-                ln=lambda value: f"LN({value})",
-                real=lambda value: value,
-            ),
+        ranked = full_text_search(
+            "ORACLE",
+            self.graph.name,
+            searched_labels(target, search.label),
+            search.properties,
+            search.text,
+            search.index,
         )
-        return self._scored(target, candidates, search.where, search.threshold, search.limit, search.depth, bindings)
+        return self._scored(
+            target, ranked.statement, search.where, search.threshold, search.limit, search.depth, ranked.parameters
+        )
 
     def _scored(
         self,
@@ -153,13 +104,3 @@ class OracleSearch:
             ),
             dict(bindings or {}),
         )
-
-
-def _oracle_count(text: str, term: str, bind: Callable[[str], str]) -> str:
-    """How often `term` occurs in `text` on Oracle, each bound in the order the statement reads them (see `counted`)."""
-    two = counted(term)
-    if two is None:
-        return f"REGEXP_COUNT(REGEXP_REPLACE({text}, '{SEPARATOR}', '\\1\\1'), {bind(term)})"
-    ended, continued = two
-    first = f"REGEXP_COUNT({text}, {bind(ended)})"
-    return first if continued is None else f"{first} - REGEXP_COUNT({text}, {bind(continued)})"

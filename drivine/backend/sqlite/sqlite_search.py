@@ -1,19 +1,14 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from typing import Any
 
 from drivine.backend.graph_statement import GraphStatement
-from drivine.backend.matching_search import MatchingSearch
+from drivine.backend.matching_search import MatchingSearch, searched_labels
 from drivine.backend.nearest_search import NearestSearch
-from drivine.backend.sql.bm25 import Bm25Dialect, bm25_ranked
 from drivine.backend.sql.sql_graph import sql_text
-from drivine.backend.sql.text_query import TextQuery, looking_ahead
 from drivine.backend.sqlite.sqlite_graph import (
     JSON_ROWS,
-    LOWER,
-    MATH,
-    REGEXP_COUNT,
     SIMILARITY,
     SqliteGraph,
     column,
@@ -22,10 +17,9 @@ from drivine.backend.sqlite.sqlite_graph import (
     json_value,
     node_document,
     path,
-    text_of,
 )
 from drivine.backend.sqlite.sqlite_views import SqliteViews
-from drivine.drivine_error import DrivineError
+from drivine.cypher.shared_compiler import full_text_search
 from drivine.model.graph_view_model import GraphViewModel
 from drivine.model.target_model import TargetModel
 
@@ -39,8 +33,9 @@ class SqliteSearch:
 
     A vector search scores each node of the label that holds an embedding of the vector's size, by the function Drivine
     registers (see sqlite_functions), on Neo4j's scale: (1 + cos) / 2 for cosine, 1 / (1 + d²) for euclidean. A
-    full-text query is the core of Lucene's syntax (see TextQuery), each term counted as a whole word as on Postgres and
-    Oracle, scored by BM25 as Neo4j's index scores it (see bm25_ranked), then scaled by the best hit.
+    full-text search's candidates are the shared module's (`full_text_search`): the core of Lucene's syntax, each term
+    counted as a whole word by `drivine_regexp_count` (see sqlite_patterns), as on Postgres and Oracle, its text lowered
+    by `drivine_lower`, and scored by BM25 as Neo4j's index scores it, by `drivine_math`, then scaled by the best hit.
     """
 
     def __init__(self, graph: SqliteGraph) -> None:
@@ -56,33 +51,12 @@ class SqliteSearch:
         return self._scored(target, candidates, search.where, search.threshold, search.limit, search.depth)
 
     def matching(self, target: TargetModel, search: MatchingSearch) -> GraphStatement:
-        if search.text is None:
-            raise DrivineError("A full-text search on SQLite is written with its text.")
-        query = TextQuery.parse(search.text)
-        bindings: dict[str, Any] = {}
-
-        def bind(value: str) -> str:
-            name = f"_term{len(bindings)}"
-            bindings[name] = value
-            return f"CAST(${name} AS TEXT)"
-
-        # Narrowed by the root's every label before the scale, so the best of it is a hit the search can return.
-        root = target.root if isinstance(target, GraphViewModel) else target
-        labels = [search.label, *(it for it in root.labels if it != search.label)]
-        length = f"length({joined_text('c', search.properties)})"
-        labelled = f"{self.graph.nodes} c WHERE {has_labels('c', labels)}"
-        candidates = bm25_ranked(
-            f"SELECT c.nid, {searched_text('c', search.properties)} AS text, {length} AS len FROM {labelled}",
-            f"SELECT {length} AS len FROM {labelled}",
-            query,
-            Bm25Dialect(
-                count=lambda text, term: f"{REGEXP_COUNT}({text}, {bind(looking_ahead(term))})",
-                holds=lambda text, term: f"{REGEXP_COUNT}({text}, {bind(term)}) > 0",
-                ln=lambda value: f"{MATH}('log', {value})",
-                real=lambda value: f"CAST({value} AS REAL)",
-            ),
+        ranked = full_text_search(
+            "SQLITE", self.graph.name, searched_labels(target, search.label), search.properties, search.text
         )
-        return self._scored(target, candidates, search.where, search.threshold, search.limit, search.depth, bindings)
+        return self._scored(
+            target, ranked.statement, search.where, search.threshold, search.limit, search.depth, ranked.parameters
+        )
 
     def _scored(
         self,
@@ -127,16 +101,3 @@ def holds(alias: str, property: str, dimensions: int | None) -> str:
     if dimensions is None:
         return array
     return f"{array} AND json_array_length({column(alias, 'props')}, {path(property)}) = {dimensions}"
-
-
-def searched_text(alias: str, properties: Sequence[str]) -> str:
-    """
-    The text a full-text search reads of the row `alias`: its properties, each as text, a space between them, in lower
-    case, by the function Drivine registers: SQLite's own `lower` lowers only ASCII.
-    """
-    return f"{LOWER}({joined_text(alias, properties)})"
-
-
-def joined_text(alias: str, properties: Sequence[str]) -> str:
-    """`searched_text` before it is lowered: what a full-text search measures a text's length by (drivine4j#604)."""
-    return " || ' ' || ".join(f"COALESCE({text_of(alias, it)}, '')" for it in properties)

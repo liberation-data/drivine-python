@@ -27,11 +27,12 @@ from drivine import (
 from drivine.backend.cypher_backend import CypherBackend
 from drivine.backend.cypher_grammar import FALKORDB_GRAMMAR, MEMGRAPH_GRAMMAR, NEO4J_GRAMMAR, CypherGrammar
 from drivine.backend.graph_backend import GraphBackend
-from drivine.backend.matching_search import FILTERED_OVER_FETCH, INDEX_LIMIT_CEILING, MatchingSearch, index_limit
+from drivine.backend.matching_search import FILTERED_OVER_FETCH, INDEX_LIMIT_CEILING, MatchingSearch
 from drivine.backend.oracle.oracle_backend import OracleBackend
 from drivine.backend.oracle.oracle_graph import OracleGraph
 from drivine.backend.postgres.postgres_backend import PostgresBackend
 from drivine.backend.postgres.postgres_graph import PostgresGraph
+from drivine.cypher.shared_compiler import SearchIndex
 from drivine.model.graph_view_model import GraphViewModel
 
 
@@ -80,7 +81,9 @@ def search(
     target = registry.view(type_) if issubclass(type_, GraphView) else registry.fragment(type_)
     root = target.root if isinstance(target, GraphViewModel) else target
     return (
-        CypherBackend(grammar).matching(target, MatchingSearch(root.labels[0], ("body",), limit, where, threshold)).text
+        CypherBackend(grammar)
+        .matching(target, MatchingSearch(root.labels[0], ("body",), limit, where, threshold, text="graph"))
+        .text
     )
 
 
@@ -91,25 +94,33 @@ def cut(text: str) -> int:
     return int(found.group(1))
 
 
-def test_the_neo4j_index_call_is_asked_for_a_limit():
-    assert (
-        "CALL db.index.fulltext.queryNodes('Article_body_fulltext', $_text, {limit: 80}) YIELD node, score"
-        in search(Article, where="n.id = $id")
+def test_the_neo4j_index_call_is_asked_for_a_limit_written_into_the_statement_and_the_query_bound():
+    registry = ModelRegistry()
+    statement = CypherBackend(NEO4J_GRAMMAR).matching(
+        registry.fragment(Article), MatchingSearch("Article", ("body",), 8, "n.id = $id", text="graph")
     )
+    assert (
+        "CALL db.index.fulltext.queryNodes('Article_body_fulltext', $_cy_ft1, {limit: 80})\nYIELD node, score"
+        in statement.text
+    )
+    # The limits are written as Drivine for TypeScript writes them, whose numbers go over Bolt as floats: only the
+    # query is bound.
+    assert statement.bindings == {"_cy_ft1": "graph"}
 
 
 def test_the_memgraph_index_call_is_asked_for_a_limit_no_larger_than_it_survives():
     # Without a limit text_search yields 1,000 hits; with one near 500,000,000 Memgraph aborts (memgraph/memgraph#5200).
-    assert "CALL text_search.search_all('Article_body_fulltext', $_text, {limit: 1100}) YIELD node, score" in search(
-        Article, 1100, grammar=MEMGRAPH_GRAMMAR
-    )
+    assert (
+        "CALL text_search.search_all('Article_body_fulltext', $_cy_ft1, "
+        "{limit: CASE WHEN 1100 < 1000000 THEN 1100 ELSE 1000000 END})\nYIELD node, score"
+    ) in search(Article, 1100, grammar=MEMGRAPH_GRAMMAR)
     capped = search(Article, 2_000_000, grammar=MEMGRAPH_GRAMMAR)
-    assert "{limit: 1000000}) YIELD node, score" in capped
+    assert "{limit: CASE WHEN 2000000 < 1000000 THEN 2000000 ELSE 1000000 END})\nYIELD node, score" in capped
     assert cut(capped) == 2_000_000
 
 
 def test_the_falkordb_index_call_takes_no_limit():
-    assert "CALL db.idx.fulltext.queryNodes('Article', $_text) YIELD node, score" in search(
+    assert "CALL db.idx.fulltext.queryNodes('Article', $_cy_ft1)\nYIELD node, score\n" in search(
         Article, grammar=FALKORDB_GRAMMAR
     )
 
@@ -143,9 +154,14 @@ def test_a_view_over_fetches_for_its_required_relationship_alone():
 
 
 def test_the_index_limit_is_capped_however_large_the_limit():
-    assert index_limit(INDEX_LIMIT_CEILING, True) == INDEX_LIMIT_CEILING
-    assert index_limit(2**63 - 1, False) == INDEX_LIMIT_CEILING
-    assert index_limit(1000, True) == 1000 * FILTERED_OVER_FETCH
+    assert INDEX_LIMIT_CEILING == 2_147_483_647
+    for where in (None, "n.id = $id"):
+        assert cut(search(Article, 2**63 - 1, where)) == INDEX_LIMIT_CEILING
+    assert cut(search(Article, INDEX_LIMIT_CEILING // 10 + 1, "n.id = $id")) == INDEX_LIMIT_CEILING
+    assert cut(search(Article, 1000, "n.id = $id")) == 1000 * FILTERED_OVER_FETCH
+    text = search(Article, 2**63 - 1, "n.id = $id")
+    assert "{limit: 2147483647}" in text
+    assert f"LIMIT {2**63 - 1}\nRETURN" in text
 
 
 @pytest.mark.parametrize("grammar", ENGINES, ids=lambda it: it.engine)
@@ -153,7 +169,7 @@ def test_a_fragment_is_limited_before_it_is_projected_without_a_second_sort(gram
     # A node's properties, a chunk's text and its embedding among them, are read only for the rows returned. A sort
     # between the filter and the limit would hold every row that passes, each carrying the head's collected hits.
     text = search(Article, where="n.id = $id", grammar=grammar)
-    after_head = text.split("UNWIND _hits AS _hit", 1)[1]
+    after_head = text.split("UNWIND _ftResults AS _ftRow", 1)[1]
 
     assert "\nWITH n, _score\nLIMIT 8\n" in after_head, text
     assert after_head.index("LIMIT 8") < after_head.index("properties(n)"), text
@@ -207,7 +223,9 @@ def test_a_root_of_more_labels_is_checked_for_them_before_its_hits_are_cut_or_sc
     # no WHERE before an ORDER BY in one.
     text = search(type_, grammar=grammar)
 
-    assert "YIELD node, score\nWITH node, score WHERE node:Article:Reviewed\nWITH node, score\nORDER BY" in text, text
+    assert "YIELD node, score\nWITH node, score WHERE node:`Article`:`Reviewed`\nWITH node, score\nORDER BY" in text, (
+        text
+    )
     assert cut(text) == 8 * FILTERED_OVER_FETCH
 
 
@@ -219,29 +237,31 @@ def test_a_root_of_one_label_has_its_hits_cut_with_no_label_check(type_: type[An
 SQL_STORES = [
     pytest.param(PostgresBackend(PostgresGraph()), None, "c.labels @> '[\"Reviewed\"]'", id="postgres"),
     pytest.param(OracleBackend(OracleGraph()), None, ',"Reviewed",', id="oracle"),
-    pytest.param(OracleBackend(OracleGraph()), "drivine_t_Article", ',"Reviewed",', id="oracle-text"),
+    pytest.param(
+        OracleBackend(OracleGraph()), SearchIndex(oracle_text="drivine_t_Article"), ',"Reviewed",', id="oracle-text"
+    ),
 ]
 
 
-def scaled(backend: GraphBackend, type_: type[Any], table: str | None) -> str:
+def scaled(backend: GraphBackend, type_: type[Any], index: SearchIndex | None) -> str:
     """The hits a SQL store's scale, its MAX() OVER (), is taken over, before they are joined to the nodes returned."""
     registry = ModelRegistry()
     target = registry.view(type_) if issubclass(type_, GraphView) else registry.fragment(type_)
-    text = backend.matching(target, MatchingSearch("Article", ("body",), 8, text="graph", table=table)).text
+    text = backend.matching(target, MatchingSearch("Article", ("body",), 8, text="graph", index=index)).text
     return text[text.index("OVER ()") : text.index(") s JOIN")]
 
 
 @pytest.mark.parametrize("type_", [ReviewedArticle, ReviewedArticleView], ids=lambda it: it.__name__)
-@pytest.mark.parametrize(("backend", "table", "second"), SQL_STORES)
+@pytest.mark.parametrize(("backend", "index", "second"), SQL_STORES)
 def test_a_sql_store_checks_a_roots_every_label_before_it_scales_the_hits(
-    backend: GraphBackend, table: str | None, second: str, type_: type[Any]
+    backend: GraphBackend, index: SearchIndex | None, second: str, type_: type[Any]
 ):
-    assert second in scaled(backend, type_, table)
+    assert second in scaled(backend, type_, index)
 
 
 @pytest.mark.parametrize("type_", [Article, ArticleView], ids=lambda it: it.__name__)
-@pytest.mark.parametrize(("backend", "table", "second"), SQL_STORES)
+@pytest.mark.parametrize(("backend", "index", "second"), SQL_STORES)
 def test_a_sql_store_checks_no_other_label_before_it_scales_the_hits_of_a_root_of_one(
-    backend: GraphBackend, table: str | None, second: str, type_: type[Any]
+    backend: GraphBackend, index: SearchIndex | None, second: str, type_: type[Any]
 ):
-    assert "Reviewed" not in scaled(backend, type_, table)
+    assert "Reviewed" not in scaled(backend, type_, index)

@@ -97,3 +97,40 @@ def test_the_platforms_with_a_wheel_are_the_ones_the_compiler_is_built_for():
     assert on("darwin", "arm64") and on("linux", "x86_64") and on("linux", "aarch64") and on("win32", "AMD64")
     assert not on("darwin", "x86_64") and not on("linux", "x86_64", libc="") and not on("win32", "ARM64")
     assert not on("win32", "AMD64", maxsize=2**31 - 1) and not on("linux", "x86_64", maxsize=2**31 - 1)
+
+
+def search_refusals(has_wheel: bool) -> list[str]:
+    """What a full-text search on each graph engine raises with the compiler missing, has_wheel as given."""
+    script = (
+        "import sys\n"
+        "sys.modules['drivine_cypher_compiler'] = None\n"
+        "import drivine.cypher.shared_compiler as shared\n"
+        f"shared.has_wheel = lambda: {has_wheel}\n"
+        "from drivine import DrivineError\n"
+        "for store in ('NEO4J', 'MEMGRAPH', 'FALKORDB'):\n"
+        "    try:\n"
+        "        shared.full_text_search(store, None, ['Doc'], ['body'], 'graph', top_k=5)\n"
+        "        print('written')\n"
+        "    except DrivineError as error:\n"
+        "        print(error)\n"
+    )
+    return run(script).splitlines()
+
+
+def test_a_graph_engines_full_text_search_is_the_modules_and_names_what_installs_it_where_it_has_a_wheel():
+    # The graph engines' extras don't install the module, as it has no wheel for every platform they run on.
+    assert search_refusals(True) == [
+        f"Full-text search on {engine} is written by drivine-cypher-compiler, which the compiler extra installs: "
+        f'pip install "drivine[{extra},compiler]".'
+        for engine, extra in (("Neo4j", "neo4j"), ("Memgraph", "neo4j"), ("FalkorDB", "falkordb"))
+    ]
+
+
+def test_a_graph_engines_full_text_search_where_the_module_has_no_wheel_is_refused_naming_the_platform():
+    import platform
+
+    lines = search_refusals(False)
+    assert [it.split(" is written")[0] for it in lines] == [
+        f"Full-text search on {engine}" for engine in ("Neo4j", "Memgraph", "FalkorDB")
+    ]
+    assert all(f"{platform.system()} {platform.machine()}" in it and "Every other statement" in it for it in lines)

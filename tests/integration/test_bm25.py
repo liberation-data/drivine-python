@@ -1,8 +1,8 @@
 """
-Full-text search scores by BM25 on every store (drivine4j#604): Lucene's, on Neo4j, and bm25_ranked on the SQL stores
-without a text index of their own. A rare term outweighs a common one, a short text outranks a long one that holds a
-term as often, and a term's count adds less each time it is counted again. Memgraph and FalkorDB score by their own
-measures, and are left out.
+Full-text search scores by BM25 on every store (drivine4j#604): Lucene's, on Neo4j, and the shared module's on the SQL
+stores without a text index of their own. A rare term outweighs a common one, a short text outranks a long one that
+holds a term as often, and a term's count adds less each time it is counted again. Memgraph and FalkorDB score by their
+own measures, and are left out.
 """
 
 import json
@@ -23,7 +23,11 @@ from drivine import (
     StatelessGraphObjectManager,
     full_text_index,
 )
-from drivine.backend.sql.bm25 import K1, PREFIX, B
+
+K1 = 1.2
+B = 0.75
+PREFIX = K1 + 1
+"""Lucene's BM25 constants, which the shared module's search scores by: k1, b, and what a prefix term adds, k1 + 1."""
 
 
 class Bm25Article(NodeFragment, labels=["Bm25Article"]):
@@ -158,7 +162,7 @@ class TestBm25:
         assert hits[0][1] == pytest.approx(1, abs=1e-9)
         assert all(0 < score <= 1 for _, score in hits)
         if gom.persistence_manager.type != DatabaseType.NEO4J:
-            # bm25_ranked's own figure, lengths in characters (Lucene's are in words): "graph" 5 times in 45
+            # The module's own figure, lengths in characters (Lucene's are in words): "graph" 5 times in 45
             # characters, each counted though written again at once (drivine4j#607), against "graph" and "soup" once
             # each in 15, over 33 texts of 940 characters, "graph" in 22 and "soup" in 1.
             assert dict(hits)["many"] == pytest.approx(0.1541609729904888, abs=1e-9)

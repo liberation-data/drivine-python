@@ -9,12 +9,13 @@ import dataclasses
 import json
 import re
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any
 
 import pytest
 
 from drivine.backend.oracle.oracle_backend import OracleBackend
 from drivine.backend.oracle.oracle_graph import OracleGraph
+from drivine.cypher.shared_compiler import SearchIndex
 from drivine.sync import (
     ConnectionProperties,
     DatabaseRegistry,
@@ -159,11 +160,13 @@ def test_lists_uses_and_drops_what_drivine4j_made_and_makes_none_beside_it(
     graph = OracleGraph(GRAPH)
     backend = OracleBackend(graph)
 
-    def table_of(kind: Literal["VECTOR", "FULLTEXT"], label: str, properties: list[str]) -> str | None:
-        return pm.maybe_get_one(backend.search_index_table(kind, label, properties).spec())
+    def vector_table() -> str | None:
+        return pm.maybe_get_one(backend.vector_index_table("Chunk", "embedding").spec())
 
-    assert table_of("VECTOR", "Chunk", ["embedding"]) == graph.vectors("Chunk", "embedding")
-    assert table_of("FULLTEXT", "Article", ["title", "body"]) == graph.texts("Article", ["title", "body"])
+    assert vector_table() == graph.vectors("Chunk", "embedding")
+    lookup = backend.full_text_index("Article", ["title", "body"])
+    found = lookup.found(pm.query(lookup.statement.spec()))
+    assert found == SearchIndex(oracle_text=graph.texts("Article", ["title", "body"]))
     gom.save_all([Chunk(id="c1", embedding=[1, 0]), Chunk(id="c2", embedding=[0, 1])])
     side = graph.vectors("Chunk", "embedding")
     assert int(pm.get_one(QuerySpecification[Any](f"SELECT COUNT(*) FROM {side}"))) == 2
@@ -175,7 +178,7 @@ def test_lists_uses_and_drops_what_drivine4j_made_and_makes_none_beside_it(
         gom.indexes.drop(spec)
     assert rows(pm, GRAPH) == []
     assert [it for it in indexes(pm, GRAPH) if re.match(r"^JVM_(IX|LX|UQ|V|T)_", it)] == []
-    assert table_of("VECTOR", "Chunk", ["embedding"]) is None
+    assert vector_table() is None
 
 
 def test_records_what_drivine4j_records_to_the_object_names(
@@ -306,7 +309,7 @@ def test_understands_a_store_this_library_wrote_before_it_recorded_what_drivine4
     assert (gom.constraints.ensure(UNIQUES[0])).status == "ALREADY_MATCHING"
     assert (gom.indexes.ensure(VECTORS)).status == "ALREADY_MATCHING"
     backend = OracleBackend(graph)
-    found = pm.maybe_get_one(backend.search_index_table("VECTOR", "Chunk", ["embedding"]).spec())
+    found = pm.maybe_get_one(backend.vector_index_table("Chunk", "embedding").spec())
     assert found == graph.vectors("Chunk", "embedding")
 
     # A range index over the unique property is served by the earlier constraint's index, as by one made now.

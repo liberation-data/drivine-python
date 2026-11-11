@@ -118,6 +118,58 @@ def test_a_day_and_a_moment_are_their_iso_text_on_a_sql_store(cypher_pm: Persist
     assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?", moment), moment
 
 
+PYTHON_TEMPORALS = pytest.mark.parametrize(
+    "value",
+    [
+        date(2024, 1, 1),
+        datetime(2024, 1, 1, 9, 30),
+        datetime(2024, 1, 1, 9, 30, tzinfo=UTC),
+        time(9, 30),
+        time(9, 30, tzinfo=timezone(timedelta(hours=10))),
+        timedelta(days=1, hours=2),
+    ],
+    ids=["date", "localdatetime", "datetime", "localtime", "time", "duration"],
+)
+"""Each kind of Python temporal, which goes to the shared compiler tagged with its kind, at any depth."""
+
+
+def _bindable(pm: PersistenceManager, value: Any) -> None:
+    """Skips a zoned time on Neo4j, whose driver can't send one: it asks its tzinfo's utcoffset of the time itself."""
+    if pm.type is DatabaseType.NEO4J and isinstance(value, time) and value.tzinfo is not None:
+        pytest.skip("Neo4j's Python driver can't bind a datetime.time with a tzinfo (utcoffset wants a datetime)")
+
+
+@PYTHON_TEMPORALS
+def test_a_python_temporal_bound_beside_the_text_that_spells_it_is_not_equal_to_it(
+    cypher_pm: PersistenceManager, value: Any
+):
+    _bindable(cypher_pm, value)
+    # A SQL store compares it as the temporal it is, not as its ISO text, as Neo4j does (drivine-cypher-spec#171).
+    text = str(cypher_pm.get_one(spec("RETURN toString($v)", {"v": value})))
+    row = cypher_pm.get_one(spec("RETURN [$v = $s, $v <> $s]", {"v": value, "s": text}))
+    assert row == [False, True], (value, text)
+
+
+@PYTHON_TEMPORALS
+def test_a_python_temporal_bound_in_a_list_or_map_beside_the_text_that_spells_it_is_not_equal_to_it(
+    cypher_pm: PersistenceManager, value: Any
+):
+    _bindable(cypher_pm, value)
+    text = str(cypher_pm.get_one(spec("RETURN toString($v)", {"v": value})))
+    row = cypher_pm.get_one(
+        spec("RETURN [$v IN [$s], $s IN [$v], [$v] = [$s], {k: $v} = {k: $s}]", {"v": value, "s": text})
+    )
+    if cypher_pm.type is not DatabaseType.NEO4J:
+        # A bound temporal in a list or a map literal doesn't carry its kind into the literal's items yet, so IN and a
+        # list's or map's equality compare it as its ISO text (liberation-data/drivine4j#779).
+        if row != [False, False, False, False]:
+            pytest.xfail(
+                "a bound temporal in a list or a map is compared as its ISO text (liberation-data/drivine4j#779)"
+            )
+        pytest.fail("A bound temporal in a list or a map is no longer equal to its text here: take out the xfail")
+    assert row == [False, False, False, False], (value, text)
+
+
 def test_a_statement_of_hundreds_of_creates_each_naming_nodes_made_before_it_makes_them_all(
     cypher_pm: PersistenceManager,
 ):

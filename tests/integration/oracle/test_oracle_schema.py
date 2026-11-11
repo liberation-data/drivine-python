@@ -25,6 +25,7 @@ from drivine import (
     vector_index,
 )
 from drivine.backend.oracle.oracle_backend import OracleBackend
+from drivine.cypher.shared_compiler import SearchIndex
 from tests.integration.oracle.oracle_seed import ON_ORACLE, OracleSeed
 
 
@@ -121,11 +122,15 @@ async def test_searches_through_the_tables_made_for_vector_and_full_text_indexes
     await gom.indexes.ensure(texts)
     backend = OracleBackend()
 
-    async def table_of(kind: Literal["VECTOR", "FULLTEXT"], properties: list[str]) -> str | None:
-        return await pm.maybe_get_one(backend.search_index_table(kind, "OraSearch", properties).spec())
+    async def vector_table() -> str | None:
+        return await pm.maybe_get_one(backend.vector_index_table("OraSearch", "embedding").spec())
 
-    assert re.match(r"^drivine_v_OraSearchembedding_[0-9a-f]+$", await table_of("VECTOR", ["embedding"]) or "")
-    assert re.match(r"^drivine_t_OraSearchtext_[0-9a-f]+$", await table_of("FULLTEXT", ["text"]) or "")
+    async def text_index() -> SearchIndex:
+        lookup = backend.full_text_index("OraSearch", ["text"])
+        return lookup.found(await pm.query(lookup.statement.spec()))
+
+    assert re.match(r"^drivine_v_OraSearchembedding_[0-9a-f]+$", await vector_table() or "")
+    assert re.match(r"^drivine_t_OraSearchtext_[0-9a-f]+$", (await text_index()).oracle_text or "")
     # Saved after the index: the trigger puts it in the tables.
     await gom.save(Note(id="n2", text="relational tables", embedding=[0, 1]))
     assert [it.value.id for it in await gom.load_nearest(Note, [0, 1], top_k=1)] == ["n2"]
@@ -133,7 +138,8 @@ async def test_searches_through_the_tables_made_for_vector_and_full_text_indexes
     assert [it.value.id for it in await gom.load_matching(Note, "graph", top_k=5)] == ["n1"]
     await gom.indexes.drop(vectors)
     await gom.indexes.drop(texts)
-    assert await table_of("VECTOR", ["embedding"]) is None
+    assert await vector_table() is None
+    assert await text_index() == SearchIndex()
     # Without the index, every node of the label is read, to the same answer.
     assert [it.value.id for it in await gom.load_matching(Note, "+relational -graph", top_k=5)] == ["n2"]
     assert [it.value.id for it in await gom.load_nearest(Note, [0, 1], top_k=1)] == ["n2"]

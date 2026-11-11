@@ -8,6 +8,7 @@ from typing import Annotated, Any, Literal
 import pytest
 
 from drivine.backend.oracle.oracle_backend import OracleBackend
+from drivine.cypher.shared_compiler import SearchIndex
 from drivine.sync import (
     DrivineError,
     FullTextIndex,
@@ -111,11 +112,15 @@ def test_searches_through_the_tables_made_for_vector_and_full_text_indexes(
     gom.indexes.ensure(texts)
     backend = OracleBackend()
 
-    def table_of(kind: Literal["VECTOR", "FULLTEXT"], properties: list[str]) -> str | None:
-        return pm.maybe_get_one(backend.search_index_table(kind, "OraSearch", properties).spec())
+    def vector_table() -> str | None:
+        return pm.maybe_get_one(backend.vector_index_table("OraSearch", "embedding").spec())
 
-    assert re.match(r"^drivine_v_OraSearchembedding_[0-9a-f]+$", table_of("VECTOR", ["embedding"]) or "")
-    assert re.match(r"^drivine_t_OraSearchtext_[0-9a-f]+$", table_of("FULLTEXT", ["text"]) or "")
+    def text_index() -> SearchIndex:
+        lookup = backend.full_text_index("OraSearch", ["text"])
+        return lookup.found(pm.query(lookup.statement.spec()))
+
+    assert re.match(r"^drivine_v_OraSearchembedding_[0-9a-f]+$", vector_table() or "")
+    assert re.match(r"^drivine_t_OraSearchtext_[0-9a-f]+$", (text_index()).oracle_text or "")
     # Saved after the index: the trigger puts it in the tables.
     gom.save(Note(id="n2", text="relational tables", embedding=[0, 1]))
     assert [it.value.id for it in gom.load_nearest(Note, [0, 1], top_k=1)] == ["n2"]
@@ -123,7 +128,8 @@ def test_searches_through_the_tables_made_for_vector_and_full_text_indexes(
     assert [it.value.id for it in gom.load_matching(Note, "graph", top_k=5)] == ["n1"]
     gom.indexes.drop(vectors)
     gom.indexes.drop(texts)
-    assert table_of("VECTOR", ["embedding"]) is None
+    assert vector_table() is None
+    assert text_index() == SearchIndex()
     # Without the index, every node of the label is read, to the same answer.
     assert [it.value.id for it in gom.load_matching(Note, "+relational -graph", top_k=5)] == ["n2"]
     assert [it.value.id for it in gom.load_nearest(Note, [0, 1], top_k=1)] == ["n2"]

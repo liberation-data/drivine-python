@@ -29,24 +29,28 @@ testing = ["testcontainers>=4.8", "pytest>=8"]
 falkordb = [
     "falkordb>=1.2",
 ]
+# Full-text search on a graph engine is written by the shared compiler too, which the graph engines' extras don't
+# install, as it has no wheel for every platform they run on (an Intel Mac, musl Linux): `pip install
+# "drivine[neo4j,compiler]"` where it has one. Pinned as the SQL stores' extras pin it.
+compiler = ["drivine-cypher-compiler==0.42.0"]
 # Each SQL store compiles Cypher with the shared compiler, drivine-cypher-compiler, a native library with a wheel for
 # macOS on Apple Silicon, Linux with glibc (x86_64, aarch64) and Windows x64: in the extras, so `pip install drivine`
 # installs anywhere and the graph engines work where it has no wheel (an Intel Mac, musl Linux). Pinned exactly, to the
 # compiler of the Cypher spec tests/cypher is a copy of.
 oracle = [
     "oracledb>=3.0",
-    "drivine-cypher-compiler==0.41.0",
+    "drivine-cypher-compiler==0.42.0",
 ]
 postgres = [
     "psycopg[binary]>=3.2",
     "psycopg-pool>=3.2",
-    "drivine-cypher-compiler==0.41.0",
+    "drivine-cypher-compiler==0.42.0",
 ]
 # SQLite is apsw's, which bundles its own SQLite: 3.53.2 or later, which writes a float as text to 17 significant
 # digits as compiled Cypher needs (3.53.0 and 3.53.1 still write 15), whatever SQLite Python was built with (#376).
 sqlite = [
     "apsw>=3.53.2",
-    "drivine-cypher-compiler==0.41.0",
+    "drivine-cypher-compiler==0.42.0",
 ]
 
 [project.entry-points.pytest11]

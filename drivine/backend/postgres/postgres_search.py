@@ -4,13 +4,11 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from drivine.backend.graph_statement import GraphStatement
-from drivine.backend.matching_search import MatchingSearch
+from drivine.backend.matching_search import MatchingSearch, searched_labels
 from drivine.backend.nearest_search import NearestSearch
 from drivine.backend.postgres.postgres_graph import PostgresGraph, has_labels, json_value, node_document, text_of
 from drivine.backend.postgres.postgres_views import PostgresViews
-from drivine.backend.sql.bm25 import Bm25Dialect, bm25_ranked
-from drivine.backend.sql.text_query import TextQuery, looking_ahead
-from drivine.drivine_error import DrivineError
+from drivine.cypher.shared_compiler import full_text_search
 from drivine.model.graph_view_model import GraphViewModel
 from drivine.model.target_model import TargetModel
 
@@ -23,10 +21,11 @@ class PostgresSearch:
 
     A vector search is pgvector's: exact over every node of the label that holds an embedding of the vector's size, or
     approximate through the label's HNSW index, which holds the embeddings of its size (see the Postgres schema
-    grammar). It scores on Neo4j's scale: (1 + cos) / 2 for cosine, 1 / (1 + d²) for euclidean. A full-text query is
-    the core of Lucene's syntax (see TextQuery), each term counted as a whole word as Oracle counts one without Oracle
-    Text, scored by BM25 as Neo4j's index scores it (see bm25_ranked), then scaled by the best hit; the trigram index of
-    a full-text index narrows it first to the nodes whose text holds a scoring term's words, which changes no score.
+    grammar). It scores on Neo4j's scale: (1 + cos) / 2 for cosine, 1 / (1 + d²) for euclidean. A full-text search's
+    candidates are the shared module's (`full_text_search`): the core of Lucene's syntax, each term counted as a whole
+    word as Oracle counts one without Oracle Text, scored by BM25 as Neo4j's index scores it, then scaled by the best
+    hit; the trigram index of a full-text index narrows them first to the nodes whose text holds a scoring term's words,
+    which changes no score.
     """
 
     def __init__(self, graph: PostgresGraph) -> None:
@@ -59,50 +58,17 @@ class PostgresSearch:
         return self._scored(target, candidates, search.where, search.threshold, search.limit, search.depth)
 
     def matching(self, target: TargetModel, search: MatchingSearch) -> GraphStatement:
-        if search.text is None:
-            raise DrivineError("A full-text search on Postgres is written with its text.")
-        query = TextQuery.parse(search.text)
-        bindings: dict[str, Any] = {}
-
-        def bind(value: str) -> str:
-            name = f"_term{len(bindings)}"
-            bindings[name] = value
-            return f"CAST(${name} AS text)"
-
-        text = searched_text("c", search.properties)
-        # A node that matches a term holds each of its words: what the trigram index answers is whether it holds them.
-        narrowed = (
-            [
-                "("
-                + " OR ".join(
-                    "(" + " AND ".join(f"{text} LIKE {bind(f'%{_like_text(it)}%')}" for it in words) + ")"
-                    for words in query.scored_words
-                )
-                + ")"
-            ]
-            if search.table
-            else []
+        ranked = full_text_search(
+            "POSTGRES",
+            self.graph.name,
+            searched_labels(target, search.label),
+            search.properties,
+            search.text,
+            search.index,
         )
-
-        # Narrowed by the root's every label before the scale, so the best of it is a hit the search can return.
-        root = target.root if isinstance(target, GraphViewModel) else target
-        labels = [search.label, *(it for it in root.labels if it != search.label)]
-        length = f"length({joined_text('c', search.properties)})"
-        candidates = bm25_ranked(
-            f"SELECT c.nid, {text} AS text, {length} AS len FROM {self.graph.nodes} c "
-            f"WHERE {' AND '.join([has_labels('c', labels), *narrowed])}",
-            f"SELECT {length} AS len FROM {self.graph.nodes} c WHERE {has_labels('c', labels)}",
-            query,
-            Bm25Dialect(
-                count=lambda text, term: (
-                    f"(SELECT count(*) FROM regexp_matches({text}, {bind(looking_ahead(term))}, 'g'))"
-                ),
-                holds=lambda text, term: f"{text} ~ {bind(term)}",
-                ln=lambda value: f"ln({value})",
-                real=lambda value: f"CAST({value} AS double precision)",
-            ),
+        return self._scored(
+            target, ranked.statement, search.where, search.threshold, search.limit, search.depth, ranked.parameters
         )
-        return self._scored(target, candidates, search.where, search.threshold, search.limit, search.depth, bindings)
 
     def _scored(
         self,
@@ -158,9 +124,9 @@ def holds(alias: str, property: str, dimensions: int | None = None) -> str:
 
 def searched_text(alias: str, properties: Sequence[str]) -> str:
     """
-    The text a full-text search reads of the row `alias`: its properties, each as text, a space between them, in lower
-    case. The expression of a full-text index too (with an empty alias), so a statement that reads it so is answered by
-    the index.
+    The text a full-text search reads of the row `alias`, as the shared module's search writes it: its properties, each
+    as text, a space between them, in lower case. The expression of a full-text index's trigram index (with an empty
+    alias), so the search's narrowing by it is answered by the index.
     """
     return f"lower({joined_text(alias, properties)})"
 
@@ -173,8 +139,3 @@ def joined_text(alias: str, properties: Sequence[str]) -> str:
 def _vector(dimensions: int | None = None) -> str:
     """The vector bound as `$_vector`, a list of numbers, as pgvector's: of `dimensions` where given."""
     return f"CAST(CAST($_vector AS float8[]) AS vector{f'({dimensions})' if dimensions else ''})"
-
-
-def _like_text(word: str) -> str:
-    """A word as text a `LIKE` pattern matches as it is: its own `%`, `_` and backslash taken as themselves."""
-    return word.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")

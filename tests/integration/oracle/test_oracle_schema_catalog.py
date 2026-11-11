@@ -7,7 +7,7 @@ import dataclasses
 import json
 import re
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any
 
 import pytest
 
@@ -29,6 +29,7 @@ from drivine import (
 )
 from drivine.backend.oracle.oracle_backend import OracleBackend
 from drivine.backend.oracle.oracle_graph import OracleGraph
+from drivine.cypher.shared_compiler import SearchIndex
 from drivine.manager.graph_object_manager_factory import GraphObjectManagerFactory
 from tests.integration.oracle.oracle_seed import ON_ORACLE
 
@@ -159,11 +160,13 @@ async def test_lists_uses_and_drops_what_drivine4j_made_and_makes_none_beside_it
     graph = OracleGraph(GRAPH)
     backend = OracleBackend(graph)
 
-    async def table_of(kind: Literal["VECTOR", "FULLTEXT"], label: str, properties: list[str]) -> str | None:
-        return await pm.maybe_get_one(backend.search_index_table(kind, label, properties).spec())
+    async def vector_table() -> str | None:
+        return await pm.maybe_get_one(backend.vector_index_table("Chunk", "embedding").spec())
 
-    assert await table_of("VECTOR", "Chunk", ["embedding"]) == graph.vectors("Chunk", "embedding")
-    assert await table_of("FULLTEXT", "Article", ["title", "body"]) == graph.texts("Article", ["title", "body"])
+    assert await vector_table() == graph.vectors("Chunk", "embedding")
+    lookup = backend.full_text_index("Article", ["title", "body"])
+    found = lookup.found(await pm.query(lookup.statement.spec()))
+    assert found == SearchIndex(oracle_text=graph.texts("Article", ["title", "body"]))
     await gom.save_all([Chunk(id="c1", embedding=[1, 0]), Chunk(id="c2", embedding=[0, 1])])
     side = graph.vectors("Chunk", "embedding")
     assert int(await pm.get_one(QuerySpecification[Any](f"SELECT COUNT(*) FROM {side}"))) == 2
@@ -175,7 +178,7 @@ async def test_lists_uses_and_drops_what_drivine4j_made_and_makes_none_beside_it
         await gom.indexes.drop(spec)
     assert await rows(pm, GRAPH) == []
     assert [it for it in await indexes(pm, GRAPH) if re.match(r"^JVM_(IX|LX|UQ|V|T)_", it)] == []
-    assert await table_of("VECTOR", "Chunk", ["embedding"]) is None
+    assert await vector_table() is None
 
 
 async def test_records_what_drivine4j_records_to_the_object_names(
@@ -308,7 +311,7 @@ async def test_understands_a_store_this_library_wrote_before_it_recorded_what_dr
     assert (await gom.constraints.ensure(UNIQUES[0])).status == "ALREADY_MATCHING"
     assert (await gom.indexes.ensure(VECTORS)).status == "ALREADY_MATCHING"
     backend = OracleBackend(graph)
-    found = await pm.maybe_get_one(backend.search_index_table("VECTOR", "Chunk", ["embedding"]).spec())
+    found = await pm.maybe_get_one(backend.vector_index_table("Chunk", "embedding").spec())
     assert found == graph.vectors("Chunk", "embedding")
 
     # A range index over the unique property is served by the earlier constraint's index, as by one made now.

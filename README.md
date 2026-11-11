@@ -34,6 +34,7 @@ pip install "drivine[falkordb]"   # FalkorDB
 pip install "drivine[oracle]"     # Oracle 23.9 or later, through python-oracledb in thin mode
 pip install "drivine[postgres]"   # Postgres 14 or later, through psycopg 3
 pip install "drivine[sqlite]"     # SQLite, a graph in a file, through apsw and the SQLite it bundles
+pip install "drivine[neo4j,compiler]"  # full-text search (load_matching) on a graph engine
 ```
 
 Python 3.11 or newer. A SQLite store and what a transaction gives there are in
@@ -41,7 +42,9 @@ Python 3.11 or newer. A SQLite store and what a transaction gives there are in
 
 The SQL stores' extras also install `drivine-cypher-compiler`, the shared Cypher compiler, a native wheel for Linux with
 glibc (x86-64 and arm64), macOS on Apple Silicon and Windows x64. On an Intel Mac or musl Linux (Alpine) there is no
-wheel, so a SQL store's extra doesn't install there; the graph engines' do. See
+wheel, so a SQL store's extra doesn't install there; the graph engines' do. Full-text search (`load_matching`) is the
+compiler's on every store: on a graph engine, add the `compiler` extra beside its own to search by text
+(`pip install "drivine[neo4j,compiler]"`). See
 [Cypher on a relational database](docs/03-cypher-on-a-relational-database.md).
 
 ## Quick start

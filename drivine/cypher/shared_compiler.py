@@ -3,8 +3,12 @@ Cypher compiled to SQL by the shared compiler: drivine-cypher-spec's Kotlin Mult
 and Drivine for TypeScript run, here as the native library the `drivine-cypher-compiler` wheel holds. A statement gives
 the same SQL in all three libraries, and a compiler fix lands once, in the module.
 
-The library is loaded on the first compile for a SQL store, not on `import drivine`, so an application on the graph
-engines alone never loads it, and runs where it has no wheel.
+Full-text search is the module's too (its README, "Full-text search"): the user's query read, BM25, each SQL store's
+ranked candidates and each graph engine's search head, and the catalog lookup of the index (see `full_text_search` and
+`full_text_index_lookup`), which the backends run, joining back their own projection.
+
+The library is loaded on the first compile for a SQL store, or the first full-text search, not on `import drivine`, so
+an application on the graph engines that doesn't search by text never loads it, and runs where it has no wheel.
 """
 
 from __future__ import annotations
@@ -16,16 +20,20 @@ import math
 import platform
 import sys
 import threading
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from enum import Enum
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from drivine.cypher.sql.compiled_cypher import CompiledCypher
 from drivine.drivine_error import DrivineError
 
 SharedStore = Literal["POSTGRES", "ORACLE", "SQLITE"]
+
+SearchStore = Literal["POSTGRES", "ORACLE", "SQLITE", "NEO4J", "MEMGRAPH", "FALKORDB"]
+"""The stores the shared module writes a full-text search for: the SQL stores, and the graph engines' heads."""
 
 PACKAGE = "drivine_cypher_compiler"
 
@@ -40,7 +48,8 @@ def shared_compiler_loaded() -> bool:
     return _compile is not None
 
 
-def _compiler(store: SharedStore) -> Callable[[str], str]:
+def _compiler(missing: Callable[[], str]) -> Callable[[str], str]:
+    """The shared compiler's entry, loaded on the first call; where it isn't installed, a DrivineError of `missing`."""
     global _compile
     if _compile is None:
         with _lock:
@@ -50,7 +59,7 @@ def _compiler(store: SharedStore) -> Callable[[str], str]:
                 except ModuleNotFoundError as error:
                     if error.name != PACKAGE:
                         raise
-                    raise DrivineError(not_installed(store)) from error
+                    raise DrivineError(missing()) from error
                 _compile = drivine_cypher_compiler.compile
     return _compile
 
@@ -124,7 +133,7 @@ def compile_cypher(
         allow_nan=False,
         separators=(",", ":"),
     )
-    answer: dict[str, Any] = json.loads(_compiler(store)(request))
+    answer: dict[str, Any] = json.loads(_compiler(lambda: not_installed(store))(request))
     if "refusal" in answer:
         raise DrivineError(answer["refusal"])
     if "error" in answer:
@@ -142,6 +151,132 @@ def compile_cypher(
         calls_stored_era=bool(stored.get("era", False)),
         non_finite=bool(answer.get("nonFinite", False)),
     )
+
+
+_GRAPH_ENGINES = {"NEO4J": "Neo4j", "MEMGRAPH": "Memgraph", "FALKORDB": "FalkorDB"}
+"""Each graph engine's name, as a message gives it."""
+
+_GRAPH_EXTRAS = {"NEO4J": "neo4j", "MEMGRAPH": "neo4j", "FALKORDB": "falkordb"}
+"""The extra that installs each graph engine's driver: Memgraph is reached over Bolt, with Neo4j's."""
+
+
+def search_not_installed(store: SearchStore) -> str:
+    """
+    Why a full-text search can't be written here: drivine-cypher-compiler isn't installed. A SQL store's extra installs
+    it. A graph engine's doesn't, as the module has no wheel for every platform the graph engines run on: there the
+    `compiler` extra installs it beside the engine's, where it has a wheel.
+    """
+    engine = _GRAPH_ENGINES.get(store)
+    if engine is None:
+        return not_installed(cast(SharedStore, store))
+    if has_wheel():
+        return (
+            f"Full-text search on {engine} is written by drivine-cypher-compiler, which the compiler extra installs: "
+            f'pip install "drivine[{_GRAPH_EXTRAS[store]},compiler]".'
+        )
+    machine = f"{platform.system()} {platform.machine()}".strip()
+    return (
+        f"Full-text search on {engine} is written by drivine-cypher-compiler, which has no wheel for {machine}: "
+        "Linux with glibc, macOS on Apple Silicon and Windows x64 have one. Every other statement works here as it is."
+    )
+
+
+@dataclass(frozen=True)
+class SearchIndex:
+    """
+    What the library found of a full-text index, as the module's search request gives it: on Postgres whether its
+    trigram index is made, on Oracle the table its Oracle Text index is over, and on Neo4j and Memgraph the index's name
+    where it isn't the one Drivine gives it.
+    """
+
+    trigram: bool | None = None
+    oracle_text: str | None = None
+    name: str | None = None
+
+    def written(self) -> dict[str, Any]:
+        """The index as the request has it: what was found, and nothing that wasn't."""
+        found = {"trigram": self.trigram, "oracleText": self.oracle_text, "name": self.name}
+        return {key: it for key, it in found.items() if it is not None}
+
+
+@dataclass(frozen=True)
+class SearchPlan:
+    """
+    A full-text search as the module writes it: on a SQL store one query of the ranked candidates, `nid` and `score`,
+    the best scoring 1, which the library joins back to its node table; on a graph engine the search's head, the
+    index's `CALL` and each hit's node and score against the best. Its parameters are named `_cy_ft<n>`, which no
+    caller binds.
+    """
+
+    statement: str
+    parameters: dict[str, Any]
+
+
+def full_text_search(
+    store: SearchStore,
+    graph: str | None,
+    labels: Sequence[str],
+    properties: Sequence[str],
+    query: str,
+    index: SearchIndex | None = None,
+    top_k: int | None = None,
+    filtered: bool = False,
+    alias: str | None = None,
+    score_alias: str | None = None,
+) -> SearchPlan:
+    """
+    The full-text search the module's `search` request asks of `store` (its README, "Full-text search"), over the graph
+    named `graph` on a SQL store, as the shared module plans it: drivine4j's statements, byte for byte. `labels` are the
+    root's, the index's first; `properties` every property the index covers, in the order it declares them; and on a
+    graph engine `top_k` how many rows the search wants, `filtered` whether its hits are filtered after the index, and
+    `alias` and `score_alias` what the head names a hit's node and score. What it warns of is logged. A query with no
+    word to look for is a DrivineError of the module's refusal.
+    """
+    search: dict[str, Any] = {"labels": list(labels), "properties": list(properties), "query": query}
+    if index is not None and index.written():
+        search["index"] = index.written()
+    if top_k is not None:
+        search["topK"] = top_k
+    if filtered:
+        search["filtered"] = True
+    if alias is not None:
+        search["alias"] = alias
+    if score_alias is not None:
+        search["scoreAlias"] = score_alias
+    answer = _search_answer(store, graph, {"search": search})
+    warnings: list[str] = answer.get("warnings") or []
+    for warning in warnings:
+        logger.warning(warning)
+    statement = answer.get("sql") or answer.get("cypher")
+    if not isinstance(statement, str):
+        raise DrivineError(f"The full-text search on {store.lower()} gave no statement.")
+    return SearchPlan(statement, decoded(answer.get("parameters") or {}))
+
+
+def full_text_index_lookup(store: SharedStore, graph: str, label: str, properties: Sequence[str]) -> SearchPlan | None:
+    """
+    The statement that finds what the graph's catalog records of the full-text index on `label`'s `properties`, as the
+    shared module writes it: on Postgres a row where its trigram index is made, on Oracle the table its Oracle Text
+    index is over, and no row where none is made. None on a store that keeps no record of it.
+    """
+    answer = _search_answer(store, graph, {"searchIndex": {"label": label, "properties": list(properties)}})
+    sql = answer.get("sql")
+    return SearchPlan(sql, decoded(answer.get("parameters") or {})) if isinstance(sql, str) else None
+
+
+def _search_answer(store: SearchStore, graph: str | None, asked: dict[str, Any]) -> dict[str, Any]:
+    """The module's answer to a full-text request; its refusal, or its error, a DrivineError."""
+    request = json.dumps(
+        {"store": store.lower(), **({"graph": {"name": graph}} if graph is not None else {}), **asked},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    answer: dict[str, Any] = json.loads(_compiler(lambda: search_not_installed(store))(request))
+    if "refusal" in answer:
+        raise DrivineError(answer["refusal"])
+    if "error" in answer:
+        raise DrivineError(f"The full-text search can't be asked of the shared module: {answer['error']}")
+    return answer
 
 
 def _graph(store: SharedStore, graph: str, nulls_equal_stored: bool, era_stored: bool) -> dict[str, Any]:

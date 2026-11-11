@@ -41,7 +41,8 @@ Python 3.11 or newer. A SQLite store and what a transaction gives there are in
 
 The SQL stores' extras also install `drivine-cypher-compiler`, the shared Cypher compiler, a native wheel for Linux with
 glibc (x86-64 and arm64), macOS on Apple Silicon and Windows x64. On an Intel Mac or musl Linux (Alpine) there is no
-wheel, so a SQL store's extra doesn't install there; the graph engines' do. See
+wheel, so a SQL store's extra doesn't install there; the graph engines' do. Full-text search (`load_matching`) is the
+compiler's on every store: on a graph engine, install `drivine-cypher-compiler` beside its extra to search by text. See
 [Cypher on a relational database](docs/03-cypher-on-a-relational-database.md).
 
 ## Quick start

@@ -15,6 +15,12 @@ Kotlin/Native, which builds it, has no target for Intel Macs or for musl Linux (
 and a SQL store's extra doesn't install there. Neo4j, Memgraph and FalkorDB work there as they do anywhere, and a Cypher
 statement for a SQL store is refused with a `DrivineError` naming the platform.
 
+Full-text search, `load_matching`, is the module's on every store: the query read, BM25, each SQL store's ranked
+candidates and each graph engine's search head. A graph engine's extra doesn't install the module, as it has no wheel
+for every platform the graph engines run on, so a search on Neo4j, Memgraph or FalkorDB needs it installed beside the
+extra (`pip install drivine-cypher-compiler`), and without it is refused with a `DrivineError` saying so. Every other
+statement on a graph engine is sent as it is, and needs no compiler.
+
 Postgres is the quickest to try:
 
 ```

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -133,14 +134,7 @@ def test_a_tree_without_an_environment_is_refused(tmp_path: Path):
         compile_bench.tree_python(tmp_path)
 
 
-@pytest.mark.parametrize(("runs", "timed"), [(1, compile_bench.IMPORT_RUNS), (5, 10)])
-def test_import_takes_at_least_import_runs(monkeypatch: pytest.MonkeyPatch, runs: int, timed: int):
-    counts: list[int] = []
-
-    def imports(runs: int) -> list[float]:
-        counts.append(runs)
-        return [1.0] * runs
-
+def _no_compiles(monkeypatch: pytest.MonkeyPatch) -> None:
     def first(store: str, runs: int) -> list[float]:
         return [1.0] * runs
 
@@ -151,9 +145,40 @@ def test_import_takes_at_least_import_runs(monkeypatch: pytest.MonkeyPatch, runs
             for store in compile_bench.STORES
         }
 
-    monkeypatch.setattr(compile_bench, "import_ms", imports)
     monkeypatch.setattr(compile_bench, "first_compile_ms", first)
     monkeypatch.setattr(compile_bench, "warm_ms", warm)
+
+
+@pytest.mark.parametrize(("runs", "timed"), [(1, compile_bench.IMPORT_RUNS), (5, 10)])
+def test_import_takes_at_least_import_runs(monkeypatch: pytest.MonkeyPatch, runs: int, timed: int):
+    counts: list[int] = []
+
+    def imports(runs: int) -> list[float]:
+        counts.append(runs)
+        return [1.0] * runs
+
+    monkeypatch.setattr(compile_bench, "import_ms", imports)
+    _no_compiles(monkeypatch)
     monkeypatch.setattr(sys, "argv", ["compile_bench.py", "--runs", str(runs)])
     assert compile_bench.main() == 0
     assert counts == [timed]
+
+
+@pytest.mark.parametrize(("ours", "code"), [(1.05, 0), (1.2, 1)])
+def test_the_run_gates_import_on_the_tree_it_was_timed_in_turn_with(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, ours: float, code: int
+):
+    counts: list[int] = []
+
+    def paired(runs: int, other: Path) -> tuple[list[float], list[float]]:
+        counts.append(runs)
+        return [ours] * runs, [1.0] * runs
+
+    monkeypatch.setattr(compile_bench, "paired_import_ms", paired)
+    _no_compiles(monkeypatch)
+    baseline = tmp_path / "baseline.json"
+    baseline.write_text(json.dumps(_results(100.0)), encoding="utf-8")
+    argv = ["compile_bench.py", "--runs", "1", "--against", str(baseline), "--import-against", "../main-tree"]
+    monkeypatch.setattr(sys, "argv", argv)
+    assert compile_bench.main() == code
+    assert counts == [compile_bench.IMPORT_RUNS]

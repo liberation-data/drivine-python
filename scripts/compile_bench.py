@@ -1,7 +1,7 @@
 """
 How long drivine takes to import and to compile Cypher to SQL: the bar the shared compiler is held to (#467, #471).
 
-    python scripts/compile_bench.py [--json results.json] [--runs N] [--against baseline.json]
+    python scripts/compile_bench.py [--json results.json] [--runs N] [--against baseline.json] [--import-against tree]
 
 It measures, each in a fresh interpreter where a fresh one is what a user's program starts with:
 
@@ -14,7 +14,8 @@ It measures, each in a fresh interpreter where a fresh one is what a user's prog
   differ only by noise: "uncached" clears the parse cache of the compiler Drivine had before (`read_cypher`), which the
   baseline (tests/bench/compile-baseline.json) was measured on, and which no compile calls now.
 
-With `--against`, it fails where a measure is worse than the baseline's by more than NOISE (see regressions).
+With `--against`, it fails where a measure is worse than its bar by more than NOISE (see regressions): a compile's is
+the baseline's, and import's is that of the checkout `--import-against` names, timed in turn with this tree's.
 
 The numbers are wall-clock and depend on the machine, so compare runs of one machine only: CI's, for the gate.
 """
@@ -217,7 +218,10 @@ def main() -> int:
     parser.add_argument(
         "--import-against",
         type=Path,
-        help="another checkout, `uv sync`ed (CI's: main): time its imports in turn with this tree's, and gate on them",
+        help=(
+            "another checkout, `uv sync`ed (CI's: main): time its imports in turn with this tree's, and, with "
+            "--against, gate on them"
+        ),
     )
     parser.add_argument(
         "--against",

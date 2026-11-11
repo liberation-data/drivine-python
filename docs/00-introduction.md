@@ -28,6 +28,7 @@ pip install "drivine[falkordb]"   # FalkorDB
 pip install "drivine[oracle]"     # Oracle 23.9 or later, through python-oracledb in thin mode
 pip install "drivine[postgres]"   # Postgres 14 or later, through psycopg 3
 pip install "drivine[sqlite]"     # SQLite, a graph in a file, through apsw and the SQLite it bundles
+pip install "drivine[neo4j,compiler]"  # full-text search (load_matching) on a graph engine
 ```
 
 The SQL stores' extras also install `drivine-cypher-compiler`, the shared Cypher compiler, which has no wheel for an

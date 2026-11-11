@@ -180,6 +180,11 @@ for hit in hits:
 found = await gom.load_matching(Chunk, "graph AND database", top_k=10, threshold=0.5)
 ```
 
+- **Breaking change in 0.8.0: full-text search on a graph engine needs the `compiler` extra.** `load_matching` is the
+  shared compiler's on every store (see [Cypher on a relational database](03-cypher-on-a-relational-database.md)),
+  which the `neo4j` and `falkordb` extras don't install: add it, `pip install "drivine[neo4j,compiler]"`, or a search
+  on Neo4j, Memgraph or FalkorDB raises a `DrivineError` saying so. Where the compiler has no wheel (an Intel Mac,
+  musl Linux) there is no full-text search on a graph engine; every other statement works there as before.
 - **One scale on every engine.** A nearest score is a similarity, higher nearer: (1 + cos) / 2 for cosine, 1 / (1 + d²)
   for euclidean. A matching score is scaled so that the best hit is 1: the best with every label of the root, as the
   index is over the first.

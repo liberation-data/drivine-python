@@ -17,8 +17,8 @@ statement for a SQL store is refused with a `DrivineError` naming the platform.
 
 Full-text search, `load_matching`, is the module's on every store: the query read, BM25, each SQL store's ranked
 candidates and each graph engine's search head. A graph engine's extra doesn't install the module, as it has no wheel
-for every platform the graph engines run on, so a search on Neo4j, Memgraph or FalkorDB needs it installed beside the
-extra (`pip install drivine-cypher-compiler`), and without it is refused with a `DrivineError` saying so. Every other
+for every platform the graph engines run on, so a search on Neo4j, Memgraph or FalkorDB needs the `compiler` extra beside
+the engine's (`pip install "drivine[neo4j,compiler]"`), and without it is refused with a `DrivineError` saying so. Every other
 statement on a graph engine is sent as it is, and needs no compiler.
 
 Postgres is the quickest to try:

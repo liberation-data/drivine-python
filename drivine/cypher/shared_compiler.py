@@ -154,21 +154,25 @@ def compile_cypher(
 
 
 _GRAPH_ENGINES = {"NEO4J": "Neo4j", "MEMGRAPH": "Memgraph", "FALKORDB": "FalkorDB"}
+"""Each graph engine's name, as a message gives it."""
+
+_GRAPH_EXTRAS = {"NEO4J": "neo4j", "MEMGRAPH": "neo4j", "FALKORDB": "falkordb"}
+"""The extra that installs each graph engine's driver: Memgraph is reached over Bolt, with Neo4j's."""
 
 
 def search_not_installed(store: SearchStore) -> str:
     """
     Why a full-text search can't be written here: drivine-cypher-compiler isn't installed. A SQL store's extra installs
-    it. A graph engine's doesn't, as the module has no wheel for every platform the graph engines run on: there it is
-    installed on its own, where it has a wheel.
+    it. A graph engine's doesn't, as the module has no wheel for every platform the graph engines run on: there the
+    `compiler` extra installs it beside the engine's, where it has a wheel.
     """
     engine = _GRAPH_ENGINES.get(store)
     if engine is None:
         return not_installed(cast(SharedStore, store))
     if has_wheel():
         return (
-            f"Full-text search on {engine} is written by drivine-cypher-compiler, the shared module: "
-            "pip install drivine-cypher-compiler."
+            f"Full-text search on {engine} is written by drivine-cypher-compiler, which the compiler extra installs: "
+            f'pip install "drivine[{_GRAPH_EXTRAS[store]},compiler]".'
         )
     machine = f"{platform.system()} {platform.machine()}".strip()
     return (

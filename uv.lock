@@ -496,6 +496,9 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+compiler = [
+    { name = "drivine-cypher-compiler" },
+]
 falkordb = [
     { name = "falkordb" },
 ]
@@ -539,6 +542,7 @@ requires-dist = [
     { name = "antlr4-python3-runtime", marker = "extra == 'postgres'", specifier = ">=4.13.2,<4.14" },
     { name = "antlr4-python3-runtime", marker = "extra == 'sqlite'", specifier = ">=4.13.2,<4.14" },
     { name = "apsw", marker = "extra == 'sqlite'", specifier = ">=3.53.2" },
+    { name = "drivine-cypher-compiler", marker = "extra == 'compiler'", specifier = "==0.41.0" },
     { name = "drivine-cypher-compiler", marker = "extra == 'oracle'", specifier = "==0.41.0" },
     { name = "drivine-cypher-compiler", marker = "extra == 'postgres'", specifier = "==0.41.0" },
     { name = "drivine-cypher-compiler", marker = "extra == 'sqlite'", specifier = "==0.41.0" },
@@ -552,7 +556,7 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'testing'", specifier = ">=8" },
     { name = "testcontainers", marker = "extra == 'testing'", specifier = ">=4.8" },
 ]
-provides-extras = ["neo4j", "pilgrim", "testing", "falkordb", "oracle", "postgres", "sqlite"]
+provides-extras = ["neo4j", "pilgrim", "testing", "falkordb", "compiler", "oracle", "postgres", "sqlite"]
 
 [package.metadata.requires-dev]
 dev = [

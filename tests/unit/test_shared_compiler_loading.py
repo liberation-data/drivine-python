@@ -120,9 +120,9 @@ def search_refusals(has_wheel: bool) -> list[str]:
 def test_a_graph_engines_full_text_search_is_the_modules_and_names_what_installs_it_where_it_has_a_wheel():
     # The graph engines' extras don't install the module, as it has no wheel for every platform they run on.
     assert search_refusals(True) == [
-        f"Full-text search on {engine} is written by drivine-cypher-compiler, the shared module: "
-        "pip install drivine-cypher-compiler."
-        for engine in ("Neo4j", "Memgraph", "FalkorDB")
+        f"Full-text search on {engine} is written by drivine-cypher-compiler, which the compiler extra installs: "
+        f'pip install "drivine[{extra},compiler]".'
+        for engine, extra in (("Neo4j", "neo4j"), ("Memgraph", "neo4j"), ("FalkorDB", "falkordb"))
     ]
 
 

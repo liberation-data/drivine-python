@@ -29,6 +29,10 @@ testing = ["testcontainers>=4.8", "pytest>=8"]
 falkordb = [
     "falkordb>=1.2",
 ]
+# Full-text search on a graph engine is written by the shared compiler too, which the graph engines' extras don't
+# install, as it has no wheel for every platform they run on (an Intel Mac, musl Linux): `pip install
+# "drivine[neo4j,compiler]"` where it has one. Pinned as the SQL stores' extras pin it.
+compiler = ["drivine-cypher-compiler==0.41.0"]
 # Each SQL store compiles Cypher with the shared compiler, drivine-cypher-compiler, a native library with a wheel for
 # macOS on Apple Silicon, Linux with glibc (x86_64, aarch64) and Windows x64: in the extras, so `pip install drivine`
 # installs anywhere and the graph engines work where it has no wheel (an Intel Mac, musl Linux). Pinned exactly, to the

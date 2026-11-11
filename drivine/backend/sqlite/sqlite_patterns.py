@@ -2,8 +2,8 @@
 The regular expressions the functions of one SQLite connection read, as drivine4j's `SqlitePatterns` reads them: Java's
 expressions, compiled with `UNICODE_CHARACTER_CLASS`, with what Postgres's add that Java's do not read, a class written
 as POSIX names it, `[:alnum:]`, which is the same class, of letters and digits in any script, as on a Postgres database
-whose text is Unicode. So an expression a full-text search writes for Postgres reads the same here (see TextQuery), and
-one a Cypher `=~` gives, `text REGEXP ('^(?:' || pattern || ')\\z')`, matches as on drivine4j's SQLite and Neo4j.
+whose text is Unicode. So an expression the shared module's full-text search writes for Postgres reads the same here,
+and one a Cypher `=~` gives, `text REGEXP ('^(?:' || pattern || ')\\z')`, matches as on drivine4j's SQLite and Neo4j.
 
 Python's `re` reads another dialect, so each expression is written as Python reads it (see JavaPattern):
 

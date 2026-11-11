@@ -261,7 +261,7 @@ async def test_reports_the_values_a_uniqueness_constraint_would_refuse_and_refus
 
 
 async def test_searches_by_vector_and_by_text_alike_with_an_index_and_without_one(
-    gom: StatelessGraphObjectManager, seed: SqlSeed
+    pm: PersistenceManager, gom: StatelessGraphObjectManager, seed: SqlSeed
 ):
     docs = [
         ("d1", "graph databases store nodes", [1, 0, 0]),
@@ -289,10 +289,18 @@ async def test_searches_by_vector_and_by_text_alike_with_an_index_and_without_on
     assert sorted(id_ for id_, _ in await matching("graph*")) == ["d1", "d3", "d5"]
     await gom.indexes.ensure(vector_index("Doc", "embedding", 3))
     await gom.indexes.ensure(full_text_index("Doc", "body"))
+
+    async def trigram() -> bool | None:
+        # Found by the shared module's lookup of the catalog, as load_matching finds it.
+        lookup = PostgresBackend(GRAPH).full_text_index("Doc", ["body"])
+        return lookup.found(await pm.query(lookup.statement.spec())).trigram
+
+    assert await trigram() is True
     assert await nearest() == exact
     assert await matching("graph -relational") == scored
     await gom.indexes.drop(vector_index("Doc", "embedding", 3))
     await gom.indexes.drop(full_text_index("Doc", "body"))
+    assert await trigram() is False
 
 
 async def test_mints_the_store_identity_once_as_a_node_of_the_graph(pm: PersistenceManager):

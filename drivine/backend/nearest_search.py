@@ -24,7 +24,7 @@ class NearestSearch:
     depth: Mapping[str, int] = field(default_factory=lambda: {})
     table: str | None = None
     """
-    The table an index made for the search is over, where the store keeps one (see `search_index_table`). On Postgres,
+    The table an index made for the search is over, where the store keeps one (see `vector_index_table`). On Postgres,
     whose index is over the node table, the size of the embeddings the index holds.
     """
     dimensions: int | None = None

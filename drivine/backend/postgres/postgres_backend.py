@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from typing import Any, Literal
+from typing import Any
 
 from drivine.annotation.direction import Direction
 from drivine.backend.cascade_depth_check import CascadeDepthCheck
 from drivine.backend.fragment_group import FragmentGroup
 from drivine.backend.graph_statement import GraphStatement
 from drivine.backend.matched_node import MatchedNode
-from drivine.backend.matching_search import MatchingSearch
+from drivine.backend.matching_search import FullTextIndexLookup, MatchingSearch
 from drivine.backend.nearest_search import NearestSearch
 from drivine.backend.page import Page
 from drivine.backend.postgres.postgres_graph import PostgresGraph, has_labels, node_document, number_of, text_of
@@ -24,6 +24,7 @@ from drivine.backend.sql.cypher_shorthand import CypherShorthand
 from drivine.backend.sql.sql_cascade import beyond_count, kept_targets
 from drivine.backend.sql.sql_catalog import CATALOG_KINDS, catalog_properties
 from drivine.backend.sql.sql_graph import self_loop_once, sql_text
+from drivine.cypher.shared_compiler import SearchIndex, full_text_index_lookup
 from drivine.drivine_error import DrivineError
 from drivine.dsl.query import Query
 from drivine.dsl.rendered_query import RenderedQuery
@@ -217,24 +218,28 @@ class PostgresBackend:
         root = target.root if isinstance(target, GraphViewModel) else target
         return self._deleting(root, self._root_where(target, where))
 
-    def search_index_table(
-        self,
-        kind: Literal["VECTOR", "FULLTEXT"],
-        label: str,
-        properties: Sequence[str],
-        dimensions: int | None = None,
-    ) -> GraphStatement:
+    def vector_index_table(self, label: str, property: str, dimensions: int | None = None) -> GraphStatement:
         """
-        Whether a search index was made, which is over the node table: the size of the embeddings a vector index holds,
-        and the name of a full-text index. One row, or none when the index was not made, or was dropped by hand.
-        `dimensions` is not needed here: the search compares the index's size with the vector's itself.
+        Whether a vector index was made, which is over the node table: the size of the embeddings it holds. One row, or
+        none when the index was not made, or was dropped by hand. `dimensions` is not needed here: the search compares
+        the index's size with the vector's itself.
         """
-        made = "details ->> 'dimensions'" if kind == "VECTOR" else "object_name"
         return PostgresStatement(
-            f'SELECT {made} AS "table" FROM {self.graph.catalog} WHERE kind = CAST($kind AS text) '
+            f"SELECT details ->> 'dimensions' AS \"table\" FROM {self.graph.catalog} WHERE kind = CAST($kind AS text) "
             "AND label = CAST($label AS text) AND properties = CAST($properties AS text) "
             "AND object_name IS NOT NULL AND to_regclass(object_name) IS NOT NULL",
-            {"kind": CATALOG_KINDS[kind], "label": label, "properties": catalog_properties(properties)},
+            {"kind": CATALOG_KINDS["VECTOR"], "label": label, "properties": catalog_properties([property])},
+        )
+
+    def full_text_index(self, label: str, properties: Sequence[str]) -> FullTextIndexLookup:
+        """
+        Whether the full-text index's trigram index was made, by the shared module's lookup of the catalog: a row where
+        it is, none where it was not made, or was dropped by hand. The search narrows the nodes it counts by it.
+        """
+        lookup = full_text_index_lookup("POSTGRES", self.graph.name, label, properties)
+        assert lookup is not None, "Postgres records its full-text indexes in its catalog."
+        return FullTextIndexLookup(
+            PostgresStatement(lookup.statement, lookup.parameters), lambda rows: SearchIndex(trigram=len(rows) > 0)
         )
 
     def nearest(self, target: TargetModel, search: NearestSearch) -> GraphStatement:

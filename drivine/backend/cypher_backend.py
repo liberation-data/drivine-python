@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
@@ -15,7 +16,7 @@ from drivine.backend.fragment_group import FragmentGroup
 from drivine.backend.graph_statement import GraphStatement
 from drivine.backend.group_statement import GroupStatement
 from drivine.backend.matched_node import MatchedNode
-from drivine.backend.matching_search import MatchingSearch, index_limit
+from drivine.backend.matching_search import INDEX_LIMIT_CEILING, MatchingSearch, searched_labels
 from drivine.backend.nearest_search import NearestSearch
 from drivine.backend.page import Page
 from drivine.backend.patch_statements import PatchStatements
@@ -23,6 +24,7 @@ from drivine.backend.save_statement import SaveStatement
 from drivine.backend.save_statement_builder import SaveStatementBuilder
 from drivine.backend.view_projection import ViewProjection
 from drivine.backend.view_projector import ViewProjector, fragment
+from drivine.cypher.shared_compiler import SearchPlan, full_text_search
 from drivine.drivine_error import DrivineError
 from drivine.dsl.query import Query
 from drivine.dsl.query_renderer import QueryRenderer
@@ -266,38 +268,39 @@ class CypherBackend:
 
     def matching(self, target: TargetModel, search: MatchingSearch) -> GraphStatement:
         """
-        The roots matching `$_text` by the full-text index, each as `{value, score}`, most relevant first. Scaled by
-        the best hit, so the scale is [0, 1] on every engine; a best score of 0 (FalkorDB) gives each 1.
+        The roots matching the text by the full-text index, each as `{value, score}`, most relevant first: the shared
+        module's head of the search (`full_text_search`), the index's `CALL`, the hits checked for the root's every
+        label (the index is on the first), cut to the best `limit` of them, or FILTERED_OVER_FETCH times as many where
+        something drops a hit after the index, and each scaled by the best, so the scale is [0, 1] on every engine; a
+        best score of 0 (FalkorDB) gives each 1. Every hit the cut keeps is collected to find the best, so the cut, not
+        the limit, is what a search costs, and an engine whose call takes a limit is given it too. The head yields its
+        rows best first, so a fragment's limit takes no sort of its own.
 
-        Every hit is collected to find the best, and each row after carries the collection, so the number of hits, not
-        the limit, is what a search costs, and a common word matches most of a corpus. So the hits are cut to the best
-        `index_limit` before they are collected, on every engine, and an engine whose call takes a limit is given it
-        too. The cut keeps the best score, so the scale is the same as with every hit.
-
-        The cut's sort stays even where the call yields its hits best first: `collect` keeps the order it is given and
-        `UNWIND` the order of the list, so the rows come out best first, and a fragment's limit takes no sort of its
-        own.
-
-        The index is on the root's first label, so it yields nodes with that label alone, which are not the root's. A
-        root with more labels has its hits checked for all of them before they are cut or scaled, so the best of the
-        scale is a hit the search can return, as on a store that narrows by labels first. The check is a `WITH` of its
-        own: FalkorDB and Memgraph take no `WHERE` before an `ORDER BY` in one.
+        The query is bound as the module binds it. Its limits are written into the statement, as a vector search's `k`
+        is, so the statement is Drivine for TypeScript's to the byte (its numbers go over Bolt as floats, which no
+        engine takes as a limit).
         """
-        limit = index_limit(search.limit, self._filters_after_search(target, search.where))
-        root = target.root if isinstance(target, GraphViewModel) else target
-        labelled = [f"WITH node, score WHERE node{label_expression(root.labels)}"] if len(root.labels) > 1 else []
-        head = [
-            self.grammar.full_text_search(search.label, search.properties, limit),
-            *labelled,
-            "WITH node, score",
-            "ORDER BY score DESC",
-            f"LIMIT {limit}",
-            "WITH collect({node: node, score: score}) AS _hits, max(score) AS _best",
-            "UNWIND _hits AS _hit",
-            f"WITH _hit.node AS {NODE_ALIAS}, CASE WHEN _best > 0 THEN _hit.score / _best ELSE 1.0 END AS _score",
-        ]
+        head = full_text_search(
+            self.grammar.search_store,
+            None,
+            searched_labels(target, search.label),
+            search.properties,
+            search.text,
+            top_k=min(search.limit, INDEX_LIMIT_CEILING),
+            filtered=self._filters_after_search(target, search.where),
+            alias=NODE_ALIAS,
+            score_alias="_score",
+        )
+        text, bindings = _counts_written(head)
         return self._scored(
-            target, head, search.where, search.threshold, search.limit, search.depth, limit_before_projection=True
+            target,
+            [text],
+            search.where,
+            search.threshold,
+            search.limit,
+            search.depth,
+            limit_before_projection=True,
+            bindings=bindings,
         )
 
     def _filters_after_search(self, target: TargetModel, where: str | None) -> bool:
@@ -443,6 +446,7 @@ class CypherBackend:
         limit: int | None,
         depth: Mapping[str, int],
         limit_before_projection: bool = False,
+        bindings: Mapping[str, Any] | None = None,
     ) -> GraphStatement:
         """
         The tail of a scored search: filter after the search, project, order by score, trim. With
@@ -479,7 +483,8 @@ class CypherBackend:
                     "ORDER BY result.score DESC",
                     *([f"LIMIT {limit}"] if limit is not None and not early else []),
                 ]
-            )
+            ),
+            dict(bindings or {}),
         )
 
     def _root_where(self, target: TargetModel, where: str | None) -> str:
@@ -525,3 +530,24 @@ class CypherBackend:
         if not model.node_id_property:
             raise DrivineError(f"{model.type.__name__} has no NodeId field, so it can't be loaded by id.")
         return f"{NODE_ALIAS}.{quote_name(model.node_id_property)} = $id"
+
+
+_SEARCH_PARAMETER = re.compile(r"\$(_cy_ft[0-9]+)(?![A-Za-z0-9_])")
+
+
+def _counts_written(head: SearchPlan) -> tuple[str, dict[str, Any]]:
+    """
+    A full-text head the shared module wrote, with each whole number it binds, the limits, written into the statement
+    as its digits, and the rest, the query, left to bind: the statement Drivine for TypeScript runs, whose numbers go
+    over Bolt as floats, which no engine takes as a limit.
+    """
+    bindings: dict[str, Any] = {}
+
+    def written(match: re.Match[str]) -> str:
+        value = head.parameters[match.group(1)]
+        if isinstance(value, int) and not isinstance(value, bool):
+            return str(value)
+        bindings[match.group(1)] = value
+        return match.group(0)
+
+    return _SEARCH_PARAMETER.sub(written, head.statement), bindings

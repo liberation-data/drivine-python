@@ -2,14 +2,14 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Mapping, Sequence
-from typing import Any, Literal
+from typing import Any
 
 from drivine.annotation.direction import Direction
 from drivine.backend.cascade_depth_check import CascadeDepthCheck
 from drivine.backend.fragment_group import FragmentGroup
 from drivine.backend.graph_statement import GraphStatement
 from drivine.backend.matched_node import MatchedNode
-from drivine.backend.matching_search import MatchingSearch
+from drivine.backend.matching_search import FullTextIndexLookup, MatchingSearch
 from drivine.backend.nearest_search import NearestSearch
 from drivine.backend.oracle.oracle_graph import OracleGraph, has_labels, json_key, node_document, text_of
 from drivine.backend.oracle.oracle_groups import OracleGroups
@@ -24,6 +24,7 @@ from drivine.backend.save_statement import SaveStatement
 from drivine.backend.sql.cypher_shorthand import CypherShorthand
 from drivine.backend.sql.sql_cascade import beyond_count, kept_targets
 from drivine.backend.sql.sql_catalog import catalog_properties
+from drivine.cypher.shared_compiler import SearchIndex, full_text_index_lookup
 from drivine.drivine_error import DrivineError
 from drivine.dsl.query import Query
 from drivine.dsl.rendered_query import RenderedQuery
@@ -219,27 +220,21 @@ END;""")
         root = target.root if isinstance(target, GraphViewModel) else target
         return self._deleting(root, self._root_where(target, where), tested)
 
-    def search_index_table(
-        self,
-        kind: Literal["VECTOR", "FULLTEXT"],
-        label: str,
-        properties: Sequence[str],
-        dimensions: int | None = None,
-    ) -> GraphStatement:
+    def vector_index_table(self, label: str, property: str, dimensions: int | None = None) -> GraphStatement:
         """
-        The statement giving the name of the table an index made for a search is over, for the index over the label's
-        properties, recorded as drivine4j records it or as this library did before: one row, or none when the index was
-        not made. Given `dimensions`, only a vector index made for embeddings of that size: Oracle refuses to measure a
-        vector against an index of another size (ORA-51808), so a search by it measures every node instead.
+        The statement giving the name of the table a vector index is over, for the index over the label's property,
+        recorded as drivine4j records it or as this library did before: one row, or none when the index was not made.
+        Given `dimensions`, only an index made for embeddings of that size: Oracle refuses to measure a vector against
+        an index of another size (ORA-51808), so a search by it measures every node instead.
         """
-        recorded, earlier = recorded_as(kind)
-        sized = kind == "VECTOR" and dimensions is not None
+        recorded, earlier = recorded_as("VECTOR")
         bindings: dict[str, Any] = {
             "kind": recorded,
             "earlier": earlier,
             "label": label,
-            "properties": catalog_properties(properties),
+            "properties": catalog_properties([property]),
         }
+        sized = dimensions is not None
         if sized:
             bindings["dimensions"] = dimensions
         return GraphStatement(
@@ -247,6 +242,18 @@ END;""")
             "AND label = $label AND properties = $properties AND object_name IS NOT NULL"
             + (" AND JSON_VALUE(details, '$.dimensions' RETURNING NUMBER) = $dimensions" if sized else ""),
             bindings,
+        )
+
+    def full_text_index(self, label: str, properties: Sequence[str]) -> FullTextIndexLookup:
+        """
+        The table the Oracle Text index of the full-text index was made over, by the shared module's lookup of the
+        catalog: one row, or none when it was not made, and the search then scores by BM25 over every node of the label.
+        """
+        lookup = full_text_index_lookup("ORACLE", self.graph.name, label, properties)
+        assert lookup is not None, "Oracle records its full-text indexes in its catalog."
+        return FullTextIndexLookup(
+            GraphStatement(lookup.statement, lookup.parameters),
+            lambda rows: SearchIndex(oracle_text=rows[0]) if rows else SearchIndex(),
         )
 
     def nearest(self, target: TargetModel, search: NearestSearch) -> GraphStatement:

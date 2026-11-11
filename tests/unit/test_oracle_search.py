@@ -28,13 +28,10 @@ def test_measures_only_the_embeddings_of_the_vectors_size_which_oracle_refuses_t
 
 
 def test_looks_for_a_vector_index_made_for_embeddings_of_the_vectors_size_only():
-    sized = backend.search_index_table("VECTOR", "SizedNote", ["embedding"], 3)
+    sized = backend.vector_index_table("SizedNote", "embedding", 3)
     assert sized.text.endswith(" AND JSON_VALUE(details, '$.dimensions' RETURNING NUMBER) = $dimensions")
     assert sized.bindings["dimensions"] == 3
-    # A full-text index has no size, and a vector index looked for without one is any made.
-    for statement in (
-        backend.search_index_table("FULLTEXT", "SizedNote", ["text"], 3),
-        backend.search_index_table("VECTOR", "SizedNote", ["embedding"]),
-    ):
-        assert "dimensions" not in statement.text
-        assert "dimensions" not in statement.bindings
+    # A vector index looked for without a size is any made.
+    unsized = backend.vector_index_table("SizedNote", "embedding")
+    assert "dimensions" not in unsized.text
+    assert "dimensions" not in unsized.bindings

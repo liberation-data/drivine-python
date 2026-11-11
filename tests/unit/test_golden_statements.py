@@ -59,6 +59,7 @@ from drivine.backend.postgres.postgres_write_statement import PostgresWriteState
 from drivine.backend.sqlite.sqlite_backend import SqliteBackend
 from drivine.backend.sqlite.sqlite_graph import SqliteGraph
 from drivine.connection.database_type import DatabaseType
+from drivine.cypher.shared_compiler import SearchIndex
 from drivine.dsl.lower_copy_lookups import lowered_where
 from drivine.dsl.query import Query
 from drivine.manager.group_query import GroupQuery
@@ -123,10 +124,14 @@ def oracle_statements() -> dict[str, str]:
         "Person.matching.indexed": backend.matching(
             person,
             MatchingSearch(
-                "Person", ("name", "bio"), 10, text="graph -relational", table="drivine_t_Personnamebio_4d5e6f"
+                "Person",
+                ("name", "bio"),
+                10,
+                text="graph -relational",
+                index=SearchIndex(oracle_text="drivine_t_Personnamebio_4d5e6f"),
             ),
         ).text,
-        "Person.searchIndexTable": backend.search_index_table("VECTOR", "Person", ["embedding"]).text,
+        "Person.searchIndexTable": backend.vector_index_table("Person", "embedding").text,
         # As load_nearest writes them: by a vector of 3, only embeddings and an index of that size (else ORA-51808).
         "Person.nearest.sized": backend.nearest(
             person, NearestSearch("Person", "embedding", "COSINE", 5, dimensions=3)
@@ -134,7 +139,7 @@ def oracle_statements() -> dict[str, str]:
         "Person.nearest.filtered.sized": backend.nearest(
             person, NearestSearch("Person", "embedding", "EUCLIDEAN", 20, SQL_WHERE, True, 5, dimensions=3)
         ).text,
-        "Person.searchIndexTable.sized": backend.search_index_table("VECTOR", "Person", ["embedding"], 3).text,
+        "Person.searchIndexTable.sized": backend.vector_index_table("Person", "embedding", 3).text,
         **indexed_reads(backend),
     }
 
@@ -202,11 +207,9 @@ def postgres_statements() -> dict[str, str]:
         ).text,
         "Person.matching.indexed": backend.matching(
             person,
-            MatchingSearch(
-                "Person", ("name", "bio"), 10, text="graph -relational", table="drivine_t_Personnamebio_4d5e6f"
-            ),
+            MatchingSearch("Person", ("name", "bio"), 10, text="graph -relational", index=SearchIndex(trigram=True)),
         ).text,
-        "Person.searchIndexTable": backend.search_index_table("VECTOR", "Person", ["embedding"]).text,
+        "Person.searchIndexTable": backend.vector_index_table("Person", "embedding").text,
     }
 
 

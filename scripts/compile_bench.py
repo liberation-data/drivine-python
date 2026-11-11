@@ -212,9 +212,10 @@ another, #495), where their least is the import's own cost, as the code makes it
 def regressions(baseline: dict[str, Any], results: dict[str, Any]) -> list[str]:
     """
     Each measure the gate takes that is worse than the baseline's by more than NOISE (#467): `import drivine`'s least
-    over IMPORT_RUNS, and per store the first compile's median and the uncached compile's median and p99. The cached
-    figures are for the record: the shared compiler keeps no parse of its own, so uncached is the fair comparison. A
-    baseline with no least import, as one written before it was kept, is held to its median, which is no less than it.
+    over at least IMPORT_RUNS, and per store the first compile's median and the uncached compile's median and p99. The
+    cached figures are for the record: the shared compiler keeps no parse of its own, so uncached is the fair
+    comparison. A baseline with no least import, as one written before it was kept, is held to its median, which is no
+    less than it.
     """
     imported = baseline["import"]
     measures = [("import drivine, min", imported.get("min", imported["median"]), results["import"]["min"])]

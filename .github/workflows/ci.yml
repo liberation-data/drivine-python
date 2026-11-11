@@ -76,8 +76,8 @@ jobs:
 
   # How long `import drivine` and compiling Cypher to SQL take, on one Python, so runs compare, against the baseline of
   # the compiler Drivine had before the shared one (tests/bench/compile-baseline.json, #467's CI run): the job fails
-  # where import, a first compile, or an uncached compile's median or p99 is worse than it by more than 10% (#471). It
-  # records them in the run's summary and as an artifact.
+  # where the least of at least 7 fresh imports, a first compile's median, or an uncached compile's median or p99 is
+  # worse than it by more than 10% (#471, #495). It records them in the run's summary and as an artifact.
   compile-bench:
     runs-on: ubuntu-latest
     timeout-minutes: 20

@@ -121,7 +121,8 @@ def test_the_gate_takes_the_least_import_and_holds_a_baseline_without_one_to_its
     )
 
 
-def test_import_takes_at_least_import_runs(monkeypatch: pytest.MonkeyPatch):
+@pytest.mark.parametrize(("runs", "timed"), [(1, compile_bench.IMPORT_RUNS), (5, 10)])
+def test_import_takes_at_least_import_runs(monkeypatch: pytest.MonkeyPatch, runs: int, timed: int):
     counts: list[int] = []
 
     def imports(runs: int) -> list[float]:
@@ -141,6 +142,6 @@ def test_import_takes_at_least_import_runs(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(compile_bench, "import_ms", imports)
     monkeypatch.setattr(compile_bench, "first_compile_ms", first)
     monkeypatch.setattr(compile_bench, "warm_ms", warm)
-    monkeypatch.setattr(sys, "argv", ["compile_bench.py", "--runs", "1"])
+    monkeypatch.setattr(sys, "argv", ["compile_bench.py", "--runs", str(runs)])
     assert compile_bench.main() == 0
-    assert counts == [compile_bench.IMPORT_RUNS]
+    assert counts == [timed]

@@ -8,11 +8,11 @@ It measures, each in a fresh interpreter where a fresh one is what a user's prog
 - import: `import drivine`, which doesn't load the compiler (that is loaded on the first compile for a SQL store);
 - first compile: a process's first compile for each SQL store, the compiler's own imports and all;
 - warm compile, per store, over every step of the Cypher spec (tests/cypher) that runs on the store: each statement
-  compiled with the parse cache cleared first (uncached), and again with it kept (cached). Each statement's time is the
-  median of its runs, and the median, mean and p99 are over the statements. A statement the compiler refuses is timed
-  as well, as a refusal is a compile too, and counted apart. The shared compiler keeps no parse cache, so the two
-  differ only by noise: "uncached" clears the parse cache of the compiler Drivine had before (`read_cypher`), which the
-  baseline (tests/bench/compile-baseline.json) was measured on, and which no compile calls now.
+  compiled `--runs` times (uncached), then `--runs` times again (cached). Each statement's time is the median of its
+  runs, and the median, mean and p99 are over the statements. A statement the compiler refuses is timed as well, as a
+  refusal is a compile too, and counted apart. The shared compiler keeps no parse cache, so the two columns agree up to
+  noise: they are kept, as the results' shape is the baseline's (tests/bench/compile-baseline.json), which was measured
+  on a compiler that had one, and the gate compares the uncached figures.
 
 With `--against`, it fails where a measure is worse than its bar by more than NOISE (see regressions): a compile's is
 the baseline's, and import's is that of the checkout `--import-against` names, timed in turn with this tree's.
@@ -146,7 +146,6 @@ def warm_ms(runs: int) -> dict[str, Any]:
     # The compiler's warnings (a RETURN of several items) would be logged thousands of times, and logging them would be
     # timed too: the bench measures the compile, not the handler an application gives its log.
     logging.getLogger("drivine").setLevel(logging.ERROR)
-    from drivine.cypher.cypher_reader import read_cypher
     from drivine.cypher.cypher_specification import cypher_compiled
     from drivine.drivine_error import DrivineError
     from drivine.query.query_specification import QuerySpecification
@@ -167,13 +166,6 @@ def warm_ms(runs: int) -> dict[str, Any]:
     steps = corpus()
     for store in STORES:  # The compiler's modules, loaded before anything is timed.
         once(store, FIRST, {"name": "Ann"})
-    # ANTLR's prediction cache, warmed on the whole corpus before anything is timed: else the first store timed would
-    # pay for warming it, and with few runs its numbers would be that, not its compile.
-    for cypher in dict.fromkeys(cypher for _, cypher, _ in steps):
-        try:
-            read_cypher(cypher)
-        except DrivineError:
-            pass
     result: dict[str, Any] = {}
     for store in STORES:
         mine = [it for it in steps if it[0] == store]
@@ -184,7 +176,6 @@ def warm_ms(runs: int) -> dict[str, Any]:
             times: list[float] = []
             refused = False
             for _ in range(runs):
-                read_cypher.cache_clear()
                 ms, refused = once(store, cypher, parameters)
                 times.append(ms)
             uncached.append(statistics.median(times))
@@ -278,7 +269,8 @@ def regressions(baseline: dict[str, Any], results: dict[str, Any]) -> list[str]:
     (`import_against`, CI's main), as a runner's type moved it by a quarter where the code didn't; with no such tree it
     isn't gated, and the baseline's is printed for reference. Per store, the first compile's median and the uncached
     compile's median and p99 are held to the baseline's. The cached figures are for the record: the shared compiler
-    keeps no parse of its own, so uncached is the fair comparison.
+    keeps no parse of its own, so the two agree up to noise, and the baseline's cached figures were of a compiler that
+    kept one.
     """
     measures: list[tuple[str, float, float]] = []
     if "import_against" in results:

@@ -4,11 +4,11 @@ tables, `<graph>_era` and `<graph>_era_date` (see `OracleGraph.era`), each opera
 regular expression they stand for wrote it three or four times, and Oracle took up to a minute to plan a statement of
 temporal arithmetic in a subquery (liberation-data/drivine#572). A store without them has each statement compiled as
 before. drivine4j's OracleEraFunctionTest of liberation-data/drivine4j#584, and its OracleNamesTest and probe's cases.
+The SQL itself is the shared compiler's: these test the texts the store keeps and what a session may call.
 """
 
 import itertools
 import logging
-from pathlib import Path
 from typing import Any
 
 import oracledb
@@ -25,7 +25,6 @@ from drivine.backend.oracle.oracle_stored_functions import (
 from drivine.connection.oracle.oracle_connection import OracleConnection
 from drivine.connection.oracle.oracle_spec_compiler import OracleSpecCompiler
 from drivine.cypher.cypher_specification import cypher_compiled
-from drivine.cypher.sql.oracle_cypher_compiler import OracleCypherCompiler
 from tests.unit.test_oracle_stored_functions import ora
 
 # The lines of drivine4j's `OracleCypherCompiler.eraFunction` and `eraDateFunction`, copied verbatim from drivine4j's
@@ -68,89 +67,6 @@ def test_the_era_functions_are_drivine4js_texts_byte_for_byte_as_create_or_repla
         f"CREATE OR REPLACE {drivine4j(DRIVINE4J_ERA, 'myGraph_era')}",
         f"CREATE OR REPLACE {drivine4j(DRIVINE4J_ERA_DATE, 'myGraph_era_date')}",
     ]
-
-
-# The compiled SQL.
-
-
-def stored(cypher: str) -> tuple[str, bool]:
-    compiled = OracleCypherCompiler("g").compile(cypher)
-    return compiled.sql, compiled.calls_stored_era
-
-
-def inline(cypher: str) -> tuple[str, bool]:
-    compiled = OracleCypherCompiler("g", era_stored=False).compile(cypher)
-    return compiled.sql, compiled.calls_stored_era
-
-
-BC = "RETURN toString(date('-0044-03-15') + duration('P1D'))"
-
-
-def test_a_year_that_may_be_bc_is_read_and_written_by_the_stores_functions_with_no_test_of_its_own():
-    sql, calls = stored(BC)
-    assert calls
-    assert "TO_TIMESTAMP(g_era(" in sql and "g_era_date(LTRIM(TO_CHAR(" in sql, sql
-    for inlined in ("ASCII(", "TIMESTAMP '0001-01-01 00:00:00'", "'^-?[0-9]{4}'", "REGEXP_REPLACE(LTRIM("):
-        assert inlined not in sql, sql
-
-
-def test_a_store_without_the_functions_has_the_year_renumbered_inline_as_before():
-    sql, calls = inline(BC)
-    assert not calls
-    assert "_era" not in sql, sql
-    assert ") < 49 THEN REGEXP_REPLACE(" in sql and "REGEXP_REPLACE(LTRIM(TO_CHAR(" in sql, sql
-
-
-AT = "datetime(CASE k WHEN 0 THEN '2024-03-15T10:00:00+02:00' ELSE '2024-03-15T09:00:00Z' END)"
-
-PINNED = {
-    "zls5": f"UNWIND [0, 1] AS k UNWIND range(1, 3) AS i WITH k, {AT} + duration({{minutes: i}}) AS t "
-    "WITH k, collect(t) AS l RETURN [min(l)[0].hour, max(l)[0].hour]",
-    "call5": "MATCH (n:CyTemporal) CALL { WITH n CALL { WITH n RETURN n.day + duration('P1D') AS e } RETURN e AS d } "
-    "RETURN (d + duration('P1D')).day",
-    "bc-read": BC,
-    "date-write": "CREATE (n:CyTemporal {id: 'w', day: date('-0044-03-15') + duration('P1D')}) RETURN toString(n.day)",
-}
-"""
-The statements whose SQL without the functions is pinned in oracle_era_inline: what the compiler gave before
-liberation-data/drivine#572, for the graph g.
-"""
-
-
-@pytest.mark.parametrize("file", PINNED)
-def test_a_store_without_the_functions_is_given_the_sql_it_was_given_before_them_byte_for_byte(file: str):
-    # A store an earlier version made gives the same rows until it is ensured. A change that compiles one of these
-    # otherwise writes its file again.
-    expected = (Path(__file__).parent / "oracle_era_inline" / f"{file}.sql").read_text()
-    sql, calls = inline(PINNED[file])
-    assert not calls, file
-    assert sql == expected, file
-    assert stored(PINNED[file])[1], file
-
-
-@pytest.mark.parametrize(
-    "cypher",
-    [
-        "CREATE (n:CyTemporal {day: date('-0044-03-15') + duration('P1D')}) RETURN toString(n.day)",
-        "RETURN reduce(s = '', d IN [date('-0044-03-15')] | s + toString(d + duration('P1D')))",
-    ],
-)
-def test_a_statement_that_writes_and_the_step_of_a_reduce_call_them_too(cypher: str):
-    # A schema function, unlike one a query declares, is called from a block's queries and from a reduce's own function.
-    sql, calls = stored(cypher)
-    assert calls and "g_era(" in sql and "g_era_date(" in sql, sql
-    assert "FUNCTION g_era" not in sql and "ASCII(" not in sql, sql
-    fallback, fallback_calls = inline(cypher)
-    assert not fallback_calls and "_era" not in fallback, fallback
-
-
-@pytest.mark.parametrize(
-    "cypher", ["MATCH (n:Person) RETURN n.name", "RETURN date('2024-03-15').year", "UNWIND [1, 2] AS i RETURN i + 1"]
-)
-def test_a_statement_with_no_year_to_renumber_compiles_as_it_would_without_the_functions(cypher: str):
-    sql, calls = stored(cypher)
-    assert not calls, sql
-    assert sql == inline(cypher)[0]
 
 
 # Whether a session may call them, asked of a session whose checks of each give what a test says.

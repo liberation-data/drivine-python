@@ -16,7 +16,7 @@ import pytest
 
 from drivine import Connection, ConnectionProperties, DatabaseRegistry, PersistenceManagerFactory, QuerySpecification
 from drivine.connection.oracle.oracle_connection_provider import OracleConnectionProvider
-from drivine.cypher.sql.oracle_cypher_compiler import OracleCypherCompiler
+from drivine.cypher.shared_compiler import compile_cypher
 from drivine.query.statement import cypher_statement
 from tests.cypher.cypher_spec import load
 from tests.integration.oracle.oracle_seed import ON_ORACLE
@@ -28,7 +28,7 @@ GRAPH = "drivine_adaptive_plans"
 CYPHER = "MATCH (:Person {name: 'Keanu'})-[r:ACTED_IN]->(m) RETURN m.title"
 """The read that found no rows in the Cypher suite (liberation-data/drivine#331)."""
 
-READ = OracleCypherCompiler(GRAPH).compile(CYPHER).sql
+READ = compile_cypher(CYPHER, {}, "ORACLE", GRAPH).sql
 
 
 @pytest.fixture(scope="module")

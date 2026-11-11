@@ -6,9 +6,13 @@ import time
 from collections.abc import Callable
 from typing import ClassVar
 
-from drivine.cypher.sql.temporal_sql import BC_BELOW
-
 logger = logging.getLogger("drivine.oracle")
+
+BC_BELOW = 49
+"""
+The code of `1`: an ISO text whose first character's code is below it starts with `-` or `0`, as one with a year BC
+does, so `era_function` rewrites it, and gives any other, an ordinary date, as it is.
+"""
 
 clock: Callable[[], float] = time.monotonic
 """
@@ -27,8 +31,8 @@ def nulls_equal_function(name: str) -> str:
     The function `name`, which compares two JSON values as Cypher compares values that may hold a null: 1 where they
     are equal, 0 where they differ, and null where a pair of their items holds a null and no pair differs. It walks the
     two together with `JSON_ELEMENT_T`, list item by list item and map key by map key, at any depth. A query declares it
-    with `WITH FUNCTION` where the store has none (see `OracleCypherCompiler.nulls_equal`); the store keeps it, made with
-    the graph, as `CREATE OR REPLACE` of the same text (see `OracleGraph.functions`).
+    with `WITH FUNCTION` where the store has none (see `CompiledCypher.calls_stored_nulls_equal`); the store keeps it,
+    made with the graph, as `CREATE OR REPLACE` of the same text (see `OracleGraph.functions`).
 
     The store's copy is part of the store layout the three Drivine libraries share (see AGENTS.md): it is
     `CREATE OR REPLACE ` and this text with `name` as `nulls_equal_name` gives it, the graph's name as written and then
@@ -116,9 +120,9 @@ def era_function(name: str) -> str:
     The function `name`, which gives the ISO 8601 text `t` of a date or a moment whose year may be BC as Oracle numbers
     that year, with no year 0: the year `0000` (1 BC) as `-0001`, and `-0044` (45 BC) as `-0045`. Any other text, and
     null, it gives as it is. A text whose first character's code is below `BC_BELOW` starts with `-` or `0`, as one with
-    a year BC does. See `OracleTemporalSql.era`, which calls it where the store keeps it: the text is written once,
-    where the test and the regular expression it stands for wrote it four times, and Oracle's hard parse of a statement
-    grows with each copy (liberation-data/drivine#572).
+    a year BC does. A compiled statement calls it where the store keeps it (see `CompiledCypher.calls_stored_era`): the
+    text is written once, where the test and the regular expression it stands for wrote it four times, and Oracle's hard
+    parse of a statement grows with each copy (liberation-data/drivine#572).
 
     The store's copy is part of the store layout the three Drivine libraries share (see AGENTS.md), as
     `nulls_equal_function`'s is: it is `CREATE OR REPLACE ` and this text with `name` as `era_name` gives it, the graph's
@@ -144,9 +148,9 @@ def era_date_function(name: str) -> str:
     """
     The function `name`, which gives the text `t` that `LTRIM(TO_CHAR(…, 'SYYYY-MM-DD…'))` writes of a timestamp, its
     year numbered as ISO 8601 numbers it where it is BC: Oracle's `-0001` (1 BC) as `0000`, and `-0045` (45 BC) as
-    `-0044`. Any other text, and null, it gives as it is. See `OracleTemporalSql.date`, which calls it where the store
-    keeps it: the timestamp is written once, where the test and the regular expression it stands for wrote it three
-    times.
+    `-0044`. Any other text, and null, it gives as it is. A compiled statement calls it where the store keeps it, as it
+    does `era_function`: the timestamp is written once, where the test and the regular expression it stands for wrote
+    it three times.
 
     The store's copy is part of the store layout the three Drivine libraries share (see AGENTS.md), as
     `nulls_equal_function`'s is: it is `CREATE OR REPLACE ` and this text with `name` as `era_date_name` gives it, the

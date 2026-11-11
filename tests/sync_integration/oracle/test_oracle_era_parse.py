@@ -29,7 +29,7 @@ import pytest
 
 from drivine.backend.oracle.oracle_graph import OracleGraph
 from drivine.connection.oracle.oracle_spec_compiler import OracleSpecCompiler
-from drivine.cypher.sql.oracle_cypher_compiler import OracleCypherCompiler
+from drivine.cypher.shared_compiler import compile_cypher
 from drivine.sync import ConnectionProperties, QuerySpecification
 from drivine.testing.drivine_test_containers import TEST_CONTAINER_PASSWORD
 from tests.sync_integration.oracle.oracle_seed import ON_ORACLE
@@ -90,7 +90,7 @@ def admin() -> oracledb.Connection:
 
 def sql_of(cypher: str, comment: str = "") -> tuple[str, dict[str, Any]]:
     """`cypher` compiled for the graph, its parameters bound as OracleConnection binds them, after `comment`."""
-    compiled = OracleCypherCompiler(GRAPH).compile(cypher)
+    compiled = compile_cypher(cypher, {}, "ORACLE", GRAPH)
     spec = QuerySpecification[Any](f"{comment}{compiled.sql}").bind(dict(compiled.parameters)).finalized_copy("SQL")
     statement = OracleSpecCompiler(spec).compile()
     return statement.statement, statement.parameters
@@ -129,7 +129,7 @@ def parsed(cypher: str, bound_ms: int) -> tuple[int, list[str]]:
     The CPU, in milliseconds, Oracle took to parse `cypher`, compiled for a store with the era functions, and its rows
     as JSON text; failing where it runs past twice `bound_ms`.
     """
-    assert OracleCypherCompiler(GRAPH).compile(cypher).calls_stored_era, cypher
+    assert compile_cypher(cypher, {}, "ORACLE", GRAPH).calls_stored_era, cypher
     statement, parameters = sql_of(cypher, f"/* era parse {time.time_ns()} */ ")
     connection = connect()
     with connection.cursor() as cursor:

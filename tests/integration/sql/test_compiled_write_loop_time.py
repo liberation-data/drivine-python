@@ -11,8 +11,8 @@ On Postgres the MERGE is timed with the edge table vacuumed while empty, as auto
 its per-row read was then planned as a Seq Scan, kept as the loop filled the table, so it was quadratic: 27 s over
 20,000 rows (#420, liberation-data/drivine4j#609). The CALL…RETURN joins its one-row list to the node table for each
 row, and Postgres, which takes the list for 100 rows, scanned every node for it instead: 36.8 s over 20,000 rows in one
-CI run. Each loop is now planned with seq scans and hash and merge joins off (see
-PostgresCypherCompiler._planned_as_nested_loops), and both pass as the other writes do.
+CI run. Each loop is now planned with seq scans and hash and merge joins off, as the shared compiler writes it, and both
+pass as the other writes do.
 
 On Postgres every write is also timed with the node table analyzed just after it was emptied, as an autoanalyze then
 leaves it: its pages of dead rows taken to hold one row. The CALL…RETURN's per-row read was then planned to materialize

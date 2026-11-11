@@ -9,7 +9,7 @@ PostgresNestedLoopSettingsTest, ported.
 
 import re
 
-from drivine.cypher.sql.postgres_cypher_compiler import PostgresCypherCompiler
+from drivine.cypher.shared_compiler import compile_cypher
 from drivine.sync import DatabaseRegistry
 from drivine.sync.connection.postgres.postgres_connection import PostgresConnection
 from tests.sync_integration.postgres.conftest import ON_POSTGRES
@@ -29,7 +29,7 @@ def settings_after(
     `fails` is a part of the error the call must raise, so that a failure before the loop turns the settings off
     doesn't pass for one inside it.
     """
-    compiled = PostgresCypherCompiler(GRAPH).compile(cypher)
+    compiled = compile_cypher(cypher, {}, "POSTGRES", GRAPH)
     prelude = "\n".join(compiled.setup)
     assert "set_config('enable_seqscan', 'off', true)" in prelude, prelude
     function = re.search(r"pg_temp\.drivine_cypher_[0-9a-f]+", prelude)

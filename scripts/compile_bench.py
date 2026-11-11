@@ -157,9 +157,10 @@ def warm_ms(runs: int) -> dict[str, Any]:
 
 
 def summary(samples: list[float]) -> dict[str, float]:
-    """The samples' median, mean, p99 (by nearest rank: the least sample at or above 99% of them) and max."""
+    """The samples' min, median, mean, p99 (by nearest rank: the least sample at or above 99% of them) and max."""
     ordered = sorted(samples)
     return {
+        "min": round(ordered[0], 3),
         "median": round(statistics.median(ordered), 3),
         "mean": round(statistics.fmean(ordered), 3),
         "p99": round(ordered[math.ceil(len(ordered) * 0.99) - 1], 3),
@@ -183,7 +184,7 @@ def main() -> int:
         "python": platform.python_version(),
         "machine": f"{platform.system()} {platform.machine()}",
         "runs": args.runs,
-        "import": summary(import_ms(args.runs * 2)),
+        "import": summary(import_ms(max(IMPORT_RUNS, args.runs * 2))),
         "first_compile": {store: summary(first_compile_ms(store, args.runs)) for store in STORES},
         "warm": warm_ms(args.runs),
     }
@@ -200,14 +201,23 @@ def main() -> int:
 NOISE = 0.10
 """How much worse than the baseline a measure may be and still pass: a run's own noise, on CI's machines."""
 
+IMPORT_RUNS = 7
+"""
+The fewest fresh imports timed, whose least the gate takes: a CI runner adds tens of milliseconds to some imports and
+not others, so their median moved by a quarter between runs of one commit (193 to 199 ms on one runner, 142 to 157 on
+another, #495), where their least is the import's own cost, as the code makes it.
+"""
+
 
 def regressions(baseline: dict[str, Any], results: dict[str, Any]) -> list[str]:
     """
-    Each measure the gate takes that is worse than the baseline's by more than NOISE (#467): `import drivine`'s median,
-    and per store the first compile's median and the uncached compile's median and p99. The cached figures are for the
-    record: the shared compiler keeps no parse of its own, so uncached is the fair comparison.
+    Each measure the gate takes that is worse than the baseline's by more than NOISE (#467): `import drivine`'s least
+    over IMPORT_RUNS, and per store the first compile's median and the uncached compile's median and p99. The cached
+    figures are for the record: the shared compiler keeps no parse of its own, so uncached is the fair comparison. A
+    baseline with no least import, as one written before it was kept, is held to its median, which is no less than it.
     """
-    measures = [("import drivine, median", baseline["import"]["median"], results["import"]["median"])]
+    imported = baseline["import"]
+    measures = [("import drivine, min", imported.get("min", imported["median"]), results["import"]["min"])]
     for store in STORES:
         measures.append(
             (
@@ -237,7 +247,8 @@ def report(results: dict[str, Any]) -> str:
         f"Compile bench: Python {results['python']} on {results['machine']}, {results['runs']} runs each, "
         "in milliseconds.",
         "",
-        f"- import drivine: median {results['import']['median']}, max {results['import']['max']}",
+        f"- import drivine: min {results['import']['min']}, median {results['import']['median']}, "
+        f"max {results['import']['max']}",
         "",
         "| Store | First compile | Statements (refused) | Uncached median / mean / p99 | Cached median / mean / p99 |",
         "|---|---|---|---|---|",

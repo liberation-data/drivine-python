@@ -165,7 +165,7 @@ class SqliteBackend:
         Deletes the root with id `$id` that meets `where`, and for a cascade the nodes a load of the view reaches from
         it through the relationships a save writes (see SqlViews.cascade): every one, or with DELETE_ORPHAN those not
         kept (see kept_targets). Every node is selected before any is deleted, so what is kept is read first. Returns
-        how many roots were deleted: `{deleted}`.
+        how many nodes were deleted, the roots and what the cascade took (#375): `{deleted}`.
         """
         root = target.root if isinstance(target, GraphViewModel) else target
         filter_ = self._deleted_where(target, where)

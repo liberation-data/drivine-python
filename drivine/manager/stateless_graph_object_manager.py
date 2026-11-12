@@ -502,7 +502,8 @@ class StatelessGraphObjectManager:
         values = {**values, "id": id}
         if cascade in (CascadeType.DELETE_ALL, CascadeType.DELETE_ORPHAN):
             await self._refuse_cascade_below_depth(target, predicate, values)
-        return await self._when_uncontended(lambda: self.persistence_manager.get_one(statement.spec(values)))
+        # FalkorDB gives DELETE_ORPHAN's sum as a float (#375).
+        return int(await self._when_uncontended(lambda: self.persistence_manager.get_one(statement.spec(values))))
 
     async def _refuse_cascade_below_depth(
         self, target: TargetModel, where: str | None, values: Mapping[str, Any]

@@ -152,7 +152,8 @@ class PostgresBackend:
         Deletes the root with id `$id` that meets `where`, and for a cascade the nodes a load of the view reaches from
         it through the relationships a save writes (see SqlViews.cascade): every one, or with DELETE_ORPHAN those not
         kept (see kept_targets). Postgres runs a statement's deletes on one snapshot, so what is kept is read before
-        anything is deleted. Returns how many roots were deleted: `{deleted}`.
+        anything is deleted. Returns how many nodes were deleted, the roots and what the cascade took (#375):
+        `{deleted}`.
         """
         root = target.root if isinstance(target, GraphViewModel) else target
         filter_ = self._deleted_where(target, where)

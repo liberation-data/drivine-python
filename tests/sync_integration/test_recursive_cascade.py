@@ -217,8 +217,10 @@ def removed_by(pm: PersistenceManager, delete: Callable[[], int]) -> tuple[set[s
     before = set(node_ids(pm))
     deleted = delete()
     removed = before - set(node_ids(pm))
-    # A delete returns every node it took, the roots and what the cascade took, as drivine4j asserts (#375).
+    # A delete returns every node it took, the roots and what the cascade took, as drivine4j asserts, as an int on
+    # every store (#375).
     assert deleted == len(removed)
+    assert type(deleted) is int
     return removed, deleted
 
 
@@ -443,6 +445,20 @@ def test_a_cascade_does_not_follow_a_path_field_as_one_relationship(pm: Persiste
     assert removed == {"rc-root"}
 
 
+@CASCADES
+def test_a_cascade_deletes_nothing_and_counts_0_for_a_root_that_is_not_there(
+    pm: PersistenceManager, cascade: CascadeType
+):
+    cascades_on(pm, cascade)
+    gom = StatelessGraphObjectManager(pm)
+    seed(pm, TREE)
+
+    removed, deleted = removed_by(pm, lambda: gom.delete(DeletableSessionTree, "rc-none", cascade=cascade))
+
+    assert removed == set()
+    assert deleted == 0
+
+
 def test_delete_orphan_keeps_a_nested_node_referred_to_from_outside(pm: PersistenceManager):
     orphans_on(pm)
     gom = StatelessGraphObjectManager(pm)
@@ -474,6 +490,20 @@ def test_delete_orphan_deletes_a_ring_back_to_its_root(pm: PersistenceManager):
 
     assert removed == loaded
     assert deleted == len(removed)
+
+
+def test_delete_orphan_counts_the_root_alone_when_every_node_the_cascade_reaches_is_kept(pm: PersistenceManager):
+    orphans_on(pm)
+    gom = StatelessGraphObjectManager(pm)
+    seed(pm, TREE)
+
+    removed, deleted = removed_by(
+        pm, lambda: gom.delete(DeletableSessionTree, "rc-grand", cascade=CascadeType.DELETE_ORPHAN)
+    )
+
+    # rc-m2 is kept: rc-user, outside the view, still refers to it.
+    assert removed == {"rc-grand"}
+    assert deleted == 1
 
 
 def test_delete_orphan_keeps_what_a_kept_node_holds(pm: PersistenceManager):

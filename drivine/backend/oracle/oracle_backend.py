@@ -155,8 +155,8 @@ class OracleBackend:
         """
         Deletes the root with id `$id` that meets `where`, and for a cascade the nodes a load of the view reaches from
         it through the relationships a save writes (see SqlViews.cascade): every one, or with DELETE_ORPHAN those not
-        kept (see kept_targets), which are read before anything is deleted. Returns how many roots were deleted:
-        `{deleted}`.
+        kept (see kept_targets), which are read before anything is deleted. Returns how many nodes were deleted, the
+        roots and what the cascade took (#375): `{deleted}`.
         """
         root = target.root if isinstance(target, GraphViewModel) else target
         filter_ = self._deleted_where(target, where)
@@ -196,6 +196,7 @@ BEGIN
     DELETE FROM {self.graph.nodes} WHERE nid IN (SELECT column_value FROM TABLE(v_roots));
     v_deleted := SQL%ROWCOUNT;
     DELETE FROM {self.graph.nodes} x WHERE x.nid IN (SELECT column_value FROM TABLE(v_targets));
+    v_deleted := v_deleted + SQL%ROWCOUNT;
     OPEN c FOR SELECT v_deleted AS "deleted" FROM dual;
     DBMS_SQL.RETURN_RESULT(c);
 END;""")

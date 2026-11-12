@@ -224,7 +224,8 @@ async def test_keeps_in_a_cascade_a_node_one_step_either_way_round_from_a_kept_o
     # a is kept by a node outside the cascade, and b by its pairing with a, stored the other way round from a.
     await _relate(gom, "a", "outside", "KNOWS")
     await _relate(gom, "b", "a", "PAIRED")
-    assert await gom.delete(Pairing, "root", cascade=CascadeType.DELETE_ORPHAN) == 1
+    # Every node deleted (#375): root and c.
+    assert await gom.delete(Pairing, "root", cascade=CascadeType.DELETE_ORPHAN) == 2
     assert await _left(gom, ids) == {"root": False, "a": True, "b": True, "c": False, "outside": True}
 
 
@@ -247,7 +248,8 @@ async def test_keeps_in_a_cascade_that_steps_either_way_a_node_by_a_step_out_or_
     await _relate(gom, "d", "a", "MENTORS")
     await _relate(gom, "c", "a", "LEADS")
     await _relate(gom, "a", "f", "MENTORS")
-    assert await gom.delete(Team, "root", cascade=CascadeType.DELETE_ORPHAN) == 1
+    # Every node deleted (#375): root, c, f and g.
+    assert await gom.delete(Team, "root", cascade=CascadeType.DELETE_ORPHAN) == 4
     assert await _left(gom, ids) == {
         "root": False,
         "a": True,
@@ -268,9 +270,10 @@ async def test_cascades_a_delete_to_every_node_the_view_reaches_or_to_orphans(go
 
     await gom.save(conversation("s1", ["m1", "m2"], "ada"))
     await gom.save(conversation("s2", ["m3"], "ada"))
-    assert await gom.delete(Conversation, "s2", cascade=CascadeType.DELETE_ORPHAN) == 1
+    # Every node deleted (#375): s2 and m3, ada kept; then s1, m1, m2 and ada.
+    assert await gom.delete(Conversation, "s2", cascade=CascadeType.DELETE_ORPHAN) == 2
     assert await gom.load(Message, "m3") is None
     assert await gom.load(Person, "ada") is not None
-    assert await gom.delete(Conversation, "s1", cascade=CascadeType.DELETE_ALL) == 1
+    assert await gom.delete(Conversation, "s1", cascade=CascadeType.DELETE_ALL) == 4
     assert await gom.load(Message, "m1") is None
     assert await gom.load(Person, "ada") is None

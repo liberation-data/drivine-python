@@ -486,7 +486,8 @@ class StatelessGraphObjectManager:
         Deletes the object whose root has the id, with the root's relationships. A view's root is deleted only if it
         meets the view's requirements, and `where`, a predicate over `n`, when given. A cascade deletes nodes the view
         reaches too, through the relationships a save of it writes: not those of its read-only fields. Returns the
-        number of roots deleted: 1, or 0 when there was none.
+        number of nodes deleted: the root and every node the cascade took, as drivine4j counts them (#375); without a
+        cascade, 1, or 0 when there was none.
 
         A view that contains itself is deleted as it loads: every level of it, and what each level holds. A cascade
         that finds a node one level below such a relationship's max_depth is refused before anything is written,
@@ -501,7 +502,8 @@ class StatelessGraphObjectManager:
         values = {**values, "id": id}
         if cascade in (CascadeType.DELETE_ALL, CascadeType.DELETE_ORPHAN):
             self._refuse_cascade_below_depth(target, predicate, values)
-        return self._when_uncontended(lambda: self.persistence_manager.get_one(statement.spec(values)))
+        # FalkorDB gives DELETE_ORPHAN's sum as a float (#375).
+        return int(self._when_uncontended(lambda: self.persistence_manager.get_one(statement.spec(values))))
 
     def _refuse_cascade_below_depth(self, target: TargetModel, where: str | None, values: Mapping[str, Any]) -> None:
         """

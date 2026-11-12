@@ -59,7 +59,8 @@ async def test_deletes_what_each_level_holds_as_load_reads_it(pm: PersistenceMan
     assert loaded is not None
     assert ids(loaded) == {"rc-root", "rc-m0", "rc-child", "rc-m1", "rc-grand", "rc-m2"}
 
-    assert await gom.delete(SessionTree, "rc-root", cascade=CascadeType.DELETE_ALL) == 1
+    # The three sessions and their three messages (#375).
+    assert await gom.delete(SessionTree, "rc-root", cascade=CascadeType.DELETE_ALL) == 6
 
     assert await nodes(pm, "Session") == []
     assert await nodes(pm, "Message") == []
@@ -213,7 +214,12 @@ async def removed_by(pm: PersistenceManager, delete: Callable[[], Awaitable[int]
     """Deletes with `delete` and gives the ids it removed, with the count it returned."""
     before = set(await node_ids(pm))
     deleted = await delete()
-    return before - set(await node_ids(pm)), deleted
+    removed = before - set(await node_ids(pm))
+    # A delete returns every node it took, the roots and what the cascade took, as drivine4j asserts, as an int on
+    # every store (#375).
+    assert deleted == len(removed)
+    assert type(deleted) is int
+    return removed, deleted
 
 
 async def load_tree(gom: StatelessGraphObjectManager, id: str) -> set[str]:
@@ -238,7 +244,7 @@ async def test_delete_all_removes_what_load_reads_at_every_level(pm: Persistence
     )
 
     assert removed == loaded
-    assert deleted == 1
+    assert deleted == len(removed)
     # The nested messages point at the user, which the view does not declare.
     assert await node_ids(pm) == ["rc-user"]
 
@@ -447,6 +453,20 @@ async def test_a_cascade_does_not_follow_a_path_field_as_one_relationship(pm: Pe
     assert removed == {"rc-root"}
 
 
+@CASCADES
+async def test_a_cascade_deletes_nothing_and_counts_0_for_a_root_that_is_not_there(
+    pm: PersistenceManager, cascade: CascadeType
+):
+    cascades_on(pm, cascade)
+    gom = StatelessGraphObjectManager(pm)
+    await seed(pm, TREE)
+
+    removed, deleted = await removed_by(pm, lambda: gom.delete(DeletableSessionTree, "rc-none", cascade=cascade))
+
+    assert removed == set()
+    assert deleted == 0
+
+
 async def test_delete_orphan_keeps_a_nested_node_referred_to_from_outside(pm: PersistenceManager):
     orphans_on(pm)
     gom = StatelessGraphObjectManager(pm)
@@ -460,7 +480,7 @@ async def test_delete_orphan_keeps_a_nested_node_referred_to_from_outside(pm: Pe
     # The nested messages are kept: the user outside the view still refers to each. The sessions are deleted, though
     # each relates to its own messages and parts: those are in the cascade.
     assert removed == loaded - {"rc-m1", "rc-m2"}
-    assert deleted == 1
+    assert deleted == len(removed)
     assert await node_ids(pm) == ["rc-m1", "rc-m2", "rc-user"]
 
 
@@ -477,6 +497,20 @@ async def test_delete_orphan_deletes_a_ring_back_to_its_root(pm: PersistenceMana
     )
 
     assert removed == loaded
+    assert deleted == len(removed)
+
+
+async def test_delete_orphan_counts_the_root_alone_when_every_node_the_cascade_reaches_is_kept(pm: PersistenceManager):
+    orphans_on(pm)
+    gom = StatelessGraphObjectManager(pm)
+    await seed(pm, TREE)
+
+    removed, deleted = await removed_by(
+        pm, lambda: gom.delete(DeletableSessionTree, "rc-grand", cascade=CascadeType.DELETE_ORPHAN)
+    )
+
+    # rc-m2 is kept: rc-user, outside the view, still refers to it.
+    assert removed == {"rc-grand"}
     assert deleted == 1
 
 

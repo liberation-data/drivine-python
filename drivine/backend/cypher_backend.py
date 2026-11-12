@@ -151,8 +151,8 @@ class CypherBackend:
         """
         Deletes the root whose id is the parameter `id`, if it meets the optional predicate (and, for a view, the view's
         requirements), with its relationships. A cascade, for a view only, deletes nodes the view reaches too, through
-        the relationships a save writes: every one, or with DELETE_ORPHAN those not kept. Returns the number of roots
-        deleted.
+        the relationships a save writes: every one, or with DELETE_ORPHAN those not kept. Returns the number of nodes
+        deleted: the roots and every node the cascade took (#375).
         """
         root = target.root if isinstance(target, GraphViewModel) else target
         head = self._deleted(target, where)
@@ -170,15 +170,17 @@ class CypherBackend:
         # (FalkorDB/FalkorDB#3387).
         targets = [f"\nWITH {NODE_ALIAS}", f"\nWITH {NODE_ALIAS}, {cascaded.targets} AS targets"]
         if cascade is CascadeType.DELETE_ALL:
+            # Each node once, the root and what the cascade took, however many paths reach it, counted as drivine4j
+            # counts them (#375). DISTINCT, not a reduce over the list, which is quadratic in a big view.
             return GraphStatement(
                 "".join(
                     [
                         head,
                         *targets,
-                        f"\nDETACH DELETE {NODE_ALIAS}",
-                        "\nWITH targets",
-                        "\nFOREACH (t IN targets | DETACH DELETE t)",
-                        "\nRETURN count(*) AS deleted",
+                        f"\nUNWIND [{NODE_ALIAS}] + targets AS t",
+                        "\nWITH DISTINCT t",
+                        "\nDETACH DELETE t",
+                        "\nRETURN count(t) AS deleted",
                     ]
                 )
             )
@@ -194,7 +196,7 @@ class CypherBackend:
                     head,
                     *targets,
                     # A node reached by two paths, or the root reached again, is in the targets once, and the root not
-                    # at all.
+                    # at all, so each node deleted is counted once (#375).
                     f"\nWITH {NODE_ALIAS}, reduce(seen = [], t IN targets | "
                     f"CASE WHEN t IN seen OR t = {NODE_ALIAS} THEN seen ELSE seen + t END) AS targets",
                     f"\nWITH {NODE_ALIAS}, targets, [t IN targets WHERE any(m IN [(t)--(m) | m] "
@@ -207,7 +209,7 @@ class CypherBackend:
                     f"\nDETACH DELETE {NODE_ALIAS}",
                     "\nWITH orphans",
                     "\nFOREACH (t IN orphans | DETACH DELETE t)",
-                    "\nRETURN count(*) AS deleted",
+                    "\nRETURN count(*) + sum(size(orphans)) AS deleted",
                 ]
             )
         )

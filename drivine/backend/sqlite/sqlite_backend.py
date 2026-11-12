@@ -165,7 +165,7 @@ class SqliteBackend:
         Deletes the root with id `$id` that meets `where`, and for a cascade the nodes a load of the view reaches from
         it through the relationships a save writes (see SqlViews.cascade): every one, or with DELETE_ORPHAN those not
         kept (see kept_targets). Every node is selected before any is deleted, so what is kept is read first. Returns
-        how many roots were deleted: `{deleted}`.
+        how many nodes were deleted, the roots and what the cascade took (#375): `{deleted}`.
         """
         root = target.root if isinstance(target, GraphViewModel) else target
         filter_ = self._deleted_where(target, where)
@@ -192,7 +192,7 @@ class SqliteBackend:
                 f"cascade_kept (nid) AS (\n    {kept}),",
             ]
             deleted += " WHERE nid NOT IN (SELECT nid FROM cascade_kept)"
-        # The roots are counted before anything is deleted: the left of the sum is worked out first.
+        # Every node deleted is counted, the roots and what the cascade took, as drivine4j counts them (#375).
         return PostgresStatement(
             "\n".join(
                 [
@@ -200,8 +200,8 @@ class SqliteBackend:
                     f"(SELECT {ROW_ALIAS}.nid {self._from(root, filter_)}),",
                     *targets,
                     f"gone AS ({deleted})",
-                    "SELECT (SELECT COUNT(*) FROM cascade_roots) + 0 * "
-                    f'{DELETE}({sql_text(self.graph.name)}, (SELECT json_group_array(nid) FROM gone)) AS "deleted"',
+                    f"SELECT {DELETE}({sql_text(self.graph.name)}, "
+                    '(SELECT json_group_array(nid) FROM gone)) AS "deleted"',
                 ]
             )
         )

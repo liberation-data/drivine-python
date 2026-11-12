@@ -43,7 +43,8 @@ class PostgresConnectionProvider(ConnectionProvider):
         self.port = port
         self.database = database
         self.user_name = user_name
-        self.password = password
+        # Kept private (#503): not part of the provider's API, nor of anything that prints its attributes by name.
+        self._password = password
         self.pool_max = pool_max
         self.connection_timeout = connection_timeout
         self.idle_timeout = idle_timeout
@@ -91,7 +92,7 @@ class PostgresConnectionProvider(ConnectionProvider):
                 port=self.port,
                 dbname=self.database,
                 user=self.user_name,
-                password=self.password,
+                password=self._password,
                 connect_timeout=max(1, self.connection_timeout // 1000) if self.connection_timeout else None,
             )
             self._pool = psycopg_pool.AsyncConnectionPool(

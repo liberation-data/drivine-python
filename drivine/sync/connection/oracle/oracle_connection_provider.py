@@ -81,7 +81,8 @@ class OracleConnectionProvider(ConnectionProvider):
         self.type = DatabaseType.ORACLE
         self.connect_string = connect_string
         self.user_name = user_name
-        self.password = password
+        # Kept private (#503): not part of the provider's API, nor of anything that prints its attributes by name.
+        self._password = password
         self.pool_max = pool_max
         self.connection_timeout = connection_timeout
         self.sets_no_adaptive_plans = sets_no_adaptive_plans
@@ -179,7 +180,7 @@ class OracleConnectionProvider(ConnectionProvider):
 
             pool = oracledb.create_pool(
                 user=self.user_name,
-                password=self.password,
+                password=self._password,
                 dsn=self.connect_string,
                 min=0,
                 max=self.pool_max,

@@ -13,8 +13,8 @@ MASK = "***"
 
 
 def masked_password(password: object) -> str | None:
-    """A password as it is printed: `'***'`, or `None` where there is none."""
-    return None if password is None or password == "" else MASK
+    """A password as it is printed: `'***'`, an empty one too as in drivine4j, or `None` where there is none."""
+    return None if password is None else MASK
 
 
 def masked_repr(instance: Any) -> str:

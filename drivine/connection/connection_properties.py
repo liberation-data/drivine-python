@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from drivine.connection.database_type import DatabaseType
+from drivine.connection.masking import masked_repr
 from drivine.connection.transaction_mode import TransactionMode
 from drivine.drivine_error import DrivineError
 
@@ -15,7 +16,8 @@ class ConnectionProperties:
     host: str
     port: int | None = None
     user_name: str | None = None
-    password: str | None = None
+    password: str | None = field(default=None, repr=False)
+    """Printed as `'***'`, or `None` where there is none: see `__repr__`."""
     idle_timeout: int | None = None
     """Milliseconds."""
     connection_timeout: int | None = None
@@ -30,6 +32,10 @@ class ConnectionProperties:
     On Oracle, Postgres and SQLite, the graph to work on: it names the graph's tables (on Oracle, its property graph
     too). Defaults to `drivine`. drivine4j's `default-graph-path`.
     """
+
+    def __repr__(self) -> str:
+        """Every property, the password as `'***'` (or `None`), as drivine4j prints them (#503)."""
+        return masked_repr(self)
 
     @classmethod
     def from_env(cls, connection_name: str | None = None, env: Mapping[str, str] | None = None) -> ConnectionProperties:

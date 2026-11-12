@@ -29,7 +29,8 @@ class Neo4jConnectionProvider(ConnectionProvider):
         self.name = name
         self.type = type
         self.uri = uri
-        self.auth = auth
+        # Kept private (#503): not part of the provider's API, nor of anything that prints its attributes by name.
+        self._auth = auth
         self.database = database
         self.config = config or {}
         self._driver: AsyncDriver | None = None
@@ -37,7 +38,7 @@ class Neo4jConnectionProvider(ConnectionProvider):
     @property
     def driver(self) -> AsyncDriver:
         if self._driver is None:
-            self._driver = AsyncGraphDatabase.driver(self.uri, auth=self.auth, **self.config)  # pyright: ignore[reportUnknownMemberType]
+            self._driver = AsyncGraphDatabase.driver(self.uri, auth=self._auth, **self.config)  # pyright: ignore[reportUnknownMemberType]
         return self._driver
 
     async def connect(self) -> Connection:

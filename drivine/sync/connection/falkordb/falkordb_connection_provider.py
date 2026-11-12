@@ -36,7 +36,8 @@ class FalkorDbConnectionProvider(ConnectionProvider):
         self.host = host
         self.port = port
         self.user_name = user_name
-        self.password = password
+        # Kept private (#503): not part of the provider's API, nor of anything that prints its attributes by name.
+        self._password = password
         self.connection_timeout = connection_timeout
         self.transaction_mode = transaction_mode
         self.transactions = AutoCommitTransactions("FalkorDB", transaction_mode)
@@ -52,7 +53,7 @@ class FalkorDbConnectionProvider(ConnectionProvider):
                 host=self.host,
                 port=self.port,
                 username=self.user_name,
-                password=self.password,
+                password=self._password,
                 socket_connect_timeout=timeout,
             )
         return self._client

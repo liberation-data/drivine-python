@@ -61,7 +61,8 @@ def test_deletes_what_each_level_holds_as_load_reads_it(pm: PersistenceManager):
     assert loaded is not None
     assert ids(loaded) == {"rc-root", "rc-m0", "rc-child", "rc-m1", "rc-grand", "rc-m2"}
 
-    assert gom.delete(SessionTree, "rc-root", cascade=CascadeType.DELETE_ALL) == 1
+    # The three sessions and their three messages (#375).
+    assert gom.delete(SessionTree, "rc-root", cascade=CascadeType.DELETE_ALL) == 6
 
     assert nodes(pm, "Session") == []
     assert nodes(pm, "Message") == []
@@ -215,7 +216,10 @@ def removed_by(pm: PersistenceManager, delete: Callable[[], int]) -> tuple[set[s
     """Deletes with `delete` and gives the ids it removed, with the count it returned."""
     before = set(node_ids(pm))
     deleted = delete()
-    return before - set(node_ids(pm)), deleted
+    removed = before - set(node_ids(pm))
+    # A delete returns every node it took, the roots and what the cascade took, as drivine4j asserts (#375).
+    assert deleted == len(removed)
+    return removed, deleted
 
 
 def load_tree(gom: StatelessGraphObjectManager, id: str) -> set[str]:
@@ -240,7 +244,7 @@ def test_delete_all_removes_what_load_reads_at_every_level(pm: PersistenceManage
     )
 
     assert removed == loaded
-    assert deleted == 1
+    assert deleted == len(removed)
     # The nested messages point at the user, which the view does not declare.
     assert node_ids(pm) == ["rc-user"]
 
@@ -452,7 +456,7 @@ def test_delete_orphan_keeps_a_nested_node_referred_to_from_outside(pm: Persiste
     # The nested messages are kept: the user outside the view still refers to each. The sessions are deleted, though
     # each relates to its own messages and parts: those are in the cascade.
     assert removed == loaded - {"rc-m1", "rc-m2"}
-    assert deleted == 1
+    assert deleted == len(removed)
     assert node_ids(pm) == ["rc-m1", "rc-m2", "rc-user"]
 
 
@@ -469,7 +473,7 @@ def test_delete_orphan_deletes_a_ring_back_to_its_root(pm: PersistenceManager):
     )
 
     assert removed == loaded
-    assert deleted == 1
+    assert deleted == len(removed)
 
 
 def test_delete_orphan_keeps_what_a_kept_node_holds(pm: PersistenceManager):

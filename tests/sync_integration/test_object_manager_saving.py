@@ -699,9 +699,10 @@ class TestDelete:
             with pytest.raises(DrivineError, match="DELETE_ORPHAN is not available on Memgraph"):
                 gom.delete(PersonCareer, "p1", cascade=CascadeType.DELETE_ORPHAN)
             return
-        assert gom.delete(PersonCareer, "p1", cascade=CascadeType.DELETE_ORPHAN) == 1
+        # Every node deleted (#375): p1 and o2, o1 kept for p2; then p2 and o1.
+        assert gom.delete(PersonCareer, "p1", cascade=CascadeType.DELETE_ORPHAN) == 2
         assert [it["uuid"] for it in nodes(pm, "Organization")] == ["o1"]
-        assert gom.delete(PersonCareer, "p2", cascade=CascadeType.DELETE_ALL) == 1
+        assert gom.delete(PersonCareer, "p2", cascade=CascadeType.DELETE_ALL) == 2
         assert gom.count(Organization) == 0
 
 

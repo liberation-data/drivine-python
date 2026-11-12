@@ -196,6 +196,7 @@ BEGIN
     DELETE FROM {self.graph.nodes} WHERE nid IN (SELECT column_value FROM TABLE(v_roots));
     v_deleted := SQL%ROWCOUNT;
     DELETE FROM {self.graph.nodes} x WHERE x.nid IN (SELECT column_value FROM TABLE(v_targets));
+    v_deleted := v_deleted + SQL%ROWCOUNT;
     OPEN c FOR SELECT v_deleted AS "deleted" FROM dual;
     DBMS_SQL.RETURN_RESULT(c);
 END;""")

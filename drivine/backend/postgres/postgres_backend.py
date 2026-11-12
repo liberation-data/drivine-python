@@ -191,7 +191,10 @@ class PostgresBackend:
                     *targets,
                     f"deleted AS (DELETE FROM {self.graph.nodes} WHERE nid IN (SELECT nid FROM cascade_roots) "
                     "RETURNING 1)",
-                    'SELECT CAST(COUNT(*) AS integer) AS "deleted" FROM deleted',
+                    # Every node deleted, the roots and what the cascade took, as drivine4j counts them (#375).
+                    "SELECT CAST((SELECT COUNT(*) FROM deleted)"
+                    f"{' + (SELECT COUNT(*) FROM deleted_targets)' if cascaded.reached else ''}"
+                    ' AS integer) AS "deleted"',
                 ]
             )
         )

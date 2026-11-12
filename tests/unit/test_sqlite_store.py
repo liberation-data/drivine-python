@@ -174,9 +174,11 @@ class TestTheStatementsOnAStore:
         return connection
 
     @pytest.mark.parametrize("cascade", [CascadeType.NONE, CascadeType.DELETE_ALL, CascadeType.DELETE_ORPHAN])
-    def test_a_delete_counts_the_roots_alone_and_deletes_once_after_reading_what_it_keeps(self, cascade: CascadeType):
+    def test_a_delete_counts_every_node_it_deletes_and_deletes_once_after_reading_what_it_keeps(
+        self, cascade: CascadeType
+    ):
         # Two roots share the id, each employed by an organization of its own; p2 is employed by o2 too, so o2 is no
-        # orphan. The count is this library's roots alone; drivine4j counts every node deleted (#375).
+        # orphan. The count is every node deleted, the roots and what the cascade took, as drivine4j counts it (#375).
         connection = self.store(
             [
                 (1, "Person", '{"uuid":"p1","name":"a"}'),
@@ -191,7 +193,8 @@ class TestTheStatementsOnAStore:
         connection.create_scalar_function(DELETE, lambda *it: calls.append(it) or _delete(connection, *it), 2)
         statement = SqliteBackend(SqliteGraph()).delete(ModelRegistry().model_of(PersonCareer), None, cascade)
 
-        assert connection.execute(statement.text, {"id": "p1"}).fetchall() == [(2,)]
+        counted = {CascadeType.NONE: 2, CascadeType.DELETE_ALL: 4, CascadeType.DELETE_ORPHAN: 3}
+        assert connection.execute(statement.text, {"id": "p1"}).fetchall() == [(counted[cascade],)]
         assert len(calls) == 1
         left = {CascadeType.NONE: [3, 4, 5], CascadeType.DELETE_ALL: [5], CascadeType.DELETE_ORPHAN: [4, 5]}
         assert [it[0] for it in connection.execute("SELECT nid FROM drivine_node ORDER BY nid")] == left[cascade]

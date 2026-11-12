@@ -197,10 +197,11 @@ async def test_deletes_a_views_root_with_every_node_it_reaches_or_only_those_lef
     # has no relationship but to the roots deleted.
     await seed.node(["Owner"], {"id": "other"})
     await seed.edge("other", "TAGGED", "orphans-tag")
-    assert await gom.delete(Holding, "all", cascade=CascadeType.DELETE_ALL) == 1
+    # Every node deleted (#375): all, all-item and all-tag; then orphans and orphans-item, the tag kept.
+    assert await gom.delete(Holding, "all", cascade=CascadeType.DELETE_ALL) == 3
     assert await gom.load(Item, "all-item") is None
     assert await gom.load(Tag, "all-tag") is None
-    assert await gom.delete(Holding, "orphans", cascade=CascadeType.DELETE_ORPHAN) == 1
+    assert await gom.delete(Holding, "orphans", cascade=CascadeType.DELETE_ORPHAN) == 2
     assert await gom.load(Item, "orphans-item") is None
     assert await gom.load(Tag, "orphans-tag") is not None
     assert await gom.load(Owner, "other") is not None

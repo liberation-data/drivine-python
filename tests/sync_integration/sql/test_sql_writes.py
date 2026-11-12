@@ -226,7 +226,8 @@ def test_keeps_in_a_cascade_a_node_one_step_either_way_round_from_a_kept_one(gom
     # a is kept by a node outside the cascade, and b by its pairing with a, stored the other way round from a.
     _relate(gom, "a", "outside", "KNOWS")
     _relate(gom, "b", "a", "PAIRED")
-    assert gom.delete(Pairing, "root", cascade=CascadeType.DELETE_ORPHAN) == 1
+    # Every node deleted (#375): root and c.
+    assert gom.delete(Pairing, "root", cascade=CascadeType.DELETE_ORPHAN) == 2
     assert _left(gom, ids) == {"root": False, "a": True, "b": True, "c": False, "outside": True}
 
 
@@ -249,7 +250,8 @@ def test_keeps_in_a_cascade_that_steps_either_way_a_node_by_a_step_out_or_in_as_
     _relate(gom, "d", "a", "MENTORS")
     _relate(gom, "c", "a", "LEADS")
     _relate(gom, "a", "f", "MENTORS")
-    assert gom.delete(Team, "root", cascade=CascadeType.DELETE_ORPHAN) == 1
+    # Every node deleted (#375): root, c, f and g.
+    assert gom.delete(Team, "root", cascade=CascadeType.DELETE_ORPHAN) == 4
     assert _left(gom, ids) == {
         "root": False,
         "a": True,
@@ -270,9 +272,10 @@ def test_cascades_a_delete_to_every_node_the_view_reaches_or_to_orphans(gom: Sta
 
     gom.save(conversation("s1", ["m1", "m2"], "ada"))
     gom.save(conversation("s2", ["m3"], "ada"))
-    assert gom.delete(Conversation, "s2", cascade=CascadeType.DELETE_ORPHAN) == 1
+    # Every node deleted (#375): s2 and m3, ada kept; then s1, m1, m2 and ada.
+    assert gom.delete(Conversation, "s2", cascade=CascadeType.DELETE_ORPHAN) == 2
     assert gom.load(Message, "m3") is None
     assert gom.load(Person, "ada") is not None
-    assert gom.delete(Conversation, "s1", cascade=CascadeType.DELETE_ALL) == 1
+    assert gom.delete(Conversation, "s1", cascade=CascadeType.DELETE_ALL) == 4
     assert gom.load(Message, "m1") is None
     assert gom.load(Person, "ada") is None

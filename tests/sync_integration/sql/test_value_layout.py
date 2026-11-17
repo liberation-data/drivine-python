@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from datetime import UTC, date, datetime
 from typing import Annotated, Any
 
@@ -80,6 +81,20 @@ def test_minus_zero_and_an_infinity_beside_a_date_are_read_back_as_the_floats_th
         # Oracle may drop -0's sign, as its own CREATE does: Drivine for TypeScript's saveValues test pins it so.
         assert math.copysign(1, loaded.reading) < 0
     assert loaded.others == [math.inf, -math.inf, 1.5]
+
+
+def test_minus_zero_is_written_as_a_cypher_create_given_it_writes_it(
+    gom: StatelessGraphObjectManager, pm: PersistenceManager
+):
+    # Drivine for TypeScript's saveValues "writes -0 as a CREATE given it writes it": the sign may go, as on Oracle.
+    pm.execute(QuerySpecification[Any](cypher_statement("MATCH (n:Held) WHERE n.id IN ['z', 'c'] DELETE n")))
+    gom.save(Held(id="z", reading=-0.0))
+    create = cypher_statement("CREATE (n:Held {id: $id, reading: $reading})")
+    pm.execute(QuerySpecification[Any](create).bind({"id": "c", "reading": -0.0}))
+    read = cypher_statement("MATCH (n:Held) WHERE n.id IN ['z', 'c'] RETURN toString(n.reading) ORDER BY n.id DESC")
+    saved, made = map(str, pm.query(QuerySpecification[Any](read)))
+    assert saved == made
+    assert re.fullmatch(r"-?0\.0", saved), saved
 
 
 def test_a_float_is_held_alike_with_a_date_beside_it_or_without(

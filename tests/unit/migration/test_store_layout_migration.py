@@ -1,0 +1,161 @@
+"""
+StoreLayoutMigration's driver, against a connection kept in memory and a planner that answers rounds as scripted
+(drivine-python#514): what each action runs, and on which connection, and what it gives back. The module's own rounds
+are the spec's (`migrate.yaml`, the module's LayoutMigratorTest); a store's are proven once drivine-python is on
+layout 2.
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Any
+
+import pytest
+
+from drivine.drivine_error import DrivineError
+from drivine.migration.store_layout_migration import MigrationDeclaration, StoreLayoutMigration
+
+
+class FakeConnection:
+    def __init__(self, log: list[str], name: str, fail_on: str | None = None) -> None:
+        self.log, self.name, self.fail_on = log, name, fail_on
+
+    async def query(self, spec: Any) -> list[Any]:
+        text = getattr(spec.statement, "text", spec.statement)
+        self.log.append(f"{self.name}: {text} {json.dumps(spec.parameters, sort_keys=True, default=str)}")
+        if self.fail_on and self.fail_on in text:
+            raise RuntimeError(f"refused {text}")
+        if text == "READ":
+            return [{"row": '{"id": 1, "props": "{}"}'}, {"a": 1, "b": 2}]
+        return []
+
+    async def start_transaction(self) -> None:
+        self.log.append(f"{self.name}: begin")
+
+    async def commit_transaction(self) -> None:
+        self.log.append(f"{self.name}: commit")
+
+    async def rollback_transaction(self) -> None:
+        self.log.append(f"{self.name}: rollback")
+
+    async def release(self, error: BaseException | None = None) -> None:
+        self.log.append(f"{self.name}: release")
+
+
+class FakeProvider:
+    type = "SQLITE"
+    graph_name = "drivine"
+
+    def __init__(self, fail_on: str | None = None) -> None:
+        self.log: list[str] = []
+        self.connections = 0
+        self.fail_on = fail_on
+
+    async def connect_unjudged(self) -> FakeConnection:
+        self.connections += 1
+        return FakeConnection(self.log, f"c{self.connections}", self.fail_on)
+
+    async def prepare_unjudged(self, connection: FakeConnection) -> None:
+        self.log.append(f"{connection.name}: prepare")
+
+    def stamp_statement(self) -> tuple[str, dict[str, Any]]:
+        return "STAMP", {"layout": 2}
+
+
+class Planner:
+    """Answers each request with the next scripted round, and keeps what it was asked."""
+
+    def __init__(self, rounds: list[list[dict[str, Any]]]) -> None:
+        self.rounds, self.asked = rounds, []
+
+    def __call__(self, text: str) -> str:
+        request = json.loads(text)["migrate"]
+        self.asked.append(request)
+        if self.rounds:
+            return json.dumps({"run": self.rounds.pop(0), "state": {"n": len(self.asked)}})
+        return json.dumps({"done": {"status": "migrated", "message": "done"}})
+
+
+DECLARED = [MigrationDeclaration("Person", "born", "date")]
+
+
+async def test_a_migration_unless_told_it_is_unproven_is_refused() -> None:
+    with pytest.raises(DrivineError, match="not yet proven"):
+        await StoreLayoutMigration(FakeProvider(), Planner([])).migrate(DECLARED)
+
+
+async def test_each_action_runs_where_it_belongs_and_the_lock_is_held_on_a_connection_of_its_own() -> None:
+    provider = FakeProvider()
+    planner = Planner(
+        [
+            [{"type": "query", "statement": "READ", "parameters": {"after": 0}, "purpose": "batch"}],
+            [
+                {"type": "execute", "statement": "CREATE", "parameters": {}, "purpose": "checkpoint"},
+                {"type": "prepare"},
+                {"type": "lock", "statement": "LOCK"},
+                {"type": "lock", "statement": "LOCK"},
+                {
+                    "type": "transaction",
+                    "statements": [
+                        {"type": "execute", "statement": "UPDATE", "parameters": {"id": 1}, "purpose": "rewrite"}
+                    ],
+                },
+                {"type": "assignStamp"},
+            ],
+        ]
+    )
+    report = await StoreLayoutMigration(provider, planner).migrate(DECLARED, batch_size=2, dry_run=False, unproven=True)
+    assert report["status"] == "migrated"
+    assert planner.asked[0]["start"] == {
+        "declarations": [{"label": "Person", "property": "born", "kind": "date"}],
+        "batchSize": 2,
+        "dryRun": False,
+        "keepInvalid": False,
+    }
+    assert planner.asked[0]["store"] == "sqlite" and planner.asked[0]["graph"] == "drivine"
+    # A row of one JSON column is read as the object it holds; any other row as it is.
+    assert planner.asked[1]["outcomes"] == [{"type": "rows", "rows": [{"id": 1, "props": "{}"}, {"a": 1, "b": 2}]}]
+    assert planner.asked[2]["outcomes"] == [{"type": "ran"}] * 6
+    assert provider.connections == 2, "the work's connection and the lock's, taken once"
+    assert [line for line in provider.log if not line.startswith("c1: READ")] == [
+        "c1: CREATE []",
+        "c1: prepare",
+        "c2: begin",
+        "c2: LOCK []",
+        "c1: begin",
+        'c1: UPDATE {"id": 1}',
+        "c1: commit",
+        'c1: STAMP {"layout": 2}',
+        "c2: rollback",
+        "c2: release",
+        "c1: release",
+    ]
+
+
+async def test_a_failed_action_ends_its_round_and_a_failed_transaction_is_rolled_back() -> None:
+    provider = FakeProvider(fail_on="UPDATE")
+    planner = Planner(
+        [
+            [
+                {"type": "transaction", "statements": [{"statement": "UPDATE", "parameters": {}}]},
+                {"type": "execute", "statement": "NEVER", "parameters": {}, "purpose": "x"},
+            ]
+        ]
+    )
+    await StoreLayoutMigration(provider, planner).migrate(DECLARED, unproven=True)
+    assert planner.asked[1]["outcomes"] == [{"type": "failed", "message": "refused UPDATE"}]
+    assert "c1: rollback" in provider.log and not any("NEVER" in line for line in provider.log)
+
+
+async def test_the_modules_refusal_is_thrown() -> None:
+    with pytest.raises(DrivineError, match="refused the migration"):
+        await StoreLayoutMigration(FakeProvider(), lambda _: json.dumps({"error": "No kind x"})).migrate(
+            DECLARED, unproven=True
+        )
+
+
+def test_a_graph_engine_is_refused() -> None:
+    provider = FakeProvider()
+    provider.type = "NEO4J"  # type: ignore[misc]
+    with pytest.raises(DrivineError, match="Postgres, Oracle or SQLite"):
+        StoreLayoutMigration(provider, Planner([]))

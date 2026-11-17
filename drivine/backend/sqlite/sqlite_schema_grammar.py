@@ -28,8 +28,8 @@ from drivine.schema.vector_index_spec import VectorIndexSpec
 
 _Spec = RangeIndexSpec | UniquenessConstraintSpec | VectorIndexSpec | FullTextIndexSpec
 
-RANGE = "ix"
-UNIQUE = "uq"
+RANGE = "ix2"
+UNIQUE = "uq2"
 """What the name of a range index, and of a uniqueness constraint's index, says it is: drivine4j's."""
 
 

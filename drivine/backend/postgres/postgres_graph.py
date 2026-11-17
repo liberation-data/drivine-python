@@ -1,14 +1,11 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 
-from drivine.backend.postgres.postgres_store_text import (
-    GRAPH_PLACEHOLDER,
-    POSTGRES_STORE_ENSURING,
-    POSTGRES_STORE_VERSION,
-)
 from drivine.backend.sql.sql_graph import DEFAULT_GRAPH, SqlGraph, sql_text
 from drivine.backend.sql.write_plan import WritePlan, WriteReturns
+from drivine.backend.store_statements import store_statements
 from drivine.drivine_error import DrivineError
 from drivine.model import stamps
 
@@ -26,23 +23,42 @@ class PostgresGraph(SqlGraph):
     `contracts_node`, and is the same graph as one called `contracts`.
     """
 
-    VERSION = POSTGRES_STORE_VERSION
-    """What the node table's comment says of a store this version made."""
-
     def __init__(self, name: str = DEFAULT_GRAPH) -> None:
         super().__init__(name, "Postgres", MAX_OBJECT_NAME)
+
+    @staticmethod
+    def version() -> str:
+        """What the node table's comment says of a store this version made: the module's version of the store."""
+        ensuring = store_statements("postgres", DEFAULT_GRAPH).ensuring or ""
+        found = re.search(r"COMMENT ON TABLE \w+ IS '([^']+)'", ensuring)
+        if found is None:
+            raise DrivineError("The shared module's Postgres store says no version in its node table's comment.")
+        return found.group(1)
+
+    @property
+    def tables_made(self) -> str:
+        """
+        A query of the store's catalog whose one value is how many of the graph's table of nodes it holds, none or one:
+        a graph without one is new, and its layout is not judged (see store_layout.judging).
+        """
+        return (
+            'SELECT count(*) AS "made" FROM pg_catalog.pg_class c '
+            f"WHERE c.oid = to_regclass({sql_text(self.nodes.lower())})"
+        )
 
     @property
     def ensuring(self) -> str:
         """
-        The block that makes the store when it is not there, and does nothing when it is: drivine4j's, byte for byte
-        (see postgres_store_text), so a graph is one store whichever library made it. The node table's comment, written
-        last, says which version made the store: one this version made is left alone, and over one an earlier version
-        made the rest is made again, which keeps its rows and has its functions replaced. The block takes a lock of its
-        own for the graph first, so two processes that each find the store missing make it one after the other;
-        Postgres runs a block's schema statements in its transaction, so the store is made whole or not at all.
+        The block that makes the store when it is not there, and does nothing when it is: the shared module's (see
+        store_statements), so a graph is one store whichever library made it. The node table's comment, written last,
+        says which version made the store: one this version made is left alone, and over one an earlier version made
+        the rest is made again, which keeps its rows and has its functions replaced. The block takes a lock of its own
+        for the graph first, so two processes that each find the store missing make it one after the other; Postgres
+        runs a block's schema statements in its transaction, so the store is made whole or not at all.
         """
-        return POSTGRES_STORE_ENSURING.replace(GRAPH_PLACEHOLDER, self.name)
+        ensuring = store_statements("postgres", self.name).ensuring
+        assert ensuring is not None
+        return ensuring
 
     booleans: tuple[str, str] = ("'true'", "'false'")
     """True and false written into a patch's query, as the driver binds them (see PlanGraph)."""

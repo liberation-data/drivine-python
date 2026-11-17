@@ -265,6 +265,11 @@ def test_a_file_whose_table_of_nodes_alone_is_old_is_refused_and_another_graph_i
         other.end()
 
 
+def unasked(statement: str, _: Any) -> list[Any]:
+    """The layout's verdict, which a store whose ids could be reused is refused before."""
+    raise AssertionError(f"The layout's verdict was asked, with {statement}")
+
+
 def test_the_graphs_look_refuses_a_store_an_earlier_drivine_made_before_anything_is_made(path: str):
     earlier_file(path, "G")
     graph = SqliteGraph("G")
@@ -278,7 +283,7 @@ def test_the_graphs_look_refuses_a_store_an_earlier_drivine_made_before_anything
 
     try:
         with pytest.raises(ReusedIdsError) as refused:
-            graph.ensure(run)
+            graph.ensure(run, unasked)
     finally:
         connection.close()
     # The look, and the file named, as the graph was named: nothing else.
@@ -297,7 +302,7 @@ def test_a_graph_whose_name_holds_autoincrement_an_earlier_drivine_made_is_refus
 
     try:
         with pytest.raises(ReusedIdsError):
-            SqliteGraph("autoincrement").ensure(run)
+            SqliteGraph("autoincrement").ensure(run, unasked)
     finally:
         connection.close()
 
@@ -312,7 +317,7 @@ def test_a_store_in_memory_an_earlier_drivine_made_is_refused_naming_no_file():
             return None if row is None else row[0]
 
         with pytest.raises(ReusedIdsError) as refused:
-            SqliteGraph().ensure(run)
+            SqliteGraph().ensure(run, unasked)
     finally:
         connection.close()
     assert refused.value.path is None

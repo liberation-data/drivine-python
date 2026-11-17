@@ -691,15 +691,77 @@ def test_writes_what_typescript_writes_for_sqlite():
     expect_golden("SQLITE", {**sqlite_statements(), **schema(schema_grammar_for(DatabaseType.SQLITE, SqliteGraph()))})
 
 
+PLANS_WITH_IDS = (
+    "Account.patch.plan",
+    "Account.patchAll.plan",
+    "Person.patch.plan",
+    "Person.patch.where.plan",
+    "Person.patchAll.plan",
+    "edges.relate.create.plan",
+    "edges.relate.plan",
+    "edges.unrelate.plan",
+    "edges.unrelateAll.plan",
+)
+"""The plans whose `ref` and `patch` steps carry the node's id in store layout 2 (drivine-python#509)."""
+
+PLANNED = (
+    "schema.createRange",
+    "schema.createRange.ignoreCase",
+    "schema.createUnique",
+    "schema.createUnique.ignoreCase",
+    "schema.createUnique.pair",
+)
+"""
+The schema statements whose index names are layout 2's here (`_ix2_`, `_uq2_`), so that a first connection's layout
+verdict reads the graph as this layout's, until the schema plan comes from the shared module (#471, step 4); and on
+SQLite the drops of them too.
+"""
+
+HELD: dict[str, dict[str, str]] = {
+    engine: {
+        **{
+            name: "layout 2's index names, until the schema plan comes from the module (#471, step 4)"
+            for name in PLANNED
+        },
+        **(
+            {it: "layout 2's index names (#471, step 4)" for it in ("schema.dropRange", "schema.dropUnique")}
+            if engine == "SQLITE"
+            else {}
+        ),
+        **(
+            {name: "a plan's steps carry the node's id (#509)" for name in PLANS_WITH_IDS} if engine != "ORACLE" else {}
+        ),
+    }
+    for engine in ("ORACLE", "POSTGRES", "SQLITE")
+}
+"""
+What of a store's goldens differs here until a later step of this library's store layout 2 lands, by name: each is
+checked to differ, or to be written here alone, so its hold is taken off as soon as it no longer does.
+"""
+
+
+def held(engine: str, name: str) -> str | None:
+    return HELD.get(engine, {}).get(name)
+
+
 def expect_golden(engine: str, statements: dict[str, str]) -> None:
     """
     Each statement as TypeScript writes it, character for character. A plan is compared as the JSON it is: the keys of
     a step's properties are in the order the object holds them, which is its fields' in Python and the order a
-    TypeScript object was given them in, and the write function reads them alike in any order.
+    TypeScript object was given them in, and the write function reads them alike in any order. A statement held (see
+    HELD) must differ, or be written here alone.
     """
-    assert statements.keys() == GOLDEN[engine].keys()
+    golden = GOLDEN[engine]
+    assert {it for it in statements if not held(engine, it)} == {it for it in golden if not held(engine, it)}
+    passing: list[str] = []
     for name, text in statements.items():
-        if name.endswith(".plan"):
-            assert json.loads(text) == json.loads(GOLDEN[engine][name]), name
+        expected = golden.get(name)
+        same = expected is not None and (
+            json.loads(text) == json.loads(expected) if name.endswith(".plan") else text == expected
+        )
+        if held(engine, name):
+            if same:
+                passing.append(name)
         else:
-            assert text == GOLDEN[engine][name], name
+            assert same, name
+    assert passing == [], f"Held, and written as TypeScript writes them: take them out of HELD: {passing}"

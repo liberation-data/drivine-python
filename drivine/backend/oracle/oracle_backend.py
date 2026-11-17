@@ -24,6 +24,7 @@ from drivine.backend.save_statement import SaveStatement
 from drivine.backend.sql.cypher_shorthand import CypherShorthand
 from drivine.backend.sql.sql_cascade import beyond_count, kept_targets
 from drivine.backend.sql.sql_catalog import catalog_properties
+from drivine.backend.store_statements import StampAndMarker
 from drivine.cypher.shared_compiler import SearchIndex, full_text_index_lookup
 from drivine.drivine_error import DrivineError
 from drivine.dsl.query import Query
@@ -45,21 +46,10 @@ STORE_LABEL = "DrivineStore"
 SCHEMA_MARKER = "_DrivineSchema"
 """The label of the nodes recording what each schema owner applied: drivine4j's, so both read one marker."""
 
-_ITEMS_MARK = "items:"
-"""What a marker's inventory is kept behind, as drivine4j keeps it: Oracle has no empty string."""
-
-_NOW_MILLIS = "ROUND((CAST(SYS_EXTRACT_UTC(SYSTIMESTAMP) AS DATE) - DATE '1970-01-01') * 86400000)"
-"""The moment, in milliseconds since the epoch, as the graph engines' timestamp() gives it."""
-
 _CONTENDED = re.compile(r"ORA-(00060|08177)\b")
 
 ROW_ALIAS = "n"
 """What a statement over a fragment calls its node's row. A raw `where` is SQL over it."""
-
-
-def _newest_first(alias: str) -> str:
-    """The newest marker first, then the one made later, so the marker read, written and kept are one."""
-    return f"JSON_VALUE({alias}.props, '$.appliedAt' RETURNING NUMBER) DESC NULLS LAST, {alias}.nid DESC"
 
 
 class OracleBackend:
@@ -329,63 +319,28 @@ END;""")
     def unrelate_all(self, origin: MatchedNode, type: str, direction: Direction) -> GraphStatement:
         return OracleWrites(self.graph).unrelate_all(origin, type, direction)
 
+    @property
+    def _stamp_and_marker(self) -> StampAndMarker:
+        """The store's stamp and schema marker statements, the shared module's (see StampAndMarker)."""
+        return StampAndMarker("oracle", self.graph.name)
+
     def store_stamps(self) -> GraphStatement:
-        """The store's identity stamps, `{id, assignedAt}`, oldest first."""
-        return GraphStatement(
-            "SELECT JSON_OBJECT('id' VALUE JSON_VALUE(n.props, '$.storeId'), 'assignedAt' VALUE "
-            "JSON_VALUE(n.props, '$.assignedAt') "
-            f'RETURNING JSON) AS "stamp" FROM {self.graph.nodes} n WHERE {has_labels("n", [STORE_LABEL])} '
-            "ORDER BY JSON_VALUE(n.props, '$.assignedAt'), JSON_VALUE(n.props, '$.storeId')"
-        )
+        return self._stamp_and_marker.store_stamps()
 
     def assign_store_stamp(self) -> GraphStatement:
-        """Mints the stamp unless it is there; the uniqueness constraint on its key turns away a racing writer's."""
-        return GraphStatement(
-            f"INSERT INTO {self.graph.nodes} (labels, props) SELECT JSON('[\"{STORE_LABEL}\"]'), "
-            "JSON_OBJECT('key' VALUE $key, 'storeId' VALUE $storeId, 'assignedAt' VALUE $assignedAt, 'engine' VALUE "
-            f"$engine) FROM dual WHERE NOT EXISTS (SELECT 1 FROM {self.graph.nodes} n WHERE "
-            f"{has_labels('n', [STORE_LABEL])} AND JSON_VALUE(n.props, '$.key') = $key)"
-        )
+        return self._stamp_and_marker.assign_store_stamp()
 
     def schema_marker(self, property: str) -> GraphStatement:
-        """An inventory is kept behind 'items:', so an empty one reads back empty, not absent (drivine4j's mark)."""
-        return GraphStatement(
-            f"SELECT JSON_VALUE(n.props, '$.{property}' RETURNING CLOB) AS \"value\" "
-            f"FROM {self.graph.nodes} n WHERE {self._marker('n')} ORDER BY {_newest_first('n')} "
-            "FETCH FIRST 1 ROWS ONLY"
-        )
+        return self._stamp_and_marker.schema_marker(property)
 
-    @staticmethod
-    def marker_items(stored: str | None) -> list[str] | None:
-        """The inventory behind its mark: stripped here, as SQL would make an empty one null."""
-        if stored is None or not stored.startswith(_ITEMS_MARK):
-            return None
-        items = stored[len(_ITEMS_MARK) :]
-        return [] if items == "" else items.split("\n")
+    def marker_items(self, stored: str | None) -> list[str] | None:
+        return self._stamp_and_marker.marker_items(stored)
 
     def record_schema_marker(self) -> GraphStatement:
-        """
-        The marker found by a query and matched by its id: matched by its scope, the MERGE would update the column it
-        matches on, which Oracle refuses (ORA-38104). Where a race left several, the newest is written. Both props are
-        built RETURNING JSON: with no RETURNING, JSON_OBJECT is VARCHAR2(4000), which a large inventory overflows.
-        """
-        nodes = self.graph.nodes
-        return GraphStatement(
-            f"MERGE INTO {nodes} n USING (SELECT (SELECT m.nid FROM {nodes} m WHERE {self._marker('m')} ORDER BY "
-            f"{_newest_first('m')} FETCH FIRST 1 ROWS ONLY) AS nid FROM dual) found ON (n.nid = found.nid) "
-            "WHEN MATCHED THEN UPDATE SET n.props = JSON_MERGEPATCH(n.props, JSON_OBJECT('version' VALUE $version, "
-            f"'items' VALUE '{_ITEMS_MARK}' || $items, 'appliedAt' VALUE {_NOW_MILLIS} RETURNING JSON)) "
-            f"WHEN NOT MATCHED THEN INSERT (labels, props) VALUES (JSON('[\"{SCHEMA_MARKER}\"]'), JSON_OBJECT('scope' "
-            f"VALUE $scope, 'version' VALUE $version, 'items' VALUE '{_ITEMS_MARK}' || $items, 'appliedAt' VALUE "
-            f"{_NOW_MILLIS} ABSENT ON NULL RETURNING JSON))"
-        )
+        return self._stamp_and_marker.record_schema_marker()
 
     def prune_schema_markers(self) -> GraphStatement:
-        return GraphStatement(
-            f"DELETE FROM {self.graph.nodes} WHERE nid IN (SELECT nid FROM (SELECT n.nid, ROW_NUMBER() OVER (ORDER BY "
-            f"{_newest_first('n')}) AS position FROM {self.graph.nodes} n WHERE {self._marker('n')}) "
-            "WHERE position > 1)"
-        )
+        return self._stamp_and_marker.prune_schema_markers()
 
     def contended(self, failure: BaseException) -> bool:
         """ORA-00060 (deadlock) and ORA-08177 (serialization) are another writer's doing: running again may succeed."""
@@ -397,10 +352,6 @@ END;""")
                 return True
             cause = cause.__cause__
         return False
-
-    def _marker(self, alias: str) -> str:
-        """The markers of the owner bound as `$scope`."""
-        return f"{has_labels(alias, [SCHEMA_MARKER])} AND JSON_VALUE({alias}.props, '$.scope') = $scope"
 
     def _root_where(self, target: TargetModel, where: str | None) -> str | None:
         """A predicate over the root's row and, for a view, the view's requirements."""

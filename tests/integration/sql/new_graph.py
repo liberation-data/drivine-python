@@ -57,16 +57,20 @@ async def store_objects_made(pm: PersistenceManager, name: str) -> int:
     return made
 
 
+TABLES = ("edge", "node", "schema", "count2_delta", "count2", "lock2")
+"""The graph's tables, by what follows its name, each after any that refers to it: store layout 2's among them."""
+
+
 async def drop_graph(pm: PersistenceManager, name: str) -> None:
     """Drops the graph's tables, and on Oracle the property graph over them."""
     if pm.type is DatabaseType.ORACLE:
         statements = [f"DROP PROPERTY GRAPH IF EXISTS {name}"] + [
-            f"DROP TABLE IF EXISTS {name}_{it} PURGE" for it in ("edge", "node", "schema")
+            f"DROP TABLE IF EXISTS {name}_{it} PURGE" for it in TABLES
         ]
     elif pm.type is DatabaseType.SQLITE:
-        statements = [f"DROP TABLE IF EXISTS {name}_{it}" for it in ("edge", "node", "schema")]
+        statements = [f"DROP TABLE IF EXISTS {name}_{it}" for it in TABLES]
     else:
         # CASCADE: the store's functions return a row of its node table.
-        statements = [f"DROP TABLE IF EXISTS {name}_edge, {name}_node, {name}_schema CASCADE"]
+        statements = [f"DROP TABLE IF EXISTS {', '.join(f'{name}_{it}' for it in TABLES)} CASCADE"]
     for statement in statements:
         await pm.execute(QuerySpecification[Any](statement))

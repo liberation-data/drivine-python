@@ -11,7 +11,6 @@ from drivine.backend.matched_node import MatchedNode
 from drivine.backend.matching_search import MatchingSearch
 from drivine.backend.nearest_search import NearestSearch
 from drivine.backend.page import Page
-from drivine.backend.postgres.postgres_backend import SCHEMA_MARKER, STORE_LABEL
 from drivine.backend.postgres.postgres_save_builder import PostgresSaveBuilder, stored_key
 from drivine.backend.postgres.postgres_statement import PostgresStatement
 from drivine.backend.postgres.postgres_writes import PostgresWrites
@@ -25,9 +24,7 @@ from drivine.backend.sqlite.sqlite_graph import (
     JSON_ROWS,
     SqliteGraph,
     has_labels,
-    label_array,
     node_document,
-    number_of,
     text,
     text_of,
 )
@@ -35,6 +32,7 @@ from drivine.backend.sqlite.sqlite_groups import SqliteGroups
 from drivine.backend.sqlite.sqlite_query_renderer import SqliteQueryRenderer
 from drivine.backend.sqlite.sqlite_search import SqliteSearch
 from drivine.backend.sqlite.sqlite_views import SqliteViews
+from drivine.backend.store_statements import StampAndMarker
 from drivine.drivine_error import DrivineError
 from drivine.dsl.query import Query
 from drivine.dsl.rendered_query import RenderedQuery
@@ -51,9 +49,6 @@ from drivine.schema.schema_item import SchemaItem
 
 ROW_ALIAS = "n"
 """What a statement over a fragment calls its node's row. A raw `where` is SQL over it."""
-
-_NOW_MILLIS = "CAST(unixepoch('subsec') * 1000 AS INTEGER)"
-"""The moment, in milliseconds since the epoch, as the graph engines' timestamp() gives it."""
 
 
 class SqliteBackend:
@@ -313,73 +308,32 @@ class SqliteBackend:
     def unrelate_all(self, origin: MatchedNode, type: str, direction: Direction) -> GraphStatement:
         return PostgresWrites(self.graph).unrelate_all(origin, type, direction)
 
+    @property
+    def _stamp_and_marker(self) -> StampAndMarker:
+        """The store's stamp and schema marker statements, the shared module's (see StampAndMarker)."""
+        return StampAndMarker("sqlite", self.graph.name, PostgresStatement.of)
+
     def store_stamps(self) -> GraphStatement:
-        """The store's identity stamps, `{id, assignedAt}`, oldest first. Each is a map, read back as the JSON it is."""
-        return PostgresStatement(
-            f"{JSON_ROWS}\n"
-            f"SELECT json_object('id', {text_of('n', 'storeId')}, 'assignedAt', {text_of('n', 'assignedAt')}) "
-            f'AS "stamp" FROM {self.graph.nodes} n WHERE {has_labels("n", [STORE_LABEL])} '
-            f"ORDER BY {text_of('n', 'assignedAt')}, {text_of('n', 'storeId')}"
-        )
+        return self._stamp_and_marker.store_stamps()
 
     def assign_store_stamp(self) -> GraphStatement:
-        """Mints the stamp unless it is there; the uniqueness constraint on its key turns away a racing writer's."""
-        return PostgresStatement(
-            f"INSERT INTO {self.graph.nodes} (labels, props) SELECT {label_array(STORE_LABEL)}, "
-            f"json_object('key', {text('$key')}, 'storeId', {text('$storeId')}, "
-            f"'assignedAt', {text('$assignedAt')}, 'engine', {text('$engine')}) "
-            f"WHERE NOT EXISTS (SELECT 1 FROM {self.graph.nodes} n WHERE {has_labels('n', [STORE_LABEL])} "
-            f"AND {text_of('n', 'key')} = {text('$key')})"
-        )
+        return self._stamp_and_marker.assign_store_stamp()
 
     def schema_marker(self, property: str) -> GraphStatement:
-        return PostgresStatement(
-            f'SELECT {text_of("n", property)} AS "value" FROM {self.graph.nodes} n WHERE {self._marker("n")} '
-            f"ORDER BY {self._newest_first('n')} LIMIT 1"
-        )
+        return self._stamp_and_marker.schema_marker(property)
 
-    @staticmethod
-    def marker_items(stored: str | None) -> list[str] | None:
-        """SQLite keeps an empty string apart from null, so an inventory is kept as it is, as drivine4j keeps it."""
-        if stored is None:
-            return None
-        return [] if stored == "" else stored.split("\n")
+    def marker_items(self, stored: str | None) -> list[str] | None:
+        return self._stamp_and_marker.marker_items(stored)
 
     def record_schema_marker(self) -> GraphStatement:
-        """
-        The newest marker of the scope is written, and one is made where there is none: the row is inserted with the
-        `nid` of the marker found, or none, and a marker that is there is written instead. A merge patch leaves out
-        what is null, so a version that is null removes the one the marker had.
-        """
-        written = f"'version', {text('$version')}, 'items', {text('$items')}, 'appliedAt', {_NOW_MILLIS}"
-        nodes = self.graph.nodes
-        return PostgresStatement(
-            f"INSERT INTO {nodes} (nid, labels, props) "
-            f"SELECT (SELECT m.nid FROM {nodes} m WHERE {self._marker('m')} ORDER BY {self._newest_first('m')} "
-            f"LIMIT 1), {label_array(SCHEMA_MARKER)}, "
-            f"json_patch('{{}}', json_object('scope', {text('$scope')}, {written})) "
-            f"WHERE 1 ON CONFLICT (nid) DO UPDATE SET props = json_patch(props, json_object({written}))"
-        )
+        return self._stamp_and_marker.record_schema_marker()
 
     def prune_schema_markers(self) -> GraphStatement:
-        return PostgresStatement(
-            f"DELETE FROM {self.graph.nodes} WHERE nid IN (SELECT nid FROM (SELECT n.nid, row_number() OVER (ORDER BY "
-            f"{self._newest_first('n')}) AS position FROM {self.graph.nodes} n WHERE {self._marker('n')}) ranked "
-            "WHERE position > 1)"
-        )
+        return self._stamp_and_marker.prune_schema_markers()
 
     def contended(self, failure: BaseException) -> bool:
         """Another connection held the file's lock, or a table's, the failure or a cause under it says (see locked)."""
         return contended(failure)
-
-    def _marker(self, alias: str) -> str:
-        """The markers of the owner bound as `$scope`."""
-        return f"{has_labels(alias, [SCHEMA_MARKER])} AND {text_of(alias, 'scope')} = {text('$scope')}"
-
-    @staticmethod
-    def _newest_first(alias: str) -> str:
-        """The marker applied last first, then the one made later, so the marker read, written and kept are one."""
-        return f"{number_of(alias, 'appliedAt')} DESC NULLS LAST, {alias}.nid DESC"
 
     def _root_where(self, target: TargetModel, where: str | None) -> str | None:
         """A predicate over the root's row and, for a view, the view's requirements."""

@@ -255,7 +255,15 @@ async def test_a_provider_is_built_from_properties_with_the_files_path_as_the_da
         )
         await connection.release()
         # sqlite_sequence is SQLite's own, kept for the AUTOINCREMENT keys (drivine4j#713).
-        assert [it["name"] for it in tables] == ["g_edge", "g_node", "g_schema", "sqlite_sequence"]
+        assert [it["name"] for it in tables] == [
+            "g_count2",
+            "g_count2_delta",
+            "g_edge",
+            "g_lock2",
+            "g_node",
+            "g_schema",
+            "sqlite_sequence",
+        ]
     finally:
         await registry.close()
     with pytest.raises(DrivineError, match="DATABASE_NAME"):

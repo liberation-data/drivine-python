@@ -217,9 +217,9 @@ class SqliteSession:
         Makes the graph's tables where they are not all there, each statement on its own: a user who may only read the
         file is refused a `CREATE … IF NOT EXISTS` even over a table that is there, so the store is looked for first
         (see SqliteGraph.ensure). A file an earlier Drivine made, whose ids could be reused, is refused with
-        ReusedIdsError.
+        ReusedIdsError, and a graph whose store layout this version doesn't read with StoreLayoutError.
         """
-        graph.ensure(self._first_value)
+        graph.ensure(self._first_value, self.query)
 
     def _first_value(self, statement: str) -> Any:
         """The first value of the statement's first row; None where it gives none."""

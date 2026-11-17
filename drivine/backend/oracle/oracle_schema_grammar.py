@@ -250,7 +250,7 @@ END;""",
         makes both; this library's is the labelled index's expression whatever the number of properties, so it stands
         for one.
         """
-        name = self.graph.object_name("uq", [spec.label, *spec.properties])
+        name = self.graph.object_name("uq2", [spec.label, *spec.properties])
         columns = ", ".join(labelled_value("n", spec.label, it) for it in spec.properties)
         served_range = range_index(spec.label, spec.properties)
         shared, index = self._shared_index(served_range)
@@ -378,7 +378,7 @@ END;"""
         property by (`'$."p"'`): Oracle would then read the property through this index's column inside a filter on
         the labelled index's expression, which it then no longer matches to the labelled index, and reads every node.
         """
-        name = self.graph.object_name("ix", spec.properties)
+        name = self.graph.object_name("ix2", spec.properties)
         columns = ", ".join(f"JSON_VALUE(props, '$.{drivine4j_step(it)}')" for it in spec.properties)
         return name, _made(f"CREATE INDEX IF NOT EXISTS {name} ON {self.graph.nodes} ({columns})")
 

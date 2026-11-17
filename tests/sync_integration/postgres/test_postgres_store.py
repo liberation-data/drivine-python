@@ -116,7 +116,7 @@ def test_makes_a_graphs_tables_at_its_providers_first_connection_whatever_is_sen
     comment = pm.get_one(
         QuerySpecification[Any](f"SELECT obj_description(to_regclass('{name}_node'), 'pg_class') AS version")
     )
-    assert comment["version"] == PostgresGraph.VERSION
+    assert comment["version"] == PostgresGraph.version()
     pm.execute(QuerySpecification[Any](f"DROP TABLE {name}_edge, {name}_node, {name}_schema CASCADE"))
 
 

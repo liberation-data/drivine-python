@@ -5,14 +5,12 @@ from collections.abc import Sequence
 
 from drivine.backend.oracle.oracle_stored_functions import (
     OracleStoredFunctions,
-    era_date_function,
     era_date_name,
-    era_function,
     era_name,
-    nulls_equal_function,
     nulls_equal_name,
 )
 from drivine.backend.sql.sql_graph import DEFAULT_GRAPH, SqlGraph, sql_text
+from drivine.backend.store_statements import store_statements
 from drivine.model import stamps
 
 
@@ -22,48 +20,23 @@ class OracleGraph(SqlGraph):
     through.
     """
 
-    DDL_WAIT_SECONDS = 60
-    """How long a statement of `ensuring` waits on a lock another session making the store holds."""
-
     def __init__(self, name: str = DEFAULT_GRAPH) -> None:
         super().__init__(name, "Oracle", 128)
 
     @property
+    def tables_made(self) -> str:
+        """
+        A query of the store's catalog whose one value is how many of the graph's table of nodes it holds, none or one:
+        a graph without one is new, and its layout is not judged (see store_layout.judging).
+        """
+        return f'SELECT COUNT(*) AS "made" FROM user_tables WHERE table_name = {sql_text(self.nodes.upper())}'
+
+    @property
     def ddl(self) -> list[str]:
-        """What makes the store. Each statement may run again."""
-        return [
-            f"""CREATE TABLE IF NOT EXISTS {self.nodes} (
-                nid    NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-                labels JSON NOT NULL,
-                props  JSON NOT NULL,
-                stamp  VARCHAR2(33)
-            )""",
-            f"""CREATE TABLE IF NOT EXISTS {self.edges} (
-                eid   NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-                src   NUMBER NOT NULL REFERENCES {self.nodes} (nid) ON DELETE CASCADE,
-                dst   NUMBER NOT NULL REFERENCES {self.nodes} (nid) ON DELETE CASCADE,
-                type  VARCHAR2(128) NOT NULL,
-                props JSON DEFAULT '{{}}' NOT NULL
-            )""",
-            f"""CREATE TABLE IF NOT EXISTS {self.catalog} (
-                kind        VARCHAR2(40) NOT NULL,
-                label       VARCHAR2(400) NOT NULL,
-                properties  VARCHAR2(2000) NOT NULL,
-                name        VARCHAR2(400),
-                object_name VARCHAR2(128),
-                details     JSON NOT NULL,
-                PRIMARY KEY (kind, label, properties)
-            )""",
-            f"CREATE INDEX IF NOT EXISTS {self.name}_edge_src ON {self.edges} (src, type)",
-            f"CREATE INDEX IF NOT EXISTS {self.name}_edge_dst ON {self.edges} (dst, type)",
-            f"CREATE MULTIVALUE INDEX IF NOT EXISTS {self.name}_node_labels ON {self.nodes} n (n.labels.string())",
-            f"""CREATE OR REPLACE PROPERTY GRAPH {self.name}
-                VERTEX TABLES ({self.nodes} KEY (nid) LABEL node PROPERTIES (nid, labels, props, stamp))
-                EDGE TABLES ({self.edges} KEY (eid)
-                    SOURCE KEY (src) REFERENCES {self.nodes} (nid)
-                    DESTINATION KEY (dst) REFERENCES {self.nodes} (nid)
-                    LABEL edge PROPERTIES (eid, src, dst, type, props))""",
-        ]
+        """What makes the store, the shared module's statements (see store_statements). Each may run again."""
+        ddl = store_statements("oracle", self.name).ddl
+        assert ddl is not None
+        return ddl
 
     @property
     def nulls_equal(self) -> str:
@@ -91,69 +64,25 @@ class OracleGraph(SqlGraph):
         return era_date_name(self.name)
 
     @property
-    def _made(self) -> dict[str, str]:
-        """Each function the store keeps beside the graph's tables, by name, and what makes it: safe to run again."""
-        return {
-            name: f"CREATE OR REPLACE {function}"
-            for name, function in (
-                (self.nulls_equal, nulls_equal_function(self.nulls_equal)),
-                (self.era, era_function(self.era)),
-                (self.era_date, era_date_function(self.era_date)),
-            )
-        }
-
-    @property
     def functions(self) -> list[str]:
-        """What makes `nulls_equal`, `era` and `era_date`: safe to run again."""
-        return list(self._made.values())
+        """What makes each of the graph's functions, the shared module's: safe to run again."""
+        functions = store_statements("oracle", self.name).functions
+        assert functions is not None
+        return functions
 
     @property
     def ensuring(self) -> str:
         """
-        The block that makes the store when it is not there and does nothing when it is: the property graph is made
-        last, so its presence says the rest is. One another process made meanwhile (ORA-00955) is taken as made.
-
-        Each of the `functions` is made after the tables, where it is not there or not valid, so a store an earlier
-        version made gains those it lacks. A user who may not make a function (ORA-01031: making one takes `CREATE
-        PROCEDURE`, which the `RESOURCE` role grants) still has the store made: a statement then calls none of those it
-        lacks (see OracleStoredFunctions).
-
-        Two sessions that each find the store missing, as two pools or processes first connecting at once do, make it
-        together: a statement of one waits on the lock the other's holds, rather than being turned away at once
-        (ORA-00054), for up to `DDL_WAIT_SECONDS`, and then finds what the other made. The wait is the session's
-        DDL_LOCK_TIMEOUT, set back to Oracle's default, no wait, when the block ends, failed or not, so the session's
-        later statements are as they were.
+        The block that makes the store when it is not there and does nothing when it is, the shared module's (see
+        store_statements): the property graph is made last, so its presence says the rest is, and each of the
+        `functions` is made where it is not there, not valid or of another version, so a store an earlier version made
+        gains those it lacks. A user who may not make a function still has the store made: a statement then calls none
+        of those it lacks (see OracleStoredFunctions). Two sessions that each find the store missing make it together:
+        a statement turned away by the lock the other's holds (ORA-00054) is tried again, for up to 30 seconds.
         """
-        statements = "\n".join(
-            f"    BEGIN EXECUTE IMMEDIATE {sql_text(it)}; EXCEPTION WHEN e_exists THEN NULL; END;" for it in self.ddl
-        )
-        functions = "\n".join(
-            f"""    SELECT COUNT(*) INTO v_made FROM user_objects
-        WHERE object_type = 'FUNCTION' AND object_name = '{name.upper()}' AND status = 'VALID';
-    IF v_made = 0 THEN
-    BEGIN EXECUTE IMMEDIATE {sql_text(making)}; EXCEPTION WHEN e_denied THEN NULL; END;
-    END IF;"""
-            for name, making in self._made.items()
-        )
-        return f"""DECLARE
-    v_made NUMBER;
-    e_exists EXCEPTION;
-    PRAGMA EXCEPTION_INIT(e_exists, -955);
-    e_denied EXCEPTION;
-    PRAGMA EXCEPTION_INIT(e_denied, -1031);
-BEGIN
-    SELECT COUNT(*) INTO v_made FROM user_property_graphs WHERE graph_name = '{self.name.upper()}';
-    IF v_made = 0 THEN
-    EXECUTE IMMEDIATE 'ALTER SESSION SET DDL_LOCK_TIMEOUT = {self.DDL_WAIT_SECONDS}';
-{statements}
-    EXECUTE IMMEDIATE 'ALTER SESSION SET DDL_LOCK_TIMEOUT = 0';
-    END IF;
-{functions}
-EXCEPTION
-    WHEN OTHERS THEN
-        EXECUTE IMMEDIATE 'ALTER SESSION SET DDL_LOCK_TIMEOUT = 0';
-        RAISE;
-END;"""
+        ensuring = store_statements("oracle", self.name).ensuring
+        assert ensuring is not None
+        return ensuring
 
     def ensured(self) -> None:
         """

@@ -180,10 +180,15 @@ async def test_the_store_is_made_once_and_made_again_keeps_what_it_holds(path: s
     finally:
         await other.close()
     tables = await rows(pm, "SELECT name FROM sqlite_master WHERE type IN ('table', 'index') ORDER BY name")
+    # Store layout 2's count store and lock table among them (store.yaml).
     assert [it["name"] for it in tables if not it["name"].startswith("sqlite_")] == [
+        "drivine_count2",
+        "drivine_count2_delta",
+        "drivine_count2_dk",
         "drivine_edge",
         "drivine_edge_dst",
         "drivine_edge_src",
+        "drivine_lock2",
         "drivine_node",
         "drivine_schema",
     ]
@@ -252,7 +257,7 @@ async def test_a_range_index_is_made_recorded_matched_again_and_read_by_a_lookup
     [listed] = await gom.indexes.list("RANGE")
     assert (listed.label, listed.properties) == ("Person", ("name",))
     statement = gom.backend.load_all_fragments(gom.registry.fragment(Person), gom.backend.written("n.name = 'Ada'"))
-    assert "USING INDEX drivine_ix_Personname_" in await plan(pm, statement.text)
+    assert "USING INDEX drivine_ix2_Personname_" in await plan(pm, statement.text)
 
 
 async def test_an_index_dropped_by_hand_is_not_listed_and_is_made_again_when_asked_for(gom, pm):
@@ -287,7 +292,7 @@ async def test_a_vector_and_a_full_text_index_are_recorded_and_found_and_a_chang
     assert drift.status == "DRIFT" and drift.found is not None and drift.found.dimensions == 2
     # Nothing is made for either: SQLite has no vector index, and a full-text search reads every node.
     made = await rows(pm, "SELECT name FROM sqlite_master WHERE type = 'index' AND name NOT LIKE 'sqlite_%'")
-    assert sorted(it["name"] for it in made) == ["drivine_edge_dst", "drivine_edge_src"]
+    assert sorted(it["name"] for it in made) == ["drivine_count2_dk", "drivine_edge_dst", "drivine_edge_src"]
 
 
 class Tagged(NodeFragment, labels=["Tagged"]):

@@ -8,7 +8,10 @@ class TestImage:
         assert DrivineTestContainers.image(DatabaseType.MEMGRAPH, {}) == "memgraph/memgraph:latest"
         assert DrivineTestContainers.image(DatabaseType.FALKORDB, {}) == "falkordb/falkordb:latest"
         assert DrivineTestContainers.image(DatabaseType.POSTGRES, {}) == "pgvector/pgvector:pg16"
-        assert DrivineTestContainers.image(DatabaseType.ORACLE, {}) == "gvenzl/oracle-free:23-faststart"
+        assert (
+            DrivineTestContainers.image(DatabaseType.ORACLE, {})
+            == "gvenzl/oracle-free:23-faststart@sha256:33322969a450d72c507b08d7f690d9e1d9b60aebaebc35a75b7c0b8ab4baac77"
+        )
 
     def test_is_the_types_test_image_where_it_is_set_for_that_type_only(self):
         env = {

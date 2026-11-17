@@ -5,6 +5,7 @@ SqliteGraphTest, SqliteSqlTest, SqliteSchemaGrammarTest and SqliteBackendTest, p
 
 import json
 import threading
+from datetime import time, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Annotated
@@ -154,6 +155,11 @@ class TestTheSql:
     def test_a_named_value_is_bound_as_sqlite_reads_it_and_a_positional_one_as_its_number(self):
         assert bindable("SELECT $a", {"a": {"x": [1]}}) == ("SELECT $a", {"a": '{"x":[1]}'})
         assert bindable("SELECT $1, $10", [1, 2]) == ("SELECT ?1, ?10", (1, 2))
+
+    def test_a_time_at_an_offset_with_seconds_is_bound_to_a_statement_of_sql_as_its_iso_text(self):
+        # Only the query DSL refuses one (#523), as it compares it with a stored value; this statement is the user's.
+        at = time(10, tzinfo=timezone(timedelta(hours=1, seconds=1)))
+        assert bindable("SELECT $a", {"a": at}) == ("SELECT $a", {"a": "10:00:00+01:00:01"})
 
 
 class Doc(NodeFragment, labels=["Doc"]):

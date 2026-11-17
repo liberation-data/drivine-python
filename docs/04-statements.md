@@ -53,8 +53,10 @@ people = await pm.query(spec.bind({"city": "Sydney"}))
   or a reduce's variable, or carried past a write in the statement, it compares by its properties.
 - openCypher's temporal values are their ISO 8601 text, as the store keeps a moment: `date`, `datetime`, `duration` and
   the rest make one, their fields read, and two moments compare as the moments they are. A parameter of a `date`,
-  `time`, `datetime` or `timedelta` is a temporal value of its kind. A year is numbered as Neo4j and ISO 8601 number
-  it, where Oracle and Postgres keep no year 0: `0000` is 1 BC and `-0044` is 45 BC, made, read, worked out,
+  `time`, `datetime` or `timedelta` is a temporal value of its kind; one at an offset with seconds (a zone's local
+  mean time, `-00:44:30`) is refused by name, as the store holds an offset to the minute
+  ([#517](https://github.com/liberation-data/drivine-python/issues/517)). A year is numbered as Neo4j and ISO 8601
+  number it, where Oracle and Postgres keep no year 0: `0000` is 1 BC and `-0044` is 45 BC, made, read, worked out,
   truncated, written and read back ([#326](https://github.com/liberation-data/drivine-python/issues/326)). A stored
   value whose year is 1000 or later is read as before; one of an earlier year is read by its era, so a statement that
   reads a stored date or moment compiles to SQL up to three and a half times as long (a filter on a stored date, 1,005

@@ -233,6 +233,8 @@ class Dated(NodeFragment, labels=["DatedHeld"]):
     id: Annotated[str, NodeId()]
     on: date | None = None
     at: datetime | None = None
+    clock: time | None = None
+    clocks: list[time] | None = None
 
 
 DSL_TEMPORALS = (
@@ -256,7 +258,8 @@ def test_a_saved_date_or_moment_is_compared_and_ordered_by_the_query_dsl_as_it_i
         q = refs(Dated)
         assert [it.id for it in gom.load_all(Dated, q.on.eq(date(2024, 1, 2)))] == ["t2"]
         assert [it.id for it in gom.load_all(Dated, q.at.gt(base))] == ["t2"]
-        assert [it.id for it in gom.load_all(Dated, order_by=q.on.desc())] == ["t2", "t1"]
+        # Its own nodes alone: the tests beside it save other Dated nodes in the same graph.
+        assert [it.id for it in gom.load_all(Dated, q.id.in_(["t1", "t2"]), order_by=q.on.desc())] == ["t2", "t1"]
 
     if pm.type is DatabaseType.SQLITE:
         check()
@@ -489,7 +492,7 @@ def test_a_date_is_never_a_moment_nor_a_local_moment_a_moment(gom: StatelessGrap
         moment = datetime(2024, 5, 6, 7, 8, 9, tzinfo=UTC)
         gom.save_all(
             [
-                Dated(id="d1", on=date(2024, 5, 6), at=moment),
+                Dated(id="kinds1", on=date(2024, 5, 6), at=moment),
                 Listed(id="l6", days=[date(2024, 5, 6)], moments=[moment]),
             ]
         )
@@ -501,16 +504,16 @@ def test_a_date_is_never_a_moment_nor_a_local_moment_a_moment(gom: StatelessGrap
         def lists(condition: Any) -> list[str]:
             return [it.id for it in gom.load_all(Listed, condition)]
 
-        assert dated(q.on.eq(date(2024, 5, 6))) == ["d1"]
-        assert dated(q.at.eq(moment)) == ["d1"]
+        assert dated(q.on.eq(date(2024, 5, 6))) == ["kinds1"]
+        assert dated(q.at.eq(moment)) == ["kinds1"]
         assert dated(q.at.eq(date(2024, 5, 6))) == []
         assert dated(q.at.in_([date(2024, 5, 6)])) == []
         assert dated(q.on.eq(datetime(2024, 5, 6, tzinfo=UTC))) == []
         assert dated(q.at.eq(moment.replace(tzinfo=None))) == []
         # Yet unequal, as in Cypher (Dated's label is shared with another test, so only d1 is asked of).
-        assert dated([q.id.eq("d1"), q.at.neq(date(2024, 5, 6))]) == ["d1"]
-        assert dated([q.id.eq("d1"), q.on.neq(moment)]) == ["d1"]
-        assert dated(q.at.in_([date(2024, 5, 6), moment])) == ["d1"]
+        assert dated([q.id.eq("kinds1"), q.at.neq(date(2024, 5, 6))]) == ["kinds1"]
+        assert dated([q.id.eq("kinds1"), q.on.neq(moment)]) == ["kinds1"]
+        assert dated(q.at.in_([date(2024, 5, 6), moment])) == ["kinds1"]
         assert dated(q.at.in_([date(2024, 5, 6), None, time(7, 8, 9, tzinfo=UTC)])) == []
         assert lists(listed.moments.has_item(moment)) == ["l6"]
         assert lists(listed.moments.has_item(date(2024, 5, 6))) == []
@@ -622,5 +625,35 @@ def test_a_time_of_a_named_zone_is_compared_as_the_local_time_a_save_writes_of_i
         assert [it.id for it in gom.load_all(Zoned, q.clock.eq(paris))] == ["z"]
         assert [it.id for it in gom.load_all(Zoned, q.clock.eq(time(8)))] == ["z"]
         assert [it.id for it in gom.load_all(Zoned, q.clock.eq(time(8, tzinfo=UTC)))] == []
+
+    held_or_failing(pm, check)
+
+
+@pytest.mark.parametrize("test", ["eq", "in", "has_item"])
+def test_the_query_dsl_refuses_a_time_at_an_offset_with_seconds_by_name_as_a_parameter_is(
+    gom: StatelessGraphObjectManager, test: str
+):
+    # The store holds an offset to the minute (#517); the DSL wrote this one as a text no value of it matches (#523).
+    at = time(10, tzinfo=timezone(timedelta(hours=1, seconds=1)))
+    dated = refs(Dated)
+    tested = {
+        "eq": lambda: dated.clock.eq(at),
+        "in": lambda: dated.clock.in_([time(9), at]),
+        "has_item": lambda: dated.clocks.has_item(at),
+    }[test]()
+    with pytest.raises(DrivineError, match="at an offset with seconds"):
+        gom.load_all(Dated, tested)
+
+
+def test_the_query_dsl_finds_a_time_at_an_offset_of_whole_minutes_as_it_was_before(
+    gom: StatelessGraphObjectManager, pm: PersistenceManager
+):
+    # Only an offset with seconds is refused (#523): one of whole minutes is found as before.
+    def check() -> None:
+        at = time(10, tzinfo=timezone(timedelta(hours=1)))
+        gom.save_all([Dated(id="c1", clock=at), Dated(id="c2", clock=time(9))])
+        dated = refs(Dated)
+        assert [it.id for it in gom.load_all(Dated, dated.clock.eq(at))] == ["c1"]
+        assert [it.id for it in gom.load_all(Dated, dated.clock.in_([at]))] == ["c1"]
 
     held_or_failing(pm, check)

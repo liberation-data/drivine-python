@@ -35,8 +35,9 @@ class SqliteConnection(Connection):
     `/* drivine:json */` has its text values read as JSON. A Cypher statement is compiled to SQL over the graph's tables
     (see shared_compiler), and gives a row as a graph engine gives it: its one item, or a list of its items.
 
-    Each call on the file blocks, so it runs on a thread of its own and the event loop goes on meanwhile (see
-    concurrency.blocking); the sync API runs it where it is.
+    Each call on the file blocks, so it runs on the session's own thread and the event loop goes on meanwhile (see
+    concurrency.blocking); the sync API runs it there too, as that thread has the stack SQLite's functions want (see
+    SqliteSession.thread).
     """
 
     def __init__(

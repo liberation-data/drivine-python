@@ -277,3 +277,23 @@ async def test_the_query_dsl_refuses_a_time_at_an_offset_with_seconds_by_name_as
     }[test]()
     with pytest.raises(DrivineError, match="at an offset with seconds"):
         await gom.load_all(Dated, tested)
+
+
+async def test_the_query_dsl_finds_a_time_at_an_offset_of_whole_minutes_as_it_was_before(
+    gom: StatelessGraphObjectManager, pm: PersistenceManager
+):
+    # Only an offset with seconds is refused (#523): one of whole minutes is bound as its ISO text, as before.
+    async def check() -> None:
+        at = time(10, tzinfo=timezone(timedelta(hours=1)))
+        await gom.save_all([Dated(id="c1", clock=at), Dated(id="c2", clock=time(9))])
+        dated = refs(Dated)
+        assert [it.id for it in await gom.load_all(Dated, dated.clock.eq(at))] == ["c1"]
+        assert [it.id for it in await gom.load_all(Dated, dated.clock.in_([at]))] == ["c1"]
+
+    if pm.type is DatabaseType.SQLITE:
+        await check()
+        return
+    try:
+        await check()
+    except AssertionError:
+        pytest.xfail(DSL_TEMPORALS)

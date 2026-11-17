@@ -112,6 +112,9 @@ class GraphObjectMapper:
             if value is None and field in mapping.null_as_default:
                 continue
             value = _unpacked(value) if field in mapping.json_packed else value
+            if field in mapping.bytes_fields and isinstance(value, list):
+                # Store layout 2 holds bytes as the list of their signed values.
+                value = bytes(int(it) & 0xFF for it in cast(list[Any], value))
             kind = mapping.collections.get(field)
             if kind is not None and value == {}:
                 # Drivine for TypeScript saved an empty set as {} on Memgraph and as JSON text before 3.3.

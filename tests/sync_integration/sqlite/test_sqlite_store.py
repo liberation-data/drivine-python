@@ -101,7 +101,9 @@ def test_a_property_no_save_writes_keeps_the_text_it_was_stored_with(gom, pm):
     loaded.at = datetime(2024, 1, 1, tzinfo=UTC)
     gom.save(loaded)
     [row] = rows(pm, "SELECT props FROM drivine_node")
-    assert row["props"] == '{"id":"r1","value":1.5,"extra":1e3,"nested":{"x":2.0},"at":"2024-01-01T00:00:00.000Z"}'
+    # The moment as store layout 2 holds it, its tag (host.yaml's "Values a save writes").
+    moment = '{"$t":"datetime","v":"2024-01-01T00:00:00Z","s":"10000020240101000000000000000064800"}'
+    assert row["props"] == f'{{"id":"r1","value":1.5,"extra":1e3,"nested":{{"x":2.0}},"at":{moment}}}'
 
 
 def test_moments_a_microsecond_apart_order_compare_and_seek_as_the_moments_they_are(gom, pm):

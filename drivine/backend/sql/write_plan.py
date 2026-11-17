@@ -7,6 +7,7 @@ from drivine.annotation.direction import Direction
 from drivine.backend.sql.node_writes import NodeWrites
 from drivine.backend.sql.owned_labels import OwnedLabels
 from drivine.backend.sql.root_step import RootStep
+from drivine.backend.sql.value_layout import SqlStore, held_key, write, write_props
 from drivine.model import stamps
 
 WriteReturns = Literal["STAMPS", "EACH_STAMP", "COUNT"]
@@ -33,7 +34,9 @@ class WritePlan:
     PATCHED_IF = "_patchedIf"
     """The parameter that carries the query a `patch` step asks of the node it found, or null."""
 
-    def __init__(self) -> None:
+    def __init__(self, store: SqlStore = "postgres") -> None:
+        """`store` is the store the plan writes on, Postgres's or SQLite's: each holds a float its own way."""
+        self.store: SqlStore = store
         self.mark = stamps.fresh()
         """The stamp the plan's steps take the relationship token from."""
         self._steps: list[dict[str, Any]] = []
@@ -56,9 +59,9 @@ class WritePlan:
     def shape(self, labels: Sequence[str], key: str) -> int:
         """The number of the shape a node of the labels, found by the property `key`, has: one number for one shape."""
         for i, it in enumerate(self._shapes):
-            if it["key"] == key and it["labels"] == list(labels):
+            if it["key"] == held_key(key) and it["labels"] == list(labels):
                 return i
-        self._shapes.append({"labels": list(labels), "key": key})
+        self._shapes.append({"labels": list(labels), "key": held_key(key)})
         return len(self._shapes) - 1
 
     def node(
@@ -206,8 +209,29 @@ class WritePlan:
         )
 
     def _add(self, op: str, fields: Mapping[str, Any]) -> None:
-        """Adds a step of the kind with its fields, leaving out a field that is None: the function reads it as null."""
-        self._steps.append({"op": op, **{key: value for key, value in fields.items() if value is not None}})
+        """
+        Adds a step of the kind with its fields, leaving out a field that is None: the function reads it as null. Each
+        field is as the store layout holds it (see `_held`).
+        """
+        self._steps.append(
+            {"op": op, **{key: self._held(key, value) for key, value in fields.items() if value is not None}}
+        )
+
+    def _held(self, name: str, value: Any) -> Any:
+        """
+        A step's field as the store layout holds it (drivine-cypher-spec#161), as drivine4j's plan writes it: the values
+        it writes and the id it finds a node by as the shared module writes them on the plan's store (see value_layout),
+        and the names of the properties it keys, removes, clears or lowercases escaped as their keys are held.
+        """
+        if name in ("set", "props"):
+            return write_props(value, self.store)
+        if name == "id":
+            return write(value, self.store)
+        if name == "key":
+            return held_key(value)
+        if name in ("unset", "lower", "clear"):
+            return [held_key(it) for it in value]
+        return value
 
 
 def _owned(owned: OwnedLabels) -> dict[str, Any]:

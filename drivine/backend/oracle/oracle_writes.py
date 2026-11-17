@@ -11,6 +11,7 @@ from drivine.backend.oracle.oracle_graph import OracleGraph, has_labels, json_ke
 from drivine.backend.oracle.oracle_save_builder import prelude
 from drivine.backend.save_statement_builder import id_of, object_props
 from drivine.backend.sql.sql_json import to_json
+from drivine.backend.sql.value_layout import write_props
 from drivine.drivine_error import DrivineError
 from drivine.manager.relate_mode import RelateMode
 from drivine.manager.save_options import SaveOptions
@@ -134,9 +135,8 @@ class OracleWrites:
                 match = bind(self._match_text(group.model))
                 id_ = bind(to_json(id_of(group.model, obj)))
                 labels = bind(to_json(group.model.labels))
-                body.append(
-                    f"v_root := write_node({match}, {id_}, {labels}, {bind(to_json(props))}, '[]', '[]', NULL, FALSE);"
-                )
+                held = bind(to_json(write_props(props, "oracle")))
+                body.append(f"v_root := write_node({match}, {id_}, {labels}, {held}, '[]', '[]', NULL, FALSE);")
                 body.extend(self._lowering(group.model))
         reads("after")
         result = ", ".join(
@@ -189,7 +189,7 @@ class OracleWrites:
                 "END IF;",
                 'OPEN c FOR SELECT v_related AS "related" FROM dual;',
             ],
-            {"x_type": type, "x_props": to_json(written)},
+            {"x_type": type, "x_props": to_json(write_props(written, "oracle"))},
         )
 
     def unrelate(self, from_: MatchedNode, to: MatchedNode, type: str) -> GraphStatement:

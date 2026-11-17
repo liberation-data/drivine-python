@@ -32,6 +32,11 @@ class QuerySpecification(Generic[T]):
         self.post_processors: list[ResultPostProcessor] = []
         self._skip: int | None = None
         self._limit: int | None = None
+        self.store_layout = False
+        """
+        Whether the statement's JSON is read in the store layout on a SQL store, as a compiled statement's is: the
+        object manager's own statements (see GraphStatement.spec). A user's own SQL is read as the driver reads it.
+        """
         if statement is not None:
             self.with_statement(statement)
 

@@ -28,6 +28,12 @@ class FieldMapping:
     hashed, such as the lists a set of tuples is stored as, keeps the list.
     """
 
+    bytes_fields: set[str] = field(default_factory=lambda: set())
+    """
+    Fields holding bytes, which store layout 2 holds as the list of their signed values (`[1, 2, -1]`), as drivine4j and
+    Neo4j hold a byte array: a load gives them back as bytes.
+    """
+
     @property
     def fields_by_property(self) -> dict[str, str]:
         return {name: field for field, name in self.graph_properties.items()}

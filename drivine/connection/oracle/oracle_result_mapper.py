@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import json
 from collections.abc import Sequence
 from decimal import Decimal
 from typing import Any
 
+from drivine.backend.sql import value_layout
 from drivine.mapper.graph_result_mapper import GraphResultMapper
 from drivine.query.query_specification import QuerySpecification
 
@@ -32,7 +32,8 @@ class OracleResultMapper:
             record: dict[str, Any] = {}
             for column, value in zip(columns, row, strict=True):
                 if column.endswith(_JSON_SUFFIX):
-                    record[column[: -len(_JSON_SUFFIX)]] = None if value is None else json.loads(value)
+                    # In the store layout (see value_layout).
+                    record[column[: -len(_JSON_SUFFIX)]] = None if value is None else value_layout.read(value)
                 else:
                     record[column] = _native(value)
             results.append(next(iter(record.values())) if len(record) == 1 else record)

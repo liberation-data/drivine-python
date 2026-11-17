@@ -17,6 +17,8 @@ import math
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from drivine.backend.sql import value_layout
+
 NOT_A_NUMBER = Decimal("2" + "0" * 309 + ".5")
 """The number that stands for NaN, 2e309 + 0.5, as drivine4j's compiler writes it on Postgres."""
 
@@ -81,17 +83,19 @@ def _int(text: str) -> int | float:
 def read_compiled_json(data: str | bytes) -> Any:
     """
     The JSON `data`, as Postgres writes a `json` or `jsonb` value, read as `json.loads` reads it, but for a whole number
-    past a long's range, the float nearest it.
+    past a long's range, the float nearest it; in the store layout (see value_layout).
     """
-    return json.loads(data, parse_int=_whole)
+    text = data.decode() if isinstance(data, bytes) else data
+    return value_layout.read(text, lambda it: json.loads(it, parse_int=_whole))
 
 
 def read_non_finite_json(data: str | bytes) -> Any:
     """
     The JSON `data` read as read_compiled_json reads it, with each number that stands for NaN or an infinity the double
-    it is. A string is never read as a number, whatever it holds.
+    it is, then in the store layout. A string is never read as a number, whatever it holds.
     """
-    return json.loads(data, parse_float=_float, parse_int=_int)
+    text = data.decode() if isinstance(data, bytes) else data
+    return value_layout.read_after(text, lambda it: it, lambda it: json.loads(it, parse_float=_float, parse_int=_int))
 
 
 def read_compiled(cursor: Any, non_finite: bool) -> None:

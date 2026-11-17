@@ -1,0 +1,104 @@
+# Written by scripts/unasync.py from tests/integration/sql/test_value_layout.py:
+# change that, and run the script again.
+"""
+A save's values as store layout 2 holds them on each SQL store, written by the shared module and read back through the
+object manager (see value_layout): a property whose name begins with `$`, the floats JSON writes no number of beside a
+date, one float alike with a date beside it or without, NaN refused by name where the store holds it as no number, and
+bytes the list of their signed values. host.yaml's "Values a save writes" pins what the module writes.
+"""
+
+from __future__ import annotations
+
+import json
+import math
+from datetime import UTC, date, datetime
+from typing import Annotated, Any
+
+import pytest
+
+from drivine.sync import (
+    DatabaseType,
+    DrivineError,
+    GraphProperty,
+    NodeFragment,
+    NodeId,
+    PersistenceManager,
+    QuerySpecification,
+    StatelessGraphObjectManager,
+)
+
+
+class Held(NodeFragment, labels=["Held"]):
+    id: Annotated[str, NodeId()]
+    dollar: Annotated[int | None, GraphProperty("$dollar")] = None
+    born: date | None = None
+    at: datetime | None = None
+    reading: float | None = None
+    others: list[float] | None = None
+    raw: bytes | None = None
+
+
+def stored(pm: PersistenceManager, id: str) -> dict[str, Any]:
+    """The node's properties as the store holds them, as JSON."""
+    if pm.type is DatabaseType.ORACLE:
+        text = "SELECT JSON_SERIALIZE(props) AS props FROM drivine_node WHERE JSON_VALUE(props, '$.id') = $id"
+    elif pm.type is DatabaseType.SQLITE:
+        text = "SELECT props FROM drivine_node WHERE props ->> '$.id' = $id"
+    else:
+        text = "SELECT props::text AS props FROM drivine_node WHERE props ->> 'id' = $id"
+    [row] = pm.query(QuerySpecification[Any](text).bind({"id": id}))
+    props = row["props"] if isinstance(row, dict) else row
+    found: dict[str, Any] = json.loads(props) if isinstance(props, str) else props
+    return found
+
+
+def test_a_property_whose_name_begins_with_a_dollar_is_held_escaped_and_read_back_as_it_was(
+    gom: StatelessGraphObjectManager, pm: PersistenceManager
+):
+    gom.save(Held(id="d1", dollar=7))
+    assert (stored(pm, "d1"))["$$dollar"] == 7
+    loaded = gom.load(Held, "d1")
+    assert loaded is not None and loaded.dollar == 7
+
+
+def test_minus_zero_and_an_infinity_beside_a_date_are_read_back_as_the_floats_they_are(
+    gom: StatelessGraphObjectManager, pm: PersistenceManager
+):
+    if pm.type is not DatabaseType.SQLITE:
+        pytest.skip("Postgres's jsonb holds no infinity, and Oracle's saves hold none until drivine4j#830")
+    gom.save(Held(id="f1", born=date(2024, 1, 1), reading=-0.0, others=[math.inf, -math.inf, 1.5]))
+    held = stored(pm, "f1")
+    assert held["born"]["$t"] == "date"
+    loaded = gom.load(Held, "f1")
+    assert loaded is not None and loaded.born == date(2024, 1, 1)
+    assert loaded.reading == 0 and math.copysign(1, loaded.reading) < 0
+    assert loaded.others == [math.inf, -math.inf, 1.5]
+
+
+def test_a_float_is_held_alike_with_a_date_beside_it_or_without(
+    gom: StatelessGraphObjectManager, pm: PersistenceManager
+):
+    gom.save(Held(id="w1", reading=2.0))
+    gom.save(Held(id="w2", reading=2.0, at=datetime(2024, 3, 15, 10, 30, tzinfo=UTC)))
+    alone, beside = stored(pm, "w1"), stored(pm, "w2")
+    assert alone["reading"] == beside["reading"]
+    for id in ("w1", "w2"):
+        loaded = gom.load(Held, id)
+        assert loaded is not None and loaded.reading == 2.0 and isinstance(loaded.reading, float)
+
+
+def test_nan_is_refused_by_name_where_the_store_holds_it_as_no_number(
+    gom: StatelessGraphObjectManager, pm: PersistenceManager
+):
+    with pytest.raises(DrivineError, match="NaN"):
+        gom.save(Held(id="n1", reading=math.nan))
+    assert gom.load(Held, "n1") is None
+
+
+def test_bytes_are_held_as_the_list_of_their_signed_values_and_read_back_as_the_bytes_they_are(
+    gom: StatelessGraphObjectManager, pm: PersistenceManager
+):
+    gom.save(Held(id="b1", raw=b"\x01\x02\xff"))
+    assert (stored(pm, "b1"))["raw"] == [1, 2, -1]
+    loaded = gom.load(Held, "b1")
+    assert loaded is not None and loaded.raw == b"\x01\x02\xff"

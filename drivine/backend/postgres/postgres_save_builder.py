@@ -24,6 +24,7 @@ from drivine.backend.sql.plan_graph import PlanGraph
 from drivine.backend.sql.root_step import RootStep
 from drivine.backend.sql.sql_json import to_json
 from drivine.backend.sql.sql_saves import fragment_of, stamp_excluded
+from drivine.backend.sql.value_layout import store_of
 from drivine.backend.sql.write_plan import WritePlan
 from drivine.backend.view_projector import target
 from drivine.drivine_error import DrivineError
@@ -70,7 +71,7 @@ class PostgresSaveBuilder:
     def __init__(self, graph: PlanGraph, registry: ModelRegistry | None = None) -> None:
         self.graph = graph
         self.registry = registry
-        self._plan = WritePlan()
+        self._plan = WritePlan(store_of(self.graph))
         self._stamped: list[FragmentModel] = []
         """The models of the related nodes handed their stamps back, each once."""
         self._handed: dict[str, tuple[int, Any]] = {}

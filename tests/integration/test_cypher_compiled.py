@@ -157,14 +157,7 @@ async def test_a_python_temporal_bound_in_a_list_or_map_beside_the_text_that_spe
     row = await cypher_pm.get_one(
         spec("RETURN [$v IN [$s], $s IN [$v], [$v] = [$s], {k: $v} = {k: $s}]", {"v": value, "s": text})
     )
-    if cypher_pm.type is not DatabaseType.NEO4J:
-        # A bound temporal in a list or a map literal doesn't carry its kind into the literal's items yet, so IN and a
-        # list's or map's equality compare it as its ISO text (liberation-data/drivine4j#779).
-        if row != [False, False, False, False]:
-            pytest.xfail(
-                "a bound temporal in a list or a map is compared as its ISO text (liberation-data/drivine4j#779)"
-            )
-        pytest.fail("A bound temporal in a list or a map is no longer equal to its text here: take out the xfail")
+    # Store layout 2 binds a temporal value as its tag, so in a list or a map it keeps its kind (drivine4j#779).
     assert row == [False, False, False, False], (value, text)
 
 
@@ -362,11 +355,15 @@ async def test_a_set_or_an_iterator_is_bound_as_a_list_and_an_iterator_named_twi
     assert await cypher_pm.query(twice) == [[3, 1]]
 
 
-async def test_bytes_are_bound_as_their_base64_text_as_drivine4j_writes_a_byte_array(cypher_pm: PersistenceManager):
+async def test_bytes_are_bound_as_the_list_of_their_signed_values_as_drivine4j_holds_a_byte_array(
+    cypher_pm: PersistenceManager,
+):
     if cypher_pm.type is DatabaseType.NEO4J:
-        pytest.skip("A graph engine keeps bytes as bytes; a SQL store's JSON has none, and drivine4j writes base64.")
+        pytest.skip("A graph engine keeps bytes as bytes; a SQL store's JSON has none.")
+    # Store layout 2 holds bytes as the list of their signed values, as drivine4j and Neo4j hold a byte array.
+    drivine = [0, -1, *b"drivine"]
     assert await cypher_pm.query(spec("RETURN [$b, $a]", {"b": b"\x00\xffdrivine", "a": bytearray(b"\x00\xff")})) == [
-        ["AP9kcml2aW5l", "AP8="]
+        [drivine, [0, -1]]
     ]
 
 

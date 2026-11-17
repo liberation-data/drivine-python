@@ -270,10 +270,15 @@ def module_answer(request: Mapping[str, Any], store: str) -> dict[str, Any]:
     verdict, a value written or read. Where the compiler isn't installed, a DrivineError says how to install it for
     `store`, one of the SQL stores, as the module's other requests are asked only for them.
     """
+    answer: dict[str, Any] = json.loads(module_text(request, store))
+    return answer
+
+
+def module_text(request: Mapping[str, Any], store: str) -> str:
+    """The module's answer to a request of its JSON entry, as the text it gives: see `module_answer`."""
     named = cast(SharedStore, store.upper())
     entry = _compiler(lambda: not_installed(named))
-    answer: dict[str, Any] = json.loads(entry(json.dumps(request, ensure_ascii=False, separators=(",", ":"))))
-    return answer
+    return entry(json.dumps(request, ensure_ascii=False, separators=(",", ":")))
 
 
 def _search_answer(store: SearchStore, graph: str | None, asked: dict[str, Any]) -> dict[str, Any]:

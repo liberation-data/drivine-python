@@ -89,15 +89,7 @@ class Hold:
     the read step reads."""
 
 
-_READS = 471
-"""A read step reads a column as a connection's rows give it, which reads layout 2's tags once its rows go through the
-module's `read` (store layout 2, step 5 of #471)."""
-
-HELD: dict[str, list[Hold]] = {
-    "Rows that hold temporal values and keys that begin with $": [
-        Hold(_READS, steps=(1, 2, 3, 4, 5, 6, 7, 10, 11, 12, 13, 14, 15, 16)),
-    ],
-}
+HELD: dict[str, list[Hold]] = {}
 """The holds of each case, by its name: see Hold. As Drivine for TypeScript's."""
 
 

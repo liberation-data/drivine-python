@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import sys
+
 import apsw
 import pytest
 
 from drivine.backend.sqlite import sqlite_extension
+from drivine.cypher.shared_compiler import not_installed
 from drivine.drivine_error import DrivineError
 
 
@@ -50,5 +53,17 @@ def test_an_extension_of_another_version_than_the_compiler_is_refused(monkeypatc
     try:
         with pytest.raises(DrivineError, match="and its compiler 0.0.1"):
             sqlite_extension.load(connection)
+    finally:
+        connection.close()
+
+
+def test_a_connection_without_the_compiler_is_refused_saying_how_to_install_it(monkeypatch: pytest.MonkeyPatch):
+    # None in sys.modules makes the import fail as for a package that isn't installed.
+    monkeypatch.setitem(sys.modules, "drivine_cypher_compiler", None)
+    connection = apsw.Connection(":memory:")
+    try:
+        with pytest.raises(DrivineError, match="drivine-cypher-compiler") as refused:
+            sqlite_extension.load(connection)
+        assert str(refused.value) == not_installed("SQLITE")
     finally:
         connection.close()

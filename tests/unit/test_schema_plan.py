@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Mapping, Sequence
+from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -26,6 +28,7 @@ from drivine.schema.schema_plan import (
     causes,
     ensure_result,
     module_spec,
+    plain,
     plan_spec,
     with_option_names,
 )
@@ -128,6 +131,18 @@ def test_gives_each_drivers_error_to_the_modules_rules_by_its_state_number_or_co
     assert causes(RuntimeError("plain"))[0] == {
         "sqlState": None, "vendorCode": None, "code": None, "gqlStatus": None, "message": "plain",
     }  # fmt: skip
+
+
+def test_gives_a_listings_values_as_plain_json_keeping_what_each_is():
+    row = {
+        "n": 2**70, "whole": Decimal("3"), "part": Decimal("1.5"), "at": datetime(2024, 1, 2, 3, 4, 5, tzinfo=UTC),
+        "raw": b"ok", "names": frozenset({"a"}),
+    }  # fmt: skip
+    assert plain(row) == (
+        f'{{"n":{2**70},"whole":3,"part":1.5,"at":"2024-01-02T03:04:05+00:00","raw":"ok","names":["a"]}}'
+    )
+    with pytest.raises(TypeError, match="object"):
+        plain({"x": object()})
 
 
 def test_gives_a_failures_chain_outermost_first():

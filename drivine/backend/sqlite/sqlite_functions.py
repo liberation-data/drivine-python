@@ -61,7 +61,7 @@ def register(connection: apsw.Connection) -> None:
     add(sqlite_graph.REGEXP_COUNT, patterns.count, 2, deterministic=True)
     add(sqlite_graph.LOWER, _lower, 1, deterministic=True)
     add(sqlite_graph.EPOCH, epoch, 1, deterministic=True)
-    sqlite_cypher_functions.register(connection, patterns)
+    sqlite_cypher_functions.register(connection)
 
 
 def _write(

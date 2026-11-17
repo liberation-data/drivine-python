@@ -53,7 +53,10 @@ LIST_ORDER = "drivine_list_order"
 MATH = "drivine_math"
 ROUND = "drivine_round"
 FAIL = "drivine_fail"
-"""The names of the functions Drivine registers on each connection (see sqlite_functions), drivine4j's."""
+"""
+The names of the functions each connection is given, drivine4j's: the shared module's from its extension (see
+sqlite_extension) and drivine-python's own (see sqlite_functions).
+"""
 
 Kind = Literal["TEXT", "NUMBER", "INSTANT", "DATE"]
 """How a property is read: as text, as a number, as a moment (nanoseconds since the epoch) or as a date."""

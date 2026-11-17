@@ -28,11 +28,10 @@ import apsw
 from drivine.backend.sqlite import sqlite_arguments as arguments
 from drivine.backend.sqlite import sqlite_cypher_procedure, sqlite_graph
 from drivine.backend.sqlite import sqlite_cypher_values as values
-from drivine.backend.sqlite.sqlite_patterns import Patterns
 from drivine.drivine_error import DrivineError
 
 
-def register(connection: apsw.Connection, patterns: Patterns) -> None:
+def register(connection: apsw.Connection) -> None:
     """Registers on the connection the functions compiled Cypher calls."""
     g = sqlite_graph
 
@@ -81,12 +80,6 @@ def reverse(text: Any) -> str | None:
 def random_uuid() -> str:
     """`drivine_uuid()`: a new random UUID, a version 4 one, as text: Cypher's `randomUUID()`."""
     return str(uuid.uuid4())
-
-
-"""How many units of its last place a real number may miss a whole number by and be it: see trunc."""
-
-
-"""Java's `RoundingMode`s, by their names, as Python's decimal rounds."""
 
 
 def fail(message: Any) -> None:

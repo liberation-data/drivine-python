@@ -113,8 +113,9 @@ class GraphObjectMapper:
                 continue
             value = _unpacked(value) if field in mapping.json_packed else value
             if field in mapping.bytes_fields and isinstance(value, list):
-                # Store layout 2 holds bytes as the list of their signed values.
-                value = bytes(int(it) & 0xFF for it in cast(list[Any], value))
+                # Store layout 2 holds bytes as the list of their signed values, and a collection of bytes each so.
+                held = cast(list[Any], value)
+                value = [_bytes(it) for it in held] if mapping.bytes_fields[field] else _bytes(held)
             kind = mapping.collections.get(field)
             if kind is not None and value == {}:
                 # Drivine for TypeScript saved an empty set as {} on Memgraph and as JSON text before 3.3.
@@ -135,6 +136,11 @@ def empty_collection(kind: CollectionKind) -> Any:
 
 def _instance(type_: type[BaseModel], values: dict[str, Any], validate: bool) -> Any:
     return type_.model_validate(values) if validate else type_.model_construct(**values)
+
+
+def _bytes(value: Any) -> Any:
+    """Bytes as store layout 2 holds them, the list of their signed values, as the bytes they are; else as it is."""
+    return bytes(int(it) & 0xFF for it in cast(list[Any], value)) if isinstance(value, list) else value
 
 
 def _unpacked(value: Any) -> Any:

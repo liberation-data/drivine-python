@@ -15,8 +15,9 @@ from __future__ import annotations
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Literal, TypeVar, cast
+from typing import Any, Literal, TypeVar
 
+from drivine.backend.postgres.postgres_statement import value_of
 from drivine.backend.sql.sql_catalog import CatalogKind
 from drivine.backend.store_statements import ModuleStore
 from drivine.connection.database_type import DatabaseType
@@ -81,7 +82,7 @@ class SqlPlanHost:
     def run(self, statement: str | Mapping[str, Any], parameters: Mapping[str, Any]) -> list[Any]:
         if not isinstance(statement, str):
             raise DrivineError(f"A SQL store runs no native command: {dict(statement)}.")
-        return [_column_value(it) for it in self.executor.run(statement, parameters)]
+        return [value_of(it) for it in self.executor.run(statement, parameters)]
 
     def marker(self, statement: str, parameters: Mapping[str, Any], compiled: bool, rows: bool) -> list[Any]:
         from drivine.query.statement import cypher_statement
@@ -90,7 +91,7 @@ class SqlPlanHost:
         if not rows:
             self.persistence_manager.execute(spec)
             return []
-        return [_column_value(it) for it in self.persistence_manager.query(spec)]
+        return [value_of(it) for it in self.persistence_manager.query(spec)]
 
     def read_lower_copies(self) -> list[list[str]] | None:
         if self.copies is None:
@@ -105,15 +106,6 @@ class SqlPlanHost:
 
     def changed(self) -> None:
         self._changed()
-
-
-def _column_value(row: Any) -> Any:
-    """A row of one column as that column's value; any other row as it is."""
-    if isinstance(row, Mapping):
-        columns = cast(Mapping[Any, Any], row)
-        if len(columns) == 1:
-            return next(iter(columns.values()))
-    return cast(Any, row)
 
 
 @dataclass(frozen=True)

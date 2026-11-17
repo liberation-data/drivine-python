@@ -487,8 +487,8 @@ class ModelRegistry:
                     raise DrivineError(f"NullAsDefault {where} loads a stored null as its default, so it needs one.")
                 mapping.null_as_default.add(field)
             shape = FieldShape.of(info.annotation)
-            if shape.collection is None and shape.item in (bytes, bytearray):
-                mapping.bytes_fields.add(field)
+            if shape.collection != "dict" and shape.item in (bytes, bytearray):
+                mapping.bytes_fields[field] = shape.collection is not None
             kind = shape.collection
             if kind in ("set", "tuple"):
                 mapping.collections[field] = kind

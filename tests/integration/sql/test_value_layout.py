@@ -165,3 +165,26 @@ async def test_a_dollar_named_case_insensitive_property_is_found_ignoring_case(
         # How the lowercased copy of a $-named property is named is unsettled across the libraries.
         pytest.xfail("the lowercased copy of a $-named property is named otherwise (drivine-cypher-spec#355)")
     pytest.fail("A $-named case-insensitive property is found ignoring case now: take out the hold (#355)")
+
+
+async def test_a_patch_that_removes_a_dollar_named_property_removes_it_as_the_layout_holds_it(
+    gom: StatelessGraphObjectManager, pm: PersistenceManager
+):
+    await gom.save(Held(id="u1", dollar=7))
+    await gom.patch(Held, "u1", set={"dollar": None})
+    assert "$$dollar" not in await stored(pm, "u1")
+    loaded = await gom.load(Held, "u1")
+    assert loaded is not None and loaded.dollar is None
+
+
+class Blobs(NodeFragment, labels=["Blobs"]):
+    id: Annotated[str, NodeId()]
+    parts: list[bytes] | None = None
+
+
+async def test_a_list_of_bytes_is_read_back_as_the_bytes_it_held(
+    gom: StatelessGraphObjectManager, pm: PersistenceManager
+):
+    await gom.save(Blobs(id="l1", parts=[b"\x01\xff", b""]))
+    loaded = await gom.load(Blobs, "l1")
+    assert loaded is not None and loaded.parts == [b"\x01\xff", b""]

@@ -191,6 +191,8 @@ class Hold:
     """The stores or groups the steps are held on."""
     steps: tuple[int, ...] | None = None
     """The steps, from 1; every step of the case where None."""
+    repository: str = "drivine-python"
+    """The repository of liberation-data's that `issue` is in: the shared module's fixes are drivine-cypher-spec's."""
 
 
 def _steps(first: int, last: int) -> tuple[int, ...]:
@@ -198,7 +200,14 @@ def _steps(first: int, last: int) -> tuple[int, ...]:
     return tuple(range(first, last + 1))
 
 
-HELD: dict[str, dict[str, list[Hold]]] = {}
+HELD: dict[str, dict[str, list[Hold]]] = {
+    "queries.yaml": {
+        # The native SQLite extension refuses a backreference, which the JVM's regular expressions answer.
+        "A regular expression with a backreference": [
+            Hold(240, ("sqlite",), steps=(1, 3, 4), repository="drivine-cypher-spec"),
+        ],
+    },
+}
 """
 The steps of a spec tag past what drivine-python runs that a port here has yet to make pass, by file and case. Each is
 run, and must fail; one that passes fails, so that its hold is taken out when its port lands. As Drivine for
@@ -206,12 +215,15 @@ TypeScript's.
 """
 
 
-def held_for(file: str, case: Case, index: int, store: str) -> int | None:
-    """The issue the step at `index` (from 0) of the case of `file` is held for on `store`, if it is: see `HELD`."""
+def held_for(file: str, case: Case, index: int, store: str) -> str | None:
+    """
+    The issue the step at `index` (from 0) of the case of `file` is held for on `store`, if it is, as `repository#n`:
+    see `HELD`.
+    """
     for hold in HELD.get(file, {}).get(case.name, []):
         named = any(it == store or store in GROUPS.get(it, set()) for it in hold.on)
         if named and (hold.steps is None or index + 1 in hold.steps):
-            return hold.issue
+            return f"{hold.repository}#{hold.issue}"
     return None
 
 
@@ -219,11 +231,11 @@ HELD_FAILURES = (Exception, pytest.fail.Exception)
 """What a held step fails with: the store's or the compiler's failure, or the check's."""
 
 
-def held_passes(file: str, case: Case, index: int, store: str, issue: int) -> str:
+def held_passes(file: str, case: Case, index: int, store: str, issue: str) -> str:
     """What is said of a held step that passes."""
     return (
-        f"{file}, {case.name}, step {index + 1} is held on {store} for liberation-data/drivine-python#{issue}, and "
-        "passes: take it out of HELD."
+        f"{file}, {case.name}, step {index + 1} is held on {store} for liberation-data/{issue}, and passes: take it "
+        "out of HELD."
     )
 
 

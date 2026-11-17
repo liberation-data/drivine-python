@@ -374,8 +374,9 @@ class TestTheSession:
         try:
             session.query("CREATE TABLE t (x TEXT)", {})
             session.query("INSERT INTO t VALUES ('a'), ('b'), ('c')", {})
-            with pytest.raises(Exception, match="unterminated") as raised:
-                session.query("SELECT CASE WHEN x = 'b' THEN x REGEXP '(' END AS r FROM t ORDER BY x", {})
+            # drivine_fail is drivine-python's own function: the shared module's extension fails as SQLite errors do.
+            with pytest.raises(Exception, match="at b") as raised:
+                session.query("SELECT CASE WHEN x = 'b' THEN drivine_fail('at ' || x) END AS r FROM t ORDER BY x", {})
             assert not isinstance(raised.value, apsw.Error)
         finally:
             session.close()

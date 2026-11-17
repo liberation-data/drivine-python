@@ -16,14 +16,8 @@ import re
 from decimal import Decimal
 from typing import Any, cast
 
-MIN_LONG = -(2**63)
-MAX_LONG = 2**63 - 1
-
 _NUMERIC = re.compile(r"\s*[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?")
 """The number a text starts with, as SQLite reads one: spaces before it allowed."""
-
-_WHOLE = re.compile(r"\s*([+-]?)(\d+)")
-"""The whole number a text starts with, as SQLite's `sqlite3Atoi64` reads one."""
 
 
 def text(value: Any) -> str | None:
@@ -53,44 +47,10 @@ def real(value: Any) -> float:
     return float(found.group(0)) if found else 0.0
 
 
-def integer(value: Any) -> int:
-    """
-    The argument as a whole number, as `sqlite3_value_int64` gives it: a real one cut toward zero within a long, a
-    text's leading whole number, clamped to a long.
-    """
-    if value is None:
-        return 0
-    if isinstance(value, int):
-        return int(value)
-    if isinstance(value, float):
-        if math.isnan(value):
-            return 0
-        if value <= MIN_LONG:
-            return MIN_LONG
-        if value >= 2**63:
-            return MAX_LONG
-        return int(value)
-    found = _WHOLE.match(text(value) or "")
-    if found is None:
-        return 0
-    whole = int(found.group(2)) * (-1 if found.group(1) == "-" else 1)
-    return max(MIN_LONG, min(MAX_LONG, whole))
-
-
 def int32(value: int) -> int:
     """A long's lowest 32 bits, as Kotlin's `toInt()` and `sqlite3_value_int` keep them."""
     low = value & 0xFFFFFFFF
     return low - 2**32 if low >= 2**31 else low
-
-
-def is_real(value: Any) -> bool:
-    """Whether SQLite holds the argument as a real number."""
-    return isinstance(value, float)
-
-
-def is_integer(value: Any) -> bool:
-    """Whether SQLite holds the argument as a whole number."""
-    return isinstance(value, int) and not isinstance(value, bool)
 
 
 def real_text(value: float) -> str:
@@ -138,24 +98,9 @@ def java_double(value: float) -> str:
     return f"{'-' if sign else ''}{digits[0]}.{digits[1:]}E{exponent}"
 
 
-def java_round(value: float) -> int:
-    """Java's `Math.round(double)`: the nearest long, a half toward positive infinity; NaN is 0, past a long its end."""
-    if math.isnan(value):
-        return 0
-    if value >= 2**63:
-        return MAX_LONG
-    if value <= MIN_LONG:
-        return MIN_LONG
-    floor = math.floor(value)
-    return floor + 1 if value - floor >= 0.5 else floor
-
-
 def _float(value: int) -> float:
     """A whole number as the nearest double, as Java's `BigInteger.doubleValue`: past a double's range, an infinity."""
     try:
         return float(value)
     except OverflowError:
         return math.inf if value > 0 else -math.inf
-
-
-as_double = _float

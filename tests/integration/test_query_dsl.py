@@ -111,6 +111,15 @@ class TestConditions:
         if pm.type is DatabaseType.FALKORDB:
             pytest.skip("FalkorDB's expressions take no backreference.")
         q = refs(Movie)
+        if pm.type is DatabaseType.SQLITE:
+            # The native SQLite extension refuses a backreference (liberation-data/drivine-cypher-spec#240).
+            try:
+                await gom.load_all(Movie, where=q.title.matches(".*(e)\\1.*"))
+            except DrivineError as refused:
+                if "back reference" in str(refused):
+                    pytest.xfail("the native SQLite extension refuses a backreference (drivine-cypher-spec#240)")
+                raise
+            pytest.fail("SQLite's extension answers a backreference now (drivine-cypher-spec#240): take out the xfail")
         assert titles(await gom.load_all(Movie, where=q.title.matches(".*(e)\\1.*"))) == ["Speed"]
 
     async def test_matches_the_whole_value_a_line_break_that_ends_it_included(self, pm, gom, movies):

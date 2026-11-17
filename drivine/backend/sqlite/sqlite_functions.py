@@ -33,7 +33,7 @@ from typing import Any, cast
 
 import apsw
 
-from drivine.backend.sqlite import sqlite_cypher_functions, sqlite_graph
+from drivine.backend.sqlite import sqlite_cypher_functions, sqlite_extension, sqlite_graph
 from drivine.backend.sqlite.sqlite_arguments import text as text_of_argument
 from drivine.backend.sqlite.sqlite_graph import SqliteGraph, has_label, path, text_of
 from drivine.backend.sqlite.sqlite_patterns import Patterns
@@ -47,7 +47,11 @@ _SAVEPOINT = "drivine_write"
 
 
 def register(connection: apsw.Connection) -> None:
-    """Registers every function on the connection, for the statements run on it."""
+    """
+    Registers every function on the connection, for the statements run on it: the shared module's from its SQLite
+    extension (see sqlite_extension), then this library's own.
+    """
+    sqlite_extension.load(connection)
     patterns = _Patterns()
     similarity = _Similarity()
     # apsw's stubs give a function any SQLite value; each here reads what it is given (see sqlite_arguments).
@@ -57,7 +61,6 @@ def register(connection: apsw.Connection) -> None:
     add(sqlite_graph.LOWER_COPIES, partial(_lower_copies, connection), 4)
     add(sqlite_graph.SIMILARITY, similarity.score, 3, deterministic=True)
     add(sqlite_graph.REGEXP_COUNT, patterns.count, 2, deterministic=True)
-    add(REGEXP, patterns.matches, 2, deterministic=True)
     add(sqlite_graph.LOWER, _lower, 1, deterministic=True)
     add(sqlite_graph.EPOCH, epoch, 1, deterministic=True)
     sqlite_cypher_functions.register(connection, patterns)

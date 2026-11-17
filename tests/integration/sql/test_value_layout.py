@@ -302,3 +302,26 @@ async def test_the_query_dsl_finds_a_saved_date_moment_or_time_in_a_list_by_has_
     except AssertionError:
         pytest.xfail(DSL_TEMPORALS)
     pytest.fail(f"Held, and passing: take the hold off. {DSL_TEMPORALS}")
+
+
+async def test_has_item_finds_a_moment_a_list_holds_as_text_and_passes_over_a_text_that_names_none(
+    gom: StatelessGraphObjectManager, pm: PersistenceManager
+):
+    async def check() -> None:
+        # Written by the user's own Cypher, so each item is the text it was written as, and not a save's tag.
+        statement = (
+            "MERGE (a:ListedHeld {id: 'l3'}) SET a.moments = ['2024-05-06T09:08:09.123456+02:00'] "
+            "MERGE (b:ListedHeld {id: 'l4'}) SET b.moments = ['soon', '2024-05-06T07:08:10Z']"
+        )
+        await pm.execute(QuerySpecification[Any](cypher_statement(statement)))
+        moment = datetime(2024, 5, 6, 7, 8, 9, 123456, tzinfo=UTC)
+        assert [it.id for it in await gom.load_all(Listed, refs(Listed).moments.has_item(moment))] == ["l3"]
+
+    if pm.type is DatabaseType.SQLITE:
+        await check()
+        return
+    try:
+        await check()
+    except AssertionError:
+        pytest.xfail(DSL_TEMPORALS)
+    pytest.fail(f"Held, and passing: take the hold off. {DSL_TEMPORALS}")

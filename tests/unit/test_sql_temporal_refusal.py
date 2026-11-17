@@ -10,13 +10,35 @@ from typing import Annotated, Any
 
 import pytest
 
-from drivine import DrivineError, JsonPacked, ModelRegistry, NodeFragment, NodeId, case_of, equal_to, refs
+from drivine import (
+    DrivineError,
+    GraphView,
+    JsonPacked,
+    ModelRegistry,
+    NodeFragment,
+    NodeId,
+    Relationship,
+    RelationshipFragment,
+    Root,
+    TargetNode,
+    above,
+    case_of,
+    coalesce,
+    count,
+    equal_to,
+    key,
+    refs,
+    sum_,
+)
+from drivine.backend.cypher_backend import CypherBackend
+from drivine.backend.cypher_grammar import NEO4J_GRAMMAR
 from drivine.backend.oracle.oracle_backend import OracleBackend
 from drivine.backend.oracle.oracle_graph import OracleGraph
 from drivine.backend.postgres.postgres_backend import PostgresBackend
 from drivine.backend.sqlite.sqlite_backend import SqliteBackend
 from drivine.backend.sqlite.sqlite_graph import SqliteGraph
 from drivine.dsl.query import Query
+from drivine.manager.group_query import GroupQuery
 
 
 class Dated(NodeFragment, labels=["Dated"]):
@@ -29,9 +51,22 @@ class Dated(NodeFragment, labels=["Dated"]):
     name: str | None = None
 
 
+class Met(RelationshipFragment):
+    since: date | None = None
+    to: Annotated[Dated, TargetNode()]
+
+
+class Meetings(GraphView):
+    dated: Annotated[Dated, Root()]
+    met: Annotated[list[Met], Relationship("MET")] = []
+    knows: Annotated[list[Dated], Relationship("KNOWS")] = []
+
+
 registry = ModelRegistry()
 model = registry.fragment(Dated)
+view = registry.view(Meetings)
 q = refs(Dated)
+qv = refs(Meetings)
 DAY = date(2024, 1, 2)
 AT = datetime(2024, 5, 6, 7, 8, 9, tzinfo=UTC)
 NINE = time(9)
@@ -65,6 +100,14 @@ TEMPORAL: dict[str, Callable[[], Any]] = {
     "has_item": lambda: q.days.has_item(DAY),
     "a temporal list": lambda: q.days.eq([DAY]),
     "by stored name": lambda: q.property("on").eq(DAY),
+    "a predicate": lambda: q.predicate("on", "GT", DAY),
+}
+
+IN_A_VIEW: dict[str, Callable[[], Any]] = {
+    "the root's": lambda: qv.dated.on.gt(DAY),
+    "a relationship's property": lambda: qv.met.since.gt(DAY),
+    "a relationship's property in any": lambda: qv.met.any(lambda it: it.since.gt(DAY)),
+    "a related node's": lambda: qv.knows.on.eq(DAY),
 }
 
 PLAIN: dict[str, Callable[[], Any]] = {
@@ -82,6 +125,13 @@ PLAIN: dict[str, Callable[[], Any]] = {
 def test_a_comparison_with_a_temporal_value_is_refused_by_name(store: str, where: Callable[[], Any]):
     with pytest.raises(DrivineError, match=refused(store)):
         REFUSING[store].render_where(where(), model, labels)
+
+
+@pytest.mark.parametrize("store", REFUSING)
+@pytest.mark.parametrize("where", IN_A_VIEW.values(), ids=IN_A_VIEW.keys())
+def test_a_comparison_with_a_temporal_value_in_a_view_is_refused_by_name(store: str, where: Callable[[], Any]):
+    with pytest.raises(DrivineError, match=refused(store)):
+        REFUSING[store].render_where(where(), view, labels)
 
 
 @pytest.mark.parametrize("store", REFUSING)
@@ -106,6 +156,17 @@ def test_an_order_by_a_field_declared_temporal_is_refused_by_name(store: str, fi
     # By its stored name, the field is the one that declares it.
     with pytest.raises(DrivineError, match=refused(store)):
         REFUSING[store].render_query(Query(order_by=q.property(field).asc()), model, labels)
+    # By a view's root's field.
+    with pytest.raises(DrivineError, match=refused(store)):
+        REFUSING[store].render_query(Query(order_by=getattr(qv.dated, field).asc()), view, labels)
+
+
+@pytest.mark.parametrize("store", REFUSING)
+def test_an_order_expression_that_reads_a_field_declared_temporal_is_refused_by_name(store: str):
+    for term in (case_of([above(q.on, q.at).then(0)], 1).asc(), coalesce(q.at, 0).desc()):
+        with pytest.raises(DrivineError, match=refused(store)) as raised:
+            REFUSING[store].render_query(Query(order_by=term), model, labels)
+        assert "an order's expression reads" in str(raised.value)
 
 
 @pytest.mark.parametrize("store", REFUSING)
@@ -136,3 +197,37 @@ def test_sqlite_renders_an_order_by_and_a_seek_after_a_temporal_value():
         assert SQLITE.render_query(Query(order_by=getattr(q, field).desc()), model, labels).order_by
     seek = Query(order_by=q.on.asc(), seek=q.on.after(DAY))
     assert SQLITE.render_query(seek, model, labels).where
+
+
+def test_a_graph_engine_renders_a_comparison_with_a_temporal_value_and_an_order_by_one():
+    # The refusal is the SQL stores' own: the graph engines compare and order a temporal value as it is.
+    neo4j = CypherBackend(NEO4J_GRAMMAR)
+    for where in TEMPORAL.values():
+        written, _ = neo4j.render_where(where(), model, labels)
+        assert written
+    assert neo4j.render_query(Query(order_by=q.on.desc()), model, labels).order_by
+
+
+def test_sqlite_renders_an_order_expression_that_reads_a_field_declared_temporal():
+    assert SQLITE.render_query(Query(order_by=coalesce(q.at, 0).desc()), model, labels).order_by
+
+
+GROUPS: dict[str, Callable[[], GroupQuery]] = {
+    "a grouped read's where": lambda: GroupQuery({"name": key("name")}, {"all": count()}, where=q.on.gt(DAY)),
+    "a filtered count": lambda: GroupQuery({"name": key("name")}, {"late": count(q.at.gt(AT))}),
+    "a filtered sum": lambda: GroupQuery({"name": key("name")}, {"days": sum_("id", q.on.lte(DAY))}),
+}
+
+
+@pytest.mark.parametrize("store", REFUSING)
+@pytest.mark.parametrize("grouped", GROUPS.values(), ids=GROUPS.keys())
+def test_a_grouped_read_that_compares_with_a_temporal_value_is_refused_by_name(
+    store: str, grouped: Callable[[], GroupQuery]
+):
+    with pytest.raises(DrivineError, match=refused(store)):
+        REFUSING[store].groups(model, grouped(), {}, labels)
+
+
+@pytest.mark.parametrize("grouped", GROUPS.values(), ids=GROUPS.keys())
+def test_sqlite_renders_a_grouped_read_that_compares_with_a_temporal_value(grouped: Callable[[], GroupQuery]):
+    assert SQLITE.groups(model, grouped(), {}, labels).text

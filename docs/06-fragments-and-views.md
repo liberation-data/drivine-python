@@ -81,9 +81,10 @@ q.employment_history.none(lambda it: it.role.eq("Lead"))
 - `eq_ignore_case` and `contains_ignore_case` lowercase the property, which no index reads. On a `CaseInsensitive`
   field whose index ignores case, they compare with a lowercased copy instead, which the index serves: see below.
 - **Dates and times on Postgres and Oracle:** for now a comparison with a `date`, `datetime` or `time`, a cursor after
-  one, and an order by a field declared one are refused by name there, until the DSL compares them as the values they
-  are ([drivine-cypher-spec#235](https://github.com/liberation-data/drivine-cypher-spec/issues/235)): write the filter
-  in Cypher, which does (`MATCH (n:Event) WHERE n.at > $at RETURN n`). SQLite's DSL compares them, and a `JsonPacked`
+  one, and an order by a field declared one, or by an expression that reads one, are refused by name there, until the
+  DSL compares them as the values they are
+  ([drivine-cypher-spec#235](https://github.com/liberation-data/drivine-cypher-spec/issues/235)): write the filter in
+  Cypher, which does (`MATCH (n:Event) WHERE n.at > $at RETURN n`). SQLite's DSL compares them, and a `JsonPacked`
   field is compared by its packed text on every store.
 
 ### Lookups that ignore case

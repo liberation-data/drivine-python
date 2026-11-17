@@ -50,8 +50,8 @@ class SqlQueryRenderer(ABC):
     are bound (`$_q0`, …), never written in. What is each store's own is how it compares a property, tests labels and
     reads a property for an order or an expression.
 
-    A comparison with a date, datetime or time, or an order by a field declared one, is refused by name, unless the
-    store `reads_temporals`.
+    A comparison with a date, datetime or time, or an order by a field declared one or by an expression that reads one,
+    is refused by name, unless the store `reads_temporals`.
     """
 
     store: ClassVar[str] = "this store"
@@ -251,7 +251,10 @@ class SqlQueryRenderer(ABC):
             return self._expression(it, scope, alias, "NUMBER")
 
         if node.kind == "PROPERTY":
-            return self._read(alias, root_property(node.path, scope, "An expression"), as_)
+            property = root_property(node.path, scope, "An expression")
+            if _declares_temporal(scope, property):
+                self._refuse_temporal(f"an order's expression reads {described(node.path)}, a date, datetime or time")
+            return self._read(alias, property, as_)
         if node.kind == "VALUE":
             if _temporal(node.value):
                 self._refuse_temporal(f"an order's expression holds {node.value!r}")

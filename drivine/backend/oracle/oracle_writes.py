@@ -8,11 +8,12 @@ from drivine.annotation.direction import Direction
 from drivine.backend.fragment_group import FragmentGroup
 from drivine.backend.graph_statement import GraphStatement
 from drivine.backend.matched_node import MatchedNode
+from drivine.backend.oracle.id_keyed_statement import held_id
 from drivine.backend.oracle.oracle_graph import OracleGraph, has_labels, json_key, node_document
 from drivine.backend.oracle.oracle_save_builder import prelude
 from drivine.backend.save_statement_builder import id_of, object_props
 from drivine.backend.sql.sql_json import to_json
-from drivine.backend.sql.value_layout import held_key, write_props
+from drivine.backend.sql.value_layout import held_key, write, write_props
 from drivine.drivine_error import DrivineError
 from drivine.manager.relate_mode import RelateMode
 from drivine.manager.save_options import SaveOptions
@@ -44,14 +45,15 @@ class OracleWrites:
         block = self._block(
             ["v_meets NUMBER;", "v_changed BOOLEAN := FALSE;", "v_id VARCHAR2(4000);", "v_patch CLOB;"],
             [
-                "SELECT JSON_SERIALIZE(JSON_SCALAR($id)) INTO v_id FROM dual;",
+                "v_id := $id;",
                 f"v_root := find_node({self._match(model)}, v_id);",
                 "IF v_root IS NOT NULL THEN",
                 f"    SELECT stamp INTO v_found FROM {self.graph.nodes} WHERE nid = v_root FOR UPDATE;",
                 f"    {condition}",
                 "    IF v_meets > 0 THEN",
-                "        SELECT JSON_SERIALIZE(JSON_MERGEPATCH(JSON($set), JSON(NVL($vectors, '{}'))) RETURNING CLOB) "
-                "INTO v_patch FROM dual;",
+                # EXTENDED, read and written, so each float stays a binary double (see _Patch).
+                "        SELECT JSON_SERIALIZE(JSON_MERGEPATCH(JSON($set EXTENDED), "
+                "JSON(NVL($vectors, '{}') EXTENDED)) RETURNING CLOB EXTENDED) INTO v_patch FROM dual;",
                 "        v_changed := apply_node(v_root, v_patch, '[]', '[]', NULL, FALSE);",
                 "        restamp(v_root, v_changed);",
                 *(f"        {it}" for it in self._lowering(model, "IF v_changed THEN ", " END IF;")),
@@ -76,9 +78,9 @@ class OracleWrites:
             [
                 # Read whole before any write: a cursor loop over the bound rows, with writes in it, stopped after the
                 # first node it changed (23.26), silently.
-                "SELECT JSON_SERIALIZE(id), JSON_SERIALIZE(JSON_MERGEPATCH(NVL(props, JSON('{}')), "
-                "NVL(vectors, JSON('{}'))) RETURNING CLOB) BULK COLLECT INTO v_ids, v_patches FROM "
-                "JSON_TABLE($rows, '$[*]' COLUMNS (id JSON PATH '$.id', props JSON PATH '$.props', "
+                "SELECT JSON_SERIALIZE(id RETURNING CLOB EXTENDED), JSON_SERIALIZE(JSON_MERGEPATCH(NVL(props, "
+                "JSON('{}')), NVL(vectors, JSON('{}'))) RETURNING CLOB EXTENDED) BULK COLLECT INTO v_ids, v_patches "
+                "FROM JSON_TABLE(JSON($rows EXTENDED), '$[*]' COLUMNS (id JSON PATH '$.id', props JSON PATH '$.props', "
                 "vectors JSON PATH '$.vectors'));",
                 "FOR i IN 1 .. v_ids.COUNT LOOP",
                 f"    v_root := find_node({self._match(model)}, v_ids(i));",
@@ -90,7 +92,8 @@ class OracleWrites:
                 *(f"        {it}" for it in self._lowering(model, "IF v_changed THEN ", " END IF;")),
                 "    END IF;",
                 "    v_out.EXTEND;",
-                "    SELECT JSON_SERIALIZE(JSON_OBJECT('id' VALUE JSON(v_ids(i)), 'found' VALUE v_root IS NOT NULL, "
+                "    SELECT JSON_SERIALIZE(JSON_OBJECT('id' VALUE JSON(v_ids(i) EXTENDED), "
+                "'found' VALUE v_root IS NOT NULL, "
                 "'changed' VALUE v_changed)) INTO v_out(v_out.COUNT) FROM dual;",
                 "END LOOP;",
                 # Rows from a collection, as text: a returned result set with a JSON column gives only its prefetched
@@ -123,12 +126,12 @@ class OracleWrites:
                 variable = f"v_{when}{i}"
                 if when == "before":
                     declarations.extend([f"{variable} CLOB;", f"v_after{i} CLOB;"])
-                ids = bind(to_json([id_of(group.model, it) for it in group.objects]))
+                ids = bind(held_id([id_of(group.model, it) for it in group.objects]))
                 body.append(
                     f"SELECT NVL(JSON_ARRAYAGG(JSON_OBJECT('id' VALUE JSON_QUERY(n.props, '${k}'), 'stamp' VALUE "
                     f"NVL(n.stamp, '{stamps.NEVER_STAMPED}')) RETURNING CLOB), '[]') INTO {variable} FROM "
                     f"{self.graph.nodes} n WHERE {has_labels('n', group.model.labels)} AND EXISTS (SELECT 1 FROM "
-                    f"JSON_TABLE({ids}, '$[*]' COLUMNS (v JSON PATH '$')) t WHERE JSON_EXISTS(n.props, "
+                    f"JSON_TABLE(JSON({ids} EXTENDED), '$[*]' COLUMNS (v JSON PATH '$')) t WHERE JSON_EXISTS(n.props, "
                     f"'$?(@{k} == $v)' PASSING t.v AS \"v\"));"
                 )
 
@@ -137,7 +140,7 @@ class OracleWrites:
             for obj in group.objects:
                 props = object_props(group.model, obj, options)
                 match = bind(self._match_text(group.model))
-                id_ = bind(to_json(id_of(group.model, obj)))
+                id_ = bind(held_id(id_of(group.model, obj)))
                 labels = bind(to_json(group.model.labels))
                 held = bind(to_json(write_props(props, "oracle")))
                 body.append(f"v_root := write_node({match}, {id_}, {labels}, {held}, '[]', '[]', NULL, FALSE);")
@@ -162,13 +165,16 @@ class OracleWrites:
         edges = self.graph.edges
         if mode is RelateMode.MERGE:
             joined = [
-                "    SELECT COUNT(*), NVL(SUM(CASE WHEN JSON_EQUAL(props, JSON_MERGEPATCH(props, JSON($x_props))) "
+                "    SELECT COUNT(*), NVL(SUM(CASE WHEN JSON_EQUAL(props, "
+                "JSON_MERGEPATCH(props, JSON($x_props EXTENDED))) "
                 "THEN 1 ELSE 0 END), 0)",
                 f"        INTO v_had, v_same FROM {edges} WHERE src = v_root AND dst = v_to AND type = $x_type;",
                 "    IF v_had = 0 THEN",
-                f"        INSERT INTO {edges} (src, dst, type, props) VALUES (v_root, v_to, $x_type, JSON($x_props));",
+                f"        INSERT INTO {edges} (src, dst, type, props) VALUES (v_root, v_to, $x_type, "
+                "JSON($x_props EXTENDED));",
                 "    ELSE",
-                f"        UPDATE {edges} SET props = JSON_MERGEPATCH(props, JSON($x_props)) WHERE src = v_root AND "
+                f"        UPDATE {edges} SET props = JSON_MERGEPATCH(props, JSON($x_props EXTENDED)) "
+                "WHERE src = v_root AND "
                 "dst = v_to AND type = $x_type;",
                 "    END IF;",
                 "    IF v_had = 0 OR v_same < v_had THEN relink(v_root); relink(v_to); END IF;",
@@ -176,7 +182,8 @@ class OracleWrites:
             ]
         else:
             joined = [
-                f"    INSERT INTO {edges} (src, dst, type, props) VALUES (v_root, v_to, $x_type, JSON($x_props));",
+                f"    INSERT INTO {edges} (src, dst, type, props) VALUES (v_root, v_to, $x_type, "
+                "JSON($x_props EXTENDED));",
                 "    relink(v_root);",
                 "    relink(v_to);",
                 "    v_related := 1;",
@@ -237,7 +244,7 @@ class OracleWrites:
                 "END IF;",
                 'OPEN c FOR SELECT v_removed AS "removed" FROM dual;',
             ],
-            {"x_type": type, "x_from": to_json(from_.id)},
+            {"x_type": type, "x_from": held_id(from_.id)},
         )
 
     def related(self, from_: MatchedNode, type: str, direction: Direction, target: FragmentModel) -> GraphStatement:
@@ -254,9 +261,10 @@ class OracleWrites:
             f'SELECT {node_document("n")} AS "result" FROM {self.graph.nodes} n WHERE n.nid IN ('
             f"SELECT x.nid FROM {self.graph.nodes} a JOIN {self.graph.edges} e ON e.type = $x_type "
             f"JOIN {self.graph.nodes} x ON {join} WHERE {has_labels('a', labels)} AND "
-            f"JSON_EXISTS(a.props, '$?(@{json_key(_id_property(from_.model))} == $v)' PASSING JSON($x_from) AS \"v\") "
+            f"JSON_EXISTS(a.props, '$?(@{json_key(_id_property(from_.model))} == $v)' "
+            'PASSING JSON($x_from EXTENDED) AS "v") '
             f"AND {has_labels('x', target.labels)})",
-            {"x_type": type, "x_from": to_json(from_.id)},
+            {"x_type": type, "x_from": held_id(from_.id)},
         )
 
     def _ends(self, from_: MatchedNode, to: MatchedNode) -> list[str]:
@@ -270,9 +278,9 @@ class OracleWrites:
         labels = list(dict.fromkeys([*node.model.labels, *node.labels]))
         k = json_key(_id_property(node.model))
         self._pending[name] = (
-            f"{has_labels('n', labels)} AND JSON_EXISTS(n.props, '$?(@{k} == $v)' PASSING JSON(:1) AS \"v\")"
+            f"{has_labels('n', labels)} AND JSON_EXISTS(n.props, '$?(@{k} == $v)' PASSING JSON(:1 EXTENDED) AS \"v\")"
         )
-        self._pending["x_from" if name == "x_frommatch" else "x_to"] = to_json(node.id)
+        self._pending["x_from" if name == "x_frommatch" else "x_to"] = held_id(node.id)
         return f"${name}"
 
     def _match(self, model: FragmentModel) -> str:
@@ -282,7 +290,10 @@ class OracleWrites:
     @staticmethod
     def _match_text(model: FragmentModel) -> str:
         k = json_key(_id_property(model))
-        return f"{has_labels('n', model.labels)} AND JSON_EXISTS(n.props, '$?(@{k} == $v)' PASSING JSON(:1) AS \"v\")"
+        return (
+            f"{has_labels('n', model.labels)} AND JSON_EXISTS(n.props, '$?(@{k} == $v)' "
+            'PASSING JSON(:1 EXTENDED) AS "v")'
+        )
 
     def _lowering(self, model: FragmentModel, before: str = "", after: str = "") -> list[str]:
         """
@@ -315,8 +326,10 @@ END;"""
 @dataclass(frozen=True)
 class _Patch(GraphStatement):
     """
-    A patch's block, bound with its values in the store layout (see value_layout), as a save's are: `$set` and
-    `$vectors`, or each of `$rows`' `props` and `vectors`, each by its name as the layout holds it.
+    A patch's block, bound with its values as Oracle's store layout holds them (see value_layout), as a save's are:
+    `$set` and `$vectors`, or each of `$rows`' `props` and `vectors`, each by its name as the layout holds it, and `$id`
+    or each row's id (see held_id). Each float is extended JSON's double, which the block reads `JSON(… EXTENDED)`, so a
+    float patched in stays a binary double.
     """
 
     def spec(self, more: Mapping[str, Any] | None = None) -> QuerySpecification[Any]:
@@ -324,10 +337,13 @@ class _Patch(GraphStatement):
         for name in ("set", "vectors"):
             if given.get(name) is not None:
                 given[name] = write_props(given[name], "oracle")
+        if "id" in given:
+            given["id"] = held_id(given["id"])
         if given.get("rows") is not None:
             given["rows"] = [
                 {
                     **row,
+                    "id": write(row.get("id"), "oracle"),
                     **{name: write_props(row[name], "oracle") for name in ("props", "vectors") if row.get(name)},
                 }
                 for row in given["rows"]

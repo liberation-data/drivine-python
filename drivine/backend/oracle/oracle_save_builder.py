@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from drivine.annotation.direction import Direction
+from drivine.backend.oracle.id_keyed_statement import held_id
 from drivine.backend.oracle.oracle_graph import OracleGraph, has_labels, json_key, sql_text
 from drivine.backend.save_statement import SaveStatement
 from drivine.backend.save_statement_builder import (
@@ -243,7 +244,7 @@ class OracleSaveBuilder:
 
             def not_in(listed: str, k: str = k) -> str:
                 return (
-                    f"NOT EXISTS (SELECT 1 FROM JSON_TABLE({listed}, '$[*]' COLUMNS (v JSON PATH '$')) t "
+                    f"NOT EXISTS (SELECT 1 FROM JSON_TABLE(JSON({listed} EXTENDED), '$[*]' COLUMNS (v JSON PATH '$')) t "
                     f"WHERE JSON_EXISTS(x.props, '$?(@{k} == $v)' PASSING t.v AS \"v\"))"
                 )
 
@@ -266,8 +267,8 @@ class OracleSaveBuilder:
                 else None
             )
             self._body.append(
-                f"trim_edges(v_root, {self._bind(dropped)}, {self._bind(to_json(keep))}, "
-                f"{self._bind(unreferenced) if unreferenced else 'NULL'}, {self._bind(to_json(held))});"
+                f"trim_edges(v_root, {self._bind(dropped)}, {self._bind(held_id(keep))}, "
+                f"{self._bind(unreferenced) if unreferenced else 'NULL'}, {self._bind(held_id(held))});"
             )
 
     def _read_stamps(self, when: str) -> list[str]:
@@ -283,7 +284,7 @@ class OracleSaveBuilder:
                 f"SELECT NVL(JSON_ARRAYAGG(JSON_OBJECT('id' VALUE JSON_QUERY(n.props, '${k}'), 'stamp' VALUE "
                 f"NVL(n.stamp, '{stamps.NEVER_STAMPED}')) RETURNING CLOB), '[]') INTO {variable} FROM "
                 f"{self.graph.nodes} n WHERE {has_labels('n', it.model.labels)} AND EXISTS (SELECT 1 FROM "
-                f"JSON_TABLE({self._bind(to_json(it.ids))}, '$[*]' COLUMNS (v JSON PATH '$')) t WHERE "
+                f"JSON_TABLE(JSON({self._bind(held_id(it.ids))} EXTENDED), '$[*]' COLUMNS (v JSON PATH '$')) t WHERE "
                 f"JSON_EXISTS(n.props, '$?(@{k} == $v)' PASSING t.v AS \"v\"));"
             )
         return reads
@@ -372,10 +373,10 @@ END;"""
         assert write.model.node_id_property is not None
         k = json_key(write.model.node_id_property)
         labels = has_labels("n", write.model.labels)
-        match = f"{labels} AND JSON_EXISTS(n.props, '$?(@{k} == $v)' PASSING JSON(:1) AS \"v\")"
+        match = f"{labels} AND JSON_EXISTS(n.props, '$?(@{k} == $v)' PASSING JSON(:1 EXTENDED) AS \"v\")"
         return {
             "match": self._bind(match),
-            "id": self._bind(to_json(write.id)),
+            "id": self._bind(held_id(write.id)),
             "labels": self._bind(to_json(list(dict.fromkeys(write.labels)))),
             # In the store layout (see value_layout), as the shared module writes them.
             "props": self._bind(to_json(write_props(write.props, "oracle"))),
@@ -502,7 +503,7 @@ def prelude(graph: OracleGraph, declarations: Sequence[str], lowers: bool = Fals
         kept_text VARCHAR2(4000);
     BEGIN
         SELECT props, labels INTO old_props, old_labels FROM {nodes} WHERE nid = p FOR UPDATE;
-        SELECT JSON_MERGEPATCH(old_props, JSON(p_props)) INTO new_props FROM dual;
+        SELECT JSON_MERGEPATCH(old_props, JSON(p_props EXTENDED)) INTO new_props FROM dual;
         labels := JSON_ARRAY_T.parse(JSON_SERIALIZE(old_labels));
         FOR i IN 0 .. labels.get_size - 1 LOOP
             IF has(removals, labels.get_string(i)) THEN relabelled := TRUE; ELSE kept.append(labels.get_string(i)); END IF;
@@ -511,14 +512,14 @@ def prelude(graph: OracleGraph, declarations: Sequence[str], lowers: bool = Fals
             IF NOT has(kept, additions.get_string(i)) THEN kept.append(additions.get_string(i)); relabelled := TRUE; END IF;
         END LOOP;
         IF p_record IS NOT NULL THEN
-            props := JSON_OBJECT_T.parse(JSON_SERIALIZE(new_props RETURNING CLOB));
+            props := JSON_OBJECT_T(new_props);
             IF p_replace OR NOT props.has(p_record) THEN recorded := JSON_ARRAY_T();
             ELSE recorded := props.get_array(p_record); END IF;
             FOR i IN 0 .. additions.get_size - 1 LOOP
                 IF NOT has(recorded, additions.get_string(i)) THEN recorded.append(additions.get_string(i)); END IF;
             END LOOP;
             props.put(p_record, recorded);
-            new_props := JSON(props.to_clob());
+            new_props := props.to_json;
         END IF;
         SELECT CASE WHEN JSON_EQUAL(old_props, new_props) THEN 1 ELSE 0 END INTO same FROM dual;
         -- An object type's methods are PL/SQL's: called in SQL, they are refused (ORA-40573).
@@ -554,11 +555,11 @@ def prelude(graph: OracleGraph, declarations: Sequence[str], lowers: bool = Fals
         END;
         IF e IS NULL THEN
             INSERT INTO {edges} (src, dst, type, props) VALUES (CASE WHEN p_dir = 'IN' THEN p_to ELSE p_from END,
-                CASE WHEN p_dir = 'IN' THEN p_from ELSE p_to END, p_type, JSON(NVL(p_props, '{{}}')));
+                CASE WHEN p_dir = 'IN' THEN p_from ELSE p_to END, p_type, JSON(NVL(p_props, '{{}}') EXTENDED));
             relink(p_from);
             relink(p_to);
         ELSIF p_props IS NOT NULL THEN
-            SELECT JSON_MERGEPATCH(old_props, JSON(p_props)) INTO new_props FROM dual;
+            SELECT JSON_MERGEPATCH(old_props, JSON(p_props EXTENDED)) INTO new_props FROM dual;
             SELECT CASE WHEN JSON_EQUAL(old_props, new_props) THEN 1 ELSE 0 END INTO same FROM dual;
             IF same = 0 THEN
                 UPDATE {edges} SET props = new_props WHERE eid = e;
@@ -605,14 +606,14 @@ def _lower_node(nodes: str) -> str:
     return f"""    -- Writes the lowercased copy of each property p_keys names from what the node holds, and removes the copy of one
     -- that holds nothing. Called once the write's change is told: the copies are no part of it.
     PROCEDURE lower_node(p NUMBER, p_keys VARCHAR2) IS
-        held CLOB;
+        held JSON;
         o JSON_OBJECT_T;
         lowered JSON_ARRAY_T := JSON_ARRAY_T.parse(p_keys);
         k VARCHAR2(4000);
         v CLOB;
     BEGIN
-        SELECT JSON_SERIALIZE(props RETURNING CLOB) INTO held FROM {nodes} WHERE nid = p;
-        o := JSON_OBJECT_T.parse(held);
+        SELECT props INTO held FROM {nodes} WHERE nid = p;
+        o := JSON_OBJECT_T(held);
         FOR i IN 0 .. lowered.get_size - 1 LOOP
             k := lowered.get_string(i);
             v := NULL;
@@ -622,8 +623,8 @@ def _lower_node(nodes: str) -> str:
             ELSE o.put('{lower_copies.PREFIX}' || k, v); END IF;
         END LOOP;
         -- An object type's methods are PL/SQL's: called in SQL, they are refused (ORA-40573).
-        held := o.to_clob();
-        UPDATE {nodes} SET props = JSON(held) WHERE nid = p;
+        held := o.to_json;
+        UPDATE {nodes} SET props = held WHERE nid = p;
     END;"""
 
 

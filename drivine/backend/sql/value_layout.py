@@ -5,8 +5,10 @@ alike. host.yaml's write and read steps pin it.
 
 - A value a save writes (`write`): each temporal value its tag (`{"$t": "date", "v": "2024-01-01", "s": …}`), each map
   key that begins with `$` with one more `$`, at any depth, bytes the list of their signed values, and each float as the
-  store holds it: on Postgres a whole one with its fraction, on SQLite an infinity as `9e999`; NaN and an infinity the
-  store holds as no number are refused by name. It is the store's JSON text, spliced into the statement's own as it is
+  store holds it: on Postgres a whole one with its fraction, on Oracle every one extended JSON's double
+  (`{"$numberDouble": "2.5"}`, NaN and the infinities too), which Oracle's statements read `JSON(… EXTENDED)` so it
+  stays a binary double, and on SQLite an infinity as `9e999`; NaN and an infinity the store holds as no number are
+  refused by name. It is the store's JSON text, spliced into the statement's own as it is
   (see `Held`, and sql_json.to_json), so a float's text is never read back and written again otherwise.
 - A column a row gives (`read`): each tag read as its text and each escaped key unescaped, at any depth.
 
@@ -32,17 +34,6 @@ from pydantic_core import to_jsonable_python
 from drivine.drivine_error import DrivineError
 
 SqlStore = Literal["postgres", "oracle", "sqlite"]
-
-ORACLE_SAVES_AS: SqlStore = "postgres"
-"""
-How a save's values are written on Oracle until drivine4j settles a save's floats there (liberation-data/drivine4j#830):
-each float a JSON number, as Drivine for TypeScript writes them, and NaN and the infinities refused by name. Oracle's
-own spelling, `{"$numberDouble": …}`, needs the save's PL/SQL to parse its binds as extended JSON, which the goldens it
-shares with Drivine for TypeScript don't yet. Tags, escaped keys and bytes are the module's as on every store.
-
-Held, and tracked by test_value_layout's ORACLE_FLOATS: a saved 2.0 reads back as 2 on Oracle until the saves take
-#830's binary-double form, which they do, with Drivine for TypeScript and the shared goldens, before 0.9.0 ships.
-"""
 
 
 @dataclass(frozen=True)
@@ -74,14 +65,10 @@ def write(value: Any, store: SqlStore) -> Any:
         return prepared
     from drivine.cypher.shared_compiler import module_text, written
 
-    asked = ORACLE_SAVES_AS if store == "oracle" else store
-    given = module_text({"write": written(prepared), "store": asked}, store)
+    given = module_text({"write": written(prepared), "store": store}, store)
     opening = '{"value":'
     if not given.startswith(opening):
         error = json.loads(given).get("error", given)
-        if asked != store:
-            # Oracle's saves written as Postgres's are (ORACLE_SAVES_AS): its refusal names the store it is.
-            error = error.replace("Postgres's `jsonb`", "a save on Oracle")
         raise DrivineError(f"A value can't be written in the store layout: {error}")
     return Held(given[len(opening) : -1])
 

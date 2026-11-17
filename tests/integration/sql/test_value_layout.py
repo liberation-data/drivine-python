@@ -66,8 +66,8 @@ async def test_a_property_whose_name_begins_with_a_dollar_is_held_escaped_and_re
 async def test_minus_zero_and_an_infinity_beside_a_date_are_read_back_as_the_floats_they_are(
     gom: StatelessGraphObjectManager, pm: PersistenceManager
 ):
-    if pm.type is not DatabaseType.SQLITE:
-        pytest.skip("Postgres's jsonb holds no infinity, and Oracle's saves hold none until drivine4j#830")
+    if pm.type is DatabaseType.POSTGRES:
+        pytest.skip("Postgres's jsonb holds no infinity")
     await gom.save(Held(id="f1", born=date(2024, 1, 1), reading=-0.0, others=[math.inf, -math.inf, 1.5]))
     held = await stored(pm, "f1")
     assert held["born"]["$t"] == "date"
@@ -87,42 +87,25 @@ async def test_a_float_is_held_alike_with_a_date_beside_it_or_without(
     for id in ("w1", "w2"):
         loaded = await gom.load(Held, id)
         assert loaded is not None and loaded.reading == 2.0
-        # On Oracle a saved float reads back as a number until #830 (see ORACLE_FLOATS, held on its own test).
-        assert isinstance(loaded.reading, float) or pm.type is DatabaseType.ORACLE
-
-
-ORACLE_FLOATS = (
-    "Oracle's saves write a float as a JSON number, which Oracle holds as a number, so a saved 2.0 reads back as 2, "
-    "until they take the binary-double form of liberation-data/drivine4j#830 (store layout 2), with Drivine for "
-    "TypeScript and the goldens the two share moving together, before 0.9.0 ships. A port to drivine-python is filed "
-    "once #830's approach settles."
-)
-"""The hold on a saved float on Oracle: see value_layout.ORACLE_SAVES_AS."""
+        assert isinstance(loaded.reading, float)
 
 
 async def test_a_saved_float_reads_back_as_a_float_by_the_object_manager_and_by_cypher(
     gom: StatelessGraphObjectManager, pm: PersistenceManager
 ):
-    async def check() -> None:
-        await gom.save(Held(id="w3", reading=2.0))
-        loaded = await gom.load(Held, "w3")
-        assert loaded is not None and isinstance(loaded.reading, float), loaded
-        read = await pm.get_one(QuerySpecification[Any](cypher_statement("MATCH (n:Held {id: 'w3'}) RETURN n.reading")))
-        assert isinstance(read, float) and read == 2.0, read
-
-    if pm.type is not DatabaseType.ORACLE:
-        await check()
-        return
-    try:
-        await check()
-    except AssertionError:
-        pytest.xfail(ORACLE_FLOATS)
-    pytest.fail(f"Held, and passing: take the hold off. {ORACLE_FLOATS}")
+    # On Oracle a float is held as a binary double (extended JSON's, read EXTENDED), so a whole one stays a float.
+    await gom.save(Held(id="w3", reading=2.0))
+    loaded = await gom.load(Held, "w3")
+    assert loaded is not None and isinstance(loaded.reading, float), loaded
+    read = await pm.get_one(QuerySpecification[Any](cypher_statement("MATCH (n:Held {id: 'w3'}) RETURN n.reading")))
+    assert isinstance(read, float) and read == 2.0, read
 
 
 async def test_nan_is_refused_by_name_where_the_store_holds_it_as_no_number(
     gom: StatelessGraphObjectManager, pm: PersistenceManager
 ):
+    if pm.type is DatabaseType.ORACLE:
+        pytest.skip("Oracle holds NaN as a binary double")
     with pytest.raises(DrivineError, match="NaN"):
         await gom.save(Held(id="n1", reading=math.nan))
     assert await gom.load(Held, "n1") is None

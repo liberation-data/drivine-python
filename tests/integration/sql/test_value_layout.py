@@ -73,7 +73,10 @@ async def test_minus_zero_and_an_infinity_beside_a_date_are_read_back_as_the_flo
     assert held["born"]["$t"] == "date"
     loaded = await gom.load(Held, "f1")
     assert loaded is not None and loaded.born == date(2024, 1, 1)
-    assert loaded.reading == 0 and math.copysign(1, loaded.reading) < 0
+    assert loaded.reading == 0
+    if pm.type is not DatabaseType.ORACLE:
+        # Oracle may drop -0's sign, as its own CREATE does: Drivine for TypeScript's saveValues test pins it so.
+        assert math.copysign(1, loaded.reading) < 0
     assert loaded.others == [math.inf, -math.inf, 1.5]
 
 

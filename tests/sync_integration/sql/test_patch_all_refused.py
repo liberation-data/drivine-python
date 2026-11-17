@@ -15,6 +15,7 @@ from typing import Annotated, Any
 import pytest
 
 from drivine.sync import (
+    DatabaseType,
     DrivineError,
     NodeFragment,
     NodeId,
@@ -36,11 +37,13 @@ def readings(pm: PersistenceManager) -> list[Any]:
 
 
 def test_a_value_refused_in_a_later_chunk_writes_nothing(gom: StatelessGraphObjectManager, pm: PersistenceManager):
+    if pm.type is DatabaseType.ORACLE:
+        pytest.skip("Oracle holds NaN, as a binary double, so a save refuses none there (drivine#769)")
     count = PATCH_ROWS + 1
     nodes = [Patched(id=f"p{i:05d}", reading=1.5) for i in range(count)]
     gom.save_all(nodes)
     patched = [Patched(id=it.id, reading=2.5) for it in nodes]
-    # The last, in id order, in the second chunk: NaN, which no SQL store's layout holds in a save.
+    # The last, in id order, in the second chunk: NaN, which Postgres's and SQLite's layouts hold as no number.
     patched[-1] = Patched(id=nodes[-1].id, reading=math.nan)
     with pytest.raises(DrivineError, match="NaN"):
         gom.patch_all(patched, only=["reading"])

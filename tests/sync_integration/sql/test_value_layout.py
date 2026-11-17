@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import math
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time, timedelta, timezone
 from typing import Annotated, Any
 
 import pytest
@@ -250,6 +250,49 @@ def test_a_saved_date_or_moment_is_compared_and_ordered_by_the_query_dsl_as_it_i
         assert [it.id for it in gom.load_all(Dated, q.on.eq(date(2024, 1, 2)))] == ["t2"]
         assert [it.id for it in gom.load_all(Dated, q.at.gt(base))] == ["t2"]
         assert [it.id for it in gom.load_all(Dated, order_by=q.on.desc())] == ["t2", "t1"]
+
+    if pm.type is DatabaseType.SQLITE:
+        check()
+        return
+    try:
+        check()
+    except AssertionError:
+        pytest.xfail(DSL_TEMPORALS)
+    pytest.fail(f"Held, and passing: take the hold off. {DSL_TEMPORALS}")
+
+
+class Listed(NodeFragment, labels=["ListedHeld"]):
+    id: Annotated[str, NodeId()]
+    days: list[date] | None = None
+    moments: list[datetime] | None = None
+    clocks: list[time] | None = None
+    words: list[str] | None = None
+
+
+def test_the_query_dsl_finds_a_saved_date_moment_or_time_in_a_list_by_has_item(
+    gom: StatelessGraphObjectManager, pm: PersistenceManager
+):
+    def check() -> None:
+        moment = datetime(2024, 5, 6, 7, 8, 9, 123000, tzinfo=UTC)
+        clock = time(10, tzinfo=timezone(timedelta(hours=1)))
+        gom.save_all(
+            [
+                Listed(id="l1", days=[date(2024, 1, 2)], moments=[moment], clocks=[clock, time(11)], words=["a"]),
+                Listed(id="l2", days=[date(2024, 1, 3)], moments=[moment.replace(second=10)], clocks=[], words=["b"]),
+            ]
+        )
+        q = refs(Listed)
+
+        def found(condition: Any) -> list[str]:
+            return sorted(it.id for it in gom.load_all(Listed, condition))
+
+        assert found(q.days.has_item(date(2024, 1, 2))) == ["l1"]
+        # The same moment at another offset is the moment it is (#525).
+        assert found(q.moments.has_item(moment.astimezone(timezone(timedelta(hours=-5))))) == ["l1"]
+        assert found(q.clocks.has_item(clock)) == ["l1"]
+        assert found(q.clocks.has_item(time(11))) == ["l1"]
+        assert found(q.clocks.has_item(time(12))) == []
+        assert found(q.words.has_item("b")) == ["l2"]
 
     if pm.type is DatabaseType.SQLITE:
         check()

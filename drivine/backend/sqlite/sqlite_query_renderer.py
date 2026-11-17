@@ -96,6 +96,8 @@ class SqliteQueryRenderer(SqlQueryRenderer):
             any_ = self._listed(compared, self._list(test.value, path_))
             return f"{present} AND NOT COALESCE({any_}, FALSE)" if any_ else present
         if test.operator == "HAS_ITEM":
+            if not json_packed and isinstance(test.value, (date, time)):
+                return self._holds_temporal(row, name, test.value)
             item = packed(test.value) if json_packed else super()._storable(test.value)
             return self._holds(row, name, item)
         if test.operator == "IS_NULL":
@@ -235,6 +237,22 @@ class SqliteQueryRenderer(SqlQueryRenderer):
         return (
             f"({json_type(row, name)} = 'array' AND EXISTS (SELECT 1 FROM {elements} WHERE {same_type} "
             "AND h.value IS b.value))"
+        )
+
+    def _holds_temporal(self, row: str, name: str, item: date | time) -> str:
+        """
+        Whether the list property holds the moment, date or time `item`, each held item read as a comparison reads a
+        single temporal property (see temporal_text): store layout 2 holds a saved one as its tag, an object `_holds`
+        never finds equal to the item's text (#525), so a tag is read by its text `v`, and a text as itself. A moment
+        compares as the moment it is, whatever its offset; a date as a date; a time as its text.
+        """
+        kind = _kind_of(item, False)
+        tag = "json_type(h.value, '$.\"$t\"') = 'text'"
+        held = f"(CASE WHEN h.type = 'object' AND {tag} THEN h.value ->> '$.v' WHEN h.type = 'text' THEN h.value END)"
+        bound = typed(kind, self._bind(self._scalar(item, False)))
+        return (
+            f"({json_type(row, name)} = 'array' AND EXISTS (SELECT 1 FROM json_each({row}.props, {path(name)}) h "
+            f"WHERE {typed(kind, held)} = {bound}))"
         )
 
     def _text_test(self, operator: str, value: Any, text_: str) -> str:

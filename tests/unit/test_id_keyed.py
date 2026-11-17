@@ -34,6 +34,7 @@ from drivine.backend.oracle.oracle_graph import OracleGraph
 from drivine.backend.postgres.postgres_backend import PostgresBackend
 from drivine.backend.postgres.postgres_graph import PostgresGraph
 from drivine.backend.postgres.postgres_save_builder import numeric_text, stored_key
+from drivine.backend.sql.sql_json import to_json
 from drivine.backend.sqlite.sqlite_backend import SqliteBackend
 from drivine.backend.sqlite.sqlite_graph import SqliteGraph, text_of
 from drivine.cursor.cursor import Cursor
@@ -223,3 +224,16 @@ async def test_oracle_binds_a_text_id_as_its_json_and_a_null_id_as_it_is():
     await gom.load(Gauge, 7)
     await gom.load(Gauge, None)
     assert [it["id"] for _, it in pm.bound] == ['"1e-7"', "7", None]
+
+
+def test_oracle_binds_a_patchs_id_and_each_of_a_patch_alls_row_ids_as_the_json_oracle_holds_the_id_as():
+    # A patch finds its node as a save does, by the id read `JSON(:1 EXTENDED)`: a float bound as a NUMBER, or as
+    # Python's JSON text of it, is not the binary double held.
+    backend = OracleBackend(OracleGraph())
+    model = ModelRegistry().fragment(Gauge)
+    one: Any = backend.patch_one(model).spec({"id": 1e-7, "set": {"name": "a"}, "vectors": {}}).parameters
+    assert one["id"] == ORACLE_HELD
+    assert backend.patch_one(model).spec({"id": "a", "set": {}, "vectors": {}}).parameters["id"] == '"a"'  # type: ignore[index]
+    rows = [{"id": 1e-7, "props": {"name": "a"}, "vectors": {}}, {"id": 7, "props": {"name": "b"}, "vectors": {}}]
+    many: Any = backend.patch_many(model).spec({"rows": rows}).parameters
+    assert to_json([it["id"] for it in many["rows"]]) == f"[{ORACLE_HELD},7]"

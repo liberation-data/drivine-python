@@ -13,6 +13,7 @@ from typing import Annotated, Any
 import pytest
 
 from drivine import (
+    CaseInsensitive,
     GraphView,
     NodeFragment,
     NodeId,
@@ -136,3 +137,64 @@ async def test_patch_all_hands_each_node_whose_id_is_a_float_its_result_and_patc
         loaded = await gom.load(SavedGauge, id)
         names.append(loaded.name if loaded else None)
     assert names == [f"two {id}" for id in ids]
+
+
+async def test_a_patch_finds_a_node_whose_id_is_a_float_by_the_text_or_the_value_the_store_holds_the_id_as(
+    gom: StatelessGraphObjectManager, pm: PersistenceManager
+):
+    # patch keys its node as a save does: Postgres's jsonb 0.00000010, SQLite's 1.0E-7, and Oracle a binary double.
+    ids = [1e-7, 0.1 + 0.2, 4.5]
+    await gom.save_all([SavedGauge(id=id, name="one") for id in ids])
+    results = [await gom.patch(SavedGauge, id, set={"name": f"two {id}"}) for id in ids]
+    assert [(it.found, it.applied, it.changed) for it in results] == [(True, True, True)] * len(ids)
+    names: list[Any] = []
+    for id in ids:
+        loaded = await gom.load(SavedGauge, id)
+        names.append(loaded.name if loaded else None)
+    assert names == [f"two {id}" for id in ids]
+
+
+class SavedReading(NodeFragment, labels=["SavedValue", "SavedReading"]):
+    """A node with a case-insensitive property, whose lowercased copy Oracle writes back into what the node holds."""
+
+    id: Annotated[str, NodeId()]
+    name: Annotated[str, CaseInsensitive()]
+    reading: float
+
+
+async def test_a_whole_float_beside_a_case_insensitive_property_stays_a_float_through_a_save_and_a_patch(
+    gom: StatelessGraphObjectManager, pm: PersistenceManager
+):
+    # On Oracle the lowercased copy is written by reading the node's properties and writing them back: as JSON, so a
+    # binary double stays one, where their text would read back a whole one as a number.
+    await gom.save(SavedReading(id="c", name="Ab", reading=2.0))
+    assert await cypher(pm, "MATCH (n:SavedReading {id: 'c'}) RETURN toString(n.reading)") == ["2.0"]
+    await gom.patch(SavedReading, "c", set={"name": "Cd", "reading": 3.0})
+    assert await cypher(pm, "MATCH (n:SavedReading {id: 'c'}) RETURN [n.name, toString(n.reading)]") == [["Cd", "3.0"]]
+
+
+class SavedCount(NodeFragment, labels=["SavedValue", "SavedCount"]):
+    id: Annotated[int, NodeId()]
+    name: str
+
+
+class SavedFlag(NodeFragment, labels=["SavedValue", "SavedFlag"]):
+    id: Annotated[bool, NodeId()]
+    name: str
+
+
+@pytest.mark.parametrize(("kind", "id"), [(SavedCount, 2**70), (SavedCount, 2**60 + 1), (SavedFlag, True)])
+async def test_a_whole_number_past_a_long_and_a_boolean_id_are_found_by_a_load_a_patch_a_relate_and_a_delete(
+    gom: StatelessGraphObjectManager, pm: PersistenceManager, kind: Any, id: Any
+):
+    # Each bound as the text the store holds it as, where a driver would bind it its own way: SQLite a boolean as 1,
+    # and no whole number past a long at all.
+    await gom.save(SavedValue(id="a"))
+    await gom.save(kind(id=id, name="one"))
+    await gom.save(kind(id=id, name="two"))
+    loaded = await gom.load(kind, id)
+    assert [loaded.name if loaded else None, await gom.count(kind)] == ["two", 1]
+    assert (await gom.patch(kind, id, set={"name": "three"})).found
+    assert await gom.edges.relate(node_ref(kind, id), node_ref(SavedValue, "a"), "POINTS")
+    assert [it.id for it in await gom.edges.load_related(node_ref(kind, id), "POINTS", SavedValue)] == ["a"]
+    assert await gom.delete(kind, id) == 1

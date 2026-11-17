@@ -230,6 +230,7 @@ def test_a_signalling_decimal_nan_is_the_float_nan_as_a_quiet_one_is():
         # A zone's local mean time, which isoformat writes with its seconds.
         pytest.param(datetime(1971, 1, 1, tzinfo=ZoneInfo("Africa/Monrovia")), id="datetime at -00:44:30"),
         pytest.param(time(10, 0, tzinfo=timezone(timedelta(hours=1, seconds=1))), id="time at +01:00:01"),
+        pytest.param(time(10, 0, tzinfo=timezone(-timedelta(hours=1, microseconds=1))), id="time at -01:00:00.000001"),
     ],
 )
 def test_a_temporal_parameter_at_an_offset_with_seconds_is_refused_by_name_as_the_store_holds_an_offset_to_the_minute(

@@ -340,7 +340,7 @@ def written(value: Any) -> Any:
     - a Decimal is an integer where it is whole and finite, otherwise the float nearest it, as Drivine bound one before;
     - a datetime is `{"$temporal": "DATE_TIME"}` with its ISO 8601 text where it has an offset, `LOCAL_DATE_TIME` where
       it has none; a date `DATE`; a time `TIME` or `LOCAL_TIME` alike; a timedelta `DURATION`, as the Neo4j driver
-      sends each;
+      sends each; a datetime or time at an offset that isn't a whole number of minutes is refused (`_to_the_minute`);
     - bytes, a bytearray or a memoryview are `{"$bytes": "<base64>"}`;
     - an Enum is its value;
     - a list, tuple, set, frozenset or iterator is the list of its items; a map is its entries, wrapped as

@@ -172,7 +172,7 @@ jobs:
       # Pulled here, so that the time the image takes isn't counted against the container's start. The image is the
       # one drivine/testing/drivine_test_containers.py names.
       - name: Pull the Oracle image
-        run: docker pull gvenzl/oracle-free:23-faststart
+        run: docker pull gvenzl/oracle-free:23-faststart@sha256:33322969a450d72c507b08d7f690d9e1d9b60aebaebc35a75b7c0b8ab4baac77
       - run: uv sync
       - name: Run the Oracle tests
         env:

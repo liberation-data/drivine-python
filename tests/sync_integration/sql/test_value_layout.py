@@ -228,34 +228,39 @@ class Dated(NodeFragment, labels=["DatedHeld"]):
     at: datetime | None = None
 
 
-DSL_TEMPORALS = (
-    "the query DSL compares a saved date or moment by its text, where store layout 2 holds it as its tag, until its "
-    "comparisons come from the shared module's fragments (a later PR of drivine-python#471)"
-)
-"""The hold on Postgres and Oracle: SQLite's DSL reads the tag's text (see sqlite_graph.temporal_text)."""
-
-
-def test_a_saved_date_or_moment_is_compared_and_ordered_by_the_query_dsl_as_it_is(
+def test_a_saved_date_or_moment_is_compared_and_ordered_by_the_query_dsl_as_it_is_or_refused_by_name(
     gom: StatelessGraphObjectManager, pm: PersistenceManager
 ):
-    def check() -> None:
-        base = datetime(2024, 5, 6, 7, 8, 9, 123000, tzinfo=UTC)
-        gom.save_all(
-            [
-                Dated(id="t1", on=date(2024, 1, 1), at=base),
-                Dated(id="t2", on=date(2024, 1, 2), at=base.replace(second=10)),
-            ]
+    """
+    SQLite's DSL reads the tag store layout 2 holds a date or moment as (see sqlite_graph.temporal_text). Postgres's and
+    Oracle's would compare it by its text until the DSL takes the shared module's fragments (drivine-cypher-spec#235),
+    so they refuse it by name, and Cypher compares it there.
+    """
+    base = datetime(2024, 5, 6, 7, 8, 9, 123000, tzinfo=UTC)
+    gom.save_all(
+        [
+            Dated(id="t1", on=date(2024, 1, 1), at=base),
+            Dated(id="t2", on=date(2024, 1, 2), at=base.replace(second=10)),
+        ]
+    )
+    found = pm.query(
+        QuerySpecification[Any](cypher_statement("MATCH (n:DatedHeld) WHERE n.at > $at RETURN n.id AS id")).bind(
+            {"at": base}
         )
-        q = refs(Dated)
+    )
+    assert [it["id"] if isinstance(it, dict) else it for it in found] == ["t2"]
+    q = refs(Dated)
+    if pm.type is DatabaseType.SQLITE:
         assert [it.id for it in gom.load_all(Dated, q.on.eq(date(2024, 1, 2)))] == ["t2"]
         assert [it.id for it in gom.load_all(Dated, q.at.gt(base))] == ["t2"]
         assert [it.id for it in gom.load_all(Dated, order_by=q.on.desc())] == ["t2", "t1"]
-
-    if pm.type is DatabaseType.SQLITE:
-        check()
         return
-    try:
-        check()
-    except AssertionError:
-        pytest.xfail(DSL_TEMPORALS)
-    pytest.fail(f"Held, and passing: take the hold off. {DSL_TEMPORALS}")
+    store = "Oracle" if pm.type is DatabaseType.ORACLE else "Postgres"
+    refused = rf"aren't supported on {store} yet .*drivine-cypher-spec#235"
+    with pytest.raises(DrivineError, match=refused) as raised:
+        gom.load_all(Dated, q.on.eq(date(2024, 1, 2)))
+    assert "on is compared with" in str(raised.value)
+    with pytest.raises(DrivineError, match=refused):
+        gom.load_all(Dated, q.at.gt(base))
+    with pytest.raises(DrivineError, match=refused):
+        gom.load_all(Dated, order_by=q.on.desc())

@@ -4,6 +4,7 @@ SqliteGraphTest, SqliteSqlTest, SqliteSchemaGrammarTest and SqliteBackendTest, p
 """
 
 import json
+import threading
 from decimal import Decimal
 from pathlib import Path
 from typing import Annotated
@@ -380,6 +381,23 @@ class TestTheSession:
         for name in (":memory:", "file:graph?mode=memory"):
             with pytest.raises(DrivineError, match="names no file"):
                 DatabaseRegistry().builder().database_type(DatabaseType.SQLITE).database_name(name).register("s")
+
+    def test_a_deep_regular_expression_is_answered_on_the_sessions_thread_whatever_the_processs_stack(
+        self, tmp_path: Path
+    ):
+        # A group repeated about 20,000 times, which the shared module's regexp refuses on 8 MB of stack
+        # (drivine-cypher-spec#353): answered on the session's own thread, which is started with more.
+        before = threading.stack_size()
+        session = SqliteSession(str(tmp_path / "graph.db"))
+        try:
+            assert threading.stack_size() == before, "the process's stack size is set back"
+            text = " " + "aB" * 19_999 + " "
+            found = session.thread.submit(
+                lambda: session.query("SELECT regexp($p, $t) AS m", {"p": "^(?: (aB)+ )\\z", "t": text})
+            ).result()
+            assert found == [{"m": 1}]
+        finally:
+            session.close()
 
     def test_a_function_that_fails_at_a_later_row_is_raised_as_itself(self, tmp_path: Path):
         session = SqliteSession(str(tmp_path / "graph.db"))

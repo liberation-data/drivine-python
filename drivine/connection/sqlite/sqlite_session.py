@@ -10,6 +10,7 @@ from __future__ import annotations
 import itertools
 import logging
 import re
+import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -112,7 +113,7 @@ class SqliteSession:
         except apsw.Error as error:
             # SQLite's message, as for a folder that is not there, does not name the file.
             raise DrivineError(f"Could not open the SQLite file '{path}': {error}.") from error
-        self.thread = ThreadPoolExecutor(max_workers=1, thread_name_prefix="drivine-sqlite")
+        self.thread = _session_thread()
         try:
             self.connection.set_busy_timeout(int(busy_timeout))
             deadline = time.monotonic() + busy_timeout / 1000
@@ -319,6 +320,37 @@ def rows(statement: str, found: Rows, fetched: list[Any]) -> list[dict[str, Any]
         }
         for row in fetched
     ]
+
+
+SESSION_STACK = 64 * 1024 * 1024
+"""
+The stack a session's own thread is started with: SQLite's functions, the shared module's among them, run on it, and
+its regular expressions take a frame for each repeat of a group, so the depth a pattern is answered to is the thread's
+stack's (drivine-cypher-spec#353). On 8 MB, Linux's default, a group repeated about 10,000 times is answered and 20,000
+refused; on macOS's 512 KB for a thread past the main one, 500 and 1,000. 64 MB is only address space until it is used.
+"""
+
+_starting = threading.Lock()
+
+
+def _session_thread() -> ThreadPoolExecutor:
+    """
+    A session's thread, started now with SESSION_STACK. Python sets the stack of the threads it starts next for the
+    whole process, so it is set only while this one starts, under a lock, and set back after; where the platform takes
+    no such size, the thread starts with its default.
+    """
+    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="drivine-sqlite")
+    with _starting:
+        try:
+            previous = threading.stack_size(SESSION_STACK)
+        except (ValueError, RuntimeError):
+            previous = None
+        try:
+            executor.submit(lambda: None).result()
+        finally:
+            if previous is not None:
+                threading.stack_size(previous)
+    return executor
 
 
 def json_value(text: str) -> Any:

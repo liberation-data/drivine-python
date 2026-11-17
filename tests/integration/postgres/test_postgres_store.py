@@ -220,7 +220,7 @@ async def test_records_an_index_as_drivine4j_does_reads_a_filter_through_it_and_
     spec = range_index("Ticket", "title")
     assert (await gom.indexes.ensure(spec)).status == "CREATED"
     assert (await gom.indexes.ensure(spec)).status == "ALREADY_MATCHING"
-    name = GRAPH.object_name("ix", ["Ticket", "title"])
+    name = GRAPH.object_name("ix2", ["Ticket", "title"])  # store layout 2's name, the module's
     recorded = await pm.query(
         QuerySpecification[Any](
             f"SELECT kind, properties, object_name FROM {GRAPH.catalog} WHERE label = 'Ticket' AND kind = 'RANGE_INDEX'"

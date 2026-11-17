@@ -3788,7 +3788,8 @@ async def test_substring_left_and_right_refuse_a_written_float_and_a_given_start
     # A start or a length (#263), past the spec's steps of them. Neo4j refuses a float it knows to be one whatever the
     # text; a bound one it cuts toward zero. It refuses one out of range only where the text is not null.
     compiles = cypher_pm.type is not DatabaseType.NEO4J
-    empty = None if cypher_pm.type is DatabaseType.ORACLE else ""
+    # The empty text, as Neo4j gives it: the compiler gives it on Oracle too, where a VARCHAR2 holds it as null.
+    empty = ""
     for statement, parameters, message in [
         ("RETURN left('hello', 2.7)", {}, _float_count("left", "length")),
         ("RETURN left('hello', 2.0)", {}, _float_count("left", "length")),
@@ -3843,7 +3844,8 @@ async def test_a_bound_start_or_length_that_is_nan_is_0_and_one_that_is_an_infin
     # Not in the spec yet (#143): Neo4j casts a double to a long, as Java does, NaN to 0 and an infinity to the
     # greatest or least.
     compiles = cypher_pm.type is not DatabaseType.NEO4J
-    empty = None if cypher_pm.type is DatabaseType.ORACLE else ""
+    # The empty text, as Neo4j gives it: the compiler gives it on Oracle too, where a VARCHAR2 holds it as null.
+    empty = ""
     assert await cypher_pm.query(spec("RETURN [left('hello', $n), substring('hello', $n)]", {"n": float("nan")})) == [
         [empty, "hello"]
     ]
@@ -3863,7 +3865,8 @@ async def test_a_start_or_length_from_data_is_cut_toward_zero_and_one_out_of_ran
     # A start or a length read from data (#263), past the spec's steps of them: in a WHERE and an aggregate too, and
     # on rows filtered out.
     compiles = cypher_pm.type is not DatabaseType.NEO4J
-    empty = None if cypher_pm.type is DatabaseType.ORACLE else ""
+    # The empty text, as Neo4j gives it: the compiler gives it on Oracle too, where a VARCHAR2 holds it as null.
+    empty = ""
     await clear(cypher_pm)
     await cypher_pm.execute(
         spec(
@@ -4772,9 +4775,14 @@ async def test_a_text_past_4000_bytes_is_measured_cut_changed_searched_and_added
     parts = {"a": t[: length // 2], "b": t[length // 2 :]}
     for function, expected in long_text_functions(t, unit).items():
         if cypher_pm.type is DatabaseType.SQLITE and length > 20_000 and "=~" in function:
-            # The native regexp refuses a group repeated so often on an 8 MB stack (drivine-cypher-spec#353).
-            with pytest.raises(DrivineError, match="stack"):
-                await rows(f"WITH $t AS t RETURN {function}", {"t": t})
+            # The native regexp refuses a group repeated so often where the thread's stack is too small for it, as
+            # Linux's default 8 MB is, and answers where it is larger (drivine-cypher-spec#353): either, but no other.
+            try:
+                found = await rows(f"WITH $t AS t RETURN {function}", {"t": t})
+            except DrivineError as refused:
+                assert "stack" in str(refused), refused
+                continue
+            assert found == [expected], f"{function} given"
             continue
         # Given, and stored and read in one row, and made by the statement.
         assert await rows(f"WITH $t AS t RETURN {function}", {"t": t}) == [expected], f"{function} given"
@@ -4837,7 +4845,8 @@ async def test_texts_either_side_of_4000_bytes_are_measured_searched_and_put_tog
         "n =~ 'a'",
     ):
         assert await rows(f"WITH $n AS n RETURN {function}", {"n": None}) == [None], function
-    empty = None if cypher_pm.type is DatabaseType.ORACLE else ""
+    # The empty text, as Neo4j gives it: the compiler gives it on Oracle too, where a VARCHAR2 holds it as null.
+    empty = ""
     assert await rows(
         "WITH $s AS s, $w AS w RETURN [substring(s, 5), left(s, 0), replace(s, 'abc', ''), trim(w)]",
         {"s": "abc", "w": "   "},
@@ -5223,7 +5232,8 @@ async def test_texts_long_and_short_are_reversed_each_from_its_own_and_a_null_em
     # A null text is null, and an empty one empty: on Oracle null, as its empty text is, and not read again as a long
     # one.
     assert await rows("WITH $n AS n RETURN reverse(n)", {"n": None}) == [None]
-    empty = None if cypher_pm.type is DatabaseType.ORACLE else ""
+    # The empty text, as Neo4j gives it: the compiler gives it on Oracle too, where a VARCHAR2 holds it as null.
+    empty = ""
     assert await rows("WITH $e AS e RETURN reverse(e)", {"e": ""}) == [empty]
     # A literal, a text or a list, whose CLOB Oracle bound without a type, and found no DBMS_LOB.SUBSTR for (PLS-307).
     assert await rows("RETURN [reverse('Keanu'), reverse([1, 2, 3])]") == [["unaeK", [3, 2, 1]]]

@@ -129,8 +129,8 @@ async def test_searches_through_the_tables_made_for_vector_and_full_text_indexes
         lookup = backend.full_text_index("OraSearch", ["text"])
         return lookup.found(await pm.query(lookup.statement.spec()))
 
-    assert re.match(r"^drivine_v_OraSearchembedding_[0-9a-f]+$", await vector_table() or "")
-    assert re.match(r"^drivine_t_OraSearchtext_[0-9a-f]+$", (await text_index()).oracle_text or "")
+    assert re.match(r"^drivine_v2?_OraSearchembedding_[0-9a-f]+$", await vector_table() or "")
+    assert re.match(r"^drivine_t2?_OraSearchtext_[0-9a-f]+$", (await text_index()).oracle_text or "")
     # Saved after the index: the trigger puts it in the tables.
     await gom.save(Note(id="n2", text="relational tables", embedding=[0, 1]))
     assert [it.value.id for it in await gom.load_nearest(Note, [0, 1], top_k=1)] == ["n2"]

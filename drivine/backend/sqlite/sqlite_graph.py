@@ -259,13 +259,14 @@ def number_of(alias: str, property: str) -> str:
 
 def temporal_text(alias: str, property: str) -> str:
     """
-    The text of the property of the row `alias` that holds a moment or a date: where store layout 2 holds it as its tag
-    (`{"$t": "date", "v": "2024-01-01", "s": …}`, see value_layout), as a save writes one, the tag's text `v`; anything
-    else as text_of reads it, as a moment written as text.
+    The text of the property of the row `alias` as a comparison reads a temporal value's: where store layout 2 holds it
+    as its tag (`{"$t": "date", "v": "2024-01-01", "s": …}`, see value_layout), as a save writes a moment, a date, a
+    time or a duration, the tag's text `v`; anything else as text_of reads it, as a moment written as text. A map is a
+    tag only where it has the key `$t`, which the layout escapes in a map of the user's (`$$t`).
     """
-    tag = sql_text(f"$.{quoted(property)}.v")
-    held = f"{column(alias, 'props')} ->> {tag}"
-    return f"(CASE {json_type(alias, property)} WHEN 'object' THEN {held} ELSE {text_of(alias, property)} END)"
+    props, at = column(alias, "props"), f"$.{quoted(property)}"
+    tag, held = sql_text(at + '."$t"'), f"{props} ->> {sql_text(at + '.v')}"
+    return f"(CASE WHEN json_type({props}, {tag}) = 'text' THEN {held} ELSE {text_of(alias, property)} END)"
 
 
 def typed(kind: Kind, text: str) -> str:

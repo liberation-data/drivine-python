@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time
 from types import UnionType
 from typing import Annotated, Any, Literal, Union, get_args, get_origin
 
@@ -86,7 +86,8 @@ class SqliteQueryRenderer(SqlQueryRenderer):
         if operator is not None:
             kind = _kind_of(test.value, json_packed)
             bound = typed(kind, self._bind(self._scalar(test.value, json_packed)))
-            return f"{self._typed(row, name, kind)} {operator} {bound}"
+            read = self._text_read(compared, [test.value]) if kind == "TEXT" else self._typed(row, name, kind)
+            return f"{read} {operator} {bound}"
         if test.operator == "IN":
             return self._listed(compared, self._list(test.value, path_)) or "1 = 0"
         if test.operator == "NOT_IN":
@@ -178,6 +179,14 @@ class SqliteQueryRenderer(SqlQueryRenderer):
             return number_of(row, name)
         return typed(kind, temporal_text(row, name) if kind in ("INSTANT", "DATE") else text_of(row, name))
 
+    def _text_read(self, compared: Compared, values: list[Any]) -> str:
+        """
+        The property read as text, compared with the values: a saved time's tag by its text where every value is a
+        time, as store layout 2 holds one (see temporal_text), and anything else as text_of reads it.
+        """
+        times = not compared.json_packed and all(isinstance(it, time) for it in values)
+        return (temporal_text if times else text_of)(compared.row, compared.name)
+
     def _scalar(self, value: Any, json_packed: bool) -> Any:
         """
         A value as the property holds it: packed into JSON text where the property is, and as `_storable` writes it.
@@ -207,7 +216,7 @@ class SqliteQueryRenderer(SqlQueryRenderer):
             "ELSE v.value END)"
         )
         bound = self._bind(to_json([self._scalar(it, compared.json_packed) for it in values]))
-        column = number_of(compared.row, compared.name) if numbers else text_of(compared.row, compared.name)
+        column = number_of(compared.row, compared.name) if numbers else self._text_read(compared, values)
         return f"{column} IN (SELECT {read} FROM json_each({bound}) v)"
 
     def _holds(self, row: str, name: str, item: Any) -> str:

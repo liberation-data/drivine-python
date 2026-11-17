@@ -1,7 +1,8 @@
 """
 On Oracle a statement compiled from Cypher is left out of python-oracledb's statement cache, and a SQL one is kept:
 a kept compiled statement holds megabytes of Oracle's memory (liberation-data/drivine4j#313, #218), and Drivine's own
-SQL is cheap to keep. drivine4j's JdbcConnectionTest of it.
+SQL is cheap to keep. drivine4j's JdbcConnectionTest of it. And a JSON column the driver parses is read in the store
+layout for Drivine's own statements alone.
 """
 
 from typing import Any
@@ -74,3 +75,38 @@ def test_the_sync_api_leaves_a_compiled_statement_out_of_the_cache_too():
     compiled, sql, opened, opened_sql = session.run
     assert sql == SQL and opened_sql == SQL
     assert session.prepared == [(compiled, False), (opened, False)]
+
+
+TAG = {"$t": "date", "v": "2024-01-01", "s": "10000020240101"}
+
+
+class RowCursor(Cursor):
+    """A cursor whose statement gives one row of one JSON column, parsed as python-oracledb hands Oracle's JSON type."""
+
+    def __init__(self, session: "Session") -> None:
+        super().__init__(session)
+        self.description = [("RESULT",)]
+
+    async def fetchall(self) -> list[Any]:
+        return [[{"d": dict(TAG)}]]
+
+    async def fetchmany(self, count: int) -> list[Any]:
+        return [[{"d": dict(TAG)}]]
+
+
+class RowSession(Session):
+    def cursor(self) -> Cursor:
+        return RowCursor(self)
+
+
+async def test_a_json_column_is_read_in_the_store_layout_for_drivines_own_sql_and_not_for_a_users():
+    connection = OracleConnection(RowSession(), None, "s", "cache_unit", "db|me")
+    own = QuerySpecification[Any](SQL)
+    own.store_layout = True
+    assert await connection.query(own) == [{"d": "2024-01-01"}]
+    assert await connection.query(QuerySpecification[Any](SQL)) == [{"d": TAG}]
+    # And through a cursor.
+    opened = CursorSpecification[Any](SQL)
+    opened.store_layout = True
+    assert (await (await connection.open_cursor(opened)).read(10))[0] == [{"d": "2024-01-01"}]
+    assert (await (await connection.open_cursor(CursorSpecification[Any](SQL))).read(10))[0] == [{"d": TAG}]

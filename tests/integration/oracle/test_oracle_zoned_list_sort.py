@@ -215,6 +215,11 @@ def test_a_list_of_temporal_values_a_with_takes_out_of_an_unwound_map_is_read_in
     assert rows(UNWOUND_REPROS[4]) == ["10", "10"]
 
 
+@pytest.mark.xfail(
+    reason="Oracle's hard parse of min and max of a collected list of moments takes about 6 s in store layout 2, "
+    "about the bound, so it passes on a runner as often as not (drivine-cypher-spec#244)",
+    strict=False,
+)
 def test_a_list_worked_out_with_temporal_arithmetic_by_a_comprehension_or_collect_sorts_by_its_moments_in_moments():
     comprehension = f"UNWIND [0, 1] AS k WITH k, [i IN range(1, 10) | {AT} + duration({{minutes: i}})] AS l"
     assert rows(f"{comprehension} RETURN k ORDER BY l") == ["0", "1"]

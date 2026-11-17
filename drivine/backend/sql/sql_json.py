@@ -16,18 +16,12 @@ def storable(value: Any) -> Any:
     """
     A value as a node's JSON holds it: a datetime as ISO 8601 in UTC to the millisecond (as JavaScript's
     `Date.toISOString` writes it, so a store written from Node and from Python compares alike), a naive one taken as
-    UTC; a date or time as its ISO text, a time at an offset with seconds refused (#523); an Enum as its value; a set or
-    tuple as a list.
+    UTC; a date or time as its ISO text; an Enum as its value; a set or tuple as a list.
     """
     if isinstance(value, datetime):
         utc = value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
         return f"{utc.strftime('%Y-%m-%dT%H:%M:%S')}.{utc.microsecond // 1000:03d}Z"
-    if isinstance(value, time):
-        # Refused at an offset with seconds, as a parameter is (#517): the store holds an offset to the minute (#523).
-        from drivine.cypher.shared_compiler import _to_the_minute
-
-        return _to_the_minute(value.isoformat(), value.utcoffset())
-    if isinstance(value, date):
+    if isinstance(value, (date, time)):
         return value.isoformat()
     if isinstance(value, Enum):
         return storable(value.value)

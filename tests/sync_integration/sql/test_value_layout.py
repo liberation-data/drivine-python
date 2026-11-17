@@ -220,3 +220,42 @@ def test_a_dict_or_tuple_of_bytes_is_read_back_as_the_bytes_it_held(
     assert (stored(pm, "k1"))["named"] == {"a": [1, -1], "b": []}
     loaded = gom.load(Keyed, "k1")
     assert loaded is not None and loaded.named == {"a": b"\x01\xff", "b": b""} and loaded.kept == (b"\x02",)
+
+
+class Dated(NodeFragment, labels=["DatedHeld"]):
+    id: Annotated[str, NodeId()]
+    on: date | None = None
+    at: datetime | None = None
+
+
+DSL_TEMPORALS = (
+    "the query DSL compares a saved date or moment by its text, where store layout 2 holds it as its tag, until its "
+    "comparisons come from the shared module's fragments (a later PR of drivine-python#471)"
+)
+"""The hold on Postgres and Oracle: SQLite's DSL reads the tag's text (see sqlite_graph.temporal_text)."""
+
+
+def test_a_saved_date_or_moment_is_compared_and_ordered_by_the_query_dsl_as_it_is(
+    gom: StatelessGraphObjectManager, pm: PersistenceManager
+):
+    def check() -> None:
+        base = datetime(2024, 5, 6, 7, 8, 9, 123000, tzinfo=UTC)
+        gom.save_all(
+            [
+                Dated(id="t1", on=date(2024, 1, 1), at=base),
+                Dated(id="t2", on=date(2024, 1, 2), at=base.replace(second=10)),
+            ]
+        )
+        q = refs(Dated)
+        assert [it.id for it in gom.load_all(Dated, q.on.eq(date(2024, 1, 2)))] == ["t2"]
+        assert [it.id for it in gom.load_all(Dated, q.at.gt(base))] == ["t2"]
+        assert [it.id for it in gom.load_all(Dated, order_by=q.on.desc())] == ["t2", "t1"]
+
+    if pm.type is DatabaseType.SQLITE:
+        check()
+        return
+    try:
+        check()
+    except AssertionError:
+        pytest.xfail(DSL_TEMPORALS)
+    pytest.fail(f"Held, and passing: take the hold off. {DSL_TEMPORALS}")

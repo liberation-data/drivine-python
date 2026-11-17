@@ -266,16 +266,19 @@ def number_of(alias: str, property: str) -> str:
     )
 
 
-def temporal_text(alias: str, property: str) -> str:
+def temporal_text(alias: str, property: str, tag: str | None = None) -> str:
     """
     The text of the property of the row `alias` as a comparison reads a temporal value's: where store layout 2 holds it
     as its tag (`{"$t": "date", "v": "2024-01-01", "s": …}`, see value_layout), as a save writes a moment, a date, a
     time or a duration, the tag's text `v`; anything else as text_of reads it, as a moment written as text. A map is a
-    tag only where it has the key `$t`, which the layout escapes in a map of the user's (`$$t`).
+    tag only where it has the key `$t`, which the layout escapes in a map of the user's (`$$t`). Given the kind `tag`
+    names, a tag of another kind is null, as Cypher never finds a date equal to a moment, nor either before the other.
     """
     props, at = column(alias, "props"), f"$.{quoted(property)}"
-    tag, held = sql_text(at + '."$t"'), f"{props} ->> {sql_text(at + '.v')}"
-    return f"(CASE WHEN json_type({props}, {tag}) = 'text' THEN {held} ELSE {text_of(alias, property)} END)"
+    tag_at, held = sql_text(at + '."$t"'), f"{props} ->> {sql_text(at + '.v')}"
+    if tag is not None:
+        held = f"(CASE WHEN {props} ->> {tag_at} = {sql_text(tag)} THEN {held} END)"
+    return f"(CASE WHEN json_type({props}, {tag_at}) = 'text' THEN {held} ELSE {text_of(alias, property)} END)"
 
 
 def time_key(alias: str, property: str, tag: str | None = None) -> str:
@@ -302,13 +305,14 @@ def time_key_of(json: str, at: str, tag: str | None = None) -> str:
 def typed(kind: Kind, text: str) -> str:
     """
     `text`, the text of a value, read as `kind` compares: a moment as nanoseconds since the epoch (see epoch), so two
-    written with different offsets compare as the moments they are, to the nanosecond; a date as SQLite writes one; a
+    written with different offsets compare as the moments they are, to the nanosecond; a date as SQLite writes one,
+    where the text is a date's, as a moment's text names no date, as Cypher has a moment never equal to a date; a
     time's key (see time_key) as it is.
     """
     if kind == "INSTANT":
         return epoch(text)
     if kind == "DATE":
-        return f"date({text})"
+        return f"(CASE WHEN date({text}) = {text} THEN {text} END)"
     return text
 
 

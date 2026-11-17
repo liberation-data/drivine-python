@@ -475,3 +475,36 @@ async def test_has_item_finds_a_time_in_a_list_as_cypher_finds_one_at_its_offset
         assert await found(q.clocks.has_item(time(8, 30))) == []
 
     await held_or_failing(pm, check)
+
+
+async def test_a_date_is_never_a_moment_nor_a_local_moment_a_moment(
+    gom: StatelessGraphObjectManager, pm: PersistenceManager
+):
+    async def check() -> None:
+        moment = datetime(2024, 5, 6, 7, 8, 9, tzinfo=UTC)
+        await gom.save_all(
+            [
+                Dated(id="d1", on=date(2024, 5, 6), at=moment),
+                Listed(id="l6", days=[date(2024, 5, 6)], moments=[moment]),
+            ]
+        )
+        q, listed = refs(Dated), refs(Listed)
+
+        async def dated(condition: Any) -> list[str]:
+            return [it.id for it in await gom.load_all(Dated, condition)]
+
+        async def lists(condition: Any) -> list[str]:
+            return [it.id for it in await gom.load_all(Listed, condition)]
+
+        assert await dated(q.on.eq(date(2024, 5, 6))) == ["d1"]
+        assert await dated(q.at.eq(moment)) == ["d1"]
+        assert await dated(q.at.eq(date(2024, 5, 6))) == []
+        assert await dated(q.at.in_([date(2024, 5, 6)])) == []
+        assert await dated(q.on.eq(datetime(2024, 5, 6, tzinfo=UTC))) == []
+        assert await dated(q.at.eq(moment.replace(tzinfo=None))) == []
+        assert await lists(listed.moments.has_item(moment)) == ["l6"]
+        assert await lists(listed.moments.has_item(date(2024, 5, 6))) == []
+        assert await lists(listed.days.has_item(datetime(2024, 5, 6, tzinfo=UTC))) == []
+        assert await lists(listed.moments.has_item(moment.replace(tzinfo=None))) == []
+
+    await held_or_failing(pm, check)

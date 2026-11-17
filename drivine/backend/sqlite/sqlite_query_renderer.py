@@ -49,9 +49,10 @@ class SqliteQueryRenderer(SqlQueryRenderer):
     value it is compared with: a number only where one is stored, so `'7'` is not `7`, as on the graph engines; a
     moment as nanoseconds since the epoch and a date as a date, the value bound read alike, so two moments compare as
     the moments they are; a time as its key (see time_key), so two at different offsets compare as Cypher compares
-    them, and a local time with a time with an offset as null, as in Cypher; a boolean as the text JSON writes it;
-    anything else as text, as Postgres's `->>` reads it. A missing property is null, and meets no comparison, as in
-    Cypher. Where an order puts its nulls is always said, as SQLite puts them first when ascending and Cypher last.
+    them; a boolean as the text JSON writes it; anything else as text, as Postgres's `->>` reads it. A saved temporal
+    value is compared only with a value of its own kind, as in Cypher, where a date is never a moment and a local time
+    is compared with a time with an offset as null. A missing property is null, and meets no comparison, as in Cypher.
+    Where an order puts its nulls is always said, as SQLite puts them first when ascending and Cypher last.
     """
 
     def __init__(self, views: SqliteViews, labels_of_class: Callable[[type], list[str]]) -> None:
@@ -194,14 +195,14 @@ class SqliteQueryRenderer(SqlQueryRenderer):
     def _typed(self, row: str, name: str, kind: Kind, tag: str | None = None) -> str:
         """
         The property read as `kind`: a number as one, a moment or a date as one, a time as its key, anything else as
-        text. Given the tag of the time it is compared with (see _tag_of), a saved time of the other kind is null;
-        without one, as an order and a seek read it, either.
+        text. Given the tag of the value it is compared with (see _tag_of), a saved temporal value of another kind is
+        null; without one, as an order and a seek read it, any of its kind's.
         """
         if kind == "NUMBER":
             return number_of(row, name)
         if kind == "TIME":
             return time_key(row, name, tag)
-        return typed(kind, temporal_text(row, name) if kind in ("INSTANT", "DATE") else text_of(row, name))
+        return typed(kind, temporal_text(row, name, tag) if kind in ("INSTANT", "DATE") else text_of(row, name))
 
     def _scalar(self, value: Any, json_packed: bool) -> Any:
         """
@@ -220,7 +221,7 @@ class SqliteQueryRenderer(SqlQueryRenderer):
         kinds = {_kind_of(it, compared.json_packed) for it in values if it is not None}
         if len(kinds) == 1 and (kind := next(iter(kinds))) in ("INSTANT", "DATE", "TIME"):
             # Moments, dates or times, each read as one, as a comparison reads it: against the values of each tag in
-            # turn, so a saved time is among only times of its own kind. A null among them is null read as one, which
+            # turn, so a saved one is among only values of its own kind. A null among them is null read as one, which
             # SQL's IN reads as Cypher's does.
             tags = sorted({_tag_of(it) for it in values if it is not None}, key=str)
             among: list[str] = []
@@ -259,15 +260,15 @@ class SqliteQueryRenderer(SqlQueryRenderer):
         """
         Whether the list property holds the moment, date or time `item`, each held item read as a comparison reads a
         single temporal property (see temporal_text): store layout 2 holds a saved one as its tag, an object `_holds`
-        never finds equal to the item's text (#525), so a tag is read by its text `v`, and a text as itself. A moment
-        compares as the moment it is, whatever its offset; a date as a date; a time as its key (see time_key), and a
-        text never as a time.
+        never finds equal to the item's text (#525), so a tag of the item's kind is read by its text `v`, and a text as
+        itself; a tag of another kind is no match. A moment compares as the moment it is, whatever its offset; a date as
+        a date; a time as its key (see time_key), and a text never as a time.
         """
         kind, tag = _kind_of(item, False), _tag_of(item)
         if kind == "TIME":
             held = f"(CASE WHEN h.type = 'object' THEN {time_key_of('h.value', '$', tag)} END)"
         else:
-            own = "json_type(h.value, '$.\"$t\"') = 'text'"
+            own = f"h.value ->> '$.\"$t\"' = '{tag}'"
             held = (
                 f"(CASE WHEN h.type = 'object' AND {own} THEN h.value ->> '$.v' WHEN h.type = 'text' THEN h.value END)"
             )

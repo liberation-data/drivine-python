@@ -110,11 +110,16 @@ class WritePlan:
         )
         return node
 
-    def ref(self, shape: int, stored_id: str) -> int:
-        """The step that finds the node of `shape` whose stored id is `stored_id`, which must be there."""
+    def ref(self, shape: int, stored_id: str, id: Any) -> int:
+        """
+        The step that finds the node of `shape` whose id is `id`, keyed within the plan by the text `stored_id`, which
+        must be there: found by `id` as the node holds it, as the store's write function finds a node (drivine4j's
+        `WritePlan.ref`). A null `id` finds no node: it is sent as JSON's null, as a step that finds a node carries its
+        id.
+        """
         node = self._nodes
         self._nodes += 1
-        self._add("ref", {"r": node, "s": shape, "k": stored_id})
+        self._add("ref", {"r": node, "s": shape, "k": stored_id, "id": id})
         return node
 
     def link(
@@ -185,14 +190,16 @@ class WritePlan:
         self,
         shape: int,
         stored_id: str,
+        id: Any,
         index: str,
         set: Mapping[str, Any],
         unset: Sequence[str],
         lower: Sequence[str] = (),
     ) -> None:
         """
-        The step that writes `set` to the node of `shape` whose stored id is `stored_id`, and removes `unset` from it,
-        if the node is there. It makes no node. The node is returned under `index`, with whether the step changed it.
+        The step that writes `set` to the node of `shape` whose id is `id`, keyed within the plan by the text
+        `stored_id`, and removes `unset` from it, if the node is there: found by `id` as the node holds it, a null `id`
+        finding none. It makes no node. The node is returned under `index`, with whether the step changed it.
         It writes the lowercased copy of each of `lower` on a node it changed, as a `node` step does.
         """
         self._add(
@@ -200,6 +207,7 @@ class WritePlan:
             {
                 "s": shape,
                 "k": stored_id,
+                "id": id,
                 "i": index,
                 "fresh": stamps.fresh(),
                 "set": _non_empty(dict(set)),
@@ -214,7 +222,15 @@ class WritePlan:
         field is as the store layout holds it (see `_held`).
         """
         self._steps.append(
-            {"op": op, **{key: self._held(key, value) for key, value in fields.items() if value is not None}}
+            {
+                "op": op,
+                **{
+                    key: self._held(key, value)
+                    for key, value in fields.items()
+                    # A step that finds a node carries its id, null too.
+                    if value is not None or key == "id"
+                },
+            }
         )
 
     def _held(self, name: str, value: Any) -> Any:

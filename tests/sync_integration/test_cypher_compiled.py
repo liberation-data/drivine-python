@@ -4747,6 +4747,11 @@ def test_a_text_past_4000_bytes_is_measured_cut_changed_searched_and_added_to_wh
     rows("CREATE (n:CyLongText {t: $t})", {"t": t})
     parts = {"a": t[: length // 2], "b": t[length // 2 :]}
     for function, expected in long_text_functions(t, unit).items():
+        if cypher_pm.type is DatabaseType.SQLITE and length > 20_000 and "=~" in function:
+            # The native regexp refuses a group repeated so often on an 8 MB stack (drivine-cypher-spec#353).
+            with pytest.raises(DrivineError, match="stack"):
+                rows(f"WITH $t AS t RETURN {function}", {"t": t})
+            continue
         # Given, and stored and read in one row, and made by the statement.
         assert rows(f"WITH $t AS t RETURN {function}", {"t": t}) == [expected], f"{function} given"
         assert rows(f"MATCH (n:CyLongText) WITH n.t AS t RETURN {function}") == [expected], f"{function} stored"

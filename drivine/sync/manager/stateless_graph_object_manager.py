@@ -6,6 +6,7 @@ import dataclasses
 import inspect
 import logging
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any, Literal, TypeVar
 
 from pydantic import BaseModel
@@ -49,6 +50,7 @@ from drivine.model.relationship_fragment_model import RelationshipFragmentModel
 from drivine.model.relationship_model import RelationshipModel
 from drivine.model.target_model import TargetModel
 from drivine.model.vector_field import VectorField
+from drivine.query.query_specification import QuerySpecification
 from drivine.schema.schema_grammar import SchemaGrammar, schema_grammar_for
 from drivine.schema.schema_item import SchemaItem
 from drivine.schema.schema_plan import SchemaPlan
@@ -694,10 +696,16 @@ class StatelessGraphObjectManager:
             raise DrivineError("patch_all takes each id once.")
         # In order of id, so that two calls over the same nodes take their locks in the same order.
         ordered = sorted(rows, key=lambda it: str(it["id"]))
+        # Every chunk bound before any runs, so a value refused in any writes nothing; then run as one batch, which
+        # rolls back on failure, as drivine4j's patchAll runs its chunks as one SaveExecutor batch (#512).
+        statement = self.backend.patch_many(root)
+        chunks: list[GraphStatement] = [
+            _Bound(statement.text, statement.bindings, statement.spec({"rows": ordered[start : start + PATCH_ROWS]}))
+            for start in range(0, len(ordered), PATCH_ROWS)
+        ]
         results: dict[Any, PatchResult] = {}
-        for start in range(0, len(ordered), PATCH_ROWS):
-            spec = self.backend.patch_many(root).spec({"rows": ordered[start : start + PATCH_ROWS]})
-            for it in self._when_uncontended(lambda spec=spec: self.persistence_manager.query(spec)):
+        for rows in self._run_batch(chunks):
+            for it in rows:
                 results[it["id"]] = PatchResult(it["found"], it["found"], it["changed"])
         return [results[it] for it in ids]
 
@@ -1145,3 +1153,14 @@ def _chunked(groups: list[FragmentGroup], size: int) -> list[list[FragmentGroup]
     if current:
         chunks.append(current)
     return chunks
+
+
+@dataclass(frozen=True)
+class _Bound(GraphStatement):
+    """A statement bound already, whose specification is the one it was bound as: one of patch_all's chunks."""
+
+    bound: QuerySpecification[Any] | None = None
+
+    def spec(self, more: Mapping[str, Any] | None = None) -> QuerySpecification[Any]:
+        assert self.bound is not None and not more
+        return self.bound

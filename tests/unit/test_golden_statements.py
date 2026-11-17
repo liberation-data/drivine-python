@@ -691,26 +691,10 @@ def test_writes_what_typescript_writes_for_sqlite():
     expect_golden("SQLITE", {**sqlite_statements(), **schema(schema_grammar_for(DatabaseType.SQLITE, SqliteGraph()))})
 
 
-PLANS_WITH_IDS = (
-    "Account.patch.plan",
-    "Account.patchAll.plan",
-    "Person.patch.plan",
-    "Person.patch.where.plan",
-    "Person.patchAll.plan",
-    "edges.relate.create.plan",
-    "edges.relate.plan",
-    "edges.unrelate.plan",
-    "edges.unrelateAll.plan",
-)
-"""The plans whose `ref` and `patch` steps carry the node's id in store layout 2 (drivine-python#509)."""
-
-HELD: dict[str, dict[str, str]] = {
-    engine: {name: "a plan's steps carry the node's id (#509)" for name in PLANS_WITH_IDS}
-    for engine in ("POSTGRES", "SQLITE")
-}
+HELD: dict[str, dict[str, str]] = {}
 """
-What of a store's goldens differs here until a later step of this library's store layout 2 lands, by name: each is
-checked to differ, or to be written here alone, so its hold is taken off as soon as it no longer does.
+What of a store's goldens differs here until a later change of this library's lands, by name: each is checked to
+differ, or to be written here alone, so its hold is taken off as soon as it no longer does.
 """
 
 

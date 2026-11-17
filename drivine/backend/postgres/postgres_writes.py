@@ -57,6 +57,7 @@ class PostgresWrites:
             plan.patch(
                 plan.shape(model.labels, key),
                 stored_key(bound["id"]),
+                bound["id"],
                 "0",
                 present(values),
                 absent(values),
@@ -85,7 +86,9 @@ class PostgresWrites:
             shape = plan.shape(model.labels, key)
             for i, row in enumerate(bound["rows"]):
                 values: dict[str, Any] = {**(row.get("props") or {}), **(row.get("vectors") or {})}
-                plan.patch(shape, stored_key(row["id"]), str(i), present(values), absent(values), model.lower_copied)
+                plan.patch(
+                    shape, stored_key(row["id"]), row["id"], str(i), present(values), absent(values), model.lower_copied
+                )
             return plan, None
 
         def reshaped(rows: list[str], bound: Mapping[str, Any]) -> list[Any]:
@@ -169,7 +172,7 @@ class PostgresWrites:
         """The step that finds the node `node` names, which must be there: by its class's labels and those it adds."""
         key = _id_property(node.model, "a node of it can't be referred to by id")
         labels = list(dict.fromkeys([*node.model.labels, *node.labels]))
-        return plan.ref(plan.shape(labels, key), stored_key(node.id))
+        return plan.ref(plan.shape(labels, key), stored_key(node.id), node.id)
 
     def _meeting(self, where: str, bound: Mapping[str, Any]) -> str:
         """

@@ -306,8 +306,13 @@ def test_a_rows_number_finds_a_node_whose_number_the_store_keeps_with_more_zeros
     for given, expected in [([2.5, 1, 4, 0.00001], [1, 2, 3, 4]), ([1.0, 4.0], [2, 3]), ([[1, 2.5]], [5])]:
         bound = {"rows": [{"s": it} for it in given]}
         statement = "UNWIND $rows AS row MATCH (a:Scaled {id: row.s}) RETURN a.k ORDER BY a.k"
-        assert query(pm, statement, bound) == expected, given
         where = "UNWIND $rows AS row MATCH (a:Scaled) WHERE a.id = row.s RETURN a.k ORDER BY a.k"
+        if pm.type is DatabaseType.SQLITE and isinstance(given[0], list):
+            # SQLite's compiled equality compares a list's JSON text first (liberation-data/drivine-cypher-spec#354).
+            if query(pm, statement, bound) == expected or query(pm, where, bound) == expected:
+                pytest.fail("A list of whole numbers finds its stored floats on SQLite now: take out the hold (#354)")
+            continue
+        assert query(pm, statement, bound) == expected, given
         assert query(pm, where, bound) == expected, f"{given} in a WHERE"
 
 

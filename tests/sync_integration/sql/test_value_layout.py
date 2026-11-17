@@ -510,7 +510,7 @@ def test_a_date_is_never_a_moment_nor_a_local_moment_a_moment(gom: StatelessGrap
         assert dated(q.at.in_([date(2024, 5, 6)])) == []
         assert dated(q.on.eq(datetime(2024, 5, 6, tzinfo=UTC))) == []
         assert dated(q.at.eq(moment.replace(tzinfo=None))) == []
-        # Yet unequal, as in Cypher (Dated's label is shared with another test, so only d1 is asked of).
+        # Yet unequal, as in Cypher (Dated's label is shared with another test, so only kinds1 is asked of).
         assert dated([q.id.eq("kinds1"), q.at.neq(date(2024, 5, 6))]) == ["kinds1"]
         assert dated([q.id.eq("kinds1"), q.on.neq(moment)]) == ["kinds1"]
         assert dated(q.at.in_([date(2024, 5, 6), moment])) == ["kinds1"]

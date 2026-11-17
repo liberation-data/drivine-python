@@ -39,6 +39,9 @@ How a save's values are written on Oracle until drivine4j settles a save's float
 each float a JSON number, as Drivine for TypeScript writes them, and NaN and the infinities refused by name. Oracle's
 own spelling, `{"$numberDouble": …}`, needs the save's PL/SQL to parse its binds as extended JSON, which the goldens it
 shares with Drivine for TypeScript don't yet. Tags, escaped keys and bytes are the module's as on every store.
+
+Held, and tracked by test_value_layout's ORACLE_FLOATS: a saved 2.0 reads back as 2 on Oracle until the saves take
+#830's binary-double form, which they do, with Drivine for TypeScript and the shared goldens, before 0.9.0 ships.
 """
 
 

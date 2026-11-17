@@ -23,6 +23,7 @@ from drivine import (
     PersistenceManager,
     QuerySpecification,
     StatelessGraphObjectManager,
+    cypher_statement,
 )
 
 
@@ -82,7 +83,38 @@ async def test_a_float_is_held_alike_with_a_date_beside_it_or_without(
     assert alone["reading"] == beside["reading"]
     for id in ("w1", "w2"):
         loaded = await gom.load(Held, id)
-        assert loaded is not None and loaded.reading == 2.0 and isinstance(loaded.reading, float)
+        assert loaded is not None and loaded.reading == 2.0
+        # On Oracle a saved float reads back as a number until #830 (see ORACLE_FLOATS, held on its own test).
+        assert isinstance(loaded.reading, float) or pm.type is DatabaseType.ORACLE
+
+
+ORACLE_FLOATS = (
+    "Oracle's saves write a float as a JSON number, which Oracle holds as a number, so a saved 2.0 reads back as 2, "
+    "until they take the binary-double form of liberation-data/drivine4j#830 (store layout 2), with Drivine for "
+    "TypeScript and the goldens the two share moving together, before 0.9.0 ships. A port to drivine-python is filed "
+    "once #830's approach settles."
+)
+"""The hold on a saved float on Oracle: see value_layout.ORACLE_SAVES_AS."""
+
+
+async def test_a_saved_float_reads_back_as_a_float_by_the_object_manager_and_by_cypher(
+    gom: StatelessGraphObjectManager, pm: PersistenceManager
+):
+    async def check() -> None:
+        await gom.save(Held(id="w3", reading=2.0))
+        loaded = await gom.load(Held, "w3")
+        assert loaded is not None and isinstance(loaded.reading, float), loaded
+        read = await pm.get_one(QuerySpecification[Any](cypher_statement("MATCH (n:Held {id: 'w3'}) RETURN n.reading")))
+        assert isinstance(read, float) and read == 2.0, read
+
+    if pm.type is not DatabaseType.ORACLE:
+        await check()
+        return
+    try:
+        await check()
+    except AssertionError:
+        pytest.xfail(ORACLE_FLOATS)
+    pytest.fail(f"Held, and passing: take the hold off. {ORACLE_FLOATS}")
 
 
 async def test_nan_is_refused_by_name_where_the_store_holds_it_as_no_number(

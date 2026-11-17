@@ -237,3 +237,10 @@ def test_oracle_binds_a_patchs_id_and_each_of_a_patch_alls_row_ids_as_the_json_o
     rows = [{"id": 1e-7, "props": {"name": "a"}, "vectors": {}}, {"id": 7, "props": {"name": "b"}, "vectors": {}}]
     many: Any = backend.patch_many(model).spec({"rows": rows}).parameters
     assert to_json([it["id"] for it in many["rows"]]) == f"[{ORACLE_HELD},7]"
+
+
+def test_oracle_binds_a_patchs_null_id_as_it_is_so_it_finds_no_node():
+    # Bound as the JSON text `null`, the block's find_node would match a node holding a null id, as a load doesn't.
+    backend = OracleBackend(OracleGraph())
+    model = ModelRegistry().fragment(Gauge)
+    assert backend.patch_one(model).spec({"id": None, "set": {}, "vectors": {}}).parameters["id"] is None  # type: ignore[index]

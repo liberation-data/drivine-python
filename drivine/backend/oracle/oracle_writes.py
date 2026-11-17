@@ -332,7 +332,7 @@ class _Patch(GraphStatement):
     A patch's block, bound with its values as Oracle's store layout holds them (see value_layout), as a save's are:
     `$set` and `$vectors`, or each of `$rows`' `props` and `vectors`, each by its name as the layout holds it, and `$id`
     or each row's id (see held_id). Each float is extended JSON's double, which the block reads `JSON(… EXTENDED)`, so a
-    float patched in stays a binary double.
+    float patched in stays a binary double. A null `$id` is bound as it is, and finds no node.
     """
 
     def spec(self, more: Mapping[str, Any] | None = None) -> QuerySpecification[Any]:
@@ -340,7 +340,7 @@ class _Patch(GraphStatement):
         for name in ("set", "vectors"):
             if given.get(name) is not None:
                 given[name] = write_props(given[name], "oracle")
-        if "id" in given:
+        if given.get("id") is not None:
             given["id"] = held_id(given["id"])
         if given.get("rows") is not None:
             given["rows"] = [

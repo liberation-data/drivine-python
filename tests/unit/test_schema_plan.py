@@ -249,3 +249,36 @@ async def test_a_statement_that_makes_or_drops_an_item_tells_the_host_its_items_
     await plan_item(SchemaPlan("sqlite", "drivine"), "db", host, "ENSURE", range_index("Person", "name"))  # pyright: ignore[reportArgumentType]
     assert any(it.startswith("CREATE") for it in host.ran)
     assert host.told > 0
+
+
+class NoCopiesHost(Host):
+    """A host whose manager reads the lowercased copies as none recorded, and has no store to fill them in through."""
+
+    async def read_lower_copies(self) -> list[list[str]] | None:
+        return []
+
+
+@pytest.mark.parametrize("host", [Host(), NoCopiesHost()], ids=["unread", "unfilled"])
+async def test_an_index_that_ignores_case_is_refused_making_nothing_where_no_lowercased_copies_can_be_kept(host: Host):
+    with pytest.raises(DrivineError) as raised:
+        await plan_item(
+            SchemaPlan("sqlite", "drivine"),  # pyright: ignore[reportArgumentType]
+            "db",
+            host,
+            "ENSURE",
+            RangeIndexSpec("Person", ("name",), ignore_case=True),
+        )
+    assert "The lowercased copies can't be read or filled in" in str(raised.value)
+    assert not [it for it in host.ran if "CREATE" in it.upper()]
+
+
+async def test_a_listing_the_store_refuses_is_read_as_holding_none():
+    def answer(_: str) -> list[Any]:
+        raise PostgresError("permission denied for table drivine_schema")
+
+    host = Host(answer)
+    indexes = PlannedIndexManager(planning("postgres", host), schema_grammar_for(DatabaseType.POSTGRES))
+    constraints = PlannedConstraintManager(planning("postgres", host), schema_grammar_for(DatabaseType.POSTGRES))
+    assert await indexes.list() == []
+    assert await constraints.list() == []
+    assert not await constraints.in_force(uniqueness_constraint("Person", "email"))

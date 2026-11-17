@@ -27,6 +27,7 @@ from drivine.sync import (
     QuerySpecification,
     StatelessGraphObjectManager,
     cypher_statement,
+    node_ref,
     refs,
 )
 
@@ -149,6 +150,22 @@ def test_a_patch_and_a_patch_all_hold_their_values_as_a_save_does(
         assert held["$$dollar"] == dollar and held["born"]["$t"] == "date"
         loaded = gom.load(Held, id)
         assert loaded is not None and loaded.dollar == dollar and loaded.born == born
+
+
+def test_a_relationships_values_are_held_as_a_nodes_are(gom: StatelessGraphObjectManager, pm: PersistenceManager):
+    gom.save_all([Held(id="r1"), Held(id="r2")])
+    values = {"$w": 3, "on": date(2024, 1, 1)}
+    assert gom.edges.relate(node_ref(Held, "r1"), node_ref(Held, "r2"), "HOLDS", values)
+    if pm.type is DatabaseType.ORACLE:
+        text = "SELECT JSON_SERIALIZE(props) AS props FROM drivine_edge WHERE type = 'HOLDS'"
+    elif pm.type is DatabaseType.SQLITE:
+        text = "SELECT props FROM drivine_edge WHERE type = 'HOLDS'"
+    else:
+        text = "SELECT props::text AS props FROM drivine_edge WHERE type = 'HOLDS'"
+    [row] = pm.query(QuerySpecification[Any](text))
+    props = row["props"] if isinstance(row, dict) else row
+    held: dict[str, Any] = json.loads(props) if isinstance(props, str) else props
+    assert held["$$w"] == 3 and held["on"]["$t"] == "date" and "$w" not in held
 
 
 class CaseHeld(NodeFragment, labels=["CaseHeld"]):

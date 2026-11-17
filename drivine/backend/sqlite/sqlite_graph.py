@@ -292,8 +292,9 @@ def time_key_of(json: str, at: str, tag: str | None = None) -> str:
     and orders times: the digit of its kind (see TIME_KINDS), then the tag's sort key `s`, which the module works out
     of the time's UTC nanoseconds of the day, unwrapped at midnight, then its offset. So a time with an offset is before
     another where it is earlier in UTC, as Neo4j has it, and equal to it only at the same offset, as two of a kind are
-    equal exactly where their texts are. Given the kind `tag` names, a time of the other kind is null: Cypher compares a
-    time with an offset with a local one as null. Anything else is null, as a text is never a time.
+    equal exactly where their texts are. Given the kind `tag` names, a time of the other kind is null: Cypher has a time
+    with an offset neither equal to a local one nor before or after it. Anything else is null, as a text is never a
+    time: a time held as text, as a statement of the user's may write one, is found by no comparison with a time.
     """
     tag_at, key = sql_text(at + '."$t"'), f"{json} ->> {sql_text(at + '.s')}"
     kinds = [tag] if tag is not None else list(TIME_KINDS)

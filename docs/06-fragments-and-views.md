@@ -77,6 +77,14 @@ q.employment_history.none(lambda it: it.role.eq("Lead"))
   `order_by`, ending with a unique key.
 - **An order by an expression:** `plus`, `minus`, `times`, `div`, `negate`, `exp`, `floor`, `coalesce`, `case_of`
   with `above`, `below`, `at_least`, `at_most`, `equal_to`, `has_value` and the rest, all computed in the database.
+- **Dates, moments and times on SQLite** compare as Cypher compares them, in a condition, `in_`, `has_item`, an order,
+  a seek and an order expression: a moment as the instant it is, a time by its time in UTC, so `time(9, tzinfo=+01:00)`
+  is before `time(8, 30, tzinfo=UTC)` but equal only to a time at its own offset. A value is equal only to a saved
+  value of its own kind, and neither before nor after another kind: a date is never a moment, a local moment never a
+  moment, a local time never a time with an offset, and `neq` holds for each. A time of a `ZoneInfo` has no offset,
+  and is saved and compared as a local time. A moment or a date held as text, as your own Cypher may write one, is
+  still compared as one; a time held as text is not. On Postgres and Oracle the DSL doesn't yet compare a saved date,
+  moment or time this way.
 - `count`, `delete`, `delete_all` and `patch` take conditions too.
 - `eq_ignore_case` and `contains_ignore_case` lowercase the property, which no index reads. On a `CaseInsensitive`
   field whose index ignores case, they compare with a lowercased copy instead, which the index serves: see below.

@@ -14,6 +14,7 @@ import math
 from collections.abc import Callable
 from datetime import UTC, date, datetime, time, timedelta, timezone
 from typing import Annotated, Any
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -33,6 +34,7 @@ from drivine.sync import (
     cypher_statement,
     equal_to,
     node_ref,
+    not_equal_to,
     refs,
 )
 
@@ -237,7 +239,7 @@ DSL_TEMPORALS = (
     "the query DSL compares a saved date or moment by its text, where store layout 2 holds it as its tag, until its "
     "comparisons come from the shared module's fragments (a later PR of drivine-python#471)"
 )
-"""The hold on Postgres and Oracle: SQLite's DSL reads the tag's text (see sqlite_graph.temporal_text)."""
+"""The hold on Postgres and Oracle: SQLite's DSL reads a tag's text or key (see temporal_text, time_key)."""
 
 
 def test_a_saved_date_or_moment_is_compared_and_ordered_by_the_query_dsl_as_it_is(
@@ -421,7 +423,7 @@ def test_a_time_with_an_offset_is_compared_by_its_utc_time_unwrapped_at_midnight
     held_or_failing(pm, check)
 
 
-def test_a_local_time_and_a_time_with_an_offset_meet_no_comparison_with_each_other(
+def test_a_local_time_and_a_time_with_an_offset_are_unequal_and_neither_before_the_other(
     gom: StatelessGraphObjectManager, pm: PersistenceManager
 ):
     def check() -> None:
@@ -437,6 +439,9 @@ def test_a_local_time_and_a_time_with_an_offset_meet_no_comparison_with_each_oth
         assert found(q.clock.gt(time(7, tzinfo=UTC))) == ["zoned"]
         assert found(q.clock.in_([time(8)])) == ["local"]
         assert found(q.clock.in_([time(8), time(8, tzinfo=UTC)])) == ["local", "zoned"]
+        # Unequal, as two values of two kinds are in Cypher, though neither is before the other.
+        assert found(q.clock.neq(time(8))) == ["zoned"]
+        assert found(q.clock.neq(time(8, tzinfo=UTC))) == ["local"]
         # A time with an offset orders before a local one, as Neo4j orders them.
         assert [it.id for it in gom.load_all(TwoKinds, order_by=q.clock.asc())] == ["zoned", "local"]
         after = q.clock.after(time(8, tzinfo=UTC))
@@ -502,6 +507,11 @@ def test_a_date_is_never_a_moment_nor_a_local_moment_a_moment(gom: StatelessGrap
         assert dated(q.at.in_([date(2024, 5, 6)])) == []
         assert dated(q.on.eq(datetime(2024, 5, 6, tzinfo=UTC))) == []
         assert dated(q.at.eq(moment.replace(tzinfo=None))) == []
+        # Yet unequal, as in Cypher (Dated's label is shared with another test, so only d1 is asked of).
+        assert dated([q.id.eq("d1"), q.at.neq(date(2024, 5, 6))]) == ["d1"]
+        assert dated([q.id.eq("d1"), q.on.neq(moment)]) == ["d1"]
+        assert dated(q.at.in_([date(2024, 5, 6), moment])) == ["d1"]
+        assert dated(q.at.in_([date(2024, 5, 6), None, time(7, 8, 9, tzinfo=UTC)])) == []
         assert lists(listed.moments.has_item(moment)) == ["l6"]
         assert lists(listed.moments.has_item(date(2024, 5, 6))) == []
         assert lists(listed.days.has_item(datetime(2024, 5, 6, tzinfo=UTC))) == []
@@ -554,5 +564,30 @@ def test_an_order_by_an_expression_compares_a_date_moment_or_time_as_a_condition
         # A date is no moment, nor a moment a date.
         assert ranked(equal_to(q.at, date(2024, 5, 6))) == ["r1", "r2", "r3", "r4"]
         assert ranked(below(q.on, datetime(2025, 1, 1, tzinfo=UTC))) == ["r1", "r2", "r3", "r4"]
+        # Yet unequal, as in Cypher; a missing value is neither.
+        assert ranked(not_equal_to(q.on, datetime(2025, 1, 1, tzinfo=UTC))) == ["r1", "r2", "r3", "r4"]
+        assert ranked(not_equal_to(q.clock, time(8))) == ["r2", "r3", "r1", "r4"]
+
+    held_or_failing(pm, check)
+
+
+class Zoned(NodeFragment, labels=["ZonedHeld"]):
+    """A time of its own label, so its test finds only its own."""
+
+    id: Annotated[str, NodeId()]
+    clock: time | None = None
+
+
+def test_a_time_of_a_named_zone_is_compared_as_the_local_time_a_save_writes_of_it(
+    gom: StatelessGraphObjectManager, pm: PersistenceManager
+):
+    def check() -> None:
+        # A time has no offset of a named zone, whose offset changes with the date: a save writes it a local time.
+        paris = time(8, tzinfo=ZoneInfo("Europe/Paris"))
+        gom.save_all([Zoned(id="z", clock=paris)])
+        q = refs(Zoned)
+        assert [it.id for it in gom.load_all(Zoned, q.clock.eq(paris))] == ["z"]
+        assert [it.id for it in gom.load_all(Zoned, q.clock.eq(time(8)))] == ["z"]
+        assert [it.id for it in gom.load_all(Zoned, q.clock.eq(time(8, tzinfo=UTC)))] == []
 
     held_or_failing(pm, check)

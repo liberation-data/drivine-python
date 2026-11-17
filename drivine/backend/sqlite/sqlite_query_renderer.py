@@ -52,6 +52,8 @@ class SqliteQueryRenderer(SqlQueryRenderer):
         super().__init__(views, labels_of_class)
         self._seek_kinds: dict[str, Kind] = {}
         """The kind of each value a cursor binds, by its parameter."""
+        self._seek_times: set[str] = set()
+        """The parameters a cursor binds a time to: a seek reads a saved time's tag by its text (see _text_read)."""
 
     @staticmethod
     def render(
@@ -111,7 +113,8 @@ class SqliteQueryRenderer(SqlQueryRenderer):
     def _seek_test(self, alias: str, property: str, operator: str, value: str) -> str:
         """The property read as the kind of the cursor's value, as a comparison reads it."""
         kind = self._seek_kinds.get(value[1:], "TEXT")
-        return f"{self._typed(alias, property, kind)} {'=' if operator == '==' else operator} {typed(kind, value)}"
+        read = temporal_text(alias, property) if value[1:] in self._seek_times else self._typed(alias, property, kind)
+        return f"{read} {'=' if operator == '==' else operator} {typed(kind, value)}"
 
     def _storable(self, value: Any) -> Any:
         """
@@ -133,6 +136,7 @@ class SqliteQueryRenderer(SqlQueryRenderer):
         # The cursor's values are the next bound, in turn.
         start = len(self.bindings)
         self._seek_kinds = {f"_q{start + i}": _kind_of(it.value, False) for i, it in enumerate(seek)}
+        self._seek_times = {f"_q{start + i}" for i, it in enumerate(seek) if isinstance(it.value, time)}
         return super()._keyset(keys, seek, query, alias)
 
     def _order(self, key: RootKey, scope: Scope, alias: str) -> str:
@@ -201,9 +205,10 @@ class SqliteQueryRenderer(SqlQueryRenderer):
         """
         if not values:
             return None
-        kind = _kind_of(values[0], compared.json_packed)
-        if kind in ("INSTANT", "DATE") and all(_kind_of(it, False) == kind for it in values):
-            # Moments or dates, each read as one, as a comparison reads it: a saved one's tag by its text.
+        kinds = {_kind_of(it, compared.json_packed) for it in values if it is not None}
+        if len(kinds) == 1 and (kind := next(iter(kinds))) in ("INSTANT", "DATE"):
+            # Moments or dates, each read as one, as a comparison reads it: a saved one's tag by its text. A null among
+            # them is null read as one, which SQL's IN reads as Cypher's does.
             bound = self._bind(to_json([self._scalar(it, False) for it in values]))
             among = f"SELECT {typed(kind, 'v.value')} FROM json_each({bound}) v"
             return f"{self._typed(compared.row, compared.name, kind)} IN ({among})"

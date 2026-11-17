@@ -156,7 +156,12 @@ async def test_saved_moments_and_dates_held_as_their_tags_compare_order_and_are_
     assert [it.id for it in await gom.load_all(Dated, d.on.eq(date(2024, 1, 2)))] == ["d2"]
     assert [it.id for it in await gom.load_all(Dated, d.on.lt(date(2024, 1, 2)))] == ["d1"]
     assert [it.id for it in await gom.load_all(Dated, d.on.in_([date(2024, 1, 1)]))] == ["d1"]
+    assert [it.id for it in await gom.load_all(Dated, d.on.in_([date(2024, 1, 1), None]))] == ["d1"]
     assert [it.id for it in await gom.load_all(Dated, order_by=d.on.desc())] == ["d2", "d1"]
+    # And a seek past a time reads the tag's text, as a comparison does.
+    await gom.save(Dated(id="d3", starts=time(10)))
+    order, seek = [d.starts.asc(), d.id.asc()], [d.starts.after(time(9)), d.id.after("d1")]
+    assert [it.id for it in await gom.load_all(Dated, order_by=order, seek=seek)] == ["d3"]
 
 
 async def test_a_full_text_search_scores_whole_words_ignores_case_as_unicode_does_and_leaves_out_what_it_must_not(gom):

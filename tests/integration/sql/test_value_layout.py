@@ -15,6 +15,7 @@ from typing import Annotated, Any
 import pytest
 
 from drivine import (
+    CaseInsensitive,
     DatabaseType,
     DrivineError,
     GraphProperty,
@@ -24,6 +25,7 @@ from drivine import (
     QuerySpecification,
     StatelessGraphObjectManager,
     cypher_statement,
+    refs,
 )
 
 
@@ -132,3 +134,34 @@ async def test_bytes_are_held_as_the_list_of_their_signed_values_and_read_back_a
     assert (await stored(pm, "b1"))["raw"] == [1, 2, -1]
     loaded = await gom.load(Held, "b1")
     assert loaded is not None and loaded.raw == b"\x01\x02\xff"
+
+
+async def test_a_patch_and_a_patch_all_hold_their_values_as_a_save_does(
+    gom: StatelessGraphObjectManager, pm: PersistenceManager
+):
+    await gom.save_all([Held(id="p1"), Held(id="p2")])
+    await gom.patch(Held, "p1", set={"dollar": 7, "born": date(2024, 1, 1)})
+    await gom.patch_all([Held(id="p2", dollar=8, born=date(2024, 1, 2))], only=["dollar", "born"])
+    for id, dollar, born in (("p1", 7, date(2024, 1, 1)), ("p2", 8, date(2024, 1, 2))):
+        held = await stored(pm, id)
+        assert held["$$dollar"] == dollar and held["born"]["$t"] == "date"
+        loaded = await gom.load(Held, id)
+        assert loaded is not None and loaded.dollar == dollar and loaded.born == born
+
+
+class CaseHeld(NodeFragment, labels=["CaseHeld"]):
+    id: Annotated[str, NodeId()]
+    mail: Annotated[str | None, GraphProperty("$mail"), CaseInsensitive()] = None
+
+
+async def test_a_dollar_named_case_insensitive_property_is_found_ignoring_case(
+    gom: StatelessGraphObjectManager, pm: PersistenceManager
+):
+    if pm.type is not DatabaseType.SQLITE:
+        pytest.skip("Measured on SQLite only so far (drivine-cypher-spec#355)")
+    await gom.save(CaseHeld(id="c1", mail="A@X.com"))
+    found = [it.id for it in await gom.load_all(CaseHeld, where=refs(CaseHeld).mail.eq_ignore_case("a@x.COM"))]
+    if found != ["c1"]:
+        # How the lowercased copy of a $-named property is named is unsettled across the libraries.
+        pytest.xfail("the lowercased copy of a $-named property is named otherwise (drivine-cypher-spec#355)")
+    pytest.fail("A $-named case-insensitive property is found ignoring case now: take out the hold (#355)")

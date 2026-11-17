@@ -668,7 +668,9 @@ class StatelessGraphObjectManager:
         Writes named fields of many nodes, each where its node is there, making none. One result for each object, in
         order. `only` or `except_` is required: to write every field, save. Under NullPolicy.IGNORE, the default, a
         named field that is None is left as the store has it. For a view the fields are its root's; its relationships
-        aren't written.
+        aren't written. The nodes are written PATCH_ROWS to a statement, and the statements run as one batch, as
+        `save_all` runs its: outside a transaction of the caller's, in one transaction, so a failure, or a value refused
+        in any of them, leaves nothing written; inside one, they join it.
         """
         if not objects:
             return []

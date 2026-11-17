@@ -314,7 +314,12 @@ class TestTheFunctions:
         patterns = _Patterns()
         word = "(^|[^[:alnum:]_])école($|[^[:alnum:]_])"
         assert patterns.count("l'école, école", word) == 2
-        assert patterns.matches("^a", "abc") == 1 and patterns.matches(None, "x") is None
+
+    def test_regexp_is_the_shared_modules_registered_with_the_rest(self):
+        connection = apsw.Connection(":memory:")
+        register(connection)
+        found = connection.execute("SELECT 'abc' REGEXP '^a', 'abc' REGEXP '^b', NULL REGEXP 'a'").fetchall()
+        assert found == [(1, 0, None)]
 
     def test_a_failure_in_a_function_is_raised_as_itself(self):
         connection = apsw.Connection(":memory:")

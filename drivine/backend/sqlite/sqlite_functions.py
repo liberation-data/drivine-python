@@ -9,7 +9,8 @@ drivine4j's `SqliteFunctions`, function for function, so a statement either libr
 - `drivine_delete` deletes the nodes a statement selected, and counts them.
 - `drivine_lower_copies` fills in the lowercased copies of a property, and counts the nodes it wrote.
 - `drivine_similarity` scores an embedding against a vector.
-- `drivine_regexp_count` counts the matches of a regular expression, and `regexp` is SQLite's `REGEXP` operator.
+- `drivine_regexp_count` counts the matches of a regular expression. SQLite's `REGEXP` operator is the shared
+  module's, from its extension (see sqlite_extension).
 - `drivine_lower` lowers text as Unicode does.
 - `drivine_epoch` reads a moment as nanoseconds since the epoch.
 
@@ -39,9 +40,6 @@ from drivine.backend.sqlite.sqlite_graph import SqliteGraph, has_label, path, te
 from drivine.backend.sqlite.sqlite_patterns import Patterns
 from drivine.backend.sqlite.sqlite_plan_writer import SqlitePlanWriter, Stopped
 from drivine.model import lower_copies
-
-REGEXP = "regexp"
-"""The name SQLite's `X REGEXP Y` calls, as `regexp(Y, X)`."""
 
 _SAVEPOINT = "drivine_write"
 
@@ -225,15 +223,6 @@ class _Patterns(Patterns):
     The regular expressions the functions of one connection have read, compiled once each, as Java reads them: see
     sqlite_patterns.
     """
-
-    def matches(self, expression: str | None, text: Any) -> int | None:
-        """
-        SQLite's `REGEXP` operator, which it leaves to the application: `text REGEXP expression` calls
-        `regexp(expression, text)`, true where the expression matches somewhere in the text. Null where either is null.
-        """
-        if expression is None or text is None:
-            return None
-        return 1 if self.of(str(expression)).search(text_of_argument(text) or "") else 0
 
     def count(self, text: Any, expression: str | None) -> int:
         """

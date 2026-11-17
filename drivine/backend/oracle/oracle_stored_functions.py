@@ -23,7 +23,7 @@ def nulls_equal_name(graph: str) -> str:
 def era_name(graph: str) -> str:
     """
     The function the store keeps beside the graph `graph`'s tables that renumbers the year of an ISO text as Oracle
-    does: see `era_function`.
+    does: the shared module's, made with the graph (see OracleGraph.functions).
     """
     return f"{graph}_era"
 

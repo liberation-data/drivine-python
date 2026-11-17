@@ -86,3 +86,26 @@ def test_a_column_the_store_wrote_its_own_way_is_read_so_first_its_floats_kept_a
     assert found["s"] == "\u0000drivine:float:1"
     # A user's map with the store's own key is held escaped, and read back as the user's map.
     assert read_after('{"m":{"$$numberDouble":"NaN"}}', with_nan) == {"m": {"$numberDouble": "NaN"}}
+
+
+def test_an_oracle_patch_and_patch_all_write_their_values_in_the_layout_as_a_save_does():
+    from typing import Annotated
+
+    from drivine import GraphProperty, NodeFragment, NodeId
+    from drivine.backend.oracle.oracle_backend import OracleBackend
+    from drivine.backend.oracle.oracle_graph import OracleGraph
+    from drivine.model.model_registry import ModelRegistry
+
+    class Patched(NodeFragment, labels=["Patched"]):
+        id: Annotated[str, NodeId()]
+        dollar: Annotated[int | None, GraphProperty("$dollar")] = None
+        born: date | None = None
+
+    model = ModelRegistry().fragment(Patched)
+    backend = OracleBackend(OracleGraph())
+    values = {"$dollar": 7, "born": date(2024, 1, 1)}
+    one = backend.patch_one(model).spec({"id": "p1", "set": values, "vectors": {}}).parameters
+    assert to_json(one["set"]) == f'{{"$$dollar":7,"born":{DATE_TAG}}}'
+    rows = [{"id": "p1", "props": values, "vectors": {}}]
+    many = backend.patch_many(model).spec({"rows": rows}).parameters
+    assert to_json(many["rows"]) == f'[{{"id":"p1","props":{{"$$dollar":7,"born":{DATE_TAG}}},"vectors":{{}}}}]'

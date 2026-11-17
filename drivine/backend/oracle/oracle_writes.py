@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 from drivine.annotation.direction import Direction
@@ -11,12 +12,13 @@ from drivine.backend.oracle.oracle_graph import OracleGraph, has_labels, json_ke
 from drivine.backend.oracle.oracle_save_builder import prelude
 from drivine.backend.save_statement_builder import id_of, object_props
 from drivine.backend.sql.sql_json import to_json
-from drivine.backend.sql.value_layout import write_props
+from drivine.backend.sql.value_layout import held_key, write_props
 from drivine.drivine_error import DrivineError
 from drivine.manager.relate_mode import RelateMode
 from drivine.manager.save_options import SaveOptions
 from drivine.model import stamps
 from drivine.model.fragment_model import FragmentModel
+from drivine.query.query_specification import QuerySpecification
 
 
 class OracleWrites:
@@ -39,7 +41,7 @@ class OracleWrites:
             if where
             else "v_meets := 1;"
         )
-        return self._block(
+        block = self._block(
             ["v_meets NUMBER;", "v_changed BOOLEAN := FALSE;", "v_id VARCHAR2(4000);", "v_patch CLOB;"],
             [
                 "SELECT JSON_SERIALIZE(JSON_SCALAR($id)) INTO v_id FROM dual;",
@@ -59,10 +61,11 @@ class OracleWrites:
                 "'changed' VALUE v_changed RETURNING CLOB) AS \"result:json\" FROM dual;",
             ],
         )
+        return _Patch(block.text, block.bindings)
 
     def patch_many(self, model: FragmentModel) -> GraphStatement:
         """Writes each row of `$rows`, `{id, props, vectors}`, to its node, making none: `{id, found, changed}`."""
-        return self._block(
+        block = self._block(
             [
                 "v_changed BOOLEAN;",
                 "v_out SYS.ODCIVARCHAR2LIST := SYS.ODCIVARCHAR2LIST();",
@@ -95,6 +98,7 @@ class OracleWrites:
                 'OPEN c FOR SELECT column_value AS "result:json" FROM TABLE(v_out);',
             ],
         )
+        return _Patch(block.text, block.bindings)
 
     def fragment_batch(self, groups: Sequence[FragmentGroup], options: SaveOptions) -> GraphStatement:
         """
@@ -290,7 +294,7 @@ class OracleWrites:
             return []
         self._lowers = True
         name = f"x_lower{len(self._pending)}"
-        self._pending[name] = to_json(model.lower_copied)
+        self._pending[name] = to_json([held_key(it) for it in model.lower_copied])
         return [f"{before}lower_node(v_root, ${name});{after}"]
 
     def _block(
@@ -306,6 +310,29 @@ END;"""
         taken = {**self._pending, **(bindings or {}), "x_stamp": stamps.fresh()}
         self._pending.clear()
         return GraphStatement(text, taken)
+
+
+@dataclass(frozen=True)
+class _Patch(GraphStatement):
+    """
+    A patch's block, bound with its values in the store layout (see value_layout), as a save's are: `$set` and
+    `$vectors`, or each of `$rows`' `props` and `vectors`, each by its name as the layout holds it.
+    """
+
+    def spec(self, more: Mapping[str, Any] | None = None) -> QuerySpecification[Any]:
+        given = dict(more or {})
+        for name in ("set", "vectors"):
+            if given.get(name) is not None:
+                given[name] = write_props(given[name], "oracle")
+        if given.get("rows") is not None:
+            given["rows"] = [
+                {
+                    **row,
+                    **{name: write_props(row[name], "oracle") for name in ("props", "vectors") if row.get(name)},
+                }
+                for row in given["rows"]
+            ]
+        return super().spec(given)
 
 
 def _id_property(model: FragmentModel) -> str:

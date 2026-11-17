@@ -1,5 +1,7 @@
+from pathlib import Path
+
 from drivine import DatabaseType
-from drivine.testing.drivine_test_containers import DrivineTestContainers
+from drivine.testing.drivine_test_containers import TEST_CONTAINER_SPECS, DrivineTestContainers
 
 
 class TestImage:
@@ -18,11 +20,19 @@ class TestImage:
             "NEO4J_TEST_IMAGE": "neo4j:5.26-community",
             "MEMGRAPH_TEST_IMAGE": "memgraph/memgraph:3.14.0",
             "FALKORDB_TEST_IMAGE": "falkordb/falkordb:6.0.3",
+            "ORACLE_TEST_IMAGE": "gvenzl/oracle-free:23-faststart",
         }
         assert DrivineTestContainers.image(DatabaseType.NEO4J, env) == "neo4j:5.26-community"
         assert DrivineTestContainers.image(DatabaseType.MEMGRAPH, env) == "memgraph/memgraph:3.14.0"
         assert DrivineTestContainers.image(DatabaseType.FALKORDB, env) == "falkordb/falkordb:6.0.3"
+        assert DrivineTestContainers.image(DatabaseType.ORACLE, env) == "gvenzl/oracle-free:23-faststart"
         assert DrivineTestContainers.image(DatabaseType.POSTGRES, env) == "pgvector/pgvector:pg16"
 
     def test_is_the_default_where_the_test_image_is_blank(self):
         assert DrivineTestContainers.image(DatabaseType.NEO4J, {"NEO4J_TEST_IMAGE": ""}) == "neo4j:latest"
+
+    def test_ci_pulls_the_oracle_image_the_container_runs(self):
+        # ci.yml pulls the image ahead of the tests, so that its pull isn't counted against the container's start: a pin
+        # moved in one place and not the other would pull an image the tests don't run.
+        ci = (Path(__file__).parents[2] / ".github" / "workflows" / "ci.yml").read_text()
+        assert f"docker pull {TEST_CONTAINER_SPECS[DatabaseType.ORACLE].image}\n" in ci

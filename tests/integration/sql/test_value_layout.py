@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import math
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time, timedelta, timezone
 from typing import Annotated, Any
 
 import pytest
@@ -226,6 +226,8 @@ class Dated(NodeFragment, labels=["DatedHeld"]):
     id: Annotated[str, NodeId()]
     on: date | None = None
     at: datetime | None = None
+    clock: time | None = None
+    clocks: list[time] | None = None
 
 
 DSL_TEMPORALS = (
@@ -259,3 +261,39 @@ async def test_a_saved_date_or_moment_is_compared_and_ordered_by_the_query_dsl_a
     except AssertionError:
         pytest.xfail(DSL_TEMPORALS)
     pytest.fail(f"Held, and passing: take the hold off. {DSL_TEMPORALS}")
+
+
+@pytest.mark.parametrize("test", ["eq", "in", "has_item"])
+async def test_the_query_dsl_refuses_a_time_at_an_offset_with_seconds_by_name_as_a_parameter_is(
+    gom: StatelessGraphObjectManager, test: str
+):
+    # The store holds an offset to the minute (#517); the DSL wrote this one as a text no value of it matches (#523).
+    at = time(10, tzinfo=timezone(timedelta(hours=1, seconds=1)))
+    dated = refs(Dated)
+    tested = {
+        "eq": lambda: dated.clock.eq(at),
+        "in": lambda: dated.clock.in_([time(9), at]),
+        "has_item": lambda: dated.clocks.has_item(at),
+    }[test]()
+    with pytest.raises(DrivineError, match="at an offset with seconds"):
+        await gom.load_all(Dated, tested)
+
+
+async def test_the_query_dsl_finds_a_time_at_an_offset_of_whole_minutes_as_it_was_before(
+    gom: StatelessGraphObjectManager, pm: PersistenceManager
+):
+    # Only an offset with seconds is refused (#523): one of whole minutes is bound as its ISO text, as before.
+    async def check() -> None:
+        at = time(10, tzinfo=timezone(timedelta(hours=1)))
+        await gom.save_all([Dated(id="c1", clock=at), Dated(id="c2", clock=time(9))])
+        dated = refs(Dated)
+        assert [it.id for it in await gom.load_all(Dated, dated.clock.eq(at))] == ["c1"]
+        assert [it.id for it in await gom.load_all(Dated, dated.clock.in_([at]))] == ["c1"]
+
+    if pm.type is DatabaseType.SQLITE:
+        await check()
+        return
+    try:
+        await check()
+    except AssertionError:
+        pytest.xfail(DSL_TEMPORALS)

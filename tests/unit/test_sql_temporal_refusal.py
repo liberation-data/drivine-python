@@ -101,6 +101,8 @@ TEMPORAL: dict[str, Callable[[], Any]] = {
     "not in": lambda: q.at.not_in([AT]),
     "has_item": lambda: q.days.has_item(DAY),
     "a temporal list": lambda: q.days.eq([DAY]),
+    "a map that holds one": lambda: q.name.eq({"from": DAY}),
+    "a list that holds one deeper": lambda: q.name.eq([[DAY]]),
     "by stored name": lambda: q.property("on").eq(DAY),
     "a predicate": lambda: q.predicate("on", "GT", DAY),
 }
@@ -118,6 +120,7 @@ PLAIN: dict[str, Callable[[], Any]] = {
     "in": lambda: q.name.in_(["a", "b"]),
     "in of None alone": lambda: q.on.in_([None]),
     "is_null": lambda: q.on.is_null(),
+    "a map of text": lambda: q.name.eq({"from": "2024-01-02"}),
     "a JsonPacked date": lambda: q.packed.eq(DAY),
 }
 

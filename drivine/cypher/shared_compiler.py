@@ -364,12 +364,12 @@ def written(value: Any) -> Any:
         return _float(float(value))
     if isinstance(value, datetime):
         kind = "DATE_TIME" if value.utcoffset() is not None else "LOCAL_DATE_TIME"
-        return {"$temporal": kind, "text": value.isoformat()}
+        return {"$temporal": kind, "text": _to_the_minute(value.isoformat(), value.utcoffset())}
     if isinstance(value, date):
         return {"$temporal": "DATE", "text": value.isoformat()}
     if isinstance(value, time):
         kind = "TIME" if value.utcoffset() is not None else "LOCAL_TIME"
-        return {"$temporal": kind, "text": value.isoformat()}
+        return {"$temporal": kind, "text": _to_the_minute(value.isoformat(), value.utcoffset())}
     if isinstance(value, timedelta):
         return {"$temporal": "DURATION", "text": duration(value)}
     if isinstance(value, (bytes, bytearray, memoryview)):
@@ -380,6 +380,21 @@ def written(value: Any) -> Any:
     if isinstance(value, (list, tuple, set, frozenset, Iterator)):
         return [written(it) for it in value]  # pyright: ignore[reportUnknownVariableType]
     raise DrivineError(f"A parameter of type {type(value).__name__} can't be bound to a Cypher statement.")
+
+
+def _to_the_minute(text: str, offset: timedelta | None) -> str:
+    """
+    `text`, a temporal value's ISO text, where its offset is a whole number of minutes; refused by name where it isn't,
+    as a zone's local mean time is (`Africa/Monrovia` before 1972, `-00:44:30`), which `isoformat` writes with its
+    seconds: the store layout holds an offset to the minute, and the module bound such a tag as a text
+    (liberation-data/drivine-cypher-spec#357). Drivine for TypeScript refuses it alike (liberation-data/drivine#767).
+    """
+    if offset is not None and offset % timedelta(minutes=1):
+        raise DrivineError(
+            f"A temporal parameter at an offset with seconds ({text}) can't be bound on a SQL store, which holds an "
+            "offset to the minute."
+        )
+    return text
 
 
 def _float(value: float) -> Any:

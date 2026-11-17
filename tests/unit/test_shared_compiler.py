@@ -222,3 +222,28 @@ def test_drained_parameters_are_bound_alike_by_a_second_compile(store: Any):
 
 def test_a_signalling_decimal_nan_is_the_float_nan_as_a_quiet_one_is():
     assert written(Decimal("sNaN")) == {"$float": "NaN"}
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        # A zone's local mean time, which isoformat writes with its seconds.
+        pytest.param(datetime(1971, 1, 1, tzinfo=ZoneInfo("Africa/Monrovia")), id="datetime at -00:44:30"),
+        pytest.param(time(10, 0, tzinfo=timezone(timedelta(hours=1, seconds=1))), id="time at +01:00:01"),
+    ],
+)
+def test_a_temporal_parameter_at_an_offset_with_seconds_is_refused_by_name_as_the_store_holds_an_offset_to_the_minute(
+    value: object,
+):
+    # Drivine for TypeScript's "refuses a ZonedDateTime at an offset with seconds" (liberation-data/drivine#767).
+    with pytest.raises(DrivineError, match="at an offset with seconds .* holds an offset to the minute"):
+        compile_cypher("RETURN $t AS t", {"t": value}, "SQLITE", "g")
+    from drivine.backend.sql.value_layout import write
+
+    with pytest.raises(DrivineError, match="at an offset with seconds"):
+        write({"at": value}, "postgres")
+
+
+def test_a_temporal_parameter_at_an_offset_of_whole_minutes_is_bound_as_its_kind():
+    compiled = compile_cypher("RETURN $t AS t", {"t": time(10, 0, tzinfo=timezone(timedelta(hours=-1)))}, "SQLITE", "g")
+    assert '"10:00:00-01:00"' in compiled.parameters["_cy_t"]

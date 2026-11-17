@@ -520,6 +520,39 @@ def test_a_date_is_never_a_moment_nor_a_local_moment_a_moment(gom: StatelessGrap
     held_or_failing(pm, check)
 
 
+class Wall(NodeFragment, labels=["WallHeld"]):
+    """A moment of its own label, so its test finds only its own."""
+
+    id: Annotated[str, NodeId()]
+    at: datetime | None = None
+    moments: list[datetime] | None = None
+
+
+def test_a_saved_local_moment_is_compared_with_a_local_moment_as_the_moment_it_is(
+    gom: StatelessGraphObjectManager, pm: PersistenceManager
+):
+    def check() -> None:
+        # A naive moment is saved a local moment, and found only by another (see _tag_of).
+        local = datetime(2024, 5, 6, 7, 8, 9, 500000)
+        gom.save_all([Wall(id="w", at=local, moments=[local])])
+        q = refs(Wall)
+
+        def found(condition: Any) -> list[str]:
+            return [it.id for it in gom.load_all(Wall, condition)]
+
+        assert found(q.at.eq(local)) == ["w"]
+        assert found(q.at.gt(local - timedelta(microseconds=1))) == ["w"]
+        assert found(q.at.lt(local)) == []
+        assert found(q.at.in_([local, local.replace(tzinfo=UTC)])) == ["w"]
+        assert found(q.moments.has_item(local)) == ["w"]
+        assert found(q.at.eq(local.replace(tzinfo=UTC))) == []
+        assert found(q.at.lt(local.replace(tzinfo=offset(-1)))) == []
+        assert found(q.at.neq(local.replace(tzinfo=UTC))) == ["w"]
+        assert found(q.moments.has_item(local.replace(tzinfo=UTC))) == []
+
+    held_or_failing(pm, check)
+
+
 class Ranked(NodeFragment, labels=["RankedHeld"]):
     """Dates, moments and times of their own label, so an order by an expression orders only its own."""
 

@@ -98,7 +98,7 @@ class PostgresBackend:
         )
 
     def load_fragment(self, model: FragmentModel) -> GraphStatement:
-        return self.load_all_fragments(model, self._id_predicate(model))
+        return self._by_id(self.load_all_fragments(model, self._id_predicate(model)))
 
     def count_fragments(
         self, model: FragmentModel, where: str | None = None, tested: Sequence[str] = ()
@@ -125,7 +125,7 @@ class PostgresBackend:
         )
 
     def load_view(self, model: GraphViewModel, depth: Mapping[str, int] | None = None) -> GraphStatement:
-        return self.load_all_views(model, self._id_predicate(model.root), depth)
+        return self._by_id(self.load_all_views(model, self._id_predicate(model.root), depth))
 
     def count_views(
         self,
@@ -156,7 +156,7 @@ class PostgresBackend:
         root = target.root if isinstance(target, GraphViewModel) else target
         filter_ = self._deleted_where(target, where)
         if cascade is CascadeType.NONE:
-            return self._deleting(root, filter_)
+            return self._by_id(self._deleting(root, filter_))
         if not isinstance(target, GraphViewModel):
             raise DrivineError(f"A cascade follows a view's relationships. {root.type.__name__} is a NodeFragment.")
         cascaded = PostgresViews(self.graph).cascade(target, "n.nid IN (SELECT nid FROM cascade_roots)")
@@ -182,19 +182,21 @@ class PostgresBackend:
             if cascaded.reached
             else []
         )
-        return PostgresStatement(
-            "\n".join(
-                [
-                    f"WITH {'RECURSIVE ' if orphans else ''}cascade_roots AS "
-                    f"(SELECT {ROW_ALIAS}.nid {self._from(root, filter_)}),",
-                    *targets,
-                    f"deleted AS (DELETE FROM {self.graph.nodes} WHERE nid IN (SELECT nid FROM cascade_roots) "
-                    "RETURNING 1)",
-                    # Every node deleted, the roots and what the cascade took, as drivine4j counts them (#375).
-                    "SELECT CAST((SELECT COUNT(*) FROM deleted)"
-                    f"{' + (SELECT COUNT(*) FROM deleted_targets)' if cascaded.reached else ''}"
-                    ' AS integer) AS "deleted"',
-                ]
+        return self._by_id(
+            PostgresStatement(
+                "\n".join(
+                    [
+                        f"WITH {'RECURSIVE ' if orphans else ''}cascade_roots AS "
+                        f"(SELECT {ROW_ALIAS}.nid {self._from(root, filter_)}),",
+                        *targets,
+                        f"deleted AS (DELETE FROM {self.graph.nodes} WHERE nid IN (SELECT nid FROM cascade_roots) "
+                        "RETURNING 1)",
+                        # Every node deleted, the roots and what the cascade took, as drivine4j counts them (#375).
+                        "SELECT CAST((SELECT COUNT(*) FROM deleted)"
+                        f"{' + (SELECT COUNT(*) FROM deleted_targets)' if cascaded.reached else ''}"
+                        ' AS integer) AS "deleted"',
+                    ]
+                )
             )
         )
 
@@ -205,7 +207,10 @@ class PostgresBackend:
         cascaded = PostgresViews(self.graph).cascade(target, "n.nid IN (SELECT nid FROM cascade_roots)")
         return [
             CascadeDepthCheck(
-                it.view, it.field, it.max_depth, PostgresStatement(beyond_count(roots, it.within, it.nodes))
+                it.view,
+                it.field,
+                it.max_depth,
+                self._by_id(PostgresStatement(beyond_count(roots, it.within, it.nodes))),
             )
             for it in cascaded.beyond
         ]
@@ -261,17 +266,21 @@ class PostgresBackend:
         return PostgresSaveBuilder(self.graph, registry).build(target, obj, options, create_only)
 
     def held_properties(self, model: FragmentModel) -> GraphStatement:
-        return PostgresStatement(
-            "\n".join([f'SELECT {ROW_ALIAS}.props AS "props"', self._from(model, self._id_predicate(model))])
+        return self._by_id(
+            PostgresStatement(
+                "\n".join([f'SELECT {ROW_ALIAS}.props AS "props"', self._from(model, self._id_predicate(model))])
+            )
         )
 
     def found_stamp(self, model: FragmentModel) -> GraphStatement:
-        return PostgresStatement(
-            "\n".join(
-                [
-                    f"SELECT COALESCE({ROW_ALIAS}.stamp, '{stamps.NEVER_STAMPED}') AS \"found\"",
-                    self._from(model, self._id_predicate(model)),
-                ]
+        return self._by_id(
+            PostgresStatement(
+                "\n".join(
+                    [
+                        f"SELECT COALESCE({ROW_ALIAS}.stamp, '{stamps.NEVER_STAMPED}') AS \"found\"",
+                        self._from(model, self._id_predicate(model)),
+                    ]
+                )
             )
         )
 
@@ -318,7 +327,7 @@ class PostgresBackend:
             f"JOIN {self.graph.nodes} x ON {join} WHERE {has_labels('a', labels)} AND "
             f"{text_of('a', origin.model.node_id_property)} = CAST($x_from AS text) AND "
             f"{has_labels('x', target.labels)})",
-            {"x_type": type, "x_from": stored_key(origin.id)},
+            {"x_type": type, "x_from": stored_key(origin.id, "postgres")},
         )
 
     def relate(
@@ -391,10 +400,15 @@ class PostgresBackend:
         )
 
     @staticmethod
+    def _by_id(statement: GraphStatement) -> GraphStatement:
+        """`statement`, which finds a node by `$id`, binding the id as the text the store holds it as (stored_key)."""
+        return PostgresStatement.of(statement).keying_id(lambda id: stored_key(id, "postgres"))
+
+    @staticmethod
     def _id_predicate(model: FragmentModel) -> str:
         """
         The node whose id is `$id`, read as text, as a uniqueness constraint over the id holds it and as drivine4j finds
-        a node: a number is its JSON text.
+        a node: a number is the text the store holds it as, as `_by_id` binds it.
         """
         if not model.node_id_property:
             raise DrivineError(f"{model.type.__name__} has no NodeId field, so it can't be found by id.")

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -24,7 +25,7 @@ from drivine.backend.sql.plan_graph import PlanGraph
 from drivine.backend.sql.root_step import RootStep
 from drivine.backend.sql.sql_json import to_json
 from drivine.backend.sql.sql_saves import fragment_of, stamp_excluded
-from drivine.backend.sql.value_layout import store_of
+from drivine.backend.sql.value_layout import SqlStore, store_of, write
 from drivine.backend.sql.write_plan import WritePlan
 from drivine.backend.view_projector import target
 from drivine.drivine_error import DrivineError
@@ -71,7 +72,8 @@ class PostgresSaveBuilder:
     def __init__(self, graph: PlanGraph, registry: ModelRegistry | None = None) -> None:
         self.graph = graph
         self.registry = registry
-        self._plan = WritePlan(store_of(self.graph))
+        self._store: SqlStore = store_of(self.graph)
+        self._plan = WritePlan(self._store)
         self._stamped: list[FragmentModel] = []
         """The models of the related nodes handed their stamps back, each once."""
         self._handed: dict[str, tuple[int, Any]] = {}
@@ -169,7 +171,7 @@ class PostgresSaveBuilder:
         Trims each relationship field named in `replace` to what the object holds: relationships of its type and
         direction from the root to nodes of its labels, other than those any field of that type and direction holds.
         """
-        held = [stored_key(it) for it in held_ids(view, obj)]
+        held = [stored_key(it, self._store) for it in held_ids(view, obj)]
         for field_ in replaced:
             rel = next((it for it in view.relationships if it.field == field_), None)
             if rel is None:
@@ -196,7 +198,7 @@ class PostgresSaveBuilder:
                 rel.type,
                 rel.direction,
                 self._plan.shape(into.labels, _id_property(into)),
-                [stored_key(it) for it in keep],
+                [stored_key(it, self._store) for it in keep],
                 True,
                 self._options.removed_targets is RemovedTargets.DELETE_UNREFERENCED,
                 held,
@@ -218,7 +220,7 @@ class PostgresSaveBuilder:
             self._plan.shape(write.model.labels, key),
             key,
             write.id,
-            stored_key(write.id),
+            stored_key(write.id, self._store),
             list(dict.fromkeys(write.labels)),
             writes,
             index,
@@ -298,9 +300,38 @@ class PostgresSaveBuilder:
         return self.registry.fragment(kind)
 
 
-def stored_key(id: Any) -> str:
-    """An id as the store reads its property back with `->>`: text as it is, a number or a boolean as its JSON."""
-    return id if isinstance(id, str) else to_json(id)
+def stored_key(id: Any, store: SqlStore) -> str:
+    """
+    An id as the store reads its property back as text (`->>`): text as it is, and anything else as the JSON text
+    `store`'s layout holds it as (see value_layout.write), as a save writes it, so a float id is keyed by the text it
+    is held as (`1.0E-7` on SQLite, where Python's JSON writes `1e-07`). On Postgres a number is the text `jsonb` gives
+    back for it, `numeric`'s, with no exponent (`0.00000010` for `1.0E-7`): `jsonb` holds a number as a `numeric`, not
+    as the text it was written as.
+    """
+    if isinstance(id, str):
+        return id
+    text = to_json(write(id, store))
+    return numeric_text(text) if store == "postgres" else text
+
+
+_NUMBER = re.compile(r"^(-?)(\d+)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$")
+
+
+def numeric_text(json: str) -> str:
+    """
+    `json`, JSON text, as Postgres's `numeric` writes the number it is, where it is one (`1.0E-7` as `0.00000010`): its
+    digits with no exponent, as many after the point as were written after it less the exponent, and zero with no sign.
+    Any other JSON is as it is.
+    """
+    number = _NUMBER.match(json)
+    if number is None:
+        return json
+    sign, whole, fraction, exponent = number.group(1), number.group(2), number.group(3) or "", number.group(4) or "0"
+    digits = whole + fraction
+    point = len(whole) + int(exponent)
+    before = "0" if point <= 0 else re.sub(r"^0+(?=\d)", "", digits[:point].ljust(point, "0"))
+    after = "0" * -point + digits if point <= 0 else digits[point:]
+    return f"{sign if re.search('[1-9]', digits) else ''}{before}{f'.{after}' if after else ''}"
 
 
 def without_key(props: Mapping[str, Any], key: str) -> dict[str, Any]:

@@ -56,7 +56,7 @@ class PostgresWrites:
             values: dict[str, Any] = {**(bound.get("set") or {}), **(bound.get("vectors") or {})}
             plan.patch(
                 plan.shape(model.labels, key),
-                stored_key(bound["id"]),
+                stored_key(bound["id"], store_of(self.graph)),
                 bound["id"],
                 "0",
                 present(values),
@@ -87,7 +87,13 @@ class PostgresWrites:
             for i, row in enumerate(bound["rows"]):
                 values: dict[str, Any] = {**(row.get("props") or {}), **(row.get("vectors") or {})}
                 plan.patch(
-                    shape, stored_key(row["id"]), row["id"], str(i), present(values), absent(values), model.lower_copied
+                    shape,
+                    stored_key(row["id"], store_of(self.graph)),
+                    row["id"],
+                    str(i),
+                    present(values),
+                    absent(values),
+                    model.lower_copied,
                 )
             return plan, None
 
@@ -120,7 +126,7 @@ class PostgresWrites:
                     shape,
                     key,
                     id_,
-                    stored_key(id_),
+                    stored_key(id_, store_of(self.graph)),
                     list(dict.fromkeys(group.model.labels)),
                     _writes(props, group.model.lower_copied),
                     index,
@@ -172,7 +178,7 @@ class PostgresWrites:
         """The step that finds the node `node` names, which must be there: by its class's labels and those it adds."""
         key = _id_property(node.model, "a node of it can't be referred to by id")
         labels = list(dict.fromkeys([*node.model.labels, *node.labels]))
-        return plan.ref(plan.shape(labels, key), stored_key(node.id), node.id)
+        return plan.ref(plan.shape(labels, key), stored_key(node.id, store_of(self.graph)), node.id)
 
     def _meeting(self, where: str, bound: Mapping[str, Any]) -> str:
         """

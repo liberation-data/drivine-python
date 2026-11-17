@@ -26,6 +26,8 @@ from drivine import (
     coalesce,
     count,
     equal_to,
+    has_no_value,
+    has_value,
     key,
     refs,
     sum_,
@@ -167,6 +169,13 @@ def test_an_order_expression_that_reads_a_field_declared_temporal_is_refused_by_
         with pytest.raises(DrivineError, match=refused(store)) as raised:
             REFUSING[store].render_query(Query(order_by=term), model, labels)
         assert "an order's expression reads" in str(raised.value)
+
+
+@pytest.mark.parametrize("store", REFUSING)
+def test_an_order_expression_that_tests_whether_a_field_declared_temporal_has_a_value_renders(store: str):
+    # Whether it has a value compares nothing, as is_null doesn't, so it isn't refused.
+    for term in (case_of([has_value(q.on).then(0)], 1).asc(), case_of([has_no_value(q.at).then(0)], 1).desc()):
+        assert REFUSING[store].render_query(Query(order_by=term), model, labels).order_by
 
 
 @pytest.mark.parametrize("store", REFUSING)

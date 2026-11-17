@@ -79,6 +79,9 @@ def write(value: Any, store: SqlStore) -> Any:
     opening = '{"value":'
     if not given.startswith(opening):
         error = json.loads(given).get("error", given)
+        if asked != store:
+            # Oracle's saves written as Postgres's are (ORACLE_SAVES_AS): its refusal names the store it is.
+            error = error.replace("Postgres's `jsonb`", "a save on Oracle")
         raise DrivineError(f"A value can't be written in the store layout: {error}")
     return Held(given[len(opening) : -1])
 

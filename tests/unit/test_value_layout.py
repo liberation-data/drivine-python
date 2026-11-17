@@ -53,6 +53,13 @@ def test_a_float_the_store_holds_as_no_number_is_refused_by_name(store: str, val
         write(value, store)  # pyright: ignore[reportArgumentType]
 
 
+def test_a_float_a_save_on_oracle_holds_as_no_number_is_refused_naming_oracle_not_postgres():
+    # Written as on Postgres until drivine4j#830 (ORACLE_SAVES_AS), and refused naming the store it is written on.
+    with pytest.raises(DrivineError, match="on Oracle") as refused:
+        write(math.inf, "oracle")
+    assert "Postgres" not in str(refused.value)
+
+
 def test_an_object_pydantic_writes_is_written_as_its_json_and_a_set_as_a_list():
     uuid = UUID("12345678-1234-5678-1234-567812345678")
     assert write({"id": uuid, "tags": {"a"}}, "postgres") == {"id": str(uuid), "tags": ["a"]}

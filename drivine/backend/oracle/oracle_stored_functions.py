@@ -31,7 +31,7 @@ def era_name(graph: str) -> str:
 def era_date_name(graph: str) -> str:
     """
     The function the store keeps beside the graph `graph`'s tables that renumbers the year Oracle writes as ISO 8601
-    does: see `era_date_function`.
+    does: the shared module's, made with the graph (see OracleGraph.functions).
     """
     return f"{graph}_era_date"
 

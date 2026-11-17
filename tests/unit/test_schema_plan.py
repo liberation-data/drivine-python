@@ -282,3 +282,33 @@ async def test_a_listing_the_store_refuses_is_read_as_holding_none():
     assert await indexes.list() == []
     assert await constraints.list() == []
     assert not await constraints.in_force(uniqueness_constraint("Person", "email"))
+
+
+@pytest.mark.parametrize(
+    ("listings", "waited", "expected"),
+    [
+        ([[{"buildInProgress": True}], [{"buildInProgress": False}]], 60.0, True),
+        ([[{"buildInProgress": True}]], 0.0, False),
+        ([[{"buildFailed": True}]], 60.0, False),
+    ],
+    ids=["built-while-waited-on", "still-building-past-the-timeout", "build-failed"],
+)
+async def test_a_constraint_is_in_force_once_built_and_not_where_its_build_failed_or_outlasts_the_wait(
+    monkeypatch: pytest.MonkeyPatch, listings: list[list[dict[str, Any]]], waited: float, expected: bool
+):
+    from drivine.schema import planned_managers
+
+    looks: list[None] = []
+
+    async def listed(*_: Any) -> list[dict[str, Any]]:
+        looks.append(None)
+        return listings[min(len(looks), len(listings)) - 1]
+
+    monkeypatch.setattr(planned_managers, "listed", listed)
+    monkeypatch.setattr(planned_managers, "BUILD_POLL", 0)
+    host = Host()
+    constraints = PlannedConstraintManager(
+        planning("postgres", host), schema_grammar_for(DatabaseType.POSTGRES), build_timeout=waited
+    )
+    assert await constraints.in_force(uniqueness_constraint("Person", "email")) is expected
+    assert len(looks) == (2 if expected else 1)

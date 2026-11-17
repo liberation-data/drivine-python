@@ -13,7 +13,7 @@ T = TypeVar("T")
 
 
 class SqliteCursor(BufferedCursor[T]):
-    """Reads a batch at a time from a statement's rows, each fetch on a thread of its own (see SqliteConnection)."""
+    """Reads a batch at a time from a statement's rows, each fetch on the session's thread (see SqliteConnection)."""
 
     def __init__(
         self,

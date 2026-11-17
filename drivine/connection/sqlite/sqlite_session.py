@@ -2,7 +2,7 @@
 # pyright: reportUnknownMemberType=false, reportUnknownArgumentType=false, reportUnknownVariableType=false
 """
 One apsw connection to a SQLite file as Drivine opens it, and the calls on it that block: the async and sync connections
-both run them, the async one on a thread of its own (see concurrency.blocking).
+both run them on the session's own thread (see concurrency.blocking and SqliteSession.thread).
 """
 
 from __future__ import annotations

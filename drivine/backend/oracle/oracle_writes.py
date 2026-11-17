@@ -66,7 +66,10 @@ class OracleWrites:
         return _Patch(block.text, block.bindings)
 
     def patch_many(self, model: FragmentModel) -> GraphStatement:
-        """Writes each row of `$rows`, `{id, props, vectors}`, to its node, making none: `{id, found, changed}`."""
+        """
+        Writes each row of `$rows`, `{id, props, vectors}`, to its node, making none: `{id, found, changed}` per row, in
+        the rows' order, each with its row's id as bound (see _RowOrderedPatch).
+        """
         block = self._block(
             [
                 "v_changed BOOLEAN;",
@@ -101,7 +104,7 @@ class OracleWrites:
                 'OPEN c FOR SELECT column_value AS "result:json" FROM TABLE(v_out);',
             ],
         )
-        return _Patch(block.text, block.bindings)
+        return _RowOrderedPatch(block.text, block.bindings)
 
     def fragment_batch(self, groups: Sequence[FragmentGroup], options: SaveOptions) -> GraphStatement:
         """
@@ -349,6 +352,30 @@ class _Patch(GraphStatement):
                 for row in given["rows"]
             ]
         return super().spec(given)
+
+
+@dataclass(frozen=True)
+class _RowOrderedPatch(_Patch):
+    """
+    patch_many's block, each of whose results, one per row of `$rows` in their order, is handed the id of its row as
+    the manager gave it, which the manager matches the results to its objects by. The id the block gives back is
+    Oracle's text of the id the node holds, plain JSON, where a float is a binary double whose text need not read back
+    as the number given (`0.1 + 0.2`): its object would be left with no result.
+    """
+
+    def spec(self, more: Mapping[str, Any] | None = None) -> QuerySpecification[Any]:
+        rows: list[Any] = list((more or {}).get("rows") or [])
+        return super().spec(more).add_post_processors(_InRowOrder(rows))
+
+
+@dataclass(frozen=True)
+class _InRowOrder:
+    """Hands each result the id of the row of `$rows` at its place."""
+
+    rows: list[Any]
+
+    def apply(self, results: list[Any]) -> list[Any]:
+        return [{**it, "id": self.rows[i].get("id") if i < len(self.rows) else None} for i, it in enumerate(results)]
 
 
 def _id_property(model: FragmentModel) -> str:

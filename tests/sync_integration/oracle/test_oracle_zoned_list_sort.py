@@ -218,16 +218,6 @@ def test_a_list_of_temporal_values_a_with_takes_out_of_an_unwound_map_is_read_in
 
 
 def test_a_list_worked_out_with_temporal_arithmetic_by_a_comprehension_or_collect_sorts_by_its_moments_in_moments():
-    # Compiled to work its temporal arithmetic out inline, as no statement is compiled to call the graph's function of
-    # it yet: Oracle takes past `rows`' bound to parse that (held until drivine-python#510).
-    try:
-        sorts_by_moments()
-    except (AssertionError, pytest.fail.Exception):
-        pytest.xfail("temporal arithmetic is worked out inline until a statement calls the graph's function (#510)")
-    pytest.fail("A list worked out with temporal arithmetic sorts within the bound now: take out the hold (#510)")
-
-
-def sorts_by_moments() -> None:
     comprehension = f"UNWIND [0, 1] AS k WITH k, [i IN range(1, 10) | {AT} + duration({{minutes: i}})] AS l"
     assert rows(f"{comprehension} RETURN k ORDER BY l") == ["0", "1"]
     assert rows(f"{comprehension} RETURN k ORDER BY [l]") == ["0", "1"]

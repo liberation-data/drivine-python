@@ -28,9 +28,11 @@ from drivine.backend.sqlite.sqlite_graph import (
 from drivine.backend.sqlite.sqlite_views import SqliteViews
 from drivine.drivine_error import DrivineError
 from drivine.dsl.compare_test import CompareTest
+from drivine.dsl.condition_node import ConditionNode
+from drivine.dsl.expression_node import ExpressionNode
 from drivine.dsl.model_scope import scope_of
 from drivine.dsl.query import Query
-from drivine.dsl.query_renderer import described
+from drivine.dsl.query_renderer import described, root_property
 from drivine.dsl.rendered_query import RenderedQuery
 from drivine.dsl.root_key import RootKey
 from drivine.dsl.scope import Scope
@@ -183,6 +185,28 @@ class SqliteQueryRenderer(SqlQueryRenderer):
         )
         default = " NULLS LAST" if direction == "ASC" else " NULLS FIRST"
         return f"{first}{number_of(alias, property)} {direction}{default}, {text_} {direction}{default}"
+
+    def _case_condition(self, node: ConditionNode, scope: Scope, alias: str) -> str:
+        """
+        A comparison with a date, a moment or a time compares a property as a comparison of the property with it does
+        (see _typed): a saved one of its own kind as the value it is, and one of another kind as null. Anything else as
+        any SQL store compares it.
+        """
+        given = [it.value for it in node.args if it.kind == "VALUE"] if node.kind == "COMPARE" else []
+        temporal = [it for it in given if _kind_of(it, False) in ("INSTANT", "DATE", "TIME")]
+        if not temporal:
+            return super()._case_condition(node, scope, alias)
+        kind, tag = _kind_of(temporal[0], False), _tag_of(temporal[0])
+
+        def side(it: ExpressionNode) -> str:
+            if it.kind == "PROPERTY":
+                return self._typed(alias, root_property(it.path, scope, "An expression"), kind, tag)
+            if it.kind == "VALUE":
+                return typed(kind, self._bind(self._storable(it.value))) if _tag_of(it.value) == tag else "NULL"
+            return self._expression(it, scope, alias, "TEXT")
+
+        left, right = node.args
+        return f"{side(left)} {node.operator} {side(right)}"
 
     def _read(self, alias: str, property: str, as_: Literal["NUMBER", "TEXT"]) -> str:
         if as_ == "NUMBER" and property != stamps.PROPERTY:

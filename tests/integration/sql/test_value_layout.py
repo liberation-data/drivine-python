@@ -25,7 +25,11 @@ from drivine import (
     PersistenceManager,
     QuerySpecification,
     StatelessGraphObjectManager,
+    above,
+    below,
+    case_of,
     cypher_statement,
+    equal_to,
     node_ref,
     refs,
 )
@@ -506,5 +510,53 @@ async def test_a_date_is_never_a_moment_nor_a_local_moment_a_moment(
         assert await lists(listed.moments.has_item(date(2024, 5, 6))) == []
         assert await lists(listed.days.has_item(datetime(2024, 5, 6, tzinfo=UTC))) == []
         assert await lists(listed.moments.has_item(moment.replace(tzinfo=None))) == []
+
+    await held_or_failing(pm, check)
+
+
+class Ranked(NodeFragment, labels=["RankedHeld"]):
+    """Dates, moments and times of their own label, so an order by an expression orders only its own."""
+
+    id: Annotated[str, NodeId()]
+    on: date | None = None
+    at: datetime | None = None
+    clock: time | None = None
+
+
+async def test_an_order_by_an_expression_compares_a_date_moment_or_time_as_a_condition_does(
+    gom: StatelessGraphObjectManager, pm: PersistenceManager
+):
+    async def check() -> None:
+        await gom.save_all(
+            [
+                Ranked(id="r1", on=date(2024, 3, 1), at=datetime(2024, 5, 6, 8, tzinfo=UTC)),
+                # 07:00 and 09:30 in UTC.
+                Ranked(
+                    id="r2",
+                    on=date(2024, 1, 1),
+                    at=datetime(2024, 5, 6, 9, tzinfo=offset(2)),
+                    clock=time(4, 30, tzinfo=offset(-5)),
+                ),
+                # 08:00 in UTC.
+                Ranked(id="r3", clock=time(9, tzinfo=offset(1))),
+                Ranked(id="r4", clock=time(8)),
+            ]
+        )
+        q = refs(Ranked)
+
+        async def ranked(branch: Any) -> list[str]:
+            """The ids, those the branch ranks 0 first, then the rest, each by id."""
+            ranking = case_of([branch.then(0)], 1)
+            return [it.id for it in await gom.load_all(Ranked, order_by=[ranking.asc(), q.id.asc()])]
+
+        assert await ranked(below(q.on, date(2024, 2, 1))) == ["r2", "r1", "r3", "r4"]
+        assert await ranked(below(q.at, datetime(2024, 5, 6, 7, 30, tzinfo=UTC))) == ["r2", "r1", "r3", "r4"]
+        assert await ranked(equal_to(q.at, datetime(2024, 5, 6, 9, tzinfo=offset(2)))) == ["r2", "r1", "r3", "r4"]
+        # Only 09:30 UTC is after 08:15 UTC, and a local time is neither before nor after a time with an offset.
+        assert await ranked(above(q.clock, time(8, 15, tzinfo=UTC))) == ["r2", "r1", "r3", "r4"]
+        assert await ranked(above(q.clock, time(7))) == ["r4", "r1", "r2", "r3"]
+        # A date is no moment, nor a moment a date.
+        assert await ranked(equal_to(q.at, date(2024, 5, 6))) == ["r1", "r2", "r3", "r4"]
+        assert await ranked(below(q.on, datetime(2025, 1, 1, tzinfo=UTC))) == ["r1", "r2", "r3", "r4"]
 
     await held_or_failing(pm, check)

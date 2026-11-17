@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Awaitable, Callable
 from datetime import UTC, date, datetime, time, timedelta, timezone
 from typing import Annotated, Any
 
@@ -325,3 +326,152 @@ async def test_has_item_finds_a_moment_a_list_holds_as_text_and_passes_over_a_te
     except AssertionError:
         pytest.xfail(DSL_TEMPORALS)
     pytest.fail(f"Held, and passing: take the hold off. {DSL_TEMPORALS}")
+
+
+class Clocked(NodeFragment, labels=["ClockedHeld"]):
+    id: Annotated[str, NodeId()]
+    clock: time | None = None
+
+
+class Midnight(NodeFragment, labels=["MidnightHeld"]):
+    """A time of its own label, so its test orders only its own."""
+
+    id: Annotated[str, NodeId()]
+    clock: time | None = None
+
+
+class TwoKinds(NodeFragment, labels=["TwoKindsHeld"]):
+    """A time of its own label, so its test orders only its own."""
+
+    id: Annotated[str, NodeId()]
+    clock: time | None = None
+
+
+class Local(NodeFragment, labels=["LocalHeld"]):
+    """A time of its own label, so its test orders only its own."""
+
+    id: Annotated[str, NodeId()]
+    clock: time | None = None
+
+
+def offset(hours: int) -> timezone:
+    return timezone(timedelta(hours=hours))
+
+
+async def held_or_failing(pm: PersistenceManager, check: Callable[[], Awaitable[None]]) -> None:
+    """Runs the check: on SQLite it must pass; on Postgres and Oracle it is held (DSL_TEMPORALS) until it passes."""
+    if pm.type is DatabaseType.SQLITE:
+        await check()
+        return
+    try:
+        await check()
+    except AssertionError:
+        pytest.xfail(DSL_TEMPORALS)
+    pytest.fail(f"Held, and passing: take the hold off. {DSL_TEMPORALS}")
+
+
+async def test_the_query_dsl_compares_and_orders_times_at_different_offsets_as_cypher_does(
+    gom: StatelessGraphObjectManager, pm: PersistenceManager
+):
+    async def check() -> None:
+        # drivine-python#526: 08:00:00.5, 08:30 and 09:30 in UTC, each written at another offset.
+        await gom.save_all(
+            [
+                Clocked(id="a", clock=time(9, 0, 0, 500000, tzinfo=offset(1))),
+                Clocked(id="b", clock=time(8, 30, tzinfo=UTC)),
+                Clocked(id="c", clock=time(4, 30, tzinfo=offset(-5))),
+            ]
+        )
+        q = refs(Clocked)
+
+        async def found(condition: Any) -> list[str]:
+            return sorted(it.id for it in await gom.load_all(Clocked, condition))
+
+        assert await found(q.clock.gt(time(8, 15, tzinfo=UTC))) == ["b", "c"]
+        assert await found(q.clock.lte(time(8, 30, tzinfo=UTC))) == ["a", "b"]
+        assert [it.id for it in await gom.load_all(Clocked, order_by=q.clock.asc())] == ["a", "b", "c"]
+        assert [it.id for it in await gom.load_all(Clocked, order_by=q.clock.desc())] == ["c", "b", "a"]
+        after = q.clock.after(time(8, 30, tzinfo=UTC))
+        assert [it.id for it in await gom.load_all(Clocked, order_by=q.clock.asc(), seek=after)] == ["c"]
+        # Two times are equal as Neo4j has them: the same time at the same offset, whatever text wrote it.
+        assert await found(q.clock.eq(time(8, 30, tzinfo=timezone(timedelta(0))))) == ["b"]
+        assert await found(q.clock.eq(time(9, 0, 0, 500000, tzinfo=offset(1)))) == ["a"]
+        assert await found(q.clock.eq(time(8, 0, 0, 500000, tzinfo=UTC))) == []
+        assert await found(q.clock.in_([time(8, 30, tzinfo=UTC), time(4, 30, tzinfo=offset(-5))])) == ["b", "c"]
+
+    await held_or_failing(pm, check)
+
+
+async def test_a_time_with_an_offset_is_compared_by_its_utc_time_unwrapped_at_midnight(
+    gom: StatelessGraphObjectManager, pm: PersistenceManager
+):
+    async def check() -> None:
+        # 01:00+02:00 is 23:00 the day before in UTC: Neo4j has it an hour before midnight, before any time of the day.
+        await gom.save_all(
+            [Midnight(id="early", clock=time(1, tzinfo=offset(2))), Midnight(id="late", clock=time(22, tzinfo=UTC))]
+        )
+        q = refs(Midnight)
+        assert [it.id for it in await gom.load_all(Midnight, q.clock.lt(time(0, 30, tzinfo=UTC)))] == ["early"]
+        assert [it.id for it in await gom.load_all(Midnight, order_by=q.clock.asc())] == ["early", "late"]
+
+    await held_or_failing(pm, check)
+
+
+async def test_a_local_time_and_a_time_with_an_offset_meet_no_comparison_with_each_other(
+    gom: StatelessGraphObjectManager, pm: PersistenceManager
+):
+    async def check() -> None:
+        await gom.save_all([TwoKinds(id="local", clock=time(8)), TwoKinds(id="zoned", clock=time(8, tzinfo=UTC))])
+        q = refs(TwoKinds)
+
+        async def found(condition: Any) -> list[str]:
+            return sorted(it.id for it in await gom.load_all(TwoKinds, condition))
+
+        assert await found(q.clock.eq(time(8))) == ["local"]
+        assert await found(q.clock.eq(time(8, tzinfo=UTC))) == ["zoned"]
+        assert await found(q.clock.gt(time(7))) == ["local"]
+        assert await found(q.clock.gt(time(7, tzinfo=UTC))) == ["zoned"]
+        assert await found(q.clock.in_([time(8)])) == ["local"]
+        assert await found(q.clock.in_([time(8), time(8, tzinfo=UTC)])) == ["local", "zoned"]
+        # A time with an offset orders before a local one, as Neo4j orders them.
+        assert [it.id for it in await gom.load_all(TwoKinds, order_by=q.clock.asc())] == ["zoned", "local"]
+        after = q.clock.after(time(8, tzinfo=UTC))
+        assert [it.id for it in await gom.load_all(TwoKinds, order_by=q.clock.asc(), seek=after)] == ["local"]
+
+    await held_or_failing(pm, check)
+
+
+async def test_two_local_times_are_compared_and_ordered_as_the_times_they_are(
+    gom: StatelessGraphObjectManager, pm: PersistenceManager
+):
+    async def check() -> None:
+        await gom.save_all([Local(id="l", clock=time(9, 30)), Local(id="m", clock=time(10, 0, 0, 250000))])
+        q = refs(Local)
+        assert [it.id for it in await gom.load_all(Local, q.clock.gt(time(9, 45)))] == ["m"]
+        assert [it.id for it in await gom.load_all(Local, q.clock.eq(time(9, 30)))] == ["l"]
+        # Saved as the module writes its fraction, `10:00:00.250`, and found as the time it is.
+        assert [it.id for it in await gom.load_all(Local, q.clock.eq(time(10, 0, 0, 250000)))] == ["m"]
+        assert [it.id for it in await gom.load_all(Local, order_by=q.clock.desc())] == ["m", "l"]
+
+    await held_or_failing(pm, check)
+
+
+async def test_has_item_finds_a_time_in_a_list_as_cypher_finds_one_at_its_offset(
+    gom: StatelessGraphObjectManager, pm: PersistenceManager
+):
+    async def check() -> None:
+        await gom.save_all(
+            [Listed(id="l5", clocks=[time(8, 30, tzinfo=UTC), time(10, 0, 0, 500000, tzinfo=offset(-5))])]
+        )
+        q = refs(Listed)
+
+        async def found(condition: Any) -> list[str]:
+            return sorted(it.id for it in await gom.load_all(Listed, condition))
+
+        assert await found(q.clocks.has_item(time(8, 30, tzinfo=timezone(timedelta(0))))) == ["l5"]
+        assert await found(q.clocks.has_item(time(10, 0, 0, 500000, tzinfo=offset(-5)))) == ["l5"]
+        # The same instant at another offset is another time, and a local time no time with an offset.
+        assert await found(q.clocks.has_item(time(13, 30, tzinfo=offset(5)))) == []
+        assert await found(q.clocks.has_item(time(8, 30))) == []
+
+    await held_or_failing(pm, check)

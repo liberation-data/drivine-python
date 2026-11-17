@@ -50,3 +50,27 @@ def test_each_api_takes_its_own_kind_of_function():
         transactional(coroutine)  # pyright: ignore[reportArgumentType, reportCallIssue]
     with pytest.raises(TypeError, match="takes an async function.*from drivine.sync"):
         drivine.transactional(plain)  # pyright: ignore[reportArgumentType, reportCallIssue]
+
+
+def test_a_blocking_call_on_an_executor_runs_on_its_thread_in_the_callers_context_and_raises_as_itself():
+    from concurrent.futures import ThreadPoolExecutor
+    from contextvars import ContextVar
+
+    from drivine.sync import concurrency
+
+    asked: ContextVar[str] = ContextVar("asked", default="none")
+    asked.set("the caller's")
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="given") as given:
+
+        def seen() -> tuple[str, str]:
+            return threading.current_thread().name, asked.get()
+
+        name, value = concurrency.blocking(seen, on=given)
+        assert name.startswith("given") and value == "the caller's"
+
+        def fails() -> None:
+            raise LookupError("on the other thread")
+
+        with pytest.raises(LookupError, match="on the other thread"):
+            concurrency.blocking(fails, on=given)
+    assert concurrency.blocking(lambda: threading.current_thread()) is threading.current_thread(), "where it is"

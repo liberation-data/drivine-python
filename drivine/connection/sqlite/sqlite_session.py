@@ -2,7 +2,7 @@
 # pyright: reportUnknownMemberType=false, reportUnknownArgumentType=false, reportUnknownVariableType=false
 """
 One apsw connection to a SQLite file as Drivine opens it, and the calls on it that block: the async and sync connections
-both run them, the async one on a thread of its own (see concurrency.blocking).
+both run them on the session's own thread (see concurrency.blocking and SqliteSession.thread).
 """
 
 from __future__ import annotations
@@ -10,6 +10,7 @@ from __future__ import annotations
 import itertools
 import logging
 import re
+import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -98,10 +99,11 @@ class SqliteSession:
     - The log is synced at a checkpoint and not at each commit, as is safe with a write-ahead log: a commit may be lost
       to a power cut, and the file is never left corrupt.
 
-    Outside a transaction each statement commits as it runs. It is used by one caller at a time. The async API runs
-    each call on `thread`, the connection's own: so a connection that waits for the file's lock keeps only its own
-    thread waiting, never one the connection holding the lock needs to finish, and a call made after one whose caller
-    was cancelled runs once that one has ended, never beside it.
+    Outside a transaction each statement commits as it runs. It is used by one caller at a time. Both APIs run each
+    call on `thread`, the connection's own, started with SESSION_STACK, so a regular expression is answered as deep
+    whichever thread asks. In the async API, a connection that waits for the file's lock keeps only its own thread
+    waiting, never one the connection holding the lock needs to finish, and a call made after one whose caller was
+    cancelled runs once that one has ended, never beside it.
     """
 
     def __init__(self, path: str, busy_timeout: int = DEFAULT_BUSY_TIMEOUT) -> None:
@@ -112,7 +114,6 @@ class SqliteSession:
         except apsw.Error as error:
             # SQLite's message, as for a folder that is not there, does not name the file.
             raise DrivineError(f"Could not open the SQLite file '{path}': {error}.") from error
-        self.thread = ThreadPoolExecutor(max_workers=1, thread_name_prefix="drivine-sqlite")
         try:
             self.connection.set_busy_timeout(int(busy_timeout))
             deadline = time.monotonic() + busy_timeout / 1000
@@ -128,6 +129,8 @@ class SqliteSession:
                             raise
                         time.sleep(0.005)
             sqlite_functions.register(self.connection)
+            # Started last, so a connection that fails to open leaves no thread running.
+            self.thread = _session_thread()
         except BaseException:
             self.connection.close()
             raise
@@ -319,6 +322,38 @@ def rows(statement: str, found: Rows, fetched: list[Any]) -> list[dict[str, Any]
         }
         for row in fetched
     ]
+
+
+SESSION_STACK = 64 * 1024 * 1024
+"""
+The stack a session's own thread is started with: SQLite's functions, the shared module's among them, run on it, and
+its regular expressions take a frame for each repeat of a group, so the depth a pattern is answered to is the thread's
+stack's (drivine-cypher-spec#353). On 8 MB, Linux's default, a group repeated about 10,000 times is answered and 20,000
+refused; on macOS's 512 KB for a thread past the main one, 500 and 1,000. 64 MB is only address space until it is used.
+"""
+
+_starting = threading.Lock()
+
+
+def _session_thread() -> ThreadPoolExecutor:
+    """
+    A session's thread, started now with SESSION_STACK. Python sets the stack of the threads it starts next for the
+    whole process, so it is set only while this one starts, under a lock, and set back after (a thread another caller
+    starts in that moment gets it too: address space only); where the platform takes no such size, the thread starts
+    with its default.
+    """
+    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="drivine-sqlite")
+    with _starting:
+        try:
+            previous = threading.stack_size(SESSION_STACK)
+        except (ValueError, RuntimeError):
+            previous = None
+        try:
+            executor.submit(lambda: None).result()
+        finally:
+            if previous is not None:
+                threading.stack_size(previous)
+    return executor
 
 
 def json_value(text: str) -> Any:

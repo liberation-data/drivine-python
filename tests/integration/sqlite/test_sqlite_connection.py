@@ -104,6 +104,13 @@ async def test_the_functions_drivines_statements_call_are_there(pm: PersistenceM
     assert row == {"lowered": "école", "count": 2, "matched": 1, "similarity": 1.0}
 
 
+async def test_a_deep_regular_expression_is_answered_whichever_api_and_thread_asks(pm: PersistenceManager):
+    # A group repeated about 20,000 times, which the shared module's regexp refuses on 8 MB of stack, as the main
+    # thread has on Linux (drivine-cypher-spec#353): each API runs it on the connection's own thread, started with more.
+    text = " " + "aB" * 19_999 + " "
+    assert await rows(pm, "SELECT regexp($p, $t) AS m", p="^(?: (aB)+ )\\z", t=text) == [{"m": 1}]
+
+
 async def test_a_cypher_statement_is_compiled_to_sqlites_sql_and_gives_a_graph_engines_rows(pm: PersistenceManager):
     from drivine import cypher_statement
 

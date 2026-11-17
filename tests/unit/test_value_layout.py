@@ -118,3 +118,12 @@ def test_the_object_managers_own_postgres_rows_keep_a_whole_number_past_a_long_e
     assert read_layout_json(text) == {"big": 2**70, "d": "2024-01-01"}
     # A compiled statement's reads a number past a long's range as the float nearest it, as drivine4j's does.
     assert isinstance(read_compiled_json('{"big": 1180591620717411303424}')["big"], float)
+
+
+def test_a_compiled_statements_postgres_column_reads_a_whole_number_past_a_long_alike_with_a_tag_or_without():
+    from drivine.connection.postgres.postgres_non_finite import read_compiled_json
+
+    plain = read_compiled_json(f'{{"big":{2**70}}}')
+    tagged = read_compiled_json(f'{{"big":{2**70},"$$k":1,"d":{DATE_TAG}}}')
+    assert isinstance(tagged["big"], float) and tagged["big"] == plain["big"]
+    assert tagged["$k"] == 1 and tagged["d"] == "2024-01-01"

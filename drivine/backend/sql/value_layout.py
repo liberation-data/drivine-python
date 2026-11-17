@@ -123,10 +123,14 @@ def _plain(value: Any) -> bool:
 
 
 def read(text: str, parse: Callable[[str], Any] = json.loads) -> Any:
-    """A column's JSON text read in the store layout: as `parse` reads it where it holds nothing of the layout."""
+    """
+    A column's JSON text read in the store layout: as `parse` reads it, then, where it holds anything of the layout,
+    by the module, so a number `parse` reads its own way (a whole number past a long's range a float) is read alike
+    whether or not the column holds a tag or an escaped key.
+    """
     if '"$' not in text and "\\u0024" not in text:
         return parse(text)
-    return _read_by_module(text)
+    return _read_by_module(text) if parse is json.loads else _read_through(parse(text))
 
 
 def read_after(text: str, raw: Callable[[Any], Any], parse: Callable[[str], Any] = json.loads) -> Any:

@@ -83,7 +83,9 @@ class OracleConnection(Connection):
             if cursor is not None:
                 cursor.close()
         log_statement(self.session_id, finalized, start)
-        return self.result_mapper.map_query_results(_read_lobs(rows), columns, finalized)
+        # A compiled statement's rows, and the object manager's own, are in the store layout.
+        layout = sql is not finalized or finalized.store_layout
+        return self.result_mapper.map_query_results(_read_lobs(rows), columns, finalized, layout)
 
     def open_cursor(self, spec: CursorSpecification[T]) -> OracleCursor[T]:
         finalized = spec.finalized_copy("SQL")
@@ -100,7 +102,7 @@ class OracleConnection(Connection):
         cursor.arraysize = spec.batch
         _prepare(cursor, compiled.statement, sql is not finalized)
         cursor.execute(compiled.statement, self._bindable(compiled.parameters), fetch_lobs=False)
-        return OracleCursor(finalized, cursor, self.result_mapper)
+        return OracleCursor(finalized, cursor, self.result_mapper, sql is not finalized or finalized.store_layout)
 
     def _compiled(self, finalized: QuerySpecification[T]) -> QuerySpecification[T]:
         """

@@ -6,6 +6,7 @@ import dataclasses
 import inspect
 import logging
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any, Literal, TypeVar
 
 from pydantic import BaseModel
@@ -49,8 +50,10 @@ from drivine.model.relationship_fragment_model import RelationshipFragmentModel
 from drivine.model.relationship_model import RelationshipModel
 from drivine.model.target_model import TargetModel
 from drivine.model.vector_field import VectorField
+from drivine.query.query_specification import QuerySpecification
 from drivine.schema.schema_grammar import SchemaGrammar, schema_grammar_for
 from drivine.schema.schema_item import SchemaItem
+from drivine.schema.schema_plan import SchemaPlan
 from drivine.store.store_identity import StoreIdentity
 from drivine.sync.dsl.query_index_advisor import QueryIndexAdvisor
 from drivine.sync.manager.contention import when_not_contended
@@ -60,6 +63,13 @@ from drivine.sync.manager.persistence_manager import PersistenceManager
 from drivine.sync.schema.constraint_manager import ConstraintManager
 from drivine.sync.schema.index_manager import IndexManager
 from drivine.sync.schema.lower_copy_catalog import LowerCopyCatalog
+from drivine.sync.schema.planned_managers import (
+    SQL_STORES,
+    PlannedConstraintManager,
+    PlannedIndexManager,
+    SchemaPlanning,
+    SqlPlanHost,
+)
 from drivine.sync.schema.schema_executor import SchemaExecutor
 from drivine.sync.store.store_identity_resolver import StoreIdentityResolver
 from drivine.sync.transaction.transaction import current_transaction
@@ -114,18 +124,42 @@ class StatelessGraphObjectManager:
     @property
     def indexes(self) -> IndexManager:
         """
-        Range, vector and full-text indexes of this manager's database: made idempotently, outside any transaction.
+        Range, vector and full-text indexes of this manager's database: made idempotently, outside any transaction. On
+        a SQL store, as the shared module plans them (see planned_managers).
         """
+        planning = self.schema_planning()
+        if planning is not None:
+            return PlannedIndexManager(planning, self._schema_grammar())
         return IndexManager(
             self._schema_executor(), self._schema_grammar(), self.index_advisor.refresh, self._lower_copies()
         )
 
     @property
     def constraints(self) -> ConstraintManager:
-        """Uniqueness constraints of this manager's database: made idempotently, outside any transaction."""
+        """
+        Uniqueness constraints of this manager's database: made idempotently, outside any transaction. On a SQL store,
+        as the shared module plans them (see planned_managers).
+        """
+        planning = self.schema_planning()
+        if planning is not None:
+            return PlannedConstraintManager(planning, self._schema_grammar())
         return ConstraintManager(
             self._schema_executor(), self._schema_grammar(), self.index_advisor.refresh, self._lower_copies()
         )
+
+    def schema_planning(self) -> SchemaPlanning | None:
+        """
+        The shared module's schema plan of this manager's SQL store, with how its statements run here; None on a graph
+        engine, whose schema drivine-python plans itself (liberation-data/drivine-python#515).
+        """
+        store = SQL_STORES.get(self.persistence_manager.type)
+        if store is None:
+            return None
+        graph = getattr(self.backend, "graph", None)
+        host = SqlPlanHost(
+            self._schema_executor(), self.persistence_manager, self._lower_copies(), self.index_advisor.refresh
+        )
+        return SchemaPlanning(SchemaPlan(store, graph.name if graph is not None else None), self.database, host)
 
     def store_identity(self) -> StoreIdentity:
         """
@@ -632,7 +666,9 @@ class StatelessGraphObjectManager:
         Writes named fields of many nodes, each where its node is there, making none. One result for each object, in
         order. `only` or `except_` is required: to write every field, save. Under NullPolicy.IGNORE, the default, a
         named field that is None is left as the store has it. For a view the fields are its root's; its relationships
-        aren't written.
+        aren't written. The nodes are written PATCH_ROWS to a statement, and the statements run as one batch, as
+        `save_all` runs its: outside a transaction of the caller's, in one transaction, so a failure, or a value refused
+        in any of them, leaves nothing written; inside one, they join it.
         """
         if not objects:
             return []
@@ -662,10 +698,16 @@ class StatelessGraphObjectManager:
             raise DrivineError("patch_all takes each id once.")
         # In order of id, so that two calls over the same nodes take their locks in the same order.
         ordered = sorted(rows, key=lambda it: str(it["id"]))
+        # Every chunk bound before any runs, so a value refused in any writes nothing; then run as one batch, which
+        # rolls back on failure, as drivine4j's patchAll runs its chunks as one SaveExecutor batch (#512).
+        statement = self.backend.patch_many(root)
+        chunks: list[GraphStatement] = [
+            _Bound(statement.text, statement.bindings, statement.spec({"rows": ordered[start : start + PATCH_ROWS]}))
+            for start in range(0, len(ordered), PATCH_ROWS)
+        ]
         results: dict[Any, PatchResult] = {}
-        for start in range(0, len(ordered), PATCH_ROWS):
-            spec = self.backend.patch_many(root).spec({"rows": ordered[start : start + PATCH_ROWS]})
-            for it in self._when_uncontended(lambda spec=spec: self.persistence_manager.query(spec)):
+        for rows in self._run_batch(chunks):
+            for it in rows:
                 results[it["id"]] = PatchResult(it["found"], it["found"], it["changed"])
         return [results[it] for it in ids]
 
@@ -1113,3 +1155,14 @@ def _chunked(groups: list[FragmentGroup], size: int) -> list[list[FragmentGroup]
     if current:
         chunks.append(current)
     return chunks
+
+
+@dataclass(frozen=True)
+class _Bound(GraphStatement):
+    """A statement bound already, whose specification is the one it was bound as: one of patch_all's chunks."""
+
+    bound: QuerySpecification[Any] | None = None
+
+    def spec(self, more: Mapping[str, Any] | None = None) -> QuerySpecification[Any]:
+        assert self.bound is not None and not more
+        return self.bound

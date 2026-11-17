@@ -691,15 +691,35 @@ def test_writes_what_typescript_writes_for_sqlite():
     expect_golden("SQLITE", {**sqlite_statements(), **schema(schema_grammar_for(DatabaseType.SQLITE, SqliteGraph()))})
 
 
+HELD: dict[str, dict[str, str]] = {}
+"""
+What of a store's goldens differs here until a later change of this library's lands, by name: each is checked to
+differ, or to be written here alone, so its hold is taken off as soon as it no longer does.
+"""
+
+
+def held(engine: str, name: str) -> str | None:
+    return HELD.get(engine, {}).get(name)
+
+
 def expect_golden(engine: str, statements: dict[str, str]) -> None:
     """
     Each statement as TypeScript writes it, character for character. A plan is compared as the JSON it is: the keys of
     a step's properties are in the order the object holds them, which is its fields' in Python and the order a
-    TypeScript object was given them in, and the write function reads them alike in any order.
+    TypeScript object was given them in, and the write function reads them alike in any order. A statement held (see
+    HELD) must differ, or be written here alone.
     """
-    assert statements.keys() == GOLDEN[engine].keys()
+    golden = GOLDEN[engine]
+    assert {it for it in statements if not held(engine, it)} == {it for it in golden if not held(engine, it)}
+    passing: list[str] = []
     for name, text in statements.items():
-        if name.endswith(".plan"):
-            assert json.loads(text) == json.loads(GOLDEN[engine][name]), name
+        expected = golden.get(name)
+        same = expected is not None and (
+            json.loads(text) == json.loads(expected) if name.endswith(".plan") else text == expected
+        )
+        if held(engine, name):
+            if same:
+                passing.append(name)
         else:
-            assert text == GOLDEN[engine][name], name
+            assert same, name
+    assert passing == [], f"Held, and written as TypeScript writes them: take them out of HELD: {passing}"

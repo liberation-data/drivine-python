@@ -11,7 +11,7 @@ from drivine.backend.matched_node import MatchedNode
 from drivine.backend.matching_search import FullTextIndexLookup, MatchingSearch
 from drivine.backend.nearest_search import NearestSearch
 from drivine.backend.page import Page
-from drivine.backend.postgres.postgres_graph import PostgresGraph, has_labels, node_document, number_of, text_of
+from drivine.backend.postgres.postgres_graph import PostgresGraph, has_labels, node_document, text_of
 from drivine.backend.postgres.postgres_groups import PostgresGroups
 from drivine.backend.postgres.postgres_query_renderer import PostgresQueryRenderer
 from drivine.backend.postgres.postgres_save_builder import PostgresSaveBuilder, stored_key
@@ -23,7 +23,8 @@ from drivine.backend.save_statement import SaveStatement
 from drivine.backend.sql.cypher_shorthand import CypherShorthand
 from drivine.backend.sql.sql_cascade import beyond_count, kept_targets
 from drivine.backend.sql.sql_catalog import CATALOG_KINDS, catalog_properties
-from drivine.backend.sql.sql_graph import self_loop_once, sql_text
+from drivine.backend.sql.sql_graph import self_loop_once
+from drivine.backend.store_statements import StampAndMarker
 from drivine.cypher.shared_compiler import SearchIndex, full_text_index_lookup
 from drivine.drivine_error import DrivineError
 from drivine.dsl.query import Query
@@ -44,9 +45,6 @@ STORE_LABEL = "DrivineStore"
 
 SCHEMA_MARKER = "_DrivineSchema"
 """The label of the nodes recording what each schema owner applied: drivine4j's, so both read one marker."""
-
-_NOW_MILLIS = "CAST(floor(extract(epoch FROM clock_timestamp()) * 1000) AS bigint)"
-"""The moment, in milliseconds since the epoch, as the graph engines' timestamp() gives it."""
 
 _CONTENDED = ("40001", "40P01")
 """A serialization failure and a deadlock: another writer's doing."""
@@ -334,57 +332,28 @@ class PostgresBackend:
     def unrelate_all(self, origin: MatchedNode, type: str, direction: Direction) -> GraphStatement:
         return PostgresWrites(self.graph).unrelate_all(origin, type, direction)
 
+    @property
+    def _stamp_and_marker(self) -> StampAndMarker:
+        """The store's stamp and schema marker statements, the shared module's (see StampAndMarker)."""
+        return StampAndMarker("postgres", self.graph.name, PostgresStatement.of)
+
     def store_stamps(self) -> GraphStatement:
-        """The store's identity stamps, `{id, assignedAt}`, oldest first."""
-        return PostgresStatement(
-            f"SELECT jsonb_build_object('id', {text_of('n', 'storeId')}, 'assignedAt', {text_of('n', 'assignedAt')}) "
-            f'AS "stamp" FROM {self.graph.nodes} n WHERE {has_labels("n", [STORE_LABEL])} '
-            f"ORDER BY {text_of('n', 'assignedAt')}, {text_of('n', 'storeId')}"
-        )
+        return self._stamp_and_marker.store_stamps()
 
     def assign_store_stamp(self) -> GraphStatement:
-        """Mints the stamp unless it is there; the uniqueness constraint on its key turns away a racing writer's."""
-        return PostgresStatement(
-            f"INSERT INTO {self.graph.nodes} (labels, props) SELECT {_labelled(STORE_LABEL)}, "
-            "jsonb_build_object('key', CAST($key AS text), 'storeId', CAST($storeId AS text), "
-            "'assignedAt', CAST($assignedAt AS text), 'engine', CAST($engine AS text)) "
-            f"WHERE NOT EXISTS (SELECT 1 FROM {self.graph.nodes} n WHERE {has_labels('n', [STORE_LABEL])} "
-            f"AND {text_of('n', 'key')} = CAST($key AS text))"
-        )
+        return self._stamp_and_marker.assign_store_stamp()
 
     def schema_marker(self, property: str) -> GraphStatement:
-        return PostgresStatement(
-            f'SELECT {text_of("n", property)} AS "value" FROM {self.graph.nodes} n WHERE {self._marker("n")} '
-            f"ORDER BY {self._newest_first('n')} LIMIT 1"
-        )
+        return self._stamp_and_marker.schema_marker(property)
 
-    @staticmethod
-    def marker_items(stored: str | None) -> list[str] | None:
-        """Postgres keeps an empty string apart from null, so an inventory is kept as it is, as drivine4j keeps it."""
-        if stored is None:
-            return None
-        return [] if stored == "" else stored.split("\n")
+    def marker_items(self, stored: str | None) -> list[str] | None:
+        return self._stamp_and_marker.marker_items(stored)
 
     def record_schema_marker(self) -> GraphStatement:
-        """The newest marker of the scope is written, and one is made where there is none."""
-        written = f"'version', CAST($version AS text), 'items', CAST($items AS text), 'appliedAt', {_NOW_MILLIS}"
-        nodes = self.graph.nodes
-        return PostgresStatement(
-            f"WITH found AS (SELECT m.nid FROM {nodes} m WHERE {self._marker('m')} "
-            f"ORDER BY {self._newest_first('m')} LIMIT 1), "
-            f"written AS (UPDATE {nodes} n SET props = jsonb_strip_nulls(n.props || jsonb_build_object({written})) "
-            "FROM found WHERE n.nid = found.nid RETURNING n.nid) "
-            f"INSERT INTO {nodes} (labels, props) SELECT {_labelled(SCHEMA_MARKER)}, "
-            f"jsonb_strip_nulls(jsonb_build_object('scope', CAST($scope AS text), {written})) "
-            "WHERE NOT EXISTS (SELECT 1 FROM found)"
-        )
+        return self._stamp_and_marker.record_schema_marker()
 
     def prune_schema_markers(self) -> GraphStatement:
-        return PostgresStatement(
-            f"DELETE FROM {self.graph.nodes} WHERE nid IN (SELECT nid FROM (SELECT n.nid, row_number() OVER (ORDER BY "
-            f"{self._newest_first('n')}) AS position FROM {self.graph.nodes} n WHERE {self._marker('n')}) ranked "
-            "WHERE position > 1)"
-        )
+        return self._stamp_and_marker.prune_schema_markers()
 
     def contended(self, failure: BaseException) -> bool:
         """
@@ -398,15 +367,6 @@ class PostgresBackend:
                 return True
             cause = cause.__cause__
         return False
-
-    def _marker(self, alias: str) -> str:
-        """The markers of the owner bound as `$scope`."""
-        return f"{has_labels(alias, [SCHEMA_MARKER])} AND {text_of(alias, 'scope')} = CAST($scope AS text)"
-
-    @staticmethod
-    def _newest_first(alias: str) -> str:
-        """The marker applied last first, then the one made later, so the marker read, written and kept are one."""
-        return f"{number_of(alias, 'appliedAt')} DESC NULLS LAST, {alias}.nid DESC"
 
     def _root_where(self, target: TargetModel, where: str | None) -> str | None:
         """A predicate over the root's row and, for a view, the view's requirements."""
@@ -449,8 +409,3 @@ class PostgresBackend:
             *([f"OFFSET {page.skip} ROWS"] if page.skip is not None else []),
             *([f"FETCH NEXT {page.limit} ROWS ONLY"] if page.limit is not None else []),
         ]
-
-
-def _labelled(label: str) -> str:
-    """The labels of a node that carries the one label, as a literal."""
-    return sql_text(f'["{label}"]')

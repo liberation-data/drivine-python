@@ -14,115 +14,11 @@ import pytest
 
 from drivine import QuerySpecification, cypher_statement
 from drivine.backend.oracle import oracle_stored_functions
-from drivine.backend.oracle.oracle_graph import OracleGraph
-from drivine.backend.oracle.oracle_stored_functions import OracleStoredFunctions, nulls_equal_function
-from drivine.backend.sql.sql_graph import sql_text
+from drivine.backend.oracle.oracle_stored_functions import OracleStoredFunctions
 from drivine.connection.oracle.oracle_connection import OracleConnection
 from drivine.connection.oracle.oracle_connection_provider import OracleConnectionProvider
 from drivine.cursor.cursor_specification import CursorSpecification
 from drivine.sync.connection.oracle.oracle_connection import OracleConnection as SyncOracleConnection
-
-# The lines of drivine4j's `OracleCypherCompiler.nullsEqualFunction`, copied verbatim from drivine4j's main at ae870884
-# (liberation-data/drivine4j#323), its Kotlin comment and `$name` too: Kotlin's `"$name"` is the function's name, and
-# here is replaced by it. The store keeps this function, so its text is part of the store layout the three libraries
-# share, byte for byte. A change to it is made in drivine4j first and copied here again.
-# fmt: off
-DRIVINE4J_NULLS_EQUAL = [
-    "FUNCTION $name(cy_x JSON, cy_y JSON) RETURN NUMBER IS",
-    "    FUNCTION eq(a JSON_ELEMENT_T, b JSON_ELEMENT_T) RETURN NUMBER IS",
-    "        r NUMBER := 1;",
-    "        e NUMBER;",
-    "        la JSON_ARRAY_T;",
-    "        lb JSON_ARRAY_T;",
-    "        oa JSON_OBJECT_T;",
-    "        ob JSON_OBJECT_T;",
-    "        ks JSON_KEY_LIST;",
-    "        too_long EXCEPTION;",
-    "        PRAGMA EXCEPTION_INIT(too_long, -40478);",
-    "    BEGIN",
-    "        IF a.is_Null OR b.is_Null THEN RETURN NULL; END IF;",
-    "        IF a.is_Array AND b.is_Array THEN",
-    "            la := TREAT(a AS JSON_ARRAY_T);",
-    "            lb := TREAT(b AS JSON_ARRAY_T);",
-    "            IF la.get_Size <> lb.get_Size THEN RETURN 0; END IF;",
-    "            FOR i IN 0 .. la.get_Size - 1 LOOP",
-    "                e := eq(la.get(i), lb.get(i));",
-    "                IF e = 0 THEN RETURN 0; END IF;",
-    "                IF e IS NULL THEN r := NULL; END IF;",
-    "            END LOOP;",
-    "            RETURN r;",
-    "        END IF;",
-    "        IF a.is_Object AND b.is_Object THEN",
-    "            oa := TREAT(a AS JSON_OBJECT_T);",
-    "            ob := TREAT(b AS JSON_OBJECT_T);",
-    "            IF oa.get_Size <> ob.get_Size THEN RETURN 0; END IF;",
-    "            ks := oa.get_Keys;",
-    "            FOR i IN 1 .. ks.COUNT LOOP",
-    "                IF NOT ob.has(ks(i)) THEN RETURN 0; END IF;",
-    "                e := eq(oa.get(ks(i)), ob.get(ks(i)));",
-    "                IF e = 0 THEN RETURN 0; END IF;",
-    "                IF e IS NULL THEN r := NULL; END IF;",
-    "            END LOOP;",
-    "            RETURN r;",
-    "        END IF;",
-    "        IF a.is_Number AND b.is_Number THEN RETURN CASE WHEN a.to_Number = b.to_Number THEN 1 ELSE 0 END; END IF;",  # noqa: E501
-    # As VARCHAR2s, about 3.5 times as fast as CLOBs; as CLOBs where one is past 32 KB, which to_String
-    # raises on (ORA-40478).
-    "        IF a.is_String AND b.is_String THEN",
-    "            BEGIN",
-    "                RETURN CASE WHEN a.to_String = b.to_String THEN 1 ELSE 0 END;",
-    "            EXCEPTION WHEN too_long THEN",
-    "                RETURN CASE WHEN DBMS_LOB.COMPARE(a.to_Clob, b.to_Clob) = 0 THEN 1 ELSE 0 END;",
-    "            END;",
-    "        END IF;",
-    "        IF a.is_Boolean AND b.is_Boolean THEN RETURN CASE WHEN a.to_Boolean = b.to_Boolean THEN 1 ELSE 0 END; END IF;",  # noqa: E501
-    "        RETURN 0;",
-    "    END;",
-    "BEGIN",
-    "    RETURN eq(JSON_ELEMENT_T.parse(JSON_SERIALIZE(cy_x RETURNING CLOB)), JSON_ELEMENT_T.parse(JSON_SERIALIZE(cy_y RETURNING CLOB)));",  # noqa: E501
-    "END;",
-]
-# fmt: on
-
-
-def drivine4j_nulls_equal(name: str) -> str:
-    """The text drivine4j makes of the function `name`: its lines joined by `\\n`, with no newline after the last."""
-    return "\n".join(DRIVINE4J_NULLS_EQUAL).replace("$name", name)
-
-
-def test_the_function_is_drivine4js_text_byte_for_byte_as_create_or_replace_of_it():
-    assert nulls_equal_function("myGraph_nulls_equal") == drivine4j_nulls_equal("myGraph_nulls_equal")
-    graph = OracleGraph("myGraph")
-    assert graph.nulls_equal == "myGraph_nulls_equal"
-    assert graph.functions[0] == f"CREATE OR REPLACE {drivine4j_nulls_equal('myGraph_nulls_equal')}"
-    assert graph.functions[0].endswith("END;")
-
-
-def test_each_function_is_made_after_the_tables_where_missing_or_not_valid_tolerant_of_a_user_who_may_not_make_one():
-    # drivine4j's OracleNamesTest of the block (#270, drivine4j#584): whether or not the tables were there, each
-    # function is looked for, and made where it is missing or not valid, on its own, as a store an earlier version made
-    # may have one and not the others; and a user who may not make one (ORA-01031) still has the store.
-    graph = OracleGraph("myGraph")
-    ensuring = graph.ensuring
-    for statement in graph.ddl:
-        assert f"BEGIN EXECUTE IMMEDIATE {sql_text(statement)}; EXCEPTION WHEN e_exists THEN NULL; END;" in ensuring
-    tables_end = ensuring.index("    END IF;")
-    assert "PRAGMA EXCEPTION_INIT(e_denied, -1031);" in ensuring
-    names = ["myGraph_nulls_equal", "myGraph_era", "myGraph_era_date"]
-    assert [it.removeprefix("CREATE OR REPLACE FUNCTION ").split("(")[0] for it in graph.functions] == names
-    after = max(ensuring.rindex("EXCEPTION WHEN e_exists THEN NULL; END;"), tables_end)
-    for name, statement in zip(names, graph.functions, strict=True):
-        assert statement.startswith("CREATE OR REPLACE FUNCTION "), statement
-        checked = ensuring.index(
-            "SELECT COUNT(*) INTO v_made FROM user_objects\n"
-            f"        WHERE object_type = 'FUNCTION' AND object_name = '{name.upper()}' AND status = 'VALID';"
-        )
-        made = ensuring.index(f"BEGIN EXECUTE IMMEDIATE {sql_text(statement)}; EXCEPTION WHEN e_denied THEN NULL; END;")
-        assert after < checked < made, ensuring
-        assert ensuring.index("    END IF;", made) < ensuring.find("SELECT COUNT(*)", made) or name == names[-1]
-        after = made
-    assert ensuring.count("FROM user_objects") == len(graph.functions)
-    assert ensuring.count("BEGIN EXECUTE IMMEDIATE ") == len(graph.ddl) + len(graph.functions)
 
 
 class Missing(SimpleNamespace):

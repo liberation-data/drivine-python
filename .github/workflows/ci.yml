@@ -99,7 +99,10 @@ jobs:
         # bash by name runs with pipefail, so a failing bench fails the step through the tee.
         shell: bash
         run: uv run python scripts/compile_bench.py --json compile-bench.json --against tests/bench/compile-baseline.json --import-against ../main-tree | tee -a "$GITHUB_STEP_SUMMARY"
+      # Uploaded where the gate failed too, so a change that moves the corpus or the compiler can take its results as the
+      # new baseline (tests/bench/compile-baseline.json), measured on CI's machines as the gate's are.
       - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
         with:
           name: compile-bench
           path: compile-bench.json

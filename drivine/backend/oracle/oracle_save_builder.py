@@ -20,6 +20,7 @@ from drivine.backend.save_statement_builder import (
 )
 from drivine.backend.sql.sql_json import to_json
 from drivine.backend.sql.sql_saves import fragment_of, stamp_excluded
+from drivine.backend.sql.value_layout import held_key, write_props
 from drivine.backend.view_projector import target
 from drivine.drivine_error import DrivineError
 from drivine.manager.null_policy import NullPolicy
@@ -200,7 +201,7 @@ class OracleSaveBuilder:
                 out.extend(self._lowering(write, variable))
                 related = rel.related
                 rel_props = (
-                    self._bind(to_json(props_of(related, item, [related.target_field])))
+                    self._bind(to_json(write_props(props_of(related, item, [related.target_field]), "oracle")))
                     if isinstance(related, RelationshipFragmentModel)
                     else "NULL"
                 )
@@ -365,7 +366,7 @@ END;"""
         if not write.lower:
             return []
         self._lowers = True
-        return [f"lower_node({variable}, {self._bind(to_json(write.lower))});"]
+        return [f"lower_node({variable}, {self._bind(to_json([held_key(it) for it in write.lower]))});"]
 
     def _node_params(self, write: _NodeWrite) -> dict[str, str]:
         assert write.model.node_id_property is not None
@@ -376,7 +377,8 @@ END;"""
             "match": self._bind(match),
             "id": self._bind(to_json(write.id)),
             "labels": self._bind(to_json(list(dict.fromkeys(write.labels)))),
-            "props": self._bind(to_json(write.props)),
+            # In the store layout (see value_layout), as the shared module writes them.
+            "props": self._bind(to_json(write_props(write.props, "oracle"))),
             "add": self._bind(to_json(write.add)),
             "remove": self._bind(to_json(write.remove)),
             "record": self._bind(write.record[0]) if write.record else "NULL",

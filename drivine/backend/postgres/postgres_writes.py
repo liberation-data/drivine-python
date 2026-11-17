@@ -17,6 +17,7 @@ from drivine.backend.sql.node_writes import NodeWrites
 from drivine.backend.sql.plan_graph import PlanGraph
 from drivine.backend.sql.sql_graph import sql_text
 from drivine.backend.sql.sql_json import storable, to_json
+from drivine.backend.sql.value_layout import store_of
 from drivine.backend.sql.write_plan import WritePlan
 from drivine.drivine_error import DrivineError
 from drivine.manager.relate_mode import RelateMode
@@ -51,11 +52,12 @@ class PostgresWrites:
         key = _id_property(model, "it can't be patched by id")
 
         def planned(bound: Mapping[str, Any]) -> tuple[WritePlan, str | None]:
-            plan = WritePlan()
+            plan = WritePlan(store_of(self.graph))
             values: dict[str, Any] = {**(bound.get("set") or {}), **(bound.get("vectors") or {})}
             plan.patch(
                 plan.shape(model.labels, key),
                 stored_key(bound["id"]),
+                bound["id"],
                 "0",
                 present(values),
                 absent(values),
@@ -80,11 +82,13 @@ class PostgresWrites:
         key = _id_property(model, "it can't be patched by id")
 
         def planned(bound: Mapping[str, Any]) -> tuple[WritePlan, str | None]:
-            plan = WritePlan()
+            plan = WritePlan(store_of(self.graph))
             shape = plan.shape(model.labels, key)
             for i, row in enumerate(bound["rows"]):
                 values: dict[str, Any] = {**(row.get("props") or {}), **(row.get("vectors") or {})}
-                plan.patch(shape, stored_key(row["id"]), str(i), present(values), absent(values), model.lower_copied)
+                plan.patch(
+                    shape, stored_key(row["id"]), row["id"], str(i), present(values), absent(values), model.lower_copied
+                )
             return plan, None
 
         def reshaped(rows: list[str], bound: Mapping[str, Any]) -> list[Any]:
@@ -102,7 +106,7 @@ class PostgresWrites:
         batch only adds. Returns `{groups: [{before, after}]}`, each a list of `{id, stamp}`, for the stamps to be
         handed back.
         """
-        plan = WritePlan()
+        plan = WritePlan(store_of(self.graph))
         handed: dict[str, tuple[int, Any]] = {}
         for g, group in enumerate(groups):
             key = _id_property(group.model, "it can't be saved: a save merges on the id")
@@ -158,7 +162,7 @@ class PostgresWrites:
         """The plan `steps` writes, which counts the relationships it writes: one row, their number."""
         if not type or not type.strip():
             raise DrivineError("A relationship needs a type.")
-        plan = WritePlan()
+        plan = WritePlan(store_of(self.graph))
         steps(plan)
         return PostgresWriteStatement.of(
             self.graph, "COUNT", lambda bound: (plan, None), lambda rows, bound: [int(it) for it in rows]
@@ -168,7 +172,7 @@ class PostgresWrites:
         """The step that finds the node `node` names, which must be there: by its class's labels and those it adds."""
         key = _id_property(node.model, "a node of it can't be referred to by id")
         labels = list(dict.fromkeys([*node.model.labels, *node.labels]))
-        return plan.ref(plan.shape(labels, key), stored_key(node.id))
+        return plan.ref(plan.shape(labels, key), stored_key(node.id), node.id)
 
     def _meeting(self, where: str, bound: Mapping[str, Any]) -> str:
         """

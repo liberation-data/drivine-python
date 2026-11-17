@@ -1,80 +1,99 @@
 {
   "python": "3.13.18",
   "machine": "Linux x86_64",
+  "cpu": "AMD EPYC 7763 64-Core Processor",
   "runs": 5,
   "import": {
-    "median": 155.496,
-    "mean": 185.528,
-    "p99": 457.711,
-    "max": 457.711
+    "min": 209.196,
+    "median": 214.333,
+    "mean": 244.642,
+    "p99": 516.358,
+    "max": 516.358
+  },
+  "import_against": {
+    "tree": "../main-tree",
+    "min": 204.556,
+    "median": 209.259,
+    "mean": 245.813,
+    "p99": 579.367,
+    "max": 579.367
   },
   "first_compile": {
     "POSTGRES": {
-      "median": 171.139,
-      "mean": 213.936,
-      "p99": 385.301,
-      "max": 385.301
+      "min": 53.796,
+      "median": 55.487,
+      "mean": 55.907,
+      "p99": 59.004,
+      "max": 59.004
     },
     "SQLITE": {
-      "median": 175.499,
-      "mean": 176.222,
-      "p99": 180.023,
-      "max": 180.023
+      "min": 38.975,
+      "median": 39.35,
+      "mean": 39.42,
+      "p99": 39.933,
+      "max": 39.933
     },
     "ORACLE": {
-      "median": 175.148,
-      "mean": 178.827,
-      "p99": 188.888,
-      "max": 188.888
+      "min": 39.428,
+      "median": 40.179,
+      "mean": 40.165,
+      "p99": 40.952,
+      "max": 40.952
     }
   },
   "warm": {
     "POSTGRES": {
-      "statements": 1691,
-      "refused": 414,
+      "statements": 5563,
+      "refused": 2032,
       "uncached": {
-        "median": 1.679,
-        "mean": 3.305,
-        "p99": 22.511,
-        "max": 38.936
+        "min": 0.042,
+        "median": 0.688,
+        "mean": 1.145,
+        "p99": 12.851,
+        "max": 210.05
       },
       "cached": {
-        "median": 0.274,
-        "mean": 0.377,
-        "p99": 2.093,
-        "max": 3.617
+        "min": 0.042,
+        "median": 0.667,
+        "mean": 1.08,
+        "p99": 12.024,
+        "max": 208.548
       }
     },
     "SQLITE": {
-      "statements": 1699,
-      "refused": 414,
+      "statements": 5599,
+      "refused": 2032,
       "uncached": {
-        "median": 1.774,
-        "mean": 3.366,
-        "p99": 23.04,
-        "max": 41.262
+        "min": 0.045,
+        "median": 0.734,
+        "mean": 1.21,
+        "p99": 13.263,
+        "max": 288.968
       },
       "cached": {
-        "median": 0.288,
-        "mean": 0.404,
-        "p99": 2.005,
-        "max": 6.661
+        "min": 0.045,
+        "median": 0.702,
+        "mean": 1.12,
+        "p99": 12.514,
+        "max": 278.609
       }
     },
     "ORACLE": {
-      "statements": 1697,
-      "refused": 425,
+      "statements": 5589,
+      "refused": 2042,
       "uncached": {
-        "median": 1.735,
-        "mean": 3.328,
-        "p99": 22.608,
-        "max": 39.357
+        "min": 0.054,
+        "median": 1.041,
+        "mean": 2.517,
+        "p99": 26.997,
+        "max": 200.312
       },
       "cached": {
-        "median": 0.304,
-        "mean": 0.429,
-        "p99": 2.26,
-        "max": 3.952
+        "min": 0.055,
+        "median": 0.996,
+        "mean": 2.375,
+        "p99": 26.792,
+        "max": 204.23
       }
     }
   }

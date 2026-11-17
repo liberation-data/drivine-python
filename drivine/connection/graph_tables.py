@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
 from drivine import concurrency
+from drivine.backend.sql.store_layout import judging
 from drivine.backend.sqlite.sqlite_contention import result_code
+from drivine.backend.store_statements import ModuleStore
+from drivine.connection.connection import Connection
 from drivine.manager.contention import any_cause
+from drivine.query.query_specification import QuerySpecification
 
 logger = logging.getLogger("drivine.connection")
 
@@ -39,6 +43,25 @@ def _sqlite_code(failure: BaseException) -> int | None:
     return code & 0xFF if code is not None else None
 
 
+async def judge(store: ModuleStore, graph: str, tables_made: str, connection: Connection) -> None:
+    """
+    Judges the graph's store layout on `connection` (see store_layout.judging), each statement the verdict asks run on
+    it as plain SQL, before anything is made in the graph: one this version doesn't read is refused with
+    StoreLayoutError, on this connection and on every one after it.
+    """
+    asking = judging(store, graph, tables_made)
+
+    async def rows(statement: str, parameters: Mapping[str, Any]) -> list[Any]:
+        return await connection.query(QuerySpecification[Any](statement).bind(dict(parameters)))
+
+    try:
+        ask = next(asking)
+        while True:
+            ask = asking.send(await rows(ask.statement, ask.parameters))
+    except StopIteration:
+        return
+
+
 class GraphTables:
     """
     The tables of the graph a SQL store's connection provider works on (Oracle, Postgres, SQLite), made on the
@@ -62,7 +85,8 @@ class GraphTables:
 
     A SQLite file whose tables an earlier Drivine made, whose ids could be reused, is refused with ReusedIdsError on
     every connection, and no connection is handed out (drivine4j#713): it is not a store that will not make them, so
-    the pool is not marked as made.
+    the pool is not marked as made. So is a graph whose store layout this version doesn't read, with StoreLayoutError:
+    each provider judges it (see `judge`) as its first connection is about to make the tables.
     """
 
     def __init__(self, ensuring: str) -> None:

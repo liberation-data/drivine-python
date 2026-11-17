@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from datetime import UTC, date, datetime, time
 from decimal import Decimal
 from enum import Enum
@@ -33,6 +34,30 @@ def storable(value: Any) -> Any:
     return value
 
 
+_HELD = "\u0000drivine:held:"
+"""
+What a held value stands for in the text json.dumps writes, before its own text is spliced in its place: with a token
+of the call's own after it, so no text of the value's is taken for one.
+"""
+
+
 def to_json(value: Any) -> str:
-    """The value as JSON text, compact as JSON.stringify writes it, so that text compared as text is alike."""
-    return json.dumps(storable(value), separators=(",", ":"), ensure_ascii=False, default=to_jsonable_python)
+    """
+    The value as JSON text, compact as JSON.stringify writes it, so that text compared as text is alike. A value the
+    store layout wrote (value_layout.Held) is its own text, spliced in as it is.
+    """
+    held: list[str] = []
+    mark = f"{_HELD}{uuid.uuid4().hex}:"
+
+    def default(it: Any) -> Any:
+        from drivine.backend.sql.value_layout import Held
+
+        if isinstance(it, Held):
+            held.append(it.text)
+            return f"{mark}{len(held) - 1}"
+        return to_jsonable_python(it)
+
+    text = json.dumps(storable(value), separators=(",", ":"), ensure_ascii=False, default=default)
+    for i, it in enumerate(held):
+        text = text.replace(json.dumps(f"{mark}{i}"), it, 1)
+    return text

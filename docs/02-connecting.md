@@ -87,6 +87,15 @@ On Postgres, `DATABASE_NAME` is the database, and `DATABASE_DEFAULT_GRAPH_PATH` 
 see [Postgres](#postgres). On either, Cypher you write is compiled to SQL: see
 [Cypher on a relational database](03-cypher-on-a-relational-database.md#cypher-on-a-relational-database).
 
+**Store layout.** Oracle, Postgres and SQLite hold a graph in store layout 2, as drivine4j and Drivine for TypeScript
+do: a temporal value is kept as a tagged map, a map key that begins with `$` gains one more, and bytes are kept as the
+list of their signed values. The store's stamp records the layout. On a provider's first connection, before anything is
+made, the shared module judges the graph: a new one is made in this layout, and one in an earlier layout, or none, that
+holds none of your nodes is made this layout's (what the earlier layout left is dropped; nothing is migrated). A graph
+in an earlier layout that holds nodes, or one a later Drivine wrote, is refused on that connection and every one after
+it with a `StoreLayoutError`, from `drivine` and `drivine.sync`, whose message says what to do (reload it with this
+version, or upgrade) and whose `graph` names the graph.
+
 Or in code:
 
 ```python
@@ -118,10 +127,10 @@ schema change. A user who may read the tables but not make them works once they 
 like the others, so a schema catalog that names no database applies to it too, and makes its indexes at startup.
 
 **How a graph is stored.** drivine4j's store, byte for byte, so the JVM, Node and Python read and write one graph:
-`<graph>_node (nid, labels, props, stamp)` and `<graph>_edge (eid, src, dst, type, props)`, with `labels` and `props`
-as `jsonb` and a GIN index over the labels, so a node carries any number of them; `<graph>_schema`, the indexes and
-constraints Drivine made; and `<graph>_write`, the function a save's steps are carried out by, as one statement that is
-applied whole or not at all.
+`<graph>_node (nid, labels, props, stamp, words)` and `<graph>_edge (eid, src, dst, type, props)`, with `labels` and
+`props` as `jsonb` and a GIN index over the labels, so a node carries any number of them; `<graph>_schema`, the indexes
+and constraints Drivine made; and `<graph>_write`, the function a save's steps are carried out by, as one statement that
+is applied whole or not at all.
 
 - A statement you write yourself is SQL, unless written as Cypher (see
   [Cypher on Postgres, Oracle and SQLite](04-statements.md#cypher-on-postgres-oracle-and-sqlite)). Parameters are named `$name`, as in Cypher, and a
@@ -199,10 +208,11 @@ each pooled connection would open a database of its own. In the async API each c
 the connection's own, so one waiting for the file's lock holds up neither the event loop nor another connection.
 
 **How a graph is stored.** `<graph>_node (nid INTEGER PRIMARY KEY AUTOINCREMENT, labels TEXT, props TEXT, stamp
-TEXT)`, `<graph>_edge (eid INTEGER PRIMARY KEY AUTOINCREMENT, src, dst REFERENCES <graph>_node ON DELETE CASCADE, type,
-props TEXT)` and `<graph>_schema`, the indexes and constraints Drivine made. Labels and properties are JSON text, not
-SQLite's binary `jsonb`, and labels are written sorted, with nothing escaped that JSON does not require: a label is
-found by its text. The stamp is a column. Moments compare and order to the nanosecond, whatever their offset.
+TEXT, words TEXT)`, `<graph>_edge (eid INTEGER PRIMARY KEY AUTOINCREMENT, src, dst REFERENCES <graph>_node ON DELETE
+CASCADE, type, props TEXT)` and `<graph>_schema`, the indexes and constraints Drivine made, with the shared module's
+tables of counts and its lock (`<graph>_count2`, `<graph>_count2_delta`, `<graph>_lock2`). Labels and properties are
+JSON text, not SQLite's binary `jsonb`, and labels are written sorted, with nothing escaped that JSON does not require:
+a label is found by its text. The stamp is a column. Moments compare and order to the nanosecond, whatever their offset.
 
 The id of a node or relationship that is deleted is never given to another, within a statement, a transaction or after
 it, as on Oracle and Postgres: an element id an application holds names the element it was read from or nothing.
@@ -216,8 +226,9 @@ database in memory or in a temporary file. There is no migration: make a new fil
 - A save is the plan of steps Postgres's write function carries out, carried out by a function Drivine registers on
   each connection, `drivine_write`, under a savepoint: applied whole or not at all, in a transaction or not. The other
   functions a statement calls are registered too: `drivine_delete`, `drivine_epoch`, `drivine_lower` (Unicode's lower
-  case, where SQLite's lowers ASCII), `drivine_similarity`, `drivine_regexp_count` and `REGEXP`. A statement of yours
-  may call them; a connection you open yourself has none of them.
+  case, where SQLite's lowers ASCII), `drivine_similarity` and `drivine_regexp_count`, and the shared module's, loaded
+  from its SQLite extension in the `drivine-cypher-compiler` wheel, `REGEXP` among them. A statement of yours may call
+  them; a connection you open yourself has none of them.
 - A statement Drivine writes that gives back documents opens with `/* drivine:json */`, and its text values are read
   as JSON. One you write is read as it is: a row is a dict of its columns, and `labels` and `props` are text.
 - A raw `where` is SQL over the root's row, as on Postgres; a property written as Cypher writes it, `n.name`, is read
@@ -226,8 +237,7 @@ database in memory or in a temporary file. There is no migration: make a new fil
   label's nodes. A vector or a full-text index is recorded and nothing is made for it: `load_nearest` and
   `load_matching` measure every node of the label, and `load_matching` scores by BM25, as Postgres does.
 - `matches` takes a regular expression in Java's dialect, as on drivine4j, matched against the whole value: a
-  `REGEXP` reads it as Java does, and refuses what Python can't read so, such as a script (`\p{IsLatin}`) or a
-  look-behind of more than one length.
+  `REGEXP`, the shared module's, reads it as Java does, and refuses what it can't read so, such as a look-behind.
 
 **What a transaction gives.** Each connection writes ahead to a log, enforces foreign keys and waits for a locked file
 for up to its busy timeout, 30 seconds by default.

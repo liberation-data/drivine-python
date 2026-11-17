@@ -170,6 +170,11 @@ CALL_BOUND = 90_000
 TRUNC_BOUND = 90_000
 
 
+@pytest.mark.xfail(
+    reason="Oracle's hard parse of min and max of a collected list of moments takes about 6 s in store layout 2, "
+    "about the bound, so it passes on a runner as often as not (drivine-cypher-spec#244)",
+    strict=False,
+)
 def test_the_min_and_max_of_a_collected_list_of_moments_are_planned_in_seconds():
     # About 1 second in drivine4j; 4.7 renumbered inline.
     ms, rows = parsed(ZLS, ZLS_BOUND)

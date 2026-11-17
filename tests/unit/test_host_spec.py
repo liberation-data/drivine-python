@@ -11,6 +11,7 @@ A case or step that can't pass yet is held: see HELD.
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -37,8 +38,25 @@ from tests.cypher.cypher_spec import Step, canonical, expanded, load, read
 
 CASES: list[dict[str, Any]] = read("host.yaml")["cases"]
 
-SHAPES = [{"function", "args", "result"}, {"function", "ascending"}, {"read", "value"}]
-"""The keys of each kind of step, beside its optional `note`: a function's result, its order, and a read."""
+SHAPES = [
+    {"function", "args", "result"},
+    {"function", "args", "error"},
+    {"function", "ascending"},
+    {"read", "value"},
+    {"key", "result"},
+    {"write", "result"},
+    {"write", "error"},
+]
+"""
+The keys of each kind of step, beside its optional `note`: a function's result, its failure and its order, a read, a
+temporal value's sort key, and a value a save writes, or its refusal.
+"""
+
+LAYOUT_HELD = "drivine4j#421 (layout 2)"
+"""
+The note of a step held in the spec itself, until the store's timestamps keep nine digits: run, it must fail, so the
+hold comes off when it passes, as the module's own HostSpecTest holds it.
+"""
 
 READ = {"store", "nonFinite", "column"}
 
@@ -146,8 +164,64 @@ async def check_step(monkeypatch: pytest.MonkeyPatch, step: dict[str, Any], wher
             raise ValueError(f"{where}: a read has the keys {READ}")
         await check_read(monkeypatch, step["read"], step["value"], where)
         return
+    if "key" in step:
+        check_key(step, where)
+        return
+    if "write" in step:
+        check_write(step, where)
+        return
     with database() as connection:
-        check_function(connection, step, where)
+        if LAYOUT_HELD not in str(step.get("note", "")):
+            check_function(connection, step, where)
+            return
+        try:
+            check_function(connection, step, where)
+        except AssertionError:
+            return
+        pytest.fail(f"{where}: held for layout 2 ({LAYOUT_HELD}), and passing: take the hold off")
+
+
+def module_text(request: dict[str, Any]) -> str:
+    """The shared module's answer to a request of its JSON entry, as the library asks it: its JSON text."""
+    import drivine_cypher_compiler
+
+    answer: str = drivine_cypher_compiler.compile(json.dumps(request))
+    return answer
+
+
+def module(request: dict[str, Any]) -> dict[str, Any]:
+    answer: dict[str, Any] = json.loads(module_text(request))
+    return answer
+
+
+def check_key(step: dict[str, Any], where: str) -> None:
+    """The module's sort key `s` of the temporal value the step names is its `result`, as a saved tag holds it."""
+    answer = module({"temporalKey": step["key"]})
+    if "error" in answer:
+        raise Mismatch(f"{where}: {answer['error']}")
+    assert answer["key"] == step["result"], f"{where}\nexpected: {step['result']!r}\nactual: {answer['key']!r}"
+
+
+def check_write(step: dict[str, Any], where: str) -> None:
+    """
+    The module's text of the value a save writes, as the step's store holds it, is its `result`, spliced as the store's
+    text; or the module refuses it, with the step's `error` in its message.
+    """
+    write: dict[str, Any] = step["write"]
+    # A step may leave the store out, to pin the module's refusal of a request that doesn't name one.
+    given = module_text({"write": write["value"], **({"store": write["store"]} if "store" in write else {})})
+    answer = json.loads(given)
+    if "error" in step:
+        assert "error" in answer, f"{where}: refused with {step['error']!r}, but written as {answer!r}"
+        assert step["error"] in answer["error"], f"{where}\nexpected: {step['error']!r}\nactual: {answer['error']!r}"
+        return
+    if "error" in answer:
+        raise Mismatch(f"{where}: {answer['error']}")
+    # The store's text, spliced in as it is between `{"value":` and `}`: read as JSON, 9e999 would be an infinity.
+    opening = '{"value":'
+    assert given.startswith(opening) and given.endswith("}"), f"{where}: the module answered {given!r}"
+    text = given[len(opening) : -1]
+    assert text == step["result"], f"{where}\nexpected: {step['result']!r}\nactual: {text!r}"
 
 
 @contextmanager
@@ -176,6 +250,16 @@ def check_function(connection: apsw.Connection, step: dict[str, Any], where: str
             assert found == 1, f"{where}: {before} is not before {after}"
         return
     args = expanded(step["args"])
+    if "error" in step:
+        error = step["error"]
+        if not isinstance(error, str):
+            raise ValueError(f"{where}: error is a text, not {error!r}")
+        try:
+            given = connection.execute(f"SELECT {name}({', '.join('?' for _ in args)})", args).fetchall()[0][0]
+        except apsw.Error as failure:
+            assert error in str(failure), f"{where}\nexpected a failure with: {error!r}\nactual: {failure}"
+            return
+        raise Mismatch(f"{where}: fails with {error!r}, but gave {given!r}")
     found = call(connection, f"SELECT {name}({', '.join('?' for _ in args)})", args)
     expected = expanded(step["result"])
     assert canonical(found, COMPARED) == canonical(expected, COMPARED), (
@@ -308,6 +392,9 @@ def paired(case: dict[str, Any]) -> None:
     """
     pairs: dict[str, list[str]] = case.get("pairs") or {}
     if not pairs:
+        # A case of a function no compiled statement calls says so with `pairs: {}`, as drivine_host_version's does.
+        if case.get("pairs") == {}:
+            return
         raise ValueError(f"{case['name']}: pairs no store case")
     steps: list[Step] = []
     for file, names in pairs.items():

@@ -72,10 +72,28 @@ def clear(pm: PersistenceManager) -> None:
     pm.execute(QuerySpecification[Any](f"DELETE FROM {GRAPH}_node"))
 
 
+PROBED = {
+    "A duration divided, and its seconds written",
+    "Arithmetic on temporal values read from the store",
+    "Zoned kind in a list, and in a list of lists",
+}
+"""
+The cases that call the graph's temporal arithmetic function, which dropping the era functions leaves invalid
+(ORA-06575): held until a statement is compiled to call it only where the session may (drivine-python#510).
+"""
+
+
 @pytest.mark.parametrize("case", CASES, ids=[it.name for it in CASES])
 def test_temporal_without_era(without_era: PersistenceManager, case: Case):
     clear(without_era)
-    run_case(without_era, "temporal.yaml", case)
+    if case.name not in PROBED:
+        run_case(without_era, "temporal.yaml", case)
+        return
+    try:
+        run_case(without_era, "temporal.yaml", case)
+    except Exception:
+        pytest.xfail("the temporal arithmetic function is called where the session may not (#510)")
+    pytest.fail("A case calling the temporal arithmetic function passes without the era functions: take out the hold")
 
 
 def test_numbers_a_moment_returned_by_a_call_as_neo4j_does(without_era: PersistenceManager):

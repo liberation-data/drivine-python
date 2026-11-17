@@ -256,6 +256,7 @@ class ModelRegistry:
             null_as_default=mapping.null_as_default,
             empty_when_absent=mapping.empty_when_absent,
             collections=mapping.collections,
+            bytes_fields=mapping.bytes_fields,
             type=type_,
             labels=labels,
             node_id_field=id_field,
@@ -303,6 +304,7 @@ class ModelRegistry:
             null_as_default=mapping.null_as_default,
             empty_when_absent=mapping.empty_when_absent,
             collections=mapping.collections,
+            bytes_fields=mapping.bytes_fields,
             type=type_,
             target_field=target_field,
             target=target,
@@ -484,7 +486,10 @@ class ModelRegistry:
                 if info.is_required():
                     raise DrivineError(f"NullAsDefault {where} loads a stored null as its default, so it needs one.")
                 mapping.null_as_default.add(field)
-            kind = FieldShape.of(info.annotation).collection
+            shape = FieldShape.of(info.annotation)
+            if (shape.value if shape.collection == "dict" else shape.item) in (bytes, bytearray):
+                mapping.bytes_fields[field] = shape.collection
+            kind = shape.collection
             if kind in ("set", "tuple"):
                 mapping.collections[field] = kind
             if EmptyWhenAbsent in marks:

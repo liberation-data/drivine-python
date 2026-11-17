@@ -67,14 +67,21 @@ class TestTheGraph:
         graph = SqliteGraph()
         for _ in range(2):
             for it in graph.ddl:
-                assert "IF NOT EXISTS" in it
+                # The lock table's row, inserted only where it isn't there, makes nothing of its own.
+                assert "IF NOT EXISTS" in it or it.startswith("INSERT OR IGNORE INTO drivine_lock2")
                 connection.execute(it)
         columns = {
             table: [(it[1], it[2]) for it in connection.execute(f"PRAGMA table_info({table})")]
             for table in (graph.nodes, graph.edges)
         }
         assert columns == {
-            "drivine_node": [("nid", "INTEGER"), ("labels", "TEXT"), ("props", "TEXT"), ("stamp", "TEXT")],
+            "drivine_node": [
+                ("nid", "INTEGER"),
+                ("labels", "TEXT"),
+                ("props", "TEXT"),
+                ("stamp", "TEXT"),
+                ("words", "TEXT"),
+            ],
             "drivine_edge": [
                 ("eid", "INTEGER"),
                 ("src", "INTEGER"),
@@ -307,7 +314,12 @@ class TestTheFunctions:
         patterns = _Patterns()
         word = "(^|[^[:alnum:]_])école($|[^[:alnum:]_])"
         assert patterns.count("l'école, école", word) == 2
-        assert patterns.matches("^a", "abc") == 1 and patterns.matches(None, "x") is None
+
+    def test_regexp_is_the_shared_modules_registered_with_the_rest(self):
+        connection = apsw.Connection(":memory:")
+        register(connection)
+        found = connection.execute("SELECT 'abc' REGEXP '^a', 'abc' REGEXP '^b', NULL REGEXP 'a'").fetchall()
+        assert found == [(1, 0, None)]
 
     def test_a_failure_in_a_function_is_raised_as_itself(self):
         connection = apsw.Connection(":memory:")
@@ -374,8 +386,9 @@ class TestTheSession:
         try:
             session.query("CREATE TABLE t (x TEXT)", {})
             session.query("INSERT INTO t VALUES ('a'), ('b'), ('c')", {})
-            with pytest.raises(Exception, match="unterminated") as raised:
-                session.query("SELECT CASE WHEN x = 'b' THEN x REGEXP '(' END AS r FROM t ORDER BY x", {})
+            # drivine_fail is drivine-python's own function: the shared module's extension fails as SQLite errors do.
+            with pytest.raises(Exception, match="at b") as raised:
+                session.query("SELECT CASE WHEN x = 'b' THEN drivine_fail('at ' || x) END AS r FROM t ORDER BY x", {})
             assert not isinstance(raised.value, apsw.Error)
         finally:
             session.close()

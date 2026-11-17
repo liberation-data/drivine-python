@@ -47,8 +47,8 @@ async with transaction(rollback=True):   # a test that leaves nothing behind
 
 FalkorDB has no multi-statement transactions: each statement commits as it runs. With `DATABASE_TRANSACTION_MODE=WARN`,
 the default, a transaction runs statement by statement and a rollback logs that nothing was rolled back; a `save_all`
-of several statements does the same. With `STRICT`, a transaction is refused at its first statement, and such a batch
-raises `NonAtomicBatchError`, so no code path can rely on atomicity it doesn't have.
+or `patch_all` of several statements does the same. With `STRICT`, a transaction is refused at its first statement,
+and such a batch raises `NonAtomicBatchError`, so no code path can rely on atomicity it doesn't have.
 
 ### Tasks share their transaction, one statement at a time
 

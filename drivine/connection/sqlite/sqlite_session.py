@@ -8,7 +8,6 @@ both run them, the async one on a thread of its own (see concurrency.blocking).
 from __future__ import annotations
 
 import itertools
-import json
 import logging
 import re
 import time
@@ -23,6 +22,7 @@ from uuid import UUID
 
 import apsw
 
+from drivine.backend.sql import value_layout
 from drivine.backend.sql.sql_json import storable, to_json
 from drivine.backend.sqlite import sqlite_functions
 from drivine.backend.sqlite.sqlite_contention import locked
@@ -217,9 +217,9 @@ class SqliteSession:
         Makes the graph's tables where they are not all there, each statement on its own: a user who may only read the
         file is refused a `CREATE … IF NOT EXISTS` even over a table that is there, so the store is looked for first
         (see SqliteGraph.ensure). A file an earlier Drivine made, whose ids could be reused, is refused with
-        ReusedIdsError.
+        ReusedIdsError, and a graph whose store layout this version doesn't read with StoreLayoutError.
         """
-        graph.ensure(self._first_value)
+        graph.ensure(self._first_value, self.query)
 
     def _first_value(self, statement: str) -> Any:
         """The first value of the statement's first row; None where it gives none."""
@@ -323,10 +323,11 @@ def rows(statement: str, found: Rows, fetched: list[Any]) -> list[dict[str, Any]
 
 def json_value(text: str) -> Any:
     """
-    The JSON text as the value it is, with each map in it that is exactly NAN_TEXT NaN, as drivine4j's
-    `JdbcResultMapper.sqliteRows` reads it: a statement given no NaN can still work one out, as `∞ + -∞`. A text value
-    that holds those characters holds each quote escaped, so only a map holds them: the look is a cheap pass over a
-    value that holds no NaN, which most do, and with_nan takes only the exact map.
+    The JSON text as the value it is in the store layout, with each map in it that is exactly NAN_TEXT NaN, as
+    drivine4j's `JdbcResultMapper.sqliteRows` reads it: a statement given no NaN can still work one out, as `∞ + -∞`.
+    A text value that holds those characters holds each quote escaped, so only a map holds them: the look is a cheap
+    pass over a value that holds no NaN, which most do, and with_nan takes only the exact map.
     """
-    value = json.loads(text)
-    return with_nan(value) if NAN_TEXT in text else value
+    # In the store layout (see value_layout): each tag read as its text and each escaped key unescaped, SQLite's own
+    # NaN read first, so a user's map with its key, which the layout holds escaped, stays the map it is.
+    return value_layout.read_after(text, with_nan) if NAN_TEXT in text else value_layout.read(text)

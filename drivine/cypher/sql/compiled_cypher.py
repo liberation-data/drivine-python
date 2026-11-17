@@ -14,8 +14,8 @@ class CompiledCypher:
 
     `calls_stored_nulls_equal` says whether the statement calls the function an Oracle graph is made with,
     `<graph>_nulls_equal`, which a store made by an earlier version, or by a user who may not make a function, does not
-    have: see `nulls_equal_function` in oracle_stored_functions. `calls_stored_era` says the same of the functions it
-    renumbers a year that may be BC by, `<graph>_era` and `<graph>_era_date`: see `era_function` there.
+    have: see OracleGraph.functions, the shared module's. `calls_stored_era` says the same of the functions it renumbers
+    a year that may be BC by, `<graph>_era` and `<graph>_era_date`.
 
     `non_finite` says whether the statement was given NaN or an infinity, so its rows may hold the numbers that stand
     for them, as drivine4j's compiler writes them on Postgres: see postgres_non_finite. The shared compiler says it of

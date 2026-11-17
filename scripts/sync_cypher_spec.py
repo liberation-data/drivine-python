@@ -1,7 +1,10 @@
 """
 Copies a tagged version of the Cypher spec, github.com/liberation-data/drivine-cypher-spec, to tests/cypher unchanged:
-its queries.yaml, writes.yaml, temporal.yaml, refusals.yaml, schema.yaml, host.yaml and README.md, which says what they
-hold. The tag is recorded in tests/cypher/VERSION.
+its queries.yaml, writes.yaml, temporal.yaml, refusals.yaml, schema.yaml and host.yaml; since store layout 2, the
+store's own: its DDL and reads (store.yaml), its stamps and schema marker (marker.yaml), the fragments the object
+manager compiles (fragments.yaml), the schema plans (plans.yaml) and vector search (vector.yaml); and README.md, which
+says what they hold. The same files as Drivine for TypeScript's scripts/sync-cypher-spec.sh. The tag is recorded in
+tests/cypher/VERSION.
 
     uv run python scripts/sync_cypher_spec.py v0.3.0
 
@@ -30,6 +33,11 @@ FILES = (
     "refusals.yaml",
     "schema.yaml",
     "host.yaml",
+    "store.yaml",
+    "marker.yaml",
+    "fragments.yaml",
+    "plans.yaml",
+    "vector.yaml",
     "README.md",
     "model/schema.json",
     "model/README.md",

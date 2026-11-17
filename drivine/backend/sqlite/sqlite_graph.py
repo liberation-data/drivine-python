@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Literal
 
 from drivine.backend.sql.sql_graph import DEFAULT_GRAPH, SqlGraph, sql_text
+from drivine.backend.sql.store_layout import judge
 from drivine.backend.sql.write_plan import WritePlan, WriteReturns
+from drivine.backend.store_statements import store_statements
 from drivine.connection.reused_ids_error import ReusedIdsError
 from drivine.drivine_error import DrivineError
 from drivine.model import stamps
@@ -33,7 +35,6 @@ REGEXP_COUNT = "drivine_regexp_count"
 LOWER = "drivine_lower"
 EPOCH = "drivine_epoch"
 EQUAL = "drivine_equal"
-CONTAINS = "drivine_contains"
 ADD = "drivine_add"
 CANONICAL = "drivine_canonical"
 CYPHER = "drivine_cypher"
@@ -52,7 +53,10 @@ LIST_ORDER = "drivine_list_order"
 MATH = "drivine_math"
 ROUND = "drivine_round"
 FAIL = "drivine_fail"
-"""The names of the functions Drivine registers on each connection (see sqlite_functions), drivine4j's."""
+"""
+The names of the functions each connection is given, drivine4j's: the shared module's from its extension (see
+sqlite_extension) and drivine-python's own (see sqlite_functions).
+"""
 
 Kind = Literal["TEXT", "NUMBER", "INSTANT", "DATE"]
 """How a property is read: as text, as a number, as a moment (nanoseconds since the epoch) or as a date."""
@@ -86,68 +90,64 @@ class SqliteGraph(SqlGraph):
         super().__init__(name, "SQLite", MAX_OBJECT_NAME)
 
     @property
+    def tables_made(self) -> str:
+        """
+        A query of the store's catalog whose one value is how many of the graph's table of nodes it holds, none or one:
+        a graph without one is new, and its layout is not judged (see store_layout.judging).
+        """
+        return (
+            f"SELECT count(*) AS \"made\" FROM sqlite_master WHERE type = 'table' "
+            f"AND lower(name) = {sql_text(self.nodes.lower())}"
+        )
+
+    @property
     def ddl(self) -> list[str]:
-        """What makes the store, drivine4j's statements: each may run again."""
-        return [
-            f"CREATE TABLE IF NOT EXISTS {self.nodes} (\n"
-            "    nid    INTEGER PRIMARY KEY AUTOINCREMENT,\n"
-            "    labels TEXT NOT NULL,\n"
-            "    props  TEXT NOT NULL,\n"
-            "    stamp  TEXT\n"
-            ")",
-            f"CREATE TABLE IF NOT EXISTS {self.edges} (\n"
-            "    eid   INTEGER PRIMARY KEY AUTOINCREMENT,\n"
-            f"    src   INTEGER NOT NULL REFERENCES {self.nodes} (nid) ON DELETE CASCADE,\n"
-            f"    dst   INTEGER NOT NULL REFERENCES {self.nodes} (nid) ON DELETE CASCADE,\n"
-            "    type  TEXT NOT NULL,\n"
-            "    props TEXT NOT NULL DEFAULT '{}'\n"
-            ")",
-            f"CREATE TABLE IF NOT EXISTS {self.catalog} (\n"
-            "    kind        TEXT NOT NULL,\n"
-            "    label       TEXT NOT NULL,\n"
-            "    properties  TEXT NOT NULL,\n"
-            "    name        TEXT,\n"
-            "    object_name TEXT,\n"
-            "    details     TEXT NOT NULL,\n"
-            "    PRIMARY KEY (kind, label, properties)\n"
-            ")",
-            f"CREATE INDEX IF NOT EXISTS {self.name}_edge_src ON {self.edges} (src, type)",
-            f"CREATE INDEX IF NOT EXISTS {self.name}_edge_dst ON {self.edges} (dst, type)",
-        ]
+        """
+        What makes the store when it is not there: the shared module's statements (see store_statements), so each
+        library makes the same file. Each may run again; the last, the lock table's row, makes nothing of its own.
+        """
+        ddl = store_statements("sqlite", self.name).ddl
+        assert ddl is not None
+        return ddl
 
     @property
     def made(self) -> str:
         """
-        Counts what of the `ddl` makes is there: each table and index, by its name in any case. A user who may only
-        read the file, or a connection with `query_only` set, is refused a `CREATE … IF NOT EXISTS` even over a table
-        that is there, so the store is looked for first.
+        Counts what of the `ddl` makes is there: each table and index, by its name in any case, and each statement that
+        makes nothing of its own (the lock table's row) as there where the rest are, as the module counts it
+        (`SqliteDdl.made`). A user who may only read the file, or a connection with `query_only` set, is refused a
+        `CREATE … IF NOT EXISTS` even over a table that is there, so the store is looked for first.
 
         The count is REUSES_IDS where the table of nodes or of relationships is there and was made without
         `AUTOINCREMENT`, as SQLite keeps the statement that made it: one look finds both. drivine4j's text: it looks for
         `KEY AUTOINCREMENT`, so that a graph whose name holds the word is not taken for one made with it.
         """
-        names: list[str] = []
+        making: list[str] = []
         for it in self.ddl:
             found = re.search(r"IF NOT EXISTS (\w+)", it)
-            assert found is not None
-            names.append(sql_text(found.group(1).lower()))
+            if found is not None:
+                making.append(sql_text(found.group(1).lower()))
+        rows = len(self.ddl) - len(making)
         keyed = ", ".join(sql_text(it.lower()) for it in (self.nodes, self.edges))
         return (
             "SELECT CASE WHEN EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND lower(name) IN "
-            f"({keyed}) AND sql NOT LIKE '%KEY AUTOINCREMENT%') THEN {REUSES_IDS} ELSE COUNT(*) END FROM sqlite_master "
-            f"WHERE lower(name) IN ({', '.join(names)})"
+            f"({keyed}) AND sql NOT LIKE '%KEY AUTOINCREMENT%') THEN {REUSES_IDS} ELSE COUNT(*)"
+            f"{f' + {rows}' if rows else ''} END FROM sqlite_master WHERE lower(name) IN ({', '.join(making)})"
         )
 
-    def ensure(self, run: Callable[[str], Any]) -> None:
+    def ensure(self, run: Callable[[str], Any], rows: Callable[[str, Mapping[str, Any]], list[Any]]) -> None:
         """
-        Runs the `ddl`, each statement on its own, unless `made` finds all it makes there; `run` gives the first value
-        of a statement's first row, None for none. A store whose tables give a deleted row's id again is refused with
-        ReusedIdsError, naming its file, before anything is made.
+        Makes the store, each statement of the `ddl` on its own, unless `made` finds all it makes there; `run` gives the
+        first value of a statement's first row, None for none, and `rows` a statement's rows, bound. A store whose
+        tables give a deleted row's id again is refused with ReusedIdsError, naming its file, and then the graph's
+        layout is judged (see store_layout.judge), before anything is made: one this version doesn't read is refused
+        with StoreLayoutError.
         """
-        found = run(self.made)
-        if found == REUSES_IDS:
+        if run(self.made) == REUSES_IDS:
             raise ReusedIdsError(self.name, run(DATABASE_FILE) or None)
-        if found == len(self.ddl):
+        judge("sqlite", self.name, self.tables_made, rows)
+        # Counted again: the verdict may have dropped what an earlier layout left.
+        if run(self.made) == len(self.ddl):
             return
         for it in self.ddl:
             run(it)
@@ -255,6 +255,18 @@ def number_of(alias: str, property: str) -> str:
         f"(CASE WHEN {json_type(alias, property)} IN ('integer', 'real') "
         f"THEN {column(alias, 'props')} ->> {path(property)} END)"
     )
+
+
+def temporal_text(alias: str, property: str) -> str:
+    """
+    The text of the property of the row `alias` as a comparison reads a temporal value's: where store layout 2 holds it
+    as its tag (`{"$t": "date", "v": "2024-01-01", "s": …}`, see value_layout), as a save writes a moment, a date, a
+    time or a duration, the tag's text `v`; anything else as text_of reads it, as a moment written as text. A map is a
+    tag only where it has the key `$t`, which the layout escapes in a map of the user's (`$$t`).
+    """
+    props, at = column(alias, "props"), f"$.{quoted(property)}"
+    tag, held = sql_text(at + '."$t"'), f"{props} ->> {sql_text(at + '.v')}"
+    return f"(CASE WHEN json_type({props}, {tag}) = 'text' THEN {held} ELSE {text_of(alias, property)} END)"
 
 
 def typed(kind: Kind, text: str) -> str:

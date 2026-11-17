@@ -9,7 +9,7 @@ from drivine.backend.sql.sql_graph import DEFAULT_GRAPH
 from drivine.connection.database_type import DatabaseType
 from drivine.sync.connection.connection import Connection
 from drivine.sync.connection.connection_provider import ConnectionProvider
-from drivine.sync.connection.graph_tables import GraphTables
+from drivine.sync.connection.graph_tables import GraphTables, judge
 from drivine.sync.connection.postgres.postgres_connection import PostgresConnection
 from drivine.sync.manager.contention import ddl_deadlocked, when_not_contended
 
@@ -68,13 +68,20 @@ class PostgresConnectionProvider(ConnectionProvider):
         pool.open()
         connection = pool.getconn()
         try:
-            self._tables.ensure(
-                lambda statement: when_not_contended(lambda: connection.execute(statement), ddl_deadlocked)
-            )
+            self._tables.ensure(lambda statement: self._ensure(connection, pool, statement))
         except BaseException:
             pool.putconn(connection)
             raise
         return PostgresConnection(connection, pool.putconn, f"postgres.{connection.info.backend_pid}", self.graph.name)
+
+    def _ensure(self, connection: Any, pool: Any, statement: str) -> None:
+        """
+        Judges the graph's store layout (see graph_tables.judge), then runs `statement`, the graph's `ensuring`: a graph
+        this version doesn't read is refused with StoreLayoutError before anything is made in it.
+        """
+        graph = self.graph
+        judge("postgres", graph.name, graph.tables_made, PostgresConnection(connection, pool.putconn, "", graph.name))
+        when_not_contended(lambda: connection.execute(statement), ddl_deadlocked)
 
     def end(self) -> None:
         # Cleared before waiting, so a second call made meanwhile doesn't close the pool again.

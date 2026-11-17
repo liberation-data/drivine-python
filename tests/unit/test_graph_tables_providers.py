@@ -22,6 +22,18 @@ ROW_DEADLOCK = "ORA-06512: at line 22\nORA-00060: deadlock detected while waitin
 BUSY = "ORA-06512: at line 22\nORA-00054: resource busy and acquire with NOWAIT specified or timeout expired"
 
 
+@pytest.fixture(autouse=True)
+def no_layout_verdict(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The verdict on a graph's layout, which a first connection asks before it makes the tables, is left out here: its
+    own tests ask it (test_store_layout), and these are of the making."""
+
+    async def unjudged(*_: Any) -> None:
+        return None
+
+    monkeypatch.setattr("drivine.connection.postgres.postgres_connection_provider.judge", unjudged)
+    monkeypatch.setattr("drivine.connection.oracle.oracle_connection_provider.judge", unjudged)
+
+
 class PostgresError(Exception):
     """A failure as psycopg raises one: its SQLSTATE as `sqlstate`."""
 

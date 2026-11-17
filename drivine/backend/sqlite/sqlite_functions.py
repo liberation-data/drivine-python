@@ -9,7 +9,8 @@ drivine4j's `SqliteFunctions`, function for function, so a statement either libr
 - `drivine_delete` deletes the nodes a statement selected, and counts them.
 - `drivine_lower_copies` fills in the lowercased copies of a property, and counts the nodes it wrote.
 - `drivine_similarity` scores an embedding against a vector.
-- `drivine_regexp_count` counts the matches of a regular expression, and `regexp` is SQLite's `REGEXP` operator.
+- `drivine_regexp_count` counts the matches of a regular expression. SQLite's `REGEXP` operator is the shared
+  module's, from its extension (see sqlite_extension).
 - `drivine_lower` lowers text as Unicode does.
 - `drivine_epoch` reads a moment as nanoseconds since the epoch.
 
@@ -33,21 +34,22 @@ from typing import Any, cast
 
 import apsw
 
-from drivine.backend.sqlite import sqlite_cypher_functions, sqlite_graph
+from drivine.backend.sqlite import sqlite_cypher_functions, sqlite_extension, sqlite_graph
 from drivine.backend.sqlite.sqlite_arguments import text as text_of_argument
 from drivine.backend.sqlite.sqlite_graph import SqliteGraph, has_label, path, text_of
 from drivine.backend.sqlite.sqlite_patterns import Patterns
 from drivine.backend.sqlite.sqlite_plan_writer import SqlitePlanWriter, Stopped
 from drivine.model import lower_copies
 
-REGEXP = "regexp"
-"""The name SQLite's `X REGEXP Y` calls, as `regexp(Y, X)`."""
-
 _SAVEPOINT = "drivine_write"
 
 
 def register(connection: apsw.Connection) -> None:
-    """Registers every function on the connection, for the statements run on it."""
+    """
+    Registers every function on the connection, for the statements run on it: the shared module's from its SQLite
+    extension (see sqlite_extension), then this library's own.
+    """
+    sqlite_extension.load(connection)
     patterns = _Patterns()
     similarity = _Similarity()
     # apsw's stubs give a function any SQLite value; each here reads what it is given (see sqlite_arguments).
@@ -57,10 +59,9 @@ def register(connection: apsw.Connection) -> None:
     add(sqlite_graph.LOWER_COPIES, partial(_lower_copies, connection), 4)
     add(sqlite_graph.SIMILARITY, similarity.score, 3, deterministic=True)
     add(sqlite_graph.REGEXP_COUNT, patterns.count, 2, deterministic=True)
-    add(REGEXP, patterns.matches, 2, deterministic=True)
     add(sqlite_graph.LOWER, _lower, 1, deterministic=True)
     add(sqlite_graph.EPOCH, epoch, 1, deterministic=True)
-    sqlite_cypher_functions.register(connection, patterns)
+    sqlite_cypher_functions.register(connection)
 
 
 def _write(
@@ -222,15 +223,6 @@ class _Patterns(Patterns):
     The regular expressions the functions of one connection have read, compiled once each, as Java reads them: see
     sqlite_patterns.
     """
-
-    def matches(self, expression: str | None, text: Any) -> int | None:
-        """
-        SQLite's `REGEXP` operator, which it leaves to the application: `text REGEXP expression` calls
-        `regexp(expression, text)`, true where the expression matches somewhere in the text. Null where either is null.
-        """
-        if expression is None or text is None:
-            return None
-        return 1 if self.of(str(expression)).search(text_of_argument(text) or "") else 0
 
     def count(self, text: Any, expression: str | None) -> int:
         """

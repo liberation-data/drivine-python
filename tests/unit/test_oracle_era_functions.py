@@ -19,58 +19,11 @@ from drivine.backend.oracle import oracle_stored_functions
 from drivine.backend.oracle.oracle_graph import OracleGraph
 from drivine.backend.oracle.oracle_stored_functions import (
     OracleStoredFunctions,
-    era_date_function,
-    era_function,
 )
 from drivine.connection.oracle.oracle_connection import OracleConnection
 from drivine.connection.oracle.oracle_spec_compiler import OracleSpecCompiler
 from drivine.cypher.cypher_specification import cypher_compiled
 from tests.unit.test_oracle_stored_functions import ora
-
-# The lines of drivine4j's `OracleCypherCompiler.eraFunction` and `eraDateFunction`, copied verbatim from drivine4j's
-# main at liberation-data/drivine4j#584, `$name` and `${TemporalSql.BC_BELOW}` too: Kotlin's `"$name"` is the function's
-# name, and `BC_BELOW` is 49. The store keeps these functions, so their texts are part of the store layout the three
-# libraries share, byte for byte. A change to them is made in drivine4j first and copied here again.
-# fmt: off
-DRIVINE4J_ERA = [
-    "FUNCTION $name(t VARCHAR2) RETURN VARCHAR2 DETERMINISTIC IS",
-    "BEGIN",
-    "    IF ASCII(t) < ${TemporalSql.BC_BELOW} THEN",
-    "        RETURN REGEXP_REPLACE(t, '^(-[0-9]{4}|0000)', TO_CHAR(TO_NUMBER(REGEXP_SUBSTR(t, '^-?[0-9]{4}')) - 1, 'FM0000'));",  # noqa: E501
-    "    END IF;",
-    "    RETURN t;",
-    "END;",
-]
-DRIVINE4J_ERA_DATE = [
-    "FUNCTION $name(t VARCHAR2) RETURN VARCHAR2 DETERMINISTIC IS",
-    "BEGIN",
-    "    IF SUBSTR(t, 1, 1) = '-' THEN",
-    "        RETURN TO_CHAR(TO_NUMBER(SUBSTR(t, 1, 5)) + 1, 'FM0000') || SUBSTR(t, 6);",
-    "    END IF;",
-    "    RETURN t;",
-    "END;",
-]
-# fmt: on
-
-
-def drivine4j(lines: list[str], name: str) -> str:
-    """The text drivine4j makes of the function `name`: its lines joined by `\\n`, with no newline after the last."""
-    return "\n".join(lines).replace("${TemporalSql.BC_BELOW}", "49").replace("$name", name)
-
-
-def test_the_era_functions_are_drivine4js_texts_byte_for_byte_as_create_or_replace_of_them():
-    assert era_function("myGraph_era") == drivine4j(DRIVINE4J_ERA, "myGraph_era")
-    assert era_date_function("myGraph_era_date") == drivine4j(DRIVINE4J_ERA_DATE, "myGraph_era_date")
-    graph = OracleGraph("myGraph")
-    assert (graph.era, graph.era_date) == ("myGraph_era", "myGraph_era_date")
-    assert graph.functions[1:] == [
-        f"CREATE OR REPLACE {drivine4j(DRIVINE4J_ERA, 'myGraph_era')}",
-        f"CREATE OR REPLACE {drivine4j(DRIVINE4J_ERA_DATE, 'myGraph_era_date')}",
-    ]
-
-
-# Whether a session may call them, asked of a session whose checks of each give what a test says.
-
 
 CHECKS = (("nulls_equal", "_nulls_equal(JSON('[1]'), JSON('[1]'))"), ("era", "_era('0000-01-01')"))
 """What each check calls, by the function it asks of."""

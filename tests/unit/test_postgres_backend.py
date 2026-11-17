@@ -39,9 +39,9 @@ def test_any_other_failure_is_not_contention():
 
 
 def test_keeps_an_empty_inventory_apart_from_none():
-    assert PostgresBackend.marker_items(None) is None
-    assert PostgresBackend.marker_items("") == []
-    assert PostgresBackend.marker_items("a\nb") == ["a", "b"]
+    assert PostgresBackend().marker_items(None) is None
+    assert PostgresBackend().marker_items("") == []
+    assert PostgresBackend().marker_items("a\nb") == ["a", "b"]
 
 
 class Doc(NodeFragment, labels=["Doc"]):

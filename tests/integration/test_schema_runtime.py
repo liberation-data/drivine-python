@@ -5,6 +5,7 @@ SchemaManagerRuntimeIntegrationTest. A second SchemaManager over the same databa
 
 import dataclasses
 import logging
+import re
 import uuid
 from collections.abc import AsyncIterator, Sequence
 from typing import Annotated, Any
@@ -463,7 +464,9 @@ async def test_a_runtime_item_renamed_is_an_orphan_of_its_owner_under_the_old_na
         await schema.manager(schema.dice(), **WARN).ensure_catalog(schema.runtime("dice", tag))
 
     [orphan] = orphan_warnings(caplog)
-    assert f"Owner 'dice' on {schema.db} applied 1 item(s)" in orphan and "tag_one" in orphan
+    # On a SQL store the shared module's plan words it as drivine4j does.
+    assert re.search(rf"Owner 'dice' on '?{schema.db}'? (previously )?applied 1 item\(s\)", orphan), orphan
+    assert "tag_one" in orphan
 
 
 async def test_a_violation_found_by_ensure_raises_under_fail_fast_and_the_marker_is_not_written(schema):

@@ -152,7 +152,8 @@ def test_the_tagged_values_the_answer_binds_are_read_back_at_any_depth():
 
 def test_a_map_with_a_dollar_key_is_bound_as_the_map_it_is():
     compiled = compile_cypher("RETURN $x AS x", {"x": {"$a": 1, "b": [{"$float": "c"}]}}, "SQLITE", "g")
-    assert compiled.parameters == {"_cy_x": '{"$a":1,"b":[{"$float":"c"}]}'}
+    # Store layout 2 holds a key that begins with $ with one more, at any depth (README, "Values in the store").
+    assert compiled.parameters == {"_cy_x": '{"$$a":1,"b":[{"$$float":"c"}]}'}
 
 
 def test_a_statement_given_nan_or_an_infinity_says_so():

@@ -641,8 +641,7 @@ A Python port must write what the others read. These are the formats, from the T
 - **Oracle:** the `<graph>_node`, `<graph>_edge` and `<graph>_schema` tables, the property graph over them, and the
   vector and text side tables (`src/backend/oracle/`).
 - **Postgres:** drivine4j's store, the same three tables with `jsonb` columns and the `<graph>_write` function a write's
-  plan is carried out by, made by the block `scripts/postgres_store.py` writes from drivine4j's text
-  (`src/backend/postgres/`).
+  plan is carried out by, made by the shared module's block (`drivine/backend/store_statements.py`).
 - **Property names:** see [Property names](#property-names).
 
 An integration test writes with one language and reads with the other, on each engine, for each of these.

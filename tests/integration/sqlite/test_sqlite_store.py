@@ -7,7 +7,7 @@ over every store don't cover them already.
 
 import asyncio
 import json
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, time, timedelta, timezone
 from typing import Annotated, Any
 
 import pytest
@@ -100,7 +100,9 @@ async def test_a_property_no_save_writes_keeps_the_text_it_was_stored_with(gom, 
     loaded.at = datetime(2024, 1, 1, tzinfo=UTC)
     await gom.save(loaded)
     [row] = await rows(pm, "SELECT props FROM drivine_node")
-    assert row["props"] == '{"id":"r1","value":1.5,"extra":1e3,"nested":{"x":2.0},"at":"2024-01-01T00:00:00.000Z"}'
+    # The moment as store layout 2 holds it, its tag (host.yaml's "Values a save writes").
+    moment = '{"$t":"datetime","v":"2024-01-01T00:00:00Z","s":"10000020240101000000000000000064800"}'
+    assert row["props"] == f'{{"id":"r1","value":1.5,"extra":1e3,"nested":{{"x":2.0}},"at":{moment}}}'
 
 
 async def test_moments_a_microsecond_apart_order_compare_and_seek_as_the_moments_they_are(gom, pm):
@@ -122,6 +124,44 @@ async def test_moments_a_microsecond_apart_order_compare_and_seek_as_the_moments
     assert [it.id for it in await gom.load_all(Reading, order_by=q.at.desc())] == ["c", "b", "a"]
     later = base.astimezone(timezone(timedelta(hours=-5)))
     assert [it.id for it in await gom.load_all(Reading, q.at.gte(later))] == ["a", "b", "c"]
+
+
+class Dated(NodeFragment, labels=["Dated"]):
+    id: Annotated[str, NodeId()]
+    on: date | None = None
+    starts: time | None = None
+
+
+async def test_saved_moments_and_dates_held_as_their_tags_compare_order_and_are_among_values_as_they_are(gom):
+    """Store layout 2 holds a saved temporal value as its tag: a query reads the tag's text, as it reads a text one."""
+    base = datetime(2024, 5, 6, 7, 8, 9, 123456, tzinfo=UTC)
+    await gom.save_all(
+        [
+            Reading(id="a", at=base),
+            Reading(id="b", at=(base + timedelta(microseconds=1)).astimezone(timezone(timedelta(hours=2)))),
+            Reading(id="c", at=base + timedelta(microseconds=2)),
+        ]
+    )
+    q = refs(Reading)
+    assert [it.id for it in await gom.load_all(Reading, q.at.gt(base))] == ["b", "c"]
+    assert [it.id for it in await gom.load_all(Reading, q.at.eq(base + timedelta(microseconds=1)))] == ["b"]
+    assert [it.id for it in await gom.load_all(Reading, order_by=q.at.desc())] == ["c", "b", "a"]
+    among = [base, base + timedelta(microseconds=2)]
+    assert sorted(it.id for it in await gom.load_all(Reading, q.at.in_(among))) == ["a", "c"]
+    await gom.save_all([Dated(id="d1", on=date(2024, 1, 1), starts=time(9)), Dated(id="d2", on=date(2024, 1, 2))])
+    d = refs(Dated)
+    # A time, held as its tag too, compared and listed by its text, as it was saved.
+    assert [it.id for it in await gom.load_all(Dated, d.starts.eq(time(9)))] == ["d1"]
+    assert [it.id for it in await gom.load_all(Dated, d.starts.in_([time(9), time(10)]))] == ["d1"]
+    assert [it.id for it in await gom.load_all(Dated, d.on.eq(date(2024, 1, 2)))] == ["d2"]
+    assert [it.id for it in await gom.load_all(Dated, d.on.lt(date(2024, 1, 2)))] == ["d1"]
+    assert [it.id for it in await gom.load_all(Dated, d.on.in_([date(2024, 1, 1)]))] == ["d1"]
+    assert [it.id for it in await gom.load_all(Dated, d.on.in_([date(2024, 1, 1), None]))] == ["d1"]
+    assert [it.id for it in await gom.load_all(Dated, order_by=d.on.desc())] == ["d2", "d1"]
+    # And a seek past a time reads the tag's text, as a comparison does.
+    await gom.save(Dated(id="d3", starts=time(10)))
+    order, seek = [d.starts.asc(), d.id.asc()], [d.starts.after(time(9)), d.id.after("d1")]
+    assert [it.id for it in await gom.load_all(Dated, order_by=order, seek=seek)] == ["d3"]
 
 
 async def test_a_full_text_search_scores_whole_words_ignores_case_as_unicode_does_and_leaves_out_what_it_must_not(gom):
@@ -180,10 +220,15 @@ async def test_the_store_is_made_once_and_made_again_keeps_what_it_holds(path: s
     finally:
         await other.close()
     tables = await rows(pm, "SELECT name FROM sqlite_master WHERE type IN ('table', 'index') ORDER BY name")
+    # Store layout 2's count store and lock table among them (store.yaml).
     assert [it["name"] for it in tables if not it["name"].startswith("sqlite_")] == [
+        "drivine_count2",
+        "drivine_count2_delta",
+        "drivine_count2_dk",
         "drivine_edge",
         "drivine_edge_dst",
         "drivine_edge_src",
+        "drivine_lock2",
         "drivine_node",
         "drivine_schema",
     ]
@@ -252,7 +297,7 @@ async def test_a_range_index_is_made_recorded_matched_again_and_read_by_a_lookup
     [listed] = await gom.indexes.list("RANGE")
     assert (listed.label, listed.properties) == ("Person", ("name",))
     statement = gom.backend.load_all_fragments(gom.registry.fragment(Person), gom.backend.written("n.name = 'Ada'"))
-    assert "USING INDEX drivine_ix_Personname_" in await plan(pm, statement.text)
+    assert "USING INDEX drivine_ix2_Personname_" in await plan(pm, statement.text)
 
 
 async def test_an_index_dropped_by_hand_is_not_listed_and_is_made_again_when_asked_for(gom, pm):
@@ -287,7 +332,7 @@ async def test_a_vector_and_a_full_text_index_are_recorded_and_found_and_a_chang
     assert drift.status == "DRIFT" and drift.found is not None and drift.found.dimensions == 2
     # Nothing is made for either: SQLite has no vector index, and a full-text search reads every node.
     made = await rows(pm, "SELECT name FROM sqlite_master WHERE type = 'index' AND name NOT LIKE 'sqlite_%'")
-    assert sorted(it["name"] for it in made) == ["drivine_edge_dst", "drivine_edge_src"]
+    assert sorted(it["name"] for it in made) == ["drivine_count2_dk", "drivine_edge_dst", "drivine_edge_src"]
 
 
 class Tagged(NodeFragment, labels=["Tagged"]):

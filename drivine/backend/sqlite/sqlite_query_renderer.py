@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time
 from types import UnionType
 from typing import Annotated, Any, Literal, Union, get_args, get_origin
 
@@ -15,6 +15,7 @@ from drivine.backend.sqlite.sqlite_graph import (
     json_type,
     number_of,
     path,
+    temporal_text,
     text,
     text_of,
     typed,
@@ -51,6 +52,8 @@ class SqliteQueryRenderer(SqlQueryRenderer):
         super().__init__(views, labels_of_class)
         self._seek_kinds: dict[str, Kind] = {}
         """The kind of each value a cursor binds, by its parameter."""
+        self._seek_times: set[str] = set()
+        """The parameters a cursor binds a time to: a seek reads a saved time's tag by its text (see _text_read)."""
 
     @staticmethod
     def render(
@@ -85,7 +88,8 @@ class SqliteQueryRenderer(SqlQueryRenderer):
         if operator is not None:
             kind = _kind_of(test.value, json_packed)
             bound = typed(kind, self._bind(self._scalar(test.value, json_packed)))
-            return f"{self._typed(row, name, kind)} {operator} {bound}"
+            read = self._text_read(compared, [test.value]) if kind == "TEXT" else self._typed(row, name, kind)
+            return f"{read} {operator} {bound}"
         if test.operator == "IN":
             return self._listed(compared, self._list(test.value, path_)) or "1 = 0"
         if test.operator == "NOT_IN":
@@ -109,7 +113,8 @@ class SqliteQueryRenderer(SqlQueryRenderer):
     def _seek_test(self, alias: str, property: str, operator: str, value: str) -> str:
         """The property read as the kind of the cursor's value, as a comparison reads it."""
         kind = self._seek_kinds.get(value[1:], "TEXT")
-        return f"{self._typed(alias, property, kind)} {'=' if operator == '==' else operator} {typed(kind, value)}"
+        read = temporal_text(alias, property) if value[1:] in self._seek_times else self._typed(alias, property, kind)
+        return f"{read} {'=' if operator == '==' else operator} {typed(kind, value)}"
 
     def _storable(self, value: Any) -> Any:
         """
@@ -131,6 +136,7 @@ class SqliteQueryRenderer(SqlQueryRenderer):
         # The cursor's values are the next bound, in turn.
         start = len(self.bindings)
         self._seek_kinds = {f"_q{start + i}": _kind_of(it.value, False) for i, it in enumerate(seek)}
+        self._seek_times = {f"_q{start + i}" for i, it in enumerate(seek) if isinstance(it.value, time)}
         return super()._keyset(keys, seek, query, alias)
 
     def _order(self, key: RootKey, scope: Scope, alias: str) -> str:
@@ -140,7 +146,7 @@ class SqliteQueryRenderer(SqlQueryRenderer):
             return super()._order(key, scope, alias)
         direction = "DESC" if key.term.direction == "DESC" else "ASC"
         nulls = key.term.nulls or ("LAST" if direction == "ASC" else "FIRST")
-        return f"{typed(kind, text_of(alias, key.property or ''))} {direction} NULLS {nulls}"
+        return f"{typed(kind, temporal_text(alias, key.property or ''))} {direction} NULLS {nulls}"
 
     def _ordered_property(
         self, alias: str, property: str, direction: Literal["ASC", "DESC"], nulls: str | None = None
@@ -175,7 +181,15 @@ class SqliteQueryRenderer(SqlQueryRenderer):
         """The property read as `kind`: a number as one, a moment or a date as one, anything else as text."""
         if kind == "NUMBER":
             return number_of(row, name)
-        return typed(kind, text_of(row, name))
+        return typed(kind, temporal_text(row, name) if kind in ("INSTANT", "DATE") else text_of(row, name))
+
+    def _text_read(self, compared: Compared, values: list[Any]) -> str:
+        """
+        The property read as text, compared with the values: a saved time's tag by its text where every value is a
+        time, as store layout 2 holds one (see temporal_text), and anything else as text_of reads it.
+        """
+        times = not compared.json_packed and all(isinstance(it, time) for it in values)
+        return (temporal_text if times else text_of)(compared.row, compared.name)
 
     def _scalar(self, value: Any, json_packed: bool) -> Any:
         """
@@ -185,12 +199,19 @@ class SqliteQueryRenderer(SqlQueryRenderer):
 
     def _listed(self, compared: Compared, values: list[Any]) -> str | None:
         """
-        Whether the property is among the values, read as numbers where every value is one: None for no values, which
-        nothing is among. Each value is read as a property of its kind is read, so a text is a string's text or another
-        value's JSON.
+        Whether the property is among the values, read as numbers where every value is one, and as moments or dates
+        where every value is one of those: None for no values, which nothing is among. Each value is read as a property
+        of its kind is read, so a text is a string's text or another value's JSON.
         """
         if not values:
             return None
+        kinds = {_kind_of(it, compared.json_packed) for it in values if it is not None}
+        if len(kinds) == 1 and (kind := next(iter(kinds))) in ("INSTANT", "DATE"):
+            # Moments or dates, each read as one, as a comparison reads it: a saved one's tag by its text. A null among
+            # them is null read as one, which SQL's IN reads as Cypher's does.
+            bound = self._bind(to_json([self._scalar(it, False) for it in values]))
+            among = f"SELECT {typed(kind, 'v.value')} FROM json_each({bound}) v"
+            return f"{self._typed(compared.row, compared.name, kind)} IN ({among})"
         numbers = not compared.json_packed and all(_kind_of(it, False) == "NUMBER" for it in values)
         read = (
             "(CASE WHEN v.type IN ('integer', 'real') THEN v.value END)"
@@ -200,7 +221,7 @@ class SqliteQueryRenderer(SqlQueryRenderer):
             "ELSE v.value END)"
         )
         bound = self._bind(to_json([self._scalar(it, compared.json_packed) for it in values]))
-        column = number_of(compared.row, compared.name) if numbers else text_of(compared.row, compared.name)
+        column = number_of(compared.row, compared.name) if numbers else self._text_read(compared, values)
         return f"{column} IN (SELECT {read} FROM json_each({bound}) v)"
 
     def _holds(self, row: str, name: str, item: Any) -> str:
@@ -246,9 +267,9 @@ class SqliteQueryRenderer(SqlQueryRenderer):
         """
         A regular expression that must match the whole value, as Cypher's `=~` does. A leading `(?i)` ignores case.
         SQLite has no regular expressions of its own, so the expression is Java's, as on drivine4j, read by the function
-        SQLite's `REGEXP` calls (see sqlite_patterns). It is held to the whole value by a group that takes no number, so
-        its own groups keep theirs and a backreference names the group it was written for, and ends at `\\z`, the text's
-        end, where Java's `\\Z` and `$` would match before a line break that ends it.
+        SQLite's `REGEXP` calls, the shared module's (see sqlite_extension). It is held to the whole value by a group
+        that takes no number, so its own groups keep theirs and a backreference names the group it was written for, and
+        ends at `\\z`, the text's end, where Java's `\\Z` and `$` would match before a line break that ends it.
         """
         ignore_case = pattern.startswith("(?i)")
         body = pattern[4:] if ignore_case else pattern

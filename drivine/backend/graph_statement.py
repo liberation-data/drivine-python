@@ -17,4 +17,7 @@ class GraphStatement:
     bindings: Mapping[str, Any] = field(default_factory=lambda: {})
 
     def spec(self, more: Mapping[str, Any] | None = None) -> QuerySpecification[Any]:
-        return QuerySpecification[Any](self.text).bind({**self.bindings, **(more or {})})
+        spec = QuerySpecification[Any](self.text).bind({**self.bindings, **(more or {})})
+        # A backend's statement reads the store's own JSON, which is in the store layout.
+        spec.store_layout = True
+        return spec

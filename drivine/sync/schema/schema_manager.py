@@ -18,6 +18,7 @@ from drivine.schema import vector_annotation_check
 from drivine.schema.ensure_result import EnsureResult
 from drivine.schema.recorded_inventory import RecordedInventory, inventory_entries, read_inventory
 from drivine.schema.schema_catalog import DEFAULT_SCOPE, SchemaCatalog
+from drivine.schema.schema_plan import ItemPolicy, Recreate, ensure_result, module_spec, plan_request, plan_spec
 from drivine.schema.schema_specs import SchemaSpec, item_name, made_as, uniqueness_constraint
 from drivine.schema.uniqueness_constraint_spec import UniquenessConstraintSpec
 from drivine.schema.vector_index_spec import VectorIndexSpec
@@ -28,6 +29,7 @@ from drivine.sync.manager.persistence_manager import PersistenceManager
 from drivine.sync.manager.stateless_graph_object_manager import StatelessGraphObjectManager
 from drivine.sync.schema.index_manager import IndexNotBuilt
 from drivine.sync.schema.schema_options import SchemaOptions
+from drivine.sync.schema.schema_plan_driver import run_plan
 
 logger = logging.getLogger("drivine.schema")
 
@@ -42,6 +44,11 @@ GRAPH_TYPES = (
 
 MARKER_LABEL = "_DrivineSchema"
 """The label of the schema markers: drivine4j's and TypeScript's, so all read one."""
+
+
+def _owner_of(name: str) -> str | None:
+    """An owner as the planner names one: the unnamed owner, DEFAULT_SCOPE, is None, as drivine4j's unnamed one is."""
+    return None if name == DEFAULT_SCOPE else name
 
 
 def _key_of(spec: SchemaSpec) -> str:
@@ -157,9 +164,13 @@ class SchemaManager:
             vector_annotation_check.register(catalog.items)
             self._runtime = candidate
             given = {inventory_key(it) for it in catalog.items}
+            operation = {"type": "ensure", "owner": _owner_of(catalog.name), "items": [module_spec(it) for it in items]}
             report: dict[str, list[EnsureResult[Any]]] = {}
             for database, plan in plans.items():
-                report[database] = self._apply_plan(database, plan, False, catalog.name, given)
+                planned = self._planned(database, operation)
+                report[database] = (
+                    planned if planned is not None else self._apply_plan(database, plan, False, catalog.name, given)
+                )
             return report
 
     def remove(self, owner: str, *specs: SchemaSpec) -> None:
@@ -194,8 +205,14 @@ class SchemaManager:
                     for identity in identities:
                         specs.pop(identity, None)
             self._runtime = {key: specs for key, specs in self._runtime.items() if specs}
+            operation = {
+                "type": "remove",
+                "owner": _owner_of(catalog.name),
+                "items": [module_spec(it) for it in catalog.items],
+            }
             for database in self._targets(catalog):
-                self._remove_from(database, catalog)
+                if self._planned(database, operation) is None:
+                    self._remove_from(database, catalog)
 
     def ensured(self, owner: str) -> list[SchemaSpec]:
         """What `ensure` has given the owner, on any database."""
@@ -273,6 +290,51 @@ class SchemaManager:
             kept,
         )
 
+    def _planned(self, database: str, operation: Mapping[str, Any]) -> list[EnsureResult[Any]] | None:
+        """
+        `operation` on `database`, where it is a SQL store, as the shared module's schema plan applies it: the startup
+        catalogs that apply there and the items `ensure` gave, each owner's markers, drift, violations and indexes not
+        built, and what is logged, as drivine4j applies it (see schema_plan). The results of each owner's items, in
+        order; None on a graph engine, whose schema this manager plans itself (liberation-data/drivine-python#515).
+        """
+        planning = self.factory.get(database).schema_planning()
+        if planning is None:
+            return None
+        options = self.options
+        catalogs = [
+            {"owner": _owner_of(it.name), "version": it.version, "items": [module_spec(spec) for spec in it.items]}
+            for it in options.catalogs
+            if database in self._targets(it)
+        ]
+        runtime = [
+            {
+                "owner": _owner_of(owner),
+                "databases": None if databases is None else list(databases),
+                "items": [module_spec(spec) for spec in specs.values()],
+            }
+            for (owner, databases), specs in self._runtime.items()
+        ]
+        request = plan_request(
+            database,
+            operation,
+            ItemPolicy(
+                mode=options.mode,
+                violation_sample_size=options.violation_sample_size,
+                replace_blocking_index=options.replace_blocking_index,
+                build_timeout_millis=int(options.index_build_timeout * 1000),
+            ),
+            catalogs,
+            planning.plan.runtime_on(database, runtime),
+            Recreate(on_drift=options.recreate_on_drift, on_startup=options.recreate_on_startup),
+        )
+        refusal = planning.plan.validate(request)
+        if refusal is not None:
+            raise DrivineError(refusal)
+        report = run_plan(planning.plan, request, planning.host)
+        return [
+            ensure_result(it["result"], plan_spec(it["spec"])) for owner in report["owners"] for it in owner["results"]
+        ]
+
     @staticmethod
     def _recorded(gom: StatelessGraphObjectManager, owner: str) -> RecordedInventory | None:
         """What the owner's marker records."""
@@ -304,7 +366,11 @@ class SchemaManager:
             report: dict[str, list[EnsureResult[Any]]] = {}
             for database in dict.fromkeys([*declared, *ensured]):
                 plan = self._plan(database, declared.get(database, []), ensured.get(database, []))
-                report[database] = self._apply_plan(database, plan, recreate, None, None)
+                operation = {"type": "recreateAll" if recreate else "enforce", "owners": {"all": True}}
+                planned = self._planned(database, operation)
+                report[database] = (
+                    planned if planned is not None else self._apply_plan(database, plan, recreate, None, None)
+                )
             return report
 
     def _with_runtime(

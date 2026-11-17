@@ -210,6 +210,18 @@ class TestWrites:
         assert "IF v IS NULL OR LENGTH(v) = 0 THEN o.remove(" in statement.text
         assert '["display_name","email"]' in statement.bindings.values()
 
+    def test_on_oracle_a_save_and_a_patch_lower_a_property_by_its_name_as_the_layout_holds_it(self):
+        class Dollared(NodeFragment, labels=["Dollared"]):
+            uuid: Annotated[str, NodeId()]
+            mail: Annotated[str | None, CaseInsensitive(), GraphProperty("$mail")] = None
+
+        backend = OracleBackend(OracleGraph())
+        model = self.registry.fragment(Dollared)
+        saved = backend.save(model, Dollared(uuid="d1", mail="A@X.com"), None, False, self.registry)
+        assert '["$$mail"]' in saved.bindings.values()
+        assert '["$$mail"]' in backend.patch_one(model).bindings.values()
+        assert '["$$mail"]' in backend.patch_many(model).bindings.values()
+
     def test_on_oracle_a_block_without_copies_declares_no_lower_node(self):
         from tests.models import Person
 

@@ -99,10 +99,11 @@ class SqliteSession:
     - The log is synced at a checkpoint and not at each commit, as is safe with a write-ahead log: a commit may be lost
       to a power cut, and the file is never left corrupt.
 
-    Outside a transaction each statement commits as it runs. It is used by one caller at a time. The async API runs
-    each call on `thread`, the connection's own: so a connection that waits for the file's lock keeps only its own
-    thread waiting, never one the connection holding the lock needs to finish, and a call made after one whose caller
-    was cancelled runs once that one has ended, never beside it.
+    Outside a transaction each statement commits as it runs. It is used by one caller at a time. Both APIs run each
+    call on `thread`, the connection's own, started with SESSION_STACK, so a regular expression is answered as deep
+    whichever thread asks. In the async API, a connection that waits for the file's lock keeps only its own thread
+    waiting, never one the connection holding the lock needs to finish, and a call made after one whose caller was
+    cancelled runs once that one has ended, never beside it.
     """
 
     def __init__(self, path: str, busy_timeout: int = DEFAULT_BUSY_TIMEOUT) -> None:
@@ -113,7 +114,6 @@ class SqliteSession:
         except apsw.Error as error:
             # SQLite's message, as for a folder that is not there, does not name the file.
             raise DrivineError(f"Could not open the SQLite file '{path}': {error}.") from error
-        self.thread = _session_thread()
         try:
             self.connection.set_busy_timeout(int(busy_timeout))
             deadline = time.monotonic() + busy_timeout / 1000
@@ -129,6 +129,8 @@ class SqliteSession:
                             raise
                         time.sleep(0.005)
             sqlite_functions.register(self.connection)
+            # Started last, so a connection that fails to open leaves no thread running.
+            self.thread = _session_thread()
         except BaseException:
             self.connection.close()
             raise
@@ -336,8 +338,9 @@ _starting = threading.Lock()
 def _session_thread() -> ThreadPoolExecutor:
     """
     A session's thread, started now with SESSION_STACK. Python sets the stack of the threads it starts next for the
-    whole process, so it is set only while this one starts, under a lock, and set back after; where the platform takes
-    no such size, the thread starts with its default.
+    whole process, so it is set only while this one starts, under a lock, and set back after (a thread another caller
+    starts in that moment gets it too: address space only); where the platform takes no such size, the thread starts
+    with its default.
     """
     executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="drivine-sqlite")
     with _starting:

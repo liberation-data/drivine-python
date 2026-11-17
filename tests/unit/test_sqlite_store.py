@@ -399,6 +399,33 @@ class TestTheSession:
         finally:
             session.close()
 
+    @pytest.mark.parametrize("refusal", [ValueError, RuntimeError])
+    def test_a_platform_that_refuses_the_stack_size_starts_the_sessions_thread_with_its_default(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, refusal: type[Exception]
+    ):
+        asked: list[int] = []
+
+        def stack_size(size: int = 0) -> int:
+            asked.append(size)
+            raise refusal("size not valid")
+
+        monkeypatch.setattr(threading, "stack_size", stack_size)
+        session = SqliteSession(str(tmp_path / "graph.db"))
+        try:
+            assert asked == [64 * 1024 * 1024], "nothing to set back"
+            assert session.thread.submit(lambda: session.query("SELECT 1 AS n", {})).result() == [{"n": 1}]
+        finally:
+            session.close()
+
+    def test_a_session_that_fails_to_open_leaves_no_thread_of_its_own_running(self, tmp_path: Path):
+        # Its thread is started only once the connection is set up, so a file it can't open as a database leaves none.
+        path = tmp_path / "graph.db"
+        path.write_text("not a database, but long enough for SQLite to read its header as one")
+        before = {thread for thread in threading.enumerate() if thread.name.startswith("drivine-sqlite")}
+        with pytest.raises(apsw.NotADBError):
+            SqliteSession(str(path))
+        assert {thread for thread in threading.enumerate() if thread.name.startswith("drivine-sqlite")} == before
+
     def test_a_function_that_fails_at_a_later_row_is_raised_as_itself(self, tmp_path: Path):
         session = SqliteSession(str(tmp_path / "graph.db"))
         try:

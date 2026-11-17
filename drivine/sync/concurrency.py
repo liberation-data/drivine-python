@@ -5,6 +5,7 @@ the generator doesn't write. Each thread has its own context, so its own current
 
 from __future__ import annotations
 
+import contextvars
 import inspect
 import threading
 import time
@@ -30,10 +31,13 @@ def sleep(seconds: float) -> None:
 
 def blocking(function: Callable[..., R], *arguments: Any, on: Executor | None = None) -> R:
     """
-    Runs a call that blocks, such as one on a SQLite connection, where it is: the async API runs it on a thread, `on`'s
-    where it is given.
+    Runs a call that blocks, such as one on a SQLite connection, where it is; on the executor `on` where one is given,
+    as the async API does, and waits for it: a SQLite connection's own thread is started with the stack its functions
+    want (see SqliteSession.thread), which the caller's may not have.
     """
-    return function(*arguments)
+    if on is None:
+        return function(*arguments)
+    return on.submit(contextvars.copy_context().run, function, *arguments).result()
 
 
 def runs_here(function: Callable[..., Any]) -> bool:

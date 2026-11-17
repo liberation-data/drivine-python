@@ -204,8 +204,9 @@ DATABASE_DEFAULT_GRAPH_PATH=drivine   # names the graph's tables; this is the de
 
 Or in code, `registry.builder().database_type(DatabaseType.SQLITE).database_name("graph.db").register("graph")`. The
 file is made if it isn't there, and the graph's tables on the first connection, as on Postgres. `:memory:` is refused:
-each pooled connection would open a database of its own. In the async API each connection's calls run on a thread of
-the connection's own, so one waiting for the file's lock holds up neither the event loop nor another connection.
+each pooled connection would open a database of its own. Each connection's calls run on a thread of the connection's
+own, in both APIs, started with a 64 MB stack, so a regular expression is answered as deep whichever thread asks; in the
+async API one waiting for the file's lock holds up neither the event loop nor another connection.
 
 **How a graph is stored.** `<graph>_node (nid INTEGER PRIMARY KEY AUTOINCREMENT, labels TEXT, props TEXT, stamp
 TEXT, words TEXT)`, `<graph>_edge (eid INTEGER PRIMARY KEY AUTOINCREMENT, src, dst REFERENCES <graph>_node ON DELETE

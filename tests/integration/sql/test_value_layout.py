@@ -227,6 +227,7 @@ class Dated(NodeFragment, labels=["DatedHeld"]):
     on: date | None = None
     at: datetime | None = None
     clock: time | None = None
+    clocks: list[time] | None = None
 
 
 DSL_TEMPORALS = (
@@ -262,12 +263,17 @@ async def test_a_saved_date_or_moment_is_compared_and_ordered_by_the_query_dsl_a
     pytest.fail(f"Held, and passing: take the hold off. {DSL_TEMPORALS}")
 
 
-@pytest.mark.parametrize("test", ["eq", "in"])
+@pytest.mark.parametrize("test", ["eq", "in", "has_item"])
 async def test_the_query_dsl_refuses_a_time_at_an_offset_with_seconds_by_name_as_a_parameter_is(
     gom: StatelessGraphObjectManager, test: str
 ):
     # The store holds an offset to the minute (#517); the DSL wrote this one as a text no value of it matches (#523).
     at = time(10, tzinfo=timezone(timedelta(hours=1, seconds=1)))
-    clock = refs(Dated).clock
+    dated = refs(Dated)
+    tested = {
+        "eq": lambda: dated.clock.eq(at),
+        "in": lambda: dated.clock.in_([time(9), at]),
+        "has_item": lambda: dated.clocks.has_item(at),
+    }[test]()
     with pytest.raises(DrivineError, match="at an offset with seconds"):
-        await gom.load_all(Dated, clock.eq(at) if test == "eq" else clock.in_([time(9), at]))
+        await gom.load_all(Dated, tested)

@@ -107,6 +107,10 @@ class LowerCopyCatalog:
                 filled,
             )
 
+    def stored(self) -> set[tuple[str, str]]:
+        """The lowercased copies the store records as filled in, each `(label, property)`, read now."""
+        return self._stored()
+
     def _stored(self) -> set[tuple[str, str]]:
         """What the store records, read now."""
         return set(self._statements.entries(self._run(self._statements.read, None)))

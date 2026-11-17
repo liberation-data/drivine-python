@@ -119,14 +119,14 @@ class _PostgresSchema:
         self.graph = graph
 
     def create_range(self, spec: RangeIndexSpec) -> list[str]:
-        name = self.graph.object_name("ix2", [spec.label, *spec.properties])
+        name = self.graph.object_name("ix", [spec.label, *spec.properties])
         return [
             f"CREATE INDEX IF NOT EXISTS {name} ON {self._over(spec.label, spec.properties)}",
             self._recorded(spec, name),
         ]
 
     def create_unique(self, spec: UniquenessConstraintSpec) -> list[str]:
-        name = self.graph.object_name("uq2", [spec.label, *spec.properties])
+        name = self.graph.object_name("uq", [spec.label, *spec.properties])
         return [
             f"CREATE UNIQUE INDEX IF NOT EXISTS {name} ON {self._over(spec.label, spec.properties)}",
             self._recorded(spec, name),

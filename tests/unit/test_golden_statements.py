@@ -704,35 +704,9 @@ PLANS_WITH_IDS = (
 )
 """The plans whose `ref` and `patch` steps carry the node's id in store layout 2 (drivine-python#509)."""
 
-PLANNED = (
-    "schema.createRange",
-    "schema.createRange.ignoreCase",
-    "schema.createUnique",
-    "schema.createUnique.ignoreCase",
-    "schema.createUnique.pair",
-)
-"""
-The schema statements whose index names are layout 2's here (`_ix2_`, `_uq2_`), so that a first connection's layout
-verdict reads the graph as this layout's, until the schema plan comes from the shared module (#471, step 4); and on
-SQLite the drops of them too.
-"""
-
 HELD: dict[str, dict[str, str]] = {
-    engine: {
-        **{
-            name: "layout 2's index names, until the schema plan comes from the module (#471, step 4)"
-            for name in PLANNED
-        },
-        **(
-            {it: "layout 2's index names (#471, step 4)" for it in ("schema.dropRange", "schema.dropUnique")}
-            if engine == "SQLITE"
-            else {}
-        ),
-        **(
-            {name: "a plan's steps carry the node's id (#509)" for name in PLANS_WITH_IDS} if engine != "ORACLE" else {}
-        ),
-    }
-    for engine in ("ORACLE", "POSTGRES", "SQLITE")
+    engine: {name: "a plan's steps carry the node's id (#509)" for name in PLANS_WITH_IDS}
+    for engine in ("POSTGRES", "SQLITE")
 }
 """
 What of a store's goldens differs here until a later step of this library's store layout 2 lands, by name: each is

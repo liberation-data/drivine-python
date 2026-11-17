@@ -225,13 +225,13 @@ class TestTheSchemaGrammar:
 
     def test_a_range_index_is_a_partial_index_over_the_property_as_a_statement_reads_it_for_its_label(self):
         [made, recorded] = self.grammar.create_range(range_index("Person", "name"))
-        assert made.startswith("CREATE INDEX IF NOT EXISTS drivine_ix2_Personname_")
+        assert made.startswith("CREATE INDEX IF NOT EXISTS drivine_ix_Personname_")
         assert made.endswith(f"ON drivine_node ({text_of('', 'name')}) WHERE {has_label('', 'Person')}")
         assert "INSERT INTO drivine_schema" in recorded and "'RANGE_INDEX'" in recorded and "'[\"name\"]'" in recorded
 
     def test_a_uniqueness_constraint_is_that_index_made_unique(self):
         [made, _] = self.grammar.create_unique(uniqueness_constraint("Person", "email"))
-        assert made.startswith("CREATE UNIQUE INDEX IF NOT EXISTS drivine_uq2_Personemail_")
+        assert made.startswith("CREATE UNIQUE INDEX IF NOT EXISTS drivine_uq_Personemail_")
 
     def test_a_vector_and_a_full_text_index_are_recorded_and_nothing_is_made_for_them(self):
         [vector] = self.grammar.create_vector(vector_index("Doc", "embedding", 3))
@@ -241,7 +241,7 @@ class TestTheSchemaGrammar:
 
     def test_an_index_is_dropped_by_the_name_its_kind_gives_it_and_one_never_made_is_only_forgotten(self):
         [dropped, forgotten] = self.grammar.drop_range(range_index("Person", "name"))
-        assert dropped.startswith("DROP INDEX IF EXISTS drivine_ix2_Personname_")
+        assert dropped.startswith("DROP INDEX IF EXISTS drivine_ix_Personname_")
         assert forgotten.startswith("DELETE FROM drivine_schema WHERE kind = 'RANGE_INDEX'")
         [only] = self.grammar.drop_vector(vector_index("Doc", "embedding", 3))
         assert only.startswith("DELETE FROM drivine_schema")

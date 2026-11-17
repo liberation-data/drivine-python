@@ -55,9 +55,17 @@ from drivine.model.vector_field import VectorField
 from drivine.schema.constraint_manager import ConstraintManager
 from drivine.schema.index_manager import IndexManager
 from drivine.schema.lower_copy_catalog import LowerCopyCatalog
+from drivine.schema.planned_managers import (
+    SQL_STORES,
+    PlannedConstraintManager,
+    PlannedIndexManager,
+    SchemaPlanning,
+    SqlPlanHost,
+)
 from drivine.schema.schema_executor import SchemaExecutor
 from drivine.schema.schema_grammar import SchemaGrammar, schema_grammar_for
 from drivine.schema.schema_item import SchemaItem
+from drivine.schema.schema_plan import SchemaPlan
 from drivine.store.store_identity import StoreIdentity
 from drivine.store.store_identity_resolver import StoreIdentityResolver
 from drivine.transaction.transaction import current_transaction
@@ -112,18 +120,42 @@ class StatelessGraphObjectManager:
     @property
     def indexes(self) -> IndexManager:
         """
-        Range, vector and full-text indexes of this manager's database: made idempotently, outside any transaction.
+        Range, vector and full-text indexes of this manager's database: made idempotently, outside any transaction. On
+        a SQL store, as the shared module plans them (see planned_managers).
         """
+        planning = self.schema_planning()
+        if planning is not None:
+            return PlannedIndexManager(planning, self._schema_grammar())
         return IndexManager(
             self._schema_executor(), self._schema_grammar(), self.index_advisor.refresh, self._lower_copies()
         )
 
     @property
     def constraints(self) -> ConstraintManager:
-        """Uniqueness constraints of this manager's database: made idempotently, outside any transaction."""
+        """
+        Uniqueness constraints of this manager's database: made idempotently, outside any transaction. On a SQL store,
+        as the shared module plans them (see planned_managers).
+        """
+        planning = self.schema_planning()
+        if planning is not None:
+            return PlannedConstraintManager(planning, self._schema_grammar())
         return ConstraintManager(
             self._schema_executor(), self._schema_grammar(), self.index_advisor.refresh, self._lower_copies()
         )
+
+    def schema_planning(self) -> SchemaPlanning | None:
+        """
+        The shared module's schema plan of this manager's SQL store, with how its statements run here; None on a graph
+        engine, whose schema drivine-python plans itself (liberation-data/drivine-python#515).
+        """
+        store = SQL_STORES.get(self.persistence_manager.type)
+        if store is None:
+            return None
+        graph = getattr(self.backend, "graph", None)
+        host = SqlPlanHost(
+            self._schema_executor(), self.persistence_manager, self._lower_copies(), self.index_advisor.refresh
+        )
+        return SchemaPlanning(SchemaPlan(store, graph.name if graph is not None else None), self.database, host)
 
     async def store_identity(self) -> StoreIdentity:
         """

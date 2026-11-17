@@ -32,6 +32,7 @@ from drivine.sync import (
 )
 from drivine.sync.manager.graph_object_manager_factory import GraphObjectManagerFactory
 from drivine.sync.schema.index_manager import IndexNotBuilt
+from drivine.sync.schema.planned_managers import SQL_STORES
 from tests.sync_integration.stores import create
 
 
@@ -119,6 +120,11 @@ class TestConstraints:
         if pm.type is DatabaseType.FALKORDB:
             pytest.skip("FalkorDB doesn't refuse the constraint: it fails to build it, which is a VIOLATION")
         create(gom.persistence_manager, label, {"code": "dup"}, {"code": "dup"})
+        if pm.type in SQL_STORES:
+            # The shared module's plan reads the data to confirm a VIOLATION, reporting no key, as drivine4j does.
+            result = gom.constraints.ensure(uniqueness_constraint(label, "code"), 0)
+            assert result.status == "VIOLATION" and result.sample == ()
+            return
         with pytest.raises(Exception, match=None):  # each engine words its refusal its own way
             gom.constraints.ensure(uniqueness_constraint(label, "code"), 0)
 
@@ -464,7 +470,9 @@ class TestSchemaManager:
         with caplog.at_level(logging.WARNING):
             results = (manager(second).enforce())[pm.database]
         assert [it.status for it in results] == ["RECREATED"]
-        assert f"applied 1 item(s) it no longer declares: RANGE_INDEX:{label}:b:{label}_b_range" in caplog.text
+        # The SQL stores' plan is the shared module's, which words it as drivine4j does.
+        orphans = "it no longer declares (orphans): [" if pm.type in SQL_STORES else "it no longer declares: "
+        assert f"applied 1 item(s) {orphans}RANGE_INDEX:{label}:b:{label}_b_range" in caplog.text
         gom = StatelessGraphObjectManager(pm)
         for prop in ("a", "b"):
             gom.indexes.drop(range_index(label, prop))
@@ -473,11 +481,13 @@ class TestSchemaManager:
         create(pm, label, {"code": "dup"}, {"code": "dup"})
         catalog = SchemaCatalog.of(uniqueness_constraint(label, "code")).named(label).for_database(pm.database)
         managers = GraphObjectManagerFactory(factory)
-        with pytest.raises(DrivineError, match="VIOLATION for the UNIQUE"):
+        refused = "VIOLATION: UNIQUENESS_CONSTRAINT on" if pm.type in SQL_STORES else "VIOLATION for the UNIQUE"
+        with pytest.raises(DrivineError, match=refused):
             SchemaManager(factory.registry, managers, SchemaOptions([catalog])).enforce()
         with caplog.at_level(logging.WARNING):
             SchemaManager(factory.registry, managers, SchemaOptions([catalog], mode="WARN")).enforce()
-        assert '"dup"' in caplog.text
+        # The shared module writes the sample as drivine4j logs it: `{properties={code=dup}, …}`.
+        assert ("code=dup" if pm.type in SQL_STORES else '"dup"') in caplog.text
         # With no sample asked, the engine refuses the constraint, and its refusal is raised. FalkorDB fails to build
         # it instead: the failed constraint is dropped, and the data read to confirm a VIOLATION, as in drivine4j.
         violation = f"VIOLATION for the UNIQUE on {label}(code)"

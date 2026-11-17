@@ -146,7 +146,14 @@ TEST_CONTAINER_SPECS: dict[DatabaseType, TestContainerSpec] = {
     DatabaseType.MEMGRAPH: TestContainerSpec(
         "memgraph/memgraph:latest", 7687, _memgraph, _reach(7687), ready=_bolt_ready
     ),
-    DatabaseType.ORACLE: TestContainerSpec("gvenzl/oracle-free:23-faststart", 1521, _oracle, _oracle_reach),
+    # Pinned to the last 23-faststart python-oracledb reads: the image republished on 2026-11-17 writes OSON version 2,
+    # which python-oracledb 26.0.1 refuses (DPY-3021), and 26.1.0 names no fix of. Unpin once a release reads it.
+    DatabaseType.ORACLE: TestContainerSpec(
+        "gvenzl/oracle-free:23-faststart@sha256:33322969a450d72c507b08d7f690d9e1d9b60aebaebc35a75b7c0b8ab4baac77",
+        1521,
+        _oracle,
+        _oracle_reach,
+    ),
     # pgvector's image: Postgres with the extension a vector search uses, which the object manager makes where it can.
     DatabaseType.POSTGRES: TestContainerSpec("pgvector/pgvector:pg16", 5432, _postgres, _postgres_reach),
 }

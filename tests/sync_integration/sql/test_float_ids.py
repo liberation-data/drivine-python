@@ -19,6 +19,7 @@ from drivine.sync import (
     GraphView,
     NodeFragment,
     NodeId,
+    NodeStamp,
     PersistenceManager,
     QuerySpecification,
     Relationship,
@@ -200,3 +201,21 @@ def test_a_whole_number_past_a_long_and_a_boolean_id_are_found_by_a_load_a_patch
     assert gom.edges.relate(node_ref(kind, id), node_ref(SavedValue, "a"), "POINTS")
     assert [it.id for it in gom.edges.load_related(node_ref(kind, id), "POINTS", SavedValue)] == ["a"]
     assert gom.delete(kind, id) == 1
+
+
+class StampedGauge(NodeFragment, labels=["SavedValue", "StampedGauge"]):
+    """A stamped node whose id is a float: a save_all hands each its stamp back by the id the store reads back."""
+
+    id: Annotated[float, NodeId()]
+    name: str
+    stamp: Annotated[str | None, NodeStamp()] = None
+
+
+def test_save_all_hands_each_stamped_node_whose_id_is_a_float_its_stamp(gom: StatelessGraphObjectManager):
+    # On Oracle a float id is held as a binary double, whose text need not read back as the number given (0.1 + 0.2):
+    # the stamps a save_all reads back are matched to its objects by that id.
+    saved = gom.save_all([StampedGauge(id=0.1 + 0.2, name="a"), StampedGauge(id=1e-7, name="b")])
+    assert all(it.stamp for it in saved)
+    for it in saved:
+        loaded = gom.load(StampedGauge, it.id)
+        assert loaded is not None and loaded.stamp == it.stamp

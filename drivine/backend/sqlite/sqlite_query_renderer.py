@@ -246,9 +246,9 @@ class SqliteQueryRenderer(SqlQueryRenderer):
         """
         A regular expression that must match the whole value, as Cypher's `=~` does. A leading `(?i)` ignores case.
         SQLite has no regular expressions of its own, so the expression is Java's, as on drivine4j, read by the function
-        SQLite's `REGEXP` calls (see sqlite_patterns). It is held to the whole value by a group that takes no number, so
-        its own groups keep theirs and a backreference names the group it was written for, and ends at `\\z`, the text's
-        end, where Java's `\\Z` and `$` would match before a line break that ends it.
+        SQLite's `REGEXP` calls, the shared module's (see sqlite_extension). It is held to the whole value by a group
+        that takes no number, so its own groups keep theirs and a backreference names the group it was written for, and
+        ends at `\\z`, the text's end, where Java's `\\Z` and `$` would match before a line break that ends it.
         """
         ignore_case = pattern.startswith("(?i)")
         body = pattern[4:] if ignore_case else pattern

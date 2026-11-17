@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import math
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time, timedelta, timezone
 from typing import Annotated, Any
 
 import pytest
@@ -226,6 +226,7 @@ class Dated(NodeFragment, labels=["DatedHeld"]):
     id: Annotated[str, NodeId()]
     on: date | None = None
     at: datetime | None = None
+    clock: time | None = None
 
 
 DSL_TEMPORALS = (
@@ -259,3 +260,12 @@ def test_a_saved_date_or_moment_is_compared_and_ordered_by_the_query_dsl_as_it_i
     except AssertionError:
         pytest.xfail(DSL_TEMPORALS)
     pytest.fail(f"Held, and passing: take the hold off. {DSL_TEMPORALS}")
+
+
+def test_the_query_dsl_refuses_a_time_at_an_offset_with_seconds_by_name_as_a_parameter_is(
+    gom: StatelessGraphObjectManager,
+):
+    # The store holds an offset to the minute (#517); the DSL wrote this one as a text no value of it matches (#523).
+    at = time(10, tzinfo=timezone(timedelta(hours=1, seconds=1)))
+    with pytest.raises(DrivineError, match="at an offset with seconds"):
+        gom.load_all(Dated, refs(Dated).clock.eq(at))

@@ -120,3 +120,26 @@ def test_judging_yields_each_statement_and_takes_its_rows():
     asking = judging("sqlite", "g", MADE)
     assert next(asking) == Ask(MADE)
     assert asking.send([{"made": 1}]).statement == STAMP.read_stamps
+
+
+def test_an_empty_graph_of_an_earlier_layout_has_that_layouts_objects_dropped_before_it_is_restamped():
+    objects = [
+        {"o": json.dumps({"name": "g_node_labels", "type": "INDEX"})},
+        {"o": json.dumps({"name": "g_uq_Personemail_8e5a9c3b", "type": "INDEX"})},
+    ]
+    store = Store(
+        (MADE, [{"made": 1}]),
+        (STAMP.read_stamps, stamped(None)),
+        (STAMP.layout_objects, objects),
+        (STAMP.read_stamps, stamped(2)),
+    )
+    judge("sqlite", "g", MADE, store.rows)
+    statements = [it.statement for it in store.asked]
+    drops = [
+        "DROP INDEX IF EXISTS g_uq_Personemail_8e5a9c3b",
+        "DELETE FROM g_schema WHERE LOWER(object_name) IN ('g_uq_personemail_8e5a9c3b')",
+    ]
+    # Each drop the verdict gives, in order, and then the restamp, before the graph is asked again.
+    at = statements.index(drops[0])
+    assert statements[at : at + 3] == [*drops, STAMP.restamp_layout]
+    assert statements.count(STAMP.read_stamps) == 2

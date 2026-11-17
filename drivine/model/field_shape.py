@@ -33,6 +33,8 @@ class FieldShape:
     optional: bool
     collection: CollectionKind | None
     item: Any
+    value: Any = None
+    """The type of a dict's values; None for any other shape."""
 
     @classmethod
     def of(cls, annotation: Any) -> FieldShape:
@@ -50,4 +52,6 @@ class FieldShape:
         if collection is None:
             return cls(optional, None, annotation)
         args = typing.get_args(annotation)
-        return cls(optional, collection, args[0] if args and collection != "dict" else Any)
+        if collection == "dict":
+            return cls(optional, collection, Any, args[1] if len(args) == 2 else Any)
+        return cls(optional, collection, args[0] if args else Any)

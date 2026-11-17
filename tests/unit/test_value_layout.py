@@ -109,3 +109,12 @@ def test_an_oracle_patch_and_patch_all_write_their_values_in_the_layout_as_a_sav
     rows = [{"id": "p1", "props": values, "vectors": {}}]
     many = backend.patch_many(model).spec({"rows": rows}).parameters
     assert to_json(many["rows"]) == f'[{{"id":"p1","props":{{"$$dollar":7,"born":{DATE_TAG}}},"vectors":{{}}}}]'
+
+
+def test_the_object_managers_own_postgres_rows_keep_a_whole_number_past_a_long_exactly():
+    from drivine.connection.postgres.postgres_non_finite import read_compiled_json, read_layout_json
+
+    text = f'{{"big":{2**70},"d":{DATE_TAG}}}'
+    assert read_layout_json(text) == {"big": 2**70, "d": "2024-01-01"}
+    # A compiled statement's reads a number past a long's range as the float nearest it, as drivine4j's does.
+    assert isinstance(read_compiled_json('{"big": 1180591620717411303424}')["big"], float)

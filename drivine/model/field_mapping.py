@@ -28,11 +28,11 @@ class FieldMapping:
     hashed, such as the lists a set of tuples is stored as, keeps the list.
     """
 
-    bytes_fields: dict[str, bool] = field(default_factory=lambda: {})
+    bytes_fields: dict[str, CollectionKind | None] = field(default_factory=lambda: {})
     """
     Fields holding bytes, which store layout 2 holds as the list of their signed values (`[1, 2, -1]`), as drivine4j and
-    Neo4j hold a byte array: a load gives them back as bytes. Each says whether the field is a list, set or tuple of
-    bytes, each item held so.
+    Neo4j hold a byte array: a load gives them back as bytes. Each by the collection it holds them in, each item (or a
+    dict's each value) held so; None for a field that is bytes itself.
     """
 
     @property

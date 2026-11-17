@@ -103,7 +103,7 @@ select = ["E", "F", "I", "UP", "B", "ASYNC"]
 [tool.ruff.lint.per-file-ignores]
 # The PL/SQL prelude is TypeScript's Drivine's, line for line, so that the two write the same statements.
 "drivine/backend/oracle/oracle_save_builder.py" = ["E501"]
-# The function an Oracle graph is made with, drivine4j's line for line, as part of the store layout.
+# Docstrings that name the graph's functions in full: the functions themselves are the shared module's (OracleGraph).
 "drivine/backend/oracle/oracle_stored_functions.py" = ["E501"]
 
 [tool.pyright]

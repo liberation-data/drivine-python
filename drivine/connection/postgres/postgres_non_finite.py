@@ -98,12 +98,23 @@ def read_non_finite_json(data: str | bytes) -> Any:
     return value_layout.read_after(text, lambda it: it, lambda it: json.loads(it, parse_float=_float, parse_int=_int))
 
 
-def read_compiled(cursor: Any, non_finite: bool) -> None:
+def read_layout_json(data: str | bytes) -> Any:
     """
-    Has `cursor`, a compiled statement's, read `json` and `jsonb`, as text or binary, with read_non_finite_json where
-    the statement was given NaN or an infinity, else with read_compiled_json. Set on that cursor alone, never for the
-    connection or the process: it would reach every statement, a user's own SQL and other libraries' too.
+    The JSON `data` read as `json.loads` reads it, each whole number exactly, in the store layout: the object manager's
+    own statements' (see QuerySpecification.store_layout), which read values as they were saved.
+    """
+    text = data.decode() if isinstance(data, bytes) else data
+    return value_layout.read(text)
+
+
+def read_compiled(cursor: Any, non_finite: bool, compiled: bool = True) -> None:
+    """
+    Has `cursor` read `json` and `jsonb`, as text or binary, in the store layout: a compiled statement's with
+    read_non_finite_json where the statement was given NaN or an infinity, else with read_compiled_json; any other of
+    the object manager's own with read_layout_json. Set on that cursor alone, never for the connection or the process:
+    it would reach every statement, a user's own SQL and other libraries' too.
     """
     from psycopg.types.json import set_json_loads
 
-    set_json_loads(read_non_finite_json if non_finite else read_compiled_json, cursor)
+    loads = (read_non_finite_json if non_finite else read_compiled_json) if compiled else read_layout_json
+    set_json_loads(loads, cursor)

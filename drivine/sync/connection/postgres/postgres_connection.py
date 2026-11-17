@@ -57,7 +57,7 @@ class PostgresConnection(Connection):
         start = time.perf_counter()
         with self.connection.cursor() as cursor:
             if cypher is not None or finalized.store_layout:
-                read_compiled(cursor, cypher is not None and cypher.non_finite)
+                read_compiled(cursor, cypher is not None and cypher.non_finite, cypher is not None)
             for statement in setup:
                 cursor.execute(statement)
             cursor.execute(compiled.statement, _bindable(compiled.parameters))
@@ -86,7 +86,7 @@ class PostgresConnection(Connection):
         else:
             cursor = self.connection.cursor(name=f"drivine_{next(_CURSORS)}", withhold=not self._in_transaction)
         if cypher is not None or finalized.store_layout:
-            read_compiled(cursor, cypher is not None and cypher.non_finite)
+            read_compiled(cursor, cypher is not None and cypher.non_finite, cypher is not None)
         cursor.execute(compiled.statement, _bindable(compiled.parameters))
         return PostgresCursor(finalized, cursor, self.result_mapper, compiled=sql is not finalized)
 

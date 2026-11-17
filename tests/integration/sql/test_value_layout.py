@@ -188,3 +188,18 @@ async def test_a_list_of_bytes_is_read_back_as_the_bytes_it_held(
     await gom.save(Blobs(id="l1", parts=[b"\x01\xff", b""]))
     loaded = await gom.load(Blobs, "l1")
     assert loaded is not None and loaded.parts == [b"\x01\xff", b""]
+
+
+class Keyed(NodeFragment, labels=["Keyed"]):
+    id: Annotated[str, NodeId()]
+    named: dict[str, bytes] | None = None
+    kept: tuple[bytes, ...] | None = None
+
+
+async def test_a_dict_or_tuple_of_bytes_is_read_back_as_the_bytes_it_held(
+    gom: StatelessGraphObjectManager, pm: PersistenceManager
+):
+    await gom.save(Keyed(id="k1", named={"a": b"\x01\xff", "b": b""}, kept=(b"\x02",)))
+    assert (await stored(pm, "k1"))["named"] == {"a": [1, -1], "b": []}
+    loaded = await gom.load(Keyed, "k1")
+    assert loaded is not None and loaded.named == {"a": b"\x01\xff", "b": b""} and loaded.kept == (b"\x02",)

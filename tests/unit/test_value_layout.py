@@ -134,3 +134,16 @@ def test_a_compiled_statements_postgres_column_reads_a_whole_number_past_a_long_
     tagged = read_compiled_json(f'{{"big":{2**70},"$$k":1,"d":{DATE_TAG}}}')
     assert isinstance(tagged["big"], float) and tagged["big"] == plain["big"]
     assert tagged["$k"] == 1 and tagged["d"] == "2024-01-01"
+
+
+def test_a_value_a_driver_parsed_already_is_read_in_the_layout_and_a_users_own_sql_is_not():
+    from drivine.backend.sql.value_layout import read_value
+    from drivine.connection.oracle.oracle_result_mapper import OracleResultMapper
+
+    tag = {"$t": "date", "v": "2024-01-01", "s": "10000020240101"}
+    assert read_value({"d": tag, "$$k": [1.5, {"$$m": 1}]}) == {"d": "2024-01-01", "$k": [1.5, {"$m": 1}]}
+    assert read_value({"plain": [1, "a"]}) == {"plain": [1, "a"]}
+    # Oracle's JSON type, which python-oracledb hands over parsed: read in the layout for Drivine's statements alone.
+    mapper = OracleResultMapper()
+    assert mapper.map_rows([[{"d": tag}]], ["result"], layout=True) == [{"d": "2024-01-01"}]
+    assert mapper.map_rows([[{"d": tag}]], ["result"]) == [{"d": tag}]

@@ -257,6 +257,17 @@ def number_of(alias: str, property: str) -> str:
     )
 
 
+def temporal_text(alias: str, property: str) -> str:
+    """
+    The text of the property of the row `alias` that holds a moment or a date: where store layout 2 holds it as its tag
+    (`{"$t": "date", "v": "2024-01-01", "s": …}`, see value_layout), as a save writes one, the tag's text `v`; anything
+    else as text_of reads it, as a moment written as text.
+    """
+    tag = sql_text(f"$.{quoted(property)}.v")
+    held = f"{column(alias, 'props')} ->> {tag}"
+    return f"(CASE {json_type(alias, property)} WHEN 'object' THEN {held} ELSE {text_of(alias, property)} END)"
+
+
 def typed(kind: Kind, text: str) -> str:
     """
     `text`, the text of a value, read as `kind` compares: a moment as nanoseconds since the epoch (see epoch), so two

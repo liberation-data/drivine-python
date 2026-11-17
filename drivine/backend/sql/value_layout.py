@@ -136,6 +136,24 @@ def read(text: str, parse: Callable[[str], Any] = json.loads) -> Any:
     return _read_by_module(text) if parse is json.loads else _read_through(parse(text))
 
 
+def read_value(value: Any) -> Any:
+    """
+    A column a driver hands over parsed already (Oracle's JSON type, which python-oracledb reads as a dict or a list),
+    read in the store layout as `read` reads its text: through the module where a map in it, at any depth, has a key
+    that begins with `$`, a tag's or an escaped key's, and as it is otherwise. Drivine for TypeScript's `readLayoutOf`.
+    """
+    return _read_through(value) if _keyed_with_dollar(value) else value
+
+
+def _keyed_with_dollar(value: Any) -> bool:
+    if isinstance(value, Mapping):
+        entries = cast(Mapping[Any, Any], value)
+        return any(str(key).startswith("$") or _keyed_with_dollar(it) for key, it in entries.items())
+    if isinstance(value, (list, tuple)):
+        return any(_keyed_with_dollar(it) for it in cast(Any, value))
+    return False
+
+
 def read_after(text: str, raw: Callable[[Any], Any], parse: Callable[[str], Any] = json.loads) -> Any:
     """
     A column read in the store layout, where the store writes some values its own way in the column's JSON (SQLite's

@@ -22,11 +22,19 @@ class OracleResultMapper:
     """
 
     def map_query_results(
-        self, rows: Sequence[Sequence[Any]], columns: Sequence[str], spec: QuerySpecification[Any]
+        self,
+        rows: Sequence[Sequence[Any]],
+        columns: Sequence[str],
+        spec: QuerySpecification[Any],
+        layout: bool = False,
     ) -> list[Any]:
-        return GraphResultMapper.post_process(self.map_rows(rows, columns), spec)
+        """
+        The rows mapped, with `layout`, as a compiled statement's and the object manager's own are, each JSON value
+        read in the store layout (see value_layout); a user's own SQL is read as the driver reads it.
+        """
+        return GraphResultMapper.post_process(self.map_rows(rows, columns, layout), spec)
 
-    def map_rows(self, rows: Sequence[Sequence[Any]], columns: Sequence[str]) -> list[Any]:
+    def map_rows(self, rows: Sequence[Sequence[Any]], columns: Sequence[str], layout: bool = False) -> list[Any]:
         results: list[Any] = []
         for row in rows:
             record: dict[str, Any] = {}
@@ -35,7 +43,7 @@ class OracleResultMapper:
                     # In the store layout (see value_layout).
                     record[column[: -len(_JSON_SUFFIX)]] = None if value is None else value_layout.read(value)
                 else:
-                    record[column] = _native(value)
+                    record[column] = value_layout.read_value(_native(value)) if layout else _native(value)
             results.append(next(iter(record.values())) if len(record) == 1 else record)
         return results
 

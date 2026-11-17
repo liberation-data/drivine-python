@@ -227,12 +227,14 @@ class Recreate:
 def plan_request(
     database: str,
     operation: Mapping[str, Any],
-    policy: ItemPolicy = ItemPolicy(),
+    policy: ItemPolicy | None = None,
     catalogs: Sequence[Mapping[str, Any]] = (),
     runtime: Sequence[Mapping[str, Any]] = (),
-    recreate: Recreate = Recreate(),
+    recreate: Recreate | None = None,
 ) -> dict[str, Any]:
     """A request of `operation` on the planning's database: what an item call, ensure or remove plans (`PlanJson`)."""
+    policy = policy or ItemPolicy()
+    recreate = recreate or Recreate()
     return {
         "database": database,
         "operation": dict(operation),

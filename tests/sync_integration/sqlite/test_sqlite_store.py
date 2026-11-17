@@ -8,7 +8,7 @@ over every store don't cover them already.
 """
 
 import json
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta, timezone
 from typing import Annotated, Any
 
 import pytest
@@ -125,6 +125,35 @@ def test_moments_a_microsecond_apart_order_compare_and_seek_as_the_moments_they_
     assert [it.id for it in gom.load_all(Reading, order_by=q.at.desc())] == ["c", "b", "a"]
     later = base.astimezone(timezone(timedelta(hours=-5)))
     assert [it.id for it in gom.load_all(Reading, q.at.gte(later))] == ["a", "b", "c"]
+
+
+class Dated(NodeFragment, labels=["Dated"]):
+    id: Annotated[str, NodeId()]
+    on: date | None = None
+
+
+def test_saved_moments_and_dates_held_as_their_tags_compare_order_and_are_among_values_as_they_are(gom):
+    """Store layout 2 holds a saved temporal value as its tag: a query reads the tag's text, as it reads a text one."""
+    base = datetime(2024, 5, 6, 7, 8, 9, 123456, tzinfo=UTC)
+    gom.save_all(
+        [
+            Reading(id="a", at=base),
+            Reading(id="b", at=(base + timedelta(microseconds=1)).astimezone(timezone(timedelta(hours=2)))),
+            Reading(id="c", at=base + timedelta(microseconds=2)),
+        ]
+    )
+    q = refs(Reading)
+    assert [it.id for it in gom.load_all(Reading, q.at.gt(base))] == ["b", "c"]
+    assert [it.id for it in gom.load_all(Reading, q.at.eq(base + timedelta(microseconds=1)))] == ["b"]
+    assert [it.id for it in gom.load_all(Reading, order_by=q.at.desc())] == ["c", "b", "a"]
+    among = [base, base + timedelta(microseconds=2)]
+    assert sorted(it.id for it in gom.load_all(Reading, q.at.in_(among))) == ["a", "c"]
+    gom.save_all([Dated(id="d1", on=date(2024, 1, 1)), Dated(id="d2", on=date(2024, 1, 2))])
+    d = refs(Dated)
+    assert [it.id for it in gom.load_all(Dated, d.on.eq(date(2024, 1, 2)))] == ["d2"]
+    assert [it.id for it in gom.load_all(Dated, d.on.lt(date(2024, 1, 2)))] == ["d1"]
+    assert [it.id for it in gom.load_all(Dated, d.on.in_([date(2024, 1, 1)]))] == ["d1"]
+    assert [it.id for it in gom.load_all(Dated, order_by=d.on.desc())] == ["d2", "d1"]
 
 
 def test_a_full_text_search_scores_whole_words_ignores_case_as_unicode_does_and_leaves_out_what_it_must_not(gom):

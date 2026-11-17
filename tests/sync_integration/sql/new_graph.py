@@ -67,7 +67,7 @@ def drop_graph(pm: PersistenceManager, name: str) -> None:
     """Drops the graph's tables, and on Oracle the property graph over them."""
     if pm.type is DatabaseType.ORACLE:
         statements = [f"DROP PROPERTY GRAPH IF EXISTS {name}"] + [
-            f"DROP TABLE IF EXISTS {name}_{it} PURGE" for it in TABLES
+            f"DROP TABLE IF EXISTS {name}_{it} CASCADE CONSTRAINTS PURGE" for it in TABLES
         ]
     elif pm.type is DatabaseType.SQLITE:
         statements = [f"DROP TABLE IF EXISTS {name}_{it}" for it in TABLES]

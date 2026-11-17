@@ -15,6 +15,7 @@ from drivine.backend.sqlite.sqlite_graph import (
     json_type,
     number_of,
     path,
+    temporal_text,
     text,
     text_of,
     typed,
@@ -140,7 +141,7 @@ class SqliteQueryRenderer(SqlQueryRenderer):
             return super()._order(key, scope, alias)
         direction = "DESC" if key.term.direction == "DESC" else "ASC"
         nulls = key.term.nulls or ("LAST" if direction == "ASC" else "FIRST")
-        return f"{typed(kind, text_of(alias, key.property or ''))} {direction} NULLS {nulls}"
+        return f"{typed(kind, temporal_text(alias, key.property or ''))} {direction} NULLS {nulls}"
 
     def _ordered_property(
         self, alias: str, property: str, direction: Literal["ASC", "DESC"], nulls: str | None = None
@@ -175,7 +176,7 @@ class SqliteQueryRenderer(SqlQueryRenderer):
         """The property read as `kind`: a number as one, a moment or a date as one, anything else as text."""
         if kind == "NUMBER":
             return number_of(row, name)
-        return typed(kind, text_of(row, name))
+        return typed(kind, temporal_text(row, name) if kind in ("INSTANT", "DATE") else text_of(row, name))
 
     def _scalar(self, value: Any, json_packed: bool) -> Any:
         """
@@ -185,12 +186,18 @@ class SqliteQueryRenderer(SqlQueryRenderer):
 
     def _listed(self, compared: Compared, values: list[Any]) -> str | None:
         """
-        Whether the property is among the values, read as numbers where every value is one: None for no values, which
-        nothing is among. Each value is read as a property of its kind is read, so a text is a string's text or another
-        value's JSON.
+        Whether the property is among the values, read as numbers where every value is one, and as moments or dates
+        where every value is one of those: None for no values, which nothing is among. Each value is read as a property
+        of its kind is read, so a text is a string's text or another value's JSON.
         """
         if not values:
             return None
+        kind = _kind_of(values[0], compared.json_packed)
+        if kind in ("INSTANT", "DATE") and all(_kind_of(it, False) == kind for it in values):
+            # Moments or dates, each read as one, as a comparison reads it: a saved one's tag by its text.
+            bound = self._bind(to_json([self._scalar(it, False) for it in values]))
+            among = f"SELECT {typed(kind, 'v.value')} FROM json_each({bound}) v"
+            return f"{self._typed(compared.row, compared.name, kind)} IN ({among})"
         numbers = not compared.json_packed and all(_kind_of(it, False) == "NUMBER" for it in values)
         read = (
             "(CASE WHEN v.type IN ('integer', 'real') THEN v.value END)"

@@ -11,6 +11,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import re
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -35,6 +36,7 @@ from drivine import (
     QuerySpecification,
     RelateMode,
     Relationship,
+    RemovedTargets,
     Root,
     SaveOptions,
     StatelessGraphObjectManager,
@@ -64,6 +66,14 @@ from drivine.manager.persistence_manager import PersistenceManager
 from drivine.model.model_registry import ModelRegistry
 
 T = TypeVar("T")
+
+ONE_ID = "(SELECT JSON(:1 EXTENDED) v FROM dual) i"
+"""The row an Oracle write block's find binds its one id in, as `i.v`, read EXTENDED."""
+
+
+def write_has_id(key: str, alias: str = "f") -> str:
+    """The comparison an Oracle write block makes of the node `alias`'s id `key` with the bound row's `i.v`."""
+    return id_sql("oracle", "hasId", alias, key, "i.v")
 
 
 class Gauge(NodeFragment, labels=["Gauge"]):
@@ -250,7 +260,7 @@ def test_oracle_binds_the_ends_of_load_related_unrelate_all_and_relate_as_the_js
     assert unrelated["x_from"] == ORACLE_HELD  # type: ignore[index]
     relate: Any = backend.relate(origin, MatchedNode(model, 4.5, ()), "POINTS", {}, RelateMode.MERGE).spec().parameters
     assert [relate["x_from"], relate["x_to"]] == [ORACLE_HELD, '{"$numberDouble":"4.5"}']
-    assert 'PASSING JSON(:1 EXTENDED) AS "v"' in relate["x_frommatch"]
+    assert f"{ONE_ID} CROSS JOIN drivine_node f WHERE {write_has_id('id')}" in relate["x_frommatch"]
 
 
 def test_oracle_binds_the_null_ends_of_related_unrelate_all_relate_and_unrelate_as_they_are_so_they_find_no_node():
@@ -788,3 +798,122 @@ async def test_patch_all_hands_each_object_its_result_where_falkordb_gives_a_dat
     gom = StatelessGraphObjectManager(Echoing())
     results = await gom.patch_all([PatchedDay(on=date(2024, 1, 3), value=1)], only=["value"])
     assert results == [PatchResult(True, True, True)]
+
+
+# ----- An Oracle write block's id -----
+#
+# Each Oracle write block finds a node by its id as the shared module's hasId compares it, the property's class and key
+# with the id's, which the index over the id is made over (drivine#754): the id bound once, in a row of its own, read
+# EXTENDED, since the comparison reads it more than once and a dynamic statement's binds are by position. A list of ids,
+# a fragment batch's or a save's stamped related nodes, or a trim's, is a row for each id, read EXTENDED, so a float is
+# the binary double the node holds.
+
+HINT = "/*+ NO_JSON_TABLE_TRANSFORM */"
+
+
+class DialDays(GraphView):
+    dial: Annotated[Dial, Root()]
+    days: Annotated[list[StampedDay], Relationship("ON")] = []
+
+
+def id_rows(listed: str) -> str:
+    """Each id list's rows, bound as `listed`."""
+    return f"JSON_TABLE(JSON({listed} EXTENDED), '$[*]' COLUMNS (v JSON PATH '$')) i"
+
+
+def assert_match(match: str, key: str, labels: list[str]) -> None:
+    """The bound match of a find_node or a write_node: the node of `labels` whose id `key` is the one bound `:1`."""
+    carried = " AND ".join(
+        f"INSTR(',' || LTRIM(RTRIM(JSON_SERIALIZE(f.labels), ']'), '[') || ',\"', ',\"{it}\",\"') > 0" for it in labels
+    )
+    assert match == (
+        f"n.nid IN (SELECT {HINT} f.nid + 0 FROM {ONE_ID} CROSS JOIN drivine_node f WHERE {write_has_id(key)} "
+        f"AND {carried})"
+    )
+    assert match.count(":1") == 1
+    assert "PASSING" not in match
+
+
+def matches(parameters: Any) -> list[str]:
+    """The bound texts among `parameters` that are a find_node's or a write_node's match."""
+    return [it for it in parameters.values() if isinstance(it, str) and ONE_ID in it]
+
+
+def test_oracle_finds_a_patchs_a_patch_alls_a_relates_an_unrelates_and_an_unrelate_alls_node_by_has_id_bound_once():
+    registry = ModelRegistry()
+    backend = OracleBackend(OracleGraph())
+    priced, dated = registry.fragment(Priced), registry.fragment(Dated)
+    patched: Any = backend.patch_one(priced).spec({"id": "p", "set": {}, "vectors": {}}).parameters
+    assert_match(patched["x_match"], "$$code", ["Priced"])
+    many: Any = backend.patch_many(dated).spec({"rows": []}).parameters
+    assert_match(many["x_match"], "on", ["Dated"])
+    origin = MatchedNode(priced, "p", ())
+    to = MatchedNode(dated, datetime(2024, 1, 2, tzinfo=UTC), ())
+    for statement in (
+        backend.relate(origin, to, "ON", {}, RelateMode.MERGE),
+        backend.relate(origin, to, "ON", {}, RelateMode.CREATE),
+        backend.unrelate(origin, to, "ON"),
+    ):
+        parameters: Any = statement.spec().parameters
+        assert_match(parameters["x_frommatch"], "$$code", ["Priced"])
+        assert_match(parameters["x_tomatch"], "on", ["Dated"])
+        assert parameters["x_to"] == held_id(to.id)
+    every: Any = backend.unrelate_all(origin, "ON", Direction.OUTGOING).spec().parameters
+    assert_match(every["x_frommatch"], "$$code", ["Priced"])
+    # Each of a node's labels is told by its text, as a lookup by id tells them.
+    dial: Any = backend.patch_one(registry.fragment(Dial)).spec({"id": 1, "set": {}, "vectors": {}}).parameters
+    assert_match(dial["x_match"], "id", ["Dial", "Meter"])
+
+
+def test_oracle_finds_each_node_of_a_fragment_batch_by_has_id_and_reads_their_stamps_by_has_id_over_each_ids_row():
+    model = ModelRegistry().fragment(StampedDay)
+    days = [StampedDay(on=date(2024, 1, 2)), StampedDay(on=date(2024, 1, 3))]
+    statement = OracleBackend(OracleGraph()).fragment_batch([FragmentGroup(model, days)], SaveOptions())
+    parameters: Any = statement.spec().parameters
+    found = matches(parameters)
+    assert len(found) == 2
+    for it in found:
+        assert_match(it, "on", ["StampedDay"])
+    # Read before and after the writes, each id of the list a row, which finds its node through the index.
+    reads = (
+        f"n.nid IN (SELECT {HINT} f.nid + 0 FROM {id_rows('$x_1')} CROSS JOIN drivine_node f WHERE {write_has_id('on')}"
+    )
+    assert reads in statement.text
+    # The read itself reads each node's props beside the lookup's, so it is planned without the transformation too.
+    assert statement.text.count(f"SELECT {HINT} NVL(JSON_ARRAYAGG(") == 2
+    assert statement.text.count(f"CROSS JOIN drivine_node f WHERE {write_has_id('on')}") == 2
+    assert parameters["x_1"] == held_id([it.on for it in days])
+    assert "PASSING t.v" not in statement.text
+
+
+def test_oracle_finds_a_saves_nodes_by_has_id_trims_a_replaced_list_by_has_id_over_each_id_kept_and_reads_stamps_so():
+    registry = ModelRegistry()
+    kept = StampedDay(on=date(2024, 1, 2))
+    view = DialDays(dial=Dial(id=1), days=[kept])
+    options = SaveOptions(replace=["days"], removed_targets=RemovedTargets.DELETE_UNREFERENCED)
+    statement = OracleBackend(OracleGraph()).save(registry.view(DialDays), view, options, False, registry)
+    parameters: Any = statement.spec().parameters
+    found = matches(parameters)
+    assert len(found) == 2
+    assert_match(found[0], "id", ["Dial", "Meter"])
+    assert_match(found[1], "on", ["StampedDay"])
+
+    # The trim's two statements test each target joined to the root against the rows of the ids kept, bound :2, each
+    # planned without Oracle's JSON table transformation, which lost a node's tests beside another table (spec#415).
+    trims = [it for it in parameters.values() if isinstance(it, str) and write_has_id("on", "x") in it]
+    assert len(trims) == 2
+    for trim in trims:
+        assert f"NOT EXISTS (SELECT {HINT} 1 FROM {id_rows(':2')} WHERE {write_has_id('on', 'x')})" in trim
+        assert trim.count(":2") == 1
+        assert trim.startswith(f"SELECT {HINT} ")
+        assert "PASSING" not in trim
+    # The stamps of the related days, read before and after, each id a row found through the index.
+    reads = f"n.nid IN (SELECT {HINT} f.nid + 0 FROM {id_rows('$x_')}"
+    assert re.sub(r"\$x_\d+", "$x_", statement.text).count(reads) == 2
+    assert statement.text.count(f"SELECT {HINT} NVL(JSON_ARRAYAGG(") == 2
+    assert statement.text.count(f"CROSS JOIN drivine_node f WHERE {write_has_id('on')}") == 2
+    assert "PASSING t.v" not in statement.text
+    # Each lookup hands its node back as `f.nid + 0`: Oracle eliminates a join of the node table to a view of it on a
+    # bare nid, and the filter on the view with it (drivine-cypher-spec#160).
+    for text in (statement.text, *found):
+        assert not re.search(r"SELECT (/\*\+ [A-Z_ ]+ \*/ )?f\.nid FROM", text)

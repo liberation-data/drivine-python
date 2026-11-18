@@ -5,7 +5,14 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from drivine.annotation.direction import Direction
-from drivine.backend.oracle.id_keyed_statement import held_id
+from drivine.backend.oracle.id_keyed_statement import (
+    NO_JSON_TABLE_TRANSFORM,
+    bound_id_rows,
+    found_by_ids,
+    held_id,
+    holds_id_among,
+    id_match,
+)
 from drivine.backend.oracle.oracle_graph import OracleGraph, has_labels, json_key, sql_text
 from drivine.backend.save_statement import SaveStatement
 from drivine.backend.save_statement_builder import (
@@ -240,13 +247,10 @@ class OracleSaveBuilder:
                 for item in items(it, getattr(obj, it.field, None))
             ]
             assert into.node_id_property is not None
-            k = json_key(held_key(into.node_id_property))
 
-            def not_in(listed: str, k: str = k) -> str:
-                return (
-                    f"NOT EXISTS (SELECT 1 FROM JSON_TABLE(JSON({listed} EXTENDED), '$[*]' COLUMNS (v JSON PATH '$')) t "
-                    f"WHERE JSON_EXISTS(x.props, '$?(@{k} == $v)' PASSING t.v AS \"v\"))"
-                )
+            def not_in(listed: str, property: str = into.node_id_property) -> str:
+                """Whether x, a target the root is joined to, holds none of the ids bound as `listed`."""
+                return f"NOT {holds_id_among('x', property, bound_id_rows(listed))}"
 
             if rel.direction is Direction.INCOMING:
                 on, root = "x.nid = e.src", "e.dst = q.r"
@@ -256,12 +260,12 @@ class OracleSaveBuilder:
                 on, root = "x.nid = e.dst", "e.src = q.r"
             # The root's id once, from a row of its own: a dynamic statement's binds are by position.
             dropped = (
-                f"SELECT e.eid, x.nid FROM (SELECT :1 AS r FROM dual) q CROSS JOIN {self.graph.edges} e "
+                f"SELECT {NO_JSON_TABLE_TRANSFORM} e.eid, x.nid FROM (SELECT :1 AS r FROM dual) q CROSS JOIN {self.graph.edges} e "
                 f"JOIN {self.graph.nodes} x ON {on} "
                 f"WHERE {root} AND e.type = {sql_text(rel.type)} AND {has_labels('x', into.labels)} AND {not_in(':2')}"
             )
             unreferenced = (
-                f"SELECT COUNT(*) FROM {self.graph.nodes} x WHERE x.nid = :1 AND {not_in(':2')} AND NOT EXISTS "
+                f"SELECT {NO_JSON_TABLE_TRANSFORM} COUNT(*) FROM {self.graph.nodes} x WHERE x.nid = :1 AND {not_in(':2')} AND NOT EXISTS "
                 f"(SELECT 1 FROM {self.graph.edges} r WHERE {_referenced_as(rel.direction)})"
                 if self._options.removed_targets is RemovedTargets.DELETE_UNREFERENCED
                 else None
@@ -280,12 +284,18 @@ class OracleSaveBuilder:
             variable = f"v_{when}{i}"
             if f"{variable} CLOB;" not in self._declarations:
                 self._declarations.append(f"{variable} CLOB;")
+            found = found_by_ids(
+                self.graph.nodes,
+                "n",
+                it.model.node_id_property,
+                it.model.labels,
+                bound_id_rows(self._bind(held_id(it.ids))),
+            )
+            # Hinted as the lookup is: it reads the node's props beside the lookup's, once Oracle unnests it.
             reads.append(
-                f"SELECT NVL(JSON_ARRAYAGG(JSON_OBJECT('id' VALUE JSON_QUERY(n.props, '${k}'), 'stamp' VALUE "
-                f"NVL(n.stamp, '{stamps.NEVER_STAMPED}')) RETURNING CLOB), '[]') INTO {variable} FROM "
-                f"{self.graph.nodes} n WHERE {has_labels('n', it.model.labels)} AND EXISTS (SELECT 1 FROM "
-                f"JSON_TABLE(JSON({self._bind(held_id(it.ids))} EXTENDED), '$[*]' COLUMNS (v JSON PATH '$')) t WHERE "
-                f"JSON_EXISTS(n.props, '$?(@{k} == $v)' PASSING t.v AS \"v\"));"
+                f"SELECT {NO_JSON_TABLE_TRANSFORM} NVL(JSON_ARRAYAGG(JSON_OBJECT('id' VALUE "
+                f"JSON_QUERY(n.props, '${k}'), 'stamp' VALUE NVL(n.stamp, '{stamps.NEVER_STAMPED}')) "
+                f"RETURNING CLOB), '[]') INTO {variable} FROM {self.graph.nodes} n WHERE {found};"
             )
         return reads
 
@@ -371,11 +381,8 @@ END;"""
 
     def _node_params(self, write: _NodeWrite) -> dict[str, str]:
         assert write.model.node_id_property is not None
-        k = json_key(held_key(write.model.node_id_property))
-        labels = has_labels("n", write.model.labels)
-        match = f"{labels} AND JSON_EXISTS(n.props, '$?(@{k} == $v)' PASSING JSON(:1 EXTENDED) AS \"v\")"
         return {
-            "match": self._bind(match),
+            "match": self._bind(id_match(self.graph.nodes, write.model.node_id_property, write.model.labels)),
             "id": self._bind(held_id(write.id)),
             "labels": self._bind(to_json(list(dict.fromkeys(write.labels)))),
             # In the store layout (see value_layout), as the shared module writes them.

@@ -37,6 +37,7 @@ from drivine.sync import (
     QuerySpecification,
     RelateMode,
     Relationship,
+    RemovedTargets,
     Root,
     StatelessGraphObjectManager,
     node_ref,
@@ -79,6 +80,15 @@ class LookupPriced(NodeFragment, labels=["SqlLookup", "LookupPriced"]):
 
     code: Annotated[str, NodeId(), GraphProperty("$code")]
     name: str | None = None
+    stamp: Annotated[str | None, NodeStamp()] = None
+
+
+class LookupFloat(NodeFragment, labels=["SqlLookup", "LookupFloat"]):
+    """A float NodeId, which Oracle holds as a binary double, and a write block finds as one (drivine#754)."""
+
+    id: Annotated[float, NodeId()]
+    name: str | None = None
+    stamp: Annotated[str | None, NodeStamp()] = None
 
 
 class LookupTargetDays(GraphView):
@@ -214,6 +224,73 @@ def test_a_node_of_a_str_id_is_related_and_patched(gom: StatelessGraphObjectMana
     refs_and_patches(gom, LookupText, LookupText(id="t21", name="a"), "t21", "t22")
 
 
+def test_a_node_of_a_float_id_is_related_and_patched(gom: StatelessGraphObjectManager):
+    # Oracle holds a float as a binary double: each write block finds it by the id bound as one, read EXTENDED (#754).
+    refs_and_patches(gom, LookupFloat, LookupFloat(id=2.5, name="a"), "2.5", "3.5")
+
+
+def test_a_node_of_a_dollar_named_id_is_related_unrelated_patched_all_and_unrelated_all(
+    gom: StatelessGraphObjectManager,
+):
+    gom.save(LookupPriced(code="p2", name="a"))
+    priced = node_ref(LookupPriced, "p2")
+    assert gom.edges.relate(priced, TARGET, "REFERS_TO", {}, RelateMode.CREATE)
+    assert gom.edges.relate(TARGET, priced, "REFERS_TO")
+    assert gom.edges.unrelate(priced, TARGET, "REFERS_TO") == 1
+    [all_] = gom.patch_all([LookupPriced(code="p2", name="patched all")], only=["name"])
+    assert (all_.found, all_.applied, all_.changed) == (True, True, True)
+    loaded = gom.load(LookupPriced, "p2")
+    assert loaded is not None and loaded.name == "patched all"
+    assert gom.edges.unrelate_all(priced, "REFERS_TO", Direction.INCOMING) == 1
+    assert gom.edges.load_related(TARGET, "REFERS_TO", LookupPriced) == []
+
+
+def test_each_node_of_a_save_all_is_found_by_a_float_a_date_and_a_dollar_named_id_and_handed_its_stamp(
+    gom: StatelessGraphObjectManager,
+):
+    # A save_all writes a batch: each node found by its id, so a second save_all makes no second node, and each node's
+    # stamp read back for it by its id, before and after the writes: a node the batch made is handed its whole stamp,
+    # and one that was there, whose relationships the object didn't come from, its data token.
+    def batch(suffix: str) -> list[Any]:
+        return [
+            LookupFloat(id=0.1, name=f"float{suffix}"),
+            LookupDate(id=date(2024, 7, 8), name=f"date{suffix}"),
+            LookupPriced(code="p3", name=f"priced{suffix}"),
+        ]
+
+    def loaded() -> list[str | None]:
+        found = [
+            gom.load(LookupFloat, 0.1),
+            gom.load(LookupDate, "2024-07-08"),
+            gom.load(LookupPriced, "p3"),
+        ]
+        return [it.stamp if it is not None else None for it in found]
+
+    made = batch("")
+    gom.save_all(made)
+    first = loaded()
+    assert all(it is not None and ":" in it for it in first)
+    assert [it.stamp for it in made] == first
+
+    again = batch(" again")
+    gom.save_all(again)
+    assert names(gom, LookupFloat) == ["float again"]
+    assert names(gom, LookupDate) == ["date again"]
+    assert names(gom, LookupPriced) == ["priced again"]
+    assert [it.stamp for it in again] == [f"{(it or '').split(':')[0]}:" for it in loaded()]
+
+
+def test_a_views_related_nodes_of_a_date_id_are_handed_their_stamps(gom: StatelessGraphObjectManager):
+    days = LookupTarget(id="stamped days", name="a target of stamped days")
+    first = LookupDate(id=date(2025, 3, 1), name="first day")
+    second = LookupDate(id=date(2025, 3, 2), name="second day")
+    gom.save(LookupTargetDays(target=days, days=[first, second]))
+    for it, iso in ((first, "2025-03-01"), (second, "2025-03-02")):
+        loaded = gom.load(LookupDate, iso)
+        assert loaded is not None and loaded.stamp is not None
+        assert it.stamp == loaded.stamp
+
+
 def test_a_target_of_a_date_id_is_unlinked_by_its_tags_text_and_the_one_still_held_kept(
     gom: StatelessGraphObjectManager,
 ):
@@ -239,6 +316,32 @@ def test_a_target_of_a_date_id_is_unlinked_by_its_tags_text_and_the_one_still_he
     assert again is not None and again.stamp == held.stamp
     dropped = gom.load(LookupDate, "2025-01-01")
     assert dropped is not None and dropped.name == "first day"
+
+
+def test_a_dropped_target_of_a_date_id_nothing_refers_to_is_deleted_and_the_one_still_held_kept(
+    gom: StatelessGraphObjectManager,
+):
+    # Replaced with DELETE_UNREFERENCED, the dropped target of a date id, which nothing else refers to, is deleted, and
+    # the one still held is kept, unlinked from nothing, its stamp as it was: each told from the ids kept by their tags.
+    days = LookupTarget(id="unreferenced days", name="a target of days")
+    first = LookupDate(id=date(2025, 2, 1), name="dropped day")
+    second = LookupDate(id=date(2025, 2, 2), name="held day")
+    gom.save(LookupTargetDays(target=days, days=[first, second]))
+    held = gom.load(LookupDate, "2025-02-02")
+    assert held is not None
+
+    kept = LookupDate(id=date(2025, 2, 2), name="held day")
+    gom.save(
+        LookupTargetDays(target=days, days=[kept]),
+        replace=["days"],
+        removed_targets=RemovedTargets.DELETE_UNREFERENCED,
+    )
+
+    loaded = gom.load(LookupTargetDays, "unreferenced days")
+    assert loaded is not None and [it.name for it in loaded.days] == ["held day"]
+    assert gom.load(LookupDate, "2025-02-01") is None
+    again = gom.load(LookupDate, "2025-02-02")
+    assert again is not None and again.stamp == held.stamp
 
 
 def test_a_target_of_a_uuid_id_still_held_is_kept_by_its_text_unquoted(gom: StatelessGraphObjectManager):

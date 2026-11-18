@@ -71,6 +71,33 @@ def test_leaves_a_statement_without_parameters_as_it_is():
     assert unused.parameters == {}
 
 
+def test_leaves_a_parameters_name_in_a_json_path_as_it_is_and_binds_the_placeholder():
+    # The module's SQL names a temporal tag's kind `$t` in a JSON path (#541, liberation-data/drivine#789).
+    spec = QuerySpecification("""select jsonb_path_query(n.props, '$."at"."$t"') from t where kind = $t""").bind(
+        {"t": "datetime"}
+    )
+    result = compiled(spec)
+    assert result.statement == """select jsonb_path_query(n.props, '$."at"."$t"') from t where kind = %(t)s"""
+    assert result.parameters == {"t": "datetime"}
+
+
+def test_leaves_a_parameters_name_in_quoted_text_as_it_is_a_temporal_tags_t_and_a_held_key():
+    read = """select ((n.props -> 'at') ->> '$t'), n.props ->> '$$score', "$t" from t"""
+    spec = QuerySpecification(f"{read} where kind = $t and s = $score").bind({"t": "a", "score": 1})
+    result = compiled(spec)
+    assert result.statement == f"{read} where kind = %(t)s and s = %(score)s"
+    assert result.parameters == {"score": 1, "t": "a"}
+
+
+def test_binds_no_parameter_named_only_in_quoted_text_a_dollar_quote_or_a_comment():
+    spec = QuerySpecification("select '$t', $q$ $u $q$ /* $v */ -- $w\nfrom t where id = $id").bind(
+        {"t": 1, "u": 2, "v": 3, "w": 4, "id": 5}
+    )
+    result = compiled(spec)
+    assert result.statement == "select '$t', $q$ $u $q$ /* $v */ -- $w\nfrom t where id = %(id)s"
+    assert result.parameters == {"id": 5}
+
+
 def test_applies_skip_and_limit_as_offset_and_limit():
     spec = QuerySpecification("select * from t").skip(10).limit(5)
     assert compiled(spec).statement == "select * from t OFFSET 10 LIMIT 5"

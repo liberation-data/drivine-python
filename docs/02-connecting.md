@@ -230,14 +230,17 @@ database in memory or in a temporary file. There is no migration: make a new fil
 
 - A save is the plan of steps Postgres's write function carries out, carried out by a function Drivine registers on
   each connection, `drivine_write`, under a savepoint: applied whole or not at all, in a transaction or not. The other
-  functions a statement calls are registered too: `drivine_delete`, `drivine_epoch`, `drivine_lower` (Unicode's lower
+  functions a statement calls are registered too: `drivine_delete`, `drivine_lower` (Unicode's lower
   case, where SQLite's lowers ASCII), `drivine_similarity` and `drivine_regexp_count`, and the shared module's, loaded
   from its SQLite extension in the `drivine-cypher-compiler` wheel, `REGEXP` among them. A statement of yours may call
   them; a connection you open yourself has none of them.
 - A statement Drivine writes that gives back documents opens with `/* drivine:json */`, and its text values are read
   as JSON. One you write is read as it is: a row is a dict of its columns, and `labels` and `props` are text.
-- A raw `where` is SQL over the root's row, as on Postgres; a property written as Cypher writes it, `n.name`, is read
-  as that property, as text.
+- A raw `where` is SQL over the root's row `n`, as on Postgres, read over the row a statement calls it by, `n_` (the
+  row the shared module's fragments read); a property written as Cypher writes it, `n.name`, is read as that property,
+  as text, and one whose stored name begins with `$`, ``n.`$score` ``, by the name the store holds it by. A date in a
+  raw `where` is compared with the property's JSON, the tag a save holds it as, so `n.at = $when` finds nothing: compare
+  dates in the query DSL.
 - A range index or a uniqueness constraint is a partial index over the property as a statement reads it, for the
   label's nodes. A vector or a full-text index is recorded and nothing is made for it: `load_nearest` and
   `load_matching` measure every node of the label, and `load_matching` scores by BM25, as Postgres does.

@@ -87,14 +87,17 @@ q.employment_history.none(lambda it: it.role.eq("Lead"))
   `order_by`, ending with a unique key.
 - **An order by an expression:** `plus`, `minus`, `times`, `div`, `negate`, `exp`, `floor`, `coalesce`, `case_of`
   with `above`, `below`, `at_least`, `at_most`, `equal_to`, `has_value` and the rest, all computed in the database.
-- **Dates, moments and times on SQLite** compare as Cypher compares them, in a condition, `in_`, `has_item`, an order,
-  a seek and an order expression: a moment as the instant it is, a time by its time in UTC, so `time(9, tzinfo=+01:00)`
-  is before `time(8, 30, tzinfo=UTC)` but equal only to a time at its own offset. A value is equal only to a saved
-  value of its own kind, and neither before nor after another kind: a date is never a moment, a local moment never a
-  moment, a local time never a time with an offset, and `neq` holds for each. A time of a `ZoneInfo` has no offset,
-  and is saved and compared as a local time. A moment or a date held as text, as your own Cypher may write one, is
-  still compared as one; a time held as text is not. On Postgres and Oracle the DSL doesn't yet compare a saved date,
-  moment or time this way.
+- **On SQLite the DSL is the shared module's SQL** for the Cypher it writes for Neo4j
+  ([drivine-cypher-spec#235](https://github.com/liberation-data/drivine-cypher-spec/issues/235)), so a filter, an
+  order, a seek, a patch's `where` and a grouped read give the rows Neo4j does. Dates, moments and times compare as
+  Cypher compares them: a moment by its instant, then its offset, so the same instant at two offsets is two values,
+  unequal; a time by its time in UTC, so `time(9, tzinfo=+01:00)` is before `time(8, 30, tzinfo=UTC)`. A value is
+  equal only to a saved value of its own kind, and neither before nor after another kind: a date is never a moment, a
+  local moment never a moment, a local time never a time with an offset, and a text never any of them, though it names
+  one. A time of a `ZoneInfo` has no offset, and is saved and compared as a local time. `not_in([])` holds for a node
+  that lacks the property, as `NOT (null IN [])` does in Cypher; with values in the list it doesn't. A property whose
+  stored name begins with `$` is read as the store holds it. On Postgres and Oracle the DSL doesn't yet compare a saved
+  date, moment or time.
 - `count`, `delete`, `delete_all` and `patch` take conditions too.
 - `eq_ignore_case` and `contains_ignore_case` lowercase the property, which no index reads. On a `CaseInsensitive`
   field whose index ignores case, they compare with a lowercased copy instead, which the index serves: see below.
@@ -238,7 +241,9 @@ await gom.groups.count_by(Review, "page")                       # {"/pricing": 1
 ```
 
 Aggregates are `count`, `sum_`, `avg`, `min_` and `max_`, each with an optional filter. Ties in an order are broken by
-the keys, so a page of groups is the same every time.
+the keys, so a page of groups is the same every time. On SQLite a key is ordered as Cypher orders it (a text, then a
+boolean, then a number, no value last), and `min_` and `max_` take a value of any kind, a text or a date as well as a
+number, read back as the type its field declares; on Postgres and Oracle they still read numbers alone.
 
 - **Models are Pydantic.** A loaded fragment is validated, so a bad value fails at the load.
 - **The annotation says what a relationship holds**: a fragment, a relationship fragment or a view, one or a list. A

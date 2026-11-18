@@ -588,3 +588,15 @@ def test_typed_id_reads_text_for_an_optional_id_as_its_type_and_keeps_a_value_as
     assert typed_id(clock, time(11, 0)) == time(11, 0)
     assert typed_id(clock, None) is NO_NODE
     assert typed_id(ModelRegistry().fragment(Dial), 7.5) == 7.5
+
+
+class Either(NodeFragment, labels=["Either"]):
+    ref: Annotated[int | str, NodeId()]
+
+
+def test_typed_id_keeps_text_as_it_is_given_for_an_id_of_more_than_one_type():
+    # Read as no one type: "6" may be the text the id is, so it isn't taken for the int.
+    either = ModelRegistry().fragment(Either)
+    assert typed_id(either, "6") == "6"
+    assert typed_id(either, "abc") == "abc"
+    assert typed_id(either, None) is NO_NODE

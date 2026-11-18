@@ -111,7 +111,9 @@ class ViewProjector:
         where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
         match = f"{pattern(rel, origin, rel_alias, f'{target_alias}:{labels_of(into)}')}{where}"
 
-        if self.grammar.view_projection == "CALL_SUBQUERY":
+        # Where the grammar projects inline, a view nested here with a CALL of its own, an ordered path's, is read in a
+        # CALL too: a pattern comprehension has nowhere to put one.
+        if self.grammar.view_projection == "CALL_SUBQUERY" or inner.calls:
             collected = f"collect(CASE WHEN {target_alias} IS NOT NULL THEN {item} END)"
             value = f"v{n}"
             nested = "".join(f" {it}" for it in inner.calls)
@@ -119,8 +121,6 @@ class ViewProjector:
             return ViewProjection(
                 value, [f"CALL {{ WITH {origin} OPTIONAL MATCH {match}{nested} RETURN {returned} AS {value} }}"]
             )
-        if inner.calls:
-            raise AssertionError("An inline projection has no CALL blocks.")
         comprehension = f"[{match} | {item}]"
         return ViewProjection(comprehension if rel.is_collection else f"head({comprehension})")
 
@@ -128,6 +128,9 @@ class ViewProjector:
         """
         The nodes at the far end of a path, each once, in the order one of its hops names where one does. Where the
         grammar says so, the far node's labels are tested as each is collected, after the match.
+
+        An ordered path is read in a CALL on every engine, its rows sorted by ORDER BY before they are collected, as
+        drivine4j reads it: a pattern comprehension has no ORDER BY.
         """
         self._alias_count += 1
         n = self._alias_count
@@ -137,12 +140,7 @@ class ViewProjector:
             after = self.grammar.far_labels_after_match
             match = path_pattern(path, origin, t, not after, order.node if order else None)
             kept = label_test(t, far_labels(path)) if after else f"{t} IS NOT NULL"
-            # collect(DISTINCT …) keeps each node where it first occurs, so sorting the rows first orders the list.
-            ordered = ""
-            if order:
-                bound = ", ".join(dict.fromkeys([origin, t, order.node]))
-                way = "ASC" if order.ascending else "DESC"
-                ordered = f" WITH {bound} ORDER BY {order.key} IS NULL, {order.key} {way}"
+            ordered = _sorted(origin, t, order)
             collected = f"collect(DISTINCT CASE WHEN {kept} THEN {fragment(t)} END)"
             value = f"v{n}"
             returned = collected if path.is_collection else f"head({collected})"
@@ -150,12 +148,22 @@ class ViewProjector:
                 value,
                 [f"CALL {{ WITH {origin} OPTIONAL MATCH {match}{ordered} RETURN {returned} AS {value} }}"],
             )
+        x = f"x{n}"
         if order:
-            reached = _sorted_by_key(path_pattern(path, origin, t, True, order.node), t, order, n)
-        else:
-            reached = f"[{path_pattern(path, origin, t, True)} | {t}]"
+            # collect(DISTINCT …) of the nodes, not of their maps: Memgraph's DISTINCT leaves equal maps apart.
+            value, nodes = f"v{n}", f"s{n}"
+            listed = f"[{x} IN {nodes} | {fragment(x)}]"
+            returned = listed if path.is_collection else f"head({listed})"
+            return ViewProjection(
+                value,
+                [
+                    f"CALL {{ WITH {origin} OPTIONAL MATCH {path_pattern(path, origin, t, True, order.node)}"
+                    f"{_sorted(origin, t, order)} WITH collect(DISTINCT {t}) AS {nodes} RETURN {returned} AS {value} }}"
+                ],
+            )
+        reached = f"[{path_pattern(path, origin, t, True)} | {t}]"
         distinct = f"reduce(acc = [], y IN {reached} | CASE WHEN y IN acc THEN acc ELSE acc + y END)"
-        items = f"[x{n} IN {distinct} | {fragment(f'x{n}')}]"
+        items = f"[{x} IN {distinct} | {fragment(x)}]"
         return ViewProjection(items if path.is_collection else f"head({items})")
 
     def _aggregate(self, aggregate: AggregateModel, origin: str) -> ViewProjection:
@@ -258,22 +266,19 @@ def _path_order(path: PathModel, far: str, n: int) -> _PathOrder | None:
     return _PathOrder(node, f"{node}.{quote_name(hop.order_by)}", hop.ascending)
 
 
-def _sorted_by_key(pattern: str, far: str, order: _PathOrder, n: int) -> str:
+def _sorted(origin: str, far: str, order: _PathOrder | None) -> str:
     """
-    The far nodes of `pattern`, in the order of the key: an insertion sort, since a pattern comprehension has no ORDER
-    BY and an inline projection has nowhere to put a CALL. See TypeScript's ViewProjector for how it reads the key.
+    The rows of a path's match sorted by the key of its order, where it has one: collect(DISTINCT …) keeps each node
+    where it first occurs, so sorting the rows first orders the list. A node without the key comes last whichever way
+    the path is read: the engines put a null last lowest first and first highest first, so the sort asks whether the key
+    is null before it reads the key. Values of several kinds are left to the engine's ORDER BY: Cypher's order on Neo4j
+    and Memgraph, FalkorDB's own on FalkorDB.
     """
-    s, y, a, z = f"s{n}", f"y{n}", f"a{n}", f"z{n}"
-    pairs = f"[{pattern} | {{k: {order.key}, s: toString({order.key}) = {order.key}, n: {far}}}]"
-    if order.ascending:
-        first, compares = f"{a}.s AND NOT {y}.s", f"{a}.k <= {y}.k"
-    else:
-        first, compares = f"{y}.s AND NOT {a}.s", f"{a}.k >= {y}.k"
-    before = f"{y}.k IS NULL OR ({a}.k IS NOT NULL AND (({first}) OR ({a}.s = {y}.s AND coalesce({compares}, false))))"
-    ordered = (
-        f"reduce({s} = [], {y} IN {pairs} | [{a} IN {s} WHERE {before}] + [{y}] + [{a} IN {s} WHERE NOT ({before})])"
-    )
-    return f"[{z} IN {ordered} | {z}.n]"
+    if order is None:
+        return ""
+    bound = ", ".join(dict.fromkeys([origin, far, order.node]))
+    way = "ASC" if order.ascending else "DESC"
+    return f" WITH {bound} ORDER BY {order.key} IS NULL, {order.key} {way}"
 
 
 def far_labels(path: PathModel) -> list[str]:

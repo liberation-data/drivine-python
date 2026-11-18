@@ -1,20 +1,22 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 
 from drivine.annotation.aggregate_function import AggregateFunction
 from drivine.annotation.direction import Direction
 from drivine.annotation.hop import Hop
 from drivine.backend.cascade_beyond import CascadeBeyond
+from drivine.backend.cypher import quote_name
 from drivine.backend.save_statement_builder import root_of
+from drivine.backend.sql.fragments import NODE, Fragments
 from drivine.backend.sql.nodes_of import NodesOf
-from drivine.backend.sql.order_reads import OrderReads
 from drivine.backend.sql.sql_cascade import SqlCascade
 from drivine.backend.sql.sql_graph import SqlGraph, sql_text
 from drivine.backend.sql.sql_step import SqlStep
 from drivine.backend.view_projector import target
+from drivine.cypher.shared_compiler import SharedStore
 from drivine.model.aggregate_model import AggregateModel
 from drivine.model.fragment_model import FragmentModel
 from drivine.model.graph_view_model import GraphViewModel
@@ -41,9 +43,15 @@ class SqlViews(ABC):
     first_row = "FETCH FIRST 1 ROW ONLY"
     """What ends a query that reads its first row alone."""
 
-    def __init__(self, graph: SqlGraph, depth: Mapping[str, int] | None = None) -> None:
+    def __init__(self, graph: SqlGraph, depth: Mapping[str, int] | None, store: SharedStore) -> None:
         self.graph = graph
         self.depth = depth or {}
+        self.fragments = Fragments(store, graph.name)
+        """
+        The shared module's fragments the views write (a path ordered by a hop's property): what they bind is to be
+        bound beside the statement's own, and on Oracle what they ask of the statement written into it (see
+        oracle_fragments).
+        """
         self._alias_count = 0
 
     # ----- Views -----
@@ -195,49 +203,41 @@ class SqlViews(ABC):
                 return f"({self._select(nodes.hint)}{self._array_of(document)} {nodes.from_})"
             return f"({self._select(nodes.hint)}{document} {nodes.from_} {self.first_row})"
         o = self.next_alias("o")
-        direction = "ASC" if ordered.ascending else "DESC"
+        kept = f"{self.next_alias('k')}_"
+        terms = self._path_terms(ordered)
         nodes = (
-            f"FROM {self.graph.nodes} {x} JOIN ({self._ordered_path_nodes(path, from_, ordered)}) {o} "
-            f"ON {o}.nid = {x}.nid"
+            f"FROM {self.graph.nodes} {x} JOIN ({self._ordered_path_nodes(path, from_, ordered, terms)}) {o} "
+            f"ON {o}.nid = {x}.nid JOIN {self.graph.nodes} {kept} ON {self._same_node(f'{kept}.nid', f'{o}.hop')}"
         )
-        order = (
-            f"{o}.order_kind {direction} NULLS LAST, {o}.order_number {direction} NULLS LAST, "
-            f"{o}.order_text {direction} NULLS {'FIRST' if ordered.ascending else 'LAST'}, {x}.nid"
-        )
+        order = f"{terms(kept)}, {x}.nid"
         if path.is_collection:
             return f"(SELECT {self._array_of(self.node_document(x), order)} {nodes})"
         return f"(SELECT {self.node_document(x)} {nodes} ORDER BY {order} {self.first_row})"
 
-    def _ordered_path_nodes(self, path: PathModel, from_: str, ordered: Hop) -> str:
+    def _path_terms(self, ordered: Hop) -> Callable[[str], str]:
         """
-        The nodes at the far end of a path, each with the value the hop the path is ordered by keeps for it: that of
-        the first node of the hop that leads to it, the lowest or, read highest first, the highest. The node the hop
-        reaches is mapped to no class, so its property's type is not known: it is read as a number, which is null for
-        a value that is not a JSON number (a text of digits included), and as text. `order_kind` is 0 for a text, 1 for
-        a number and null for a node without the property, so a text comes before a number read lowest first, as the
-        graph engines order them, and a node without the property last, whichever way the path is read. Only the kind
-        kept is read further: a node reached through a text and a number keeps the text, read lowest first, and the
-        number, read highest first. Where the store reads a stored `""` as null (Oracle), whether the node holds one is
-        read on its own: it is a text, and the lowest. `order_text` is null for it, and orders first among the texts
-        read lowest first.
+        The terms that order the node row `row`, of a node of the hop a path is ordered by, as Cypher orders the hop's
+        property: the shared module's (drivine-cypher-spec#235, its fragments; drivine4j's `pathOrder`), whatever its
+        kind, a date included, read highest first where the hop reads so, and a node without the property last
+        whichever way the path is read.
         """
         assert ordered.order_by is not None
+        cypher = f"{NODE}.{quote_name(ordered.order_by)}"
+        return lambda row: ", ".join(self.fragments.ordered(cypher, not ordered.ascending, "LAST", row=row))
+
+    def _ordered_path_nodes(self, path: PathModel, from_: str, ordered: Hop, terms: Callable[[str], str]) -> str:
+        """
+        The nodes at the far end of a path, each once, as `nid`, with as `hop` the node of the hop the path is ordered
+        by that it keeps: the first of those that lead to it in Cypher's order of the hop's property, `terms`, the
+        lowest or, read highest first, the highest. A node of the hop without the property is kept only where none that
+        leads to it has it.
+        """
         body, nodes = self._path_rows(path, from_)
         node = nodes[list(path.hops).index(ordered)]
         last = nodes[-1]
-        r = self.next_alias("r")
-        keep = "MIN" if ordered.ascending else "MAX"
-        reads = self._order_reads(node, ordered.order_by)
-        kind = f"{keep}(CASE WHEN {r}.num IS NOT NULL THEN 1 WHEN {r}.txt IS NOT NULL OR {r}.emp = 1 THEN 0 END)"
-        text = f"CASE WHEN {r}.num IS NULL THEN {r}.txt END"
-        # Read lowest first, a node that a "" leads to keeps no text, which orders first among the texts.
-        kept = f"CASE WHEN MAX({r}.emp) IS NULL THEN MIN({text}) END" if ordered.ascending else f"MAX({text})"
-        return (
-            f"SELECT {r}.nid, {kind} AS order_kind, "
-            f"CASE WHEN {kind} = 1 THEN {keep}({r}.num) END AS order_number, "
-            f"CASE WHEN {kind} = 0 THEN {kept} END AS order_text "
-            f"FROM (SELECT {last}.nid AS nid, {reads.num} AS num, {reads.txt} AS txt, {reads.emp} AS emp {body}) "
-            f"{r} GROUP BY {r}.nid"
+        return self._first_of_ways(
+            f"SELECT {last}.nid AS nid, {node}.nid AS hop, {node}.props AS props, {node}.stamp AS stamp {body}",
+            terms,
         )
 
     def _path_ids(self, path: PathModel, from_: str) -> str:
@@ -273,6 +273,10 @@ class SqlViews(ABC):
         else:
             fn = f"{aggregate.function.value}({number})"
         return f"(SELECT {fn} {step.from_})"
+
+    def _same_node(self, a: str, b: str) -> str:
+        """Whether the node keys `a` and `b` are equal, as the store joins a node back to the node table by its key."""
+        return f"{a} = {b}"
 
     def _steps(self, type: str, direction: Direction) -> str:
         """
@@ -332,10 +336,12 @@ class SqlViews(ABC):
         """The SELECT keyword with `hint`, where the store reads one."""
 
     @abstractmethod
-    def _order_reads(self, node: str, property: str) -> OrderReads:
+    def _first_of_ways(self, ways: str, terms: Callable[[str], str]) -> str:
         """
-        The property of the node row `node` that a path is ordered by, read as a number, as text, and as whether it is
-        `""`.
+        The ways `ways` reaches the nodes at the far end of a path, rows of `nid`, `hop`, `props` and `stamp`, the node
+        reached and the node of the ordered hop the way passes through, with its properties and stamp (which a path
+        ordered by the stamp reads): grouped by `nid`, each with as `hop` the first of its ways' by `terms`, which order
+        a row of the node of the hop.
         """
 
 

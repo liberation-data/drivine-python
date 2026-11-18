@@ -91,7 +91,7 @@ class SqliteSearch:
                     *([f"LIMIT {limit}"] if limit is not None else []),
                 ]
             ),
-            dict(bindings or {}),
+            {**(bindings or {}), **views.fragments.parameters},
         )
 
 

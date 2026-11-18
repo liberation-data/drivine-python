@@ -214,7 +214,8 @@ class OracleBackend:
                     self._from(model.root, self._view_where(model, where, depth), tested),
                     *self._page(page),
                 ]
-            )
+            ),
+            views.fragments,
         )
 
     def load_view(self, model: GraphViewModel, depth: Mapping[str, int] | None = None) -> GraphStatement:
@@ -226,7 +227,8 @@ class OracleBackend:
                         f'SELECT {views.document(model, ROW_ALIAS)} AS "result"',
                         self._found_by_id(model.root, self._view_where(model, self._id_predicate(model.root), depth)),
                     ]
-                )
+                ),
+                views.fragments,
             )
         )
 
@@ -519,14 +521,15 @@ END;""")
         tests = [carries_labels(row, model.labels), *([f"({where})"] if where else [])]
         return f"FROM {self.graph.nodes} {row}\nWHERE {' AND '.join(tests)}"
 
-    def _statement(self, text: str, bindings: Mapping[str, Any] | None = None) -> GraphStatement:
+    def _statement(self, text: str, fragments: Fragments | None = None) -> GraphStatement:
         """
         The statement `text`, with the hints the fragments in it ask for written after its first `SELECT` or `DELETE`,
         and the stored functions they call said (see oracle_fragments). A block hints each of its statements itself
-        first.
+        first. `fragments`, a view's (see SqlViews), are written into it beside those noted in it: their hints, their
+        calls, and what they bind, bound.
         """
-        made, calls = called(hinted(text), self.graph.name)
-        return GraphStatement(made, dict(bindings or {}), calls=calls)
+        made, calls = called(hinted(text, fragments.hints if fragments else ()), self.graph.name, fragments)
+        return GraphStatement(made, dict(fragments.parameters) if fragments else {}, calls=calls)
 
     @staticmethod
     def _id_predicate(model: FragmentModel, row: str = ROW_ALIAS) -> str:

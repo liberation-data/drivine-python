@@ -153,7 +153,8 @@ class SqliteBackend:
                     self._from(model.root, self._view_where(model, where, depth)),
                     *self._page(page),
                 ]
-            )
+            ),
+            views.fragments.parameters,
         )
 
     def load_view(self, model: GraphViewModel, depth: Mapping[str, int] | None = None) -> GraphStatement:

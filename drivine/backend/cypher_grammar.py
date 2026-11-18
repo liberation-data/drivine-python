@@ -100,7 +100,8 @@ class CypherGrammar:
     view_projection: Literal["INLINE", "CALL_SUBQUERY"]
     """
     How a view's relationships are projected: INLINE, as pattern comprehensions within the RETURN, or CALL_SUBQUERY,
-    each in a `CALL { }` of its own before the RETURN.
+    each in a `CALL { }` of its own before the RETURN. INLINE still reads a path ordered by a hop's property in a CALL,
+    for its ORDER BY, and a relationship to a view that holds one.
     """
     existence_check: Callable[[str], str]
     """A predicate that holds when the pattern, such as `(n)-[:R]->(:T)`, matches at least once."""

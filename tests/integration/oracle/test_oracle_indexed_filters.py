@@ -1,7 +1,9 @@
 """
 drivine4j#65: Oracle takes a test of a node's labels for a lookup of one row, so a filter on a property with a range
-index read every node of the label. A comparison with text that every root meets is now read through the index's
-expression, which tests the label too.
+index read every node of the label. An equality every root meets is written over the index's expression, which tests
+the label too: the shared module's fragment writes it so for the labels it is given (drivine-cypher-spec#235, step 4),
+over the expressions layout 2's labelled index (lx2) and unique index (uq2) are made over, so Oracle reads them
+(liberation-data/drivine#696).
 """
 
 from collections.abc import AsyncIterator
@@ -132,15 +134,11 @@ async def test_finds_through_the_index_what_it_finds_without_it(gom: StatelessGr
     assert sorted(it.issue.id for it in views) == without[0]
 
 
-@pytest.mark.xfail(
-    reason="Oracle's DSL filters read the module's layout 2 indexes once they come from its fragments (a later PR)",
-    strict=True,
-)
 async def test_reads_the_index_and_not_the_label_for_a_comparison_every_root_meets(
     gom: StatelessGraphObjectManager, pm: PersistenceManager
 ):
     await gom.indexes.ensure(BY_REPO)
-    labelled = OracleGraph().object_name("lx", ["OraIssue", "repoKey"]).upper()
+    labelled = OracleGraph().object_name("lx2", ["OraIssue", "repoKey"]).upper()
     indexed = await plan_of(gom, pm, [q.repo_key.eq("r7"), q.state.eq("closed")])
     assert labelled in indexed
     assert "DRIVINE_NODE_LABELS" not in indexed
@@ -149,16 +147,12 @@ async def test_reads_the_index_and_not_the_label_for_a_comparison_every_root_mee
     assert labelled not in either
 
 
-@pytest.mark.xfail(
-    reason="Oracle's DSL filters read the module's layout 2 indexes once they come from its fragments (a later PR)",
-    strict=True,
-)
 async def test_reads_a_uniqueness_constraint_over_the_property_as_it_reads_a_range_index(
     gom: StatelessGraphObjectManager, pm: PersistenceManager
 ):
     await gom.constraints.ensure(UNIQUE_CODE)
     plan = await plan_of(gom, pm, q.code.eq("c42"))
-    assert OracleGraph().object_name("uq", ["OraIssue", "code"]).upper() in plan
+    assert OracleGraph().object_name("uq2", ["OraIssue", "code"]).upper() in plan
     assert "DRIVINE_NODE_LABELS" not in plan
     assert await ids(gom, q.code.eq("c42")) == ["i42"]
 

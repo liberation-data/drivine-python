@@ -204,21 +204,26 @@ def test_a_name_bound_twice_or_a_callers_name_under_the_compilers_prefix_is_refu
     assert fragments.where(None, {}) is None
 
 
-def test_hints_are_kept_once_each_in_the_order_asked_and_written_after_the_outermost_keyword():
+def test_hints_are_kept_once_each_in_the_order_asked():
+    # The statement writes them in (see oracle_fragments.hinted).
     fragments = Fragments("ORACLE", "g", "people_", ["Person"], INDEXED)
     fragments.where("n.name = $_q0", {"_q0": "Ada"})
     fragments.where("n.age > $_q1", {"_q1": 1})
     assert fragments.hints == ["NO_JSON_TABLE_TRANSFORM"]
-    assert fragments.hinted("SELECT x FROM t WHERE (SELECT 1 FROM d) = 1") == (
-        "SELECT /*+ NO_JSON_TABLE_TRANSFORM */ x FROM t WHERE (SELECT 1 FROM d) = 1"
-    )
-    assert fragments.hinted("  delete FROM t") == "  delete /*+ NO_JSON_TABLE_TRANSFORM */ FROM t"
-    with pytest.raises(DrivineError, match="No SELECT or DELETE begins"):
-        fragments.hinted("WITH a AS (SELECT 1) SELECT 2")
     unhinted = Fragments("POSTGRES", "g", "people_")
     unhinted.where("n.name = $_q0", {"_q0": "Ada"})
-    assert unhinted.hinted("SELECT 1") == "SELECT 1"
-    assert unhinted.hint() == ""
+    assert unhinted.hints == []
+
+
+def test_the_stored_functions_a_fragment_calls_are_kept_for_the_statement():
+    fragments = Fragments("ORACLE", "g", "people_", ["Person"])
+    fragments.where("n.age > $_q0", {"_q0": 1})
+    assert not (fragments.calls_stored_nulls_equal or fragments.calls_stored_era)
+    fragments.where("n.meta = $_q1", {"_q1": {"a": None}})
+    assert fragments.calls_stored_nulls_equal
+    assert not fragments.calls_stored_temporal_arithmetic
+    fragments.order("n.size * 2")
+    assert fragments.calls_stored_temporal_arithmetic
 
 
 def test_a_value_that_may_be_nan_says_so():

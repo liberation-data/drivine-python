@@ -101,13 +101,12 @@ GOLDEN = json.loads((Path(__file__).parent.parent / "golden" / "statements.json"
 
 
 CYPHER_WHERE = "n.name = $name"
-SQL_WHERE = "JSON_VALUE(n.props, '$.name') = $name"
+SQL_WHERE = "JSON_VALUE(n_.props, '$.name') = $name"
 POSTGRES_WHERE = "(n_.props ->> 'name') = $name"
 SQLITE_WHERE = "(n_.props ->> '$.name') = $name"
 """
-A filter in the store's own language: Cypher over `n`, or SQL over the node row `n` on Oracle, and on SQLite and
-Postgres over `n_`, the row a read of the query DSL calls its root, as their backends' `written` gives a filter over
-`n`.
+A filter in the store's own language: Cypher over `n`, or on Oracle, SQLite and Postgres SQL over `n_`, the row a read
+of the query DSL calls its root, as their backends' `written` gives a filter over `n`.
 """
 
 

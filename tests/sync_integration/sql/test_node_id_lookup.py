@@ -367,9 +367,6 @@ def test_the_query_dsl_finds_a_uuid_id_by_the_text_a_save_holds_it_as(
     gom: StatelessGraphObjectManager, pm: PersistenceManager, request: pytest.FixtureRequest
 ):
     # The module's parameters take no UUID: the DSL binds one as the text a save holds it as (value_layout.prepared).
-    # Oracle's DSL is still its own renderer, which finds none, until #532's Oracle step reads it through the fragments.
-    if pm.type is DatabaseType.ORACLE:
-        request.applymarker(pytest.mark.xfail(strict=True, reason="drivine-python#547 on Oracle: #532 step 4"))
     gom.save_all([LookupKey(id=uuid.UUID(int=it), name=f"key {it}") for it in (1, 2, 3)])
     k = refs(LookupKey)
     found = gom.load_all(

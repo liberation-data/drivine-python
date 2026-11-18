@@ -38,16 +38,20 @@ makes it: one over the property whatever the label, and one over the label's nod
 through. A uniqueness constraint comes with a range index over its properties, which stays when the constraint is
 dropped. The object manager writes SQL for it, and the query DSL, grouped reads, search and schema management work as on
 the graph engines. A raw `where` is SQL over the node's row, `n`: its `labels`, `props` (a JSON object keyed by stored
-name) and `stamp`, say `JSON_VALUE(n.props, '$.name') = $name`. A property of the node may be written as Cypher writes
-it, `n.name = $name` (or ``n.`a name` ``), and is read as that property, one whose stored name begins with `$`,
-``n.`$score` ``, by the name the store holds it by; a property compared with `true` or `false` is compared with the text
-a JSON boolean is read as. Your own statements are SQL too, unless written as
+name) and `stamp`, say `JSON_VALUE(n.props, '$.name') = $name`, read over the row a statement calls it by, `n_` (the
+row the shared module's fragments read). A property of the node may be written as Cypher writes it, `n.name = $name`
+(or ``n.`a name` ``), and is read as that property, one whose stored name begins with `$`, ``n.`$score` ``, by the name
+the store holds it by; a property compared with `true` or `false` is compared with the text a JSON boolean is read as.
+Your own statements are SQL too, unless written as
 Cypher (see [Cypher on Postgres, Oracle and SQLite](04-statements.md#cypher-on-postgres-oracle-and-sqlite)), and a
-`$name` in quoted text or a comment, such as the JSON path `'$."$t"'`, is no parameter. `matches` takes a regular expression in
-Oracle's POSIX dialect, matched against the whole value. A leading `(?i)` ignores case; what Java adds, such as
-`(?:…)`, a look-around or `\b`, is not read. A backreference names the group the expression numbers it by,
-`\1` to `\8`; `\9` is refused, as the group that anchors the expression would make it the tenth, which POSIX does not
-have. A vector index is a table of embeddings beside the nodes, holding those of the index's size: a node written with
+`$name` in quoted text or a comment, such as the JSON path `'$."$t"'`, is no parameter. The query DSL's conditions,
+orders, seeks and grouped reads are the shared module's SQL for the Cypher the DSL writes for Neo4j
+([drivine-cypher-spec#235](https://github.com/liberation-data/drivine-cypher-spec/issues/235)), as in compiled Cypher:
+a date is compared by its moment, text is compared and ordered by its code points (`B, a, b`), and an equality of a
+property with a range index or a uniqueness constraint is read through layout 2's index of the label. Each statement
+carries the optimizer hints that SQL asks for. `matches` takes a regular expression as compiled Cypher's `=~` does,
+matched against the whole value, in Oracle's POSIX dialect. A leading `(?i)` ignores case. A backreference is read as
+Java reads it only where it is `\1` to `\8`, to a simple group; the shared module refuses any other, with why. A vector index is a table of embeddings beside the nodes, holding those of the index's size: a node written with
 another size is left out, not refused. `load_nearest` is approximate through it. With no index made, or one of another
 size than the vector's, it measures every node of the label whose embedding is of the vector's size, and is exact.
 
@@ -71,11 +75,12 @@ holds a kept statement's memory for as long as the driver keeps it, from about 4
 0.3 ms more for a short statement (Oracle reuses its plan; it doesn't parse it again from scratch). The object manager's
 statements are kept, so where the object manager does what you need, it is the faster way to Oracle.
 
-Beside the tables an Oracle graph is made with three functions: `<graph>_nulls_equal`, by which a compiled Cypher
-statement compares two lists or maps that may hold a null (see
-[Cypher on Postgres, Oracle and SQLite](04-statements.md#cypher-on-postgres-oracle-and-sqlite)), and `<graph>_era` and
+Beside the tables an Oracle graph is made with functions: `<graph>_nulls_equal`, by which a compiled Cypher statement
+compares two lists or maps that may hold a null (see
+[Cypher on Postgres, Oracle and SQLite](04-statements.md#cypher-on-postgres-oracle-and-sqlite)), `<graph>_era` and
 `<graph>_era_date`, by which it renumbers a year before 1 between Cypher's numbering and Oracle's as it reads and writes
-a date or a moment. drivine4j and Drivine for TypeScript make them byte for byte alike. Making them takes
+a date or a moment, and `<graph>_temporal_arith`, which works out `+`, `-`, `*` and `/` of a temporal value read from
+the store. drivine4j and Drivine for TypeScript make them byte for byte alike. Making them takes
 `CREATE PROCEDURE`, which the `RESOURCE` role grants, as well as the `CREATE TABLE` the tables take. A store an earlier
 version made gains those it lacks the next time a pool first connects to the graph. Where the user that makes the graph
 may not make a function, the graph is made without them, and Drivine logs a warning once for the graph when a statement
@@ -83,7 +88,10 @@ would call one, and looks for it again a minute later. Until then, without `<gra
 writes, or the step of a `reduce`, compares two lists or maps that hold a null and differ as JSON as false, where Cypher
 may give null (`a = b`, of `[null] AS a, [1] AS b`), and a read declares the function itself. Without the era
 functions, a statement gives the same rows, renumbering a year inline, but Oracle takes longer to plan one of temporal
-arithmetic: seconds, and over a minute for a moment two `CALL`s deep.
+arithmetic: seconds, and over a minute for a moment two `CALL`s deep. A statement of the query DSL that would call one
+the session may not call (a comparison of a list or a map that holds a null with another, or an order by arithmetic of
+a property, which may hold a date) is refused with a `DrivineError` that names it, where compiled Cypher is compiled
+again without a comparison's function.
 
 On Postgres, `DATABASE_NAME` is the database, and `DATABASE_DEFAULT_GRAPH_PATH` names the graph, `drivine` by default:
 see [Postgres](#postgres). On either, Cypher you write is compiled to SQL: see

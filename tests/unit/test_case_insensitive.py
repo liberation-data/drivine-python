@@ -37,7 +37,6 @@ from drivine.backend.cypher_grammar import NEO4J_GRAMMAR
 from drivine.backend.fragment_group import FragmentGroup
 from drivine.backend.oracle.oracle_backend import OracleBackend
 from drivine.backend.oracle.oracle_graph import OracleGraph
-from drivine.backend.oracle.oracle_query_renderer import past_text
 from drivine.backend.postgres.postgres_backend import PostgresBackend
 from drivine.backend.postgres.postgres_graph import PostgresGraph
 from drivine.connection.database_type import DatabaseType
@@ -371,10 +370,11 @@ class TestLookups:
         "backend, written, bound",
         [
             (CypherBackend(NEO4J_GRAMMAR), "n.`__drivine.lower.email` = toLower($_q0)", "Ada@X.com"),
+            # Oracle's is the module's fragment over the row `n_` too, which binds the value as its JSON.
             (
                 OracleBackend(OracleGraph()),
-                "JSON_VALUE(n.props, '$.\"__drivine.lower.email\"') = LOWER($_q0)",
-                "Ada@X.com",
+                "n_.props, '$.\"__drivine.lower.email\"'",
+                '"Ada@X.com"',
             ),
             # Postgres's is the module's fragment over the row `n_`: the copy compared, as JSON, with the value lowered,
             # which the module binds as its JSON.
@@ -392,44 +392,25 @@ class TestLookups:
         assert written in rendered.where
         assert bound in rendered.bindings.values()
 
-    def test_on_oracle_compare_a_value_that_may_lowercase_past_the_index_as_a_clob(self):
-        # As drivine4j's pastText: a value of more than 1,333 UTF-16 units, three bytes each at most, may lowercase past
-        # the 4,000 bytes the index holds, so the copy is compared as a CLOB and the label tested on its own.
+    def test_on_oracle_read_the_copy_through_its_index_and_still_test_the_label(self):
+        # Oracle's is the module's fragment over the row `n_`: the copy compared with the value lowered.
         account = self.registry.fragment(Account)
-        indexed = [SchemaItem("Account", ("__drivine.lower.email",))]
+        where = lowered_where(refs(Account).email.eq_ignore_case("A"), account, {"email"})
 
-        def lowered(value: str) -> tuple[str, tuple[str, ...]]:
-            where = lowered_where(refs(Account).email.eq_ignore_case(value), account, {"email"})
-            rendered = OracleBackend(OracleGraph()).render_query(
+        def rendered(indexed: list[SchemaItem]) -> Any:
+            return OracleBackend(OracleGraph()).render_query(
                 Query(where=where), account, lambda it: self.registry.fragment(it).labels, indexed
             )
-            return rendered.where, rendered.labels_tested
 
-        clob = (
-            "DBMS_LOB.COMPARE(JSON_VALUE(n.props, '$.\"__drivine.lower.email\"' RETURNING CLOB), "
-            "LOWER(TO_CLOB($_q0))) = 0"
-        )
-        assert lowered("a" * 1_334) == (clob, ())
-        # A character outside the BMP is two UTF-16 units, as Java and JavaScript count it: 1,333 characters, 1,334
-        # units.
-        assert lowered("\U0001f600" + "a" * 1_332) == (clob, ())
-        assert lowered("a" * 1_333) == (
-            "CASE WHEN JSON_EXISTS(n.labels, '$?(@ == \"Account\")') THEN JSON_VALUE(n.props, "
-            "'$.\"__drivine.lower.email\"' RETURNING VARCHAR2(4000) NULL ON ERROR) END = LOWER($_q0) AND "
-            "JSON_VALUE(n.props, '$.\"__drivine.lower.email\"') = LOWER($_q1)",
-            ("Account",),
-        )
-        assert lowered("\U0001f600" + "a" * 1_331)[1] == ("Account",)
-
-    def test_past_text_counts_utf_16_units_of_a_text_and_nothing_else(self):
-        # As drivine4j's pastText: a lone surrogate, which a Python text may hold, is one unit, and not an error.
-        assert past_text("\ud800" * 1_334)
-        assert not past_text("\ud800" * 1_333)
-        # Only a text: a number, a list or None is never past it.
-        assert not past_text(10**5000)
-        assert not past_text(["a" * 2_000])
-        assert not past_text(b"a" * 2_000)
-        assert not past_text(None)
+        plain = rendered([])
+        assert 'n_.props, \'$."__drivine.lower.email"' in plain.where
+        assert "'$[*]?(@ == \"Account\")'" not in plain.where
+        assert plain.labels_tested == ()
+        # Through the labelled index over the copy, which the module's equality reads; past 4,000 bytes its term holds
+        # for any node, so the statement still tests the label (drivine-cypher-spec#373).
+        indexed = rendered([SchemaItem("Account", ("__drivine.lower.email",))])
+        assert "CASE WHEN JSON_EXISTS(n_.labels, '$[*]?(@ == \"Account\")') THEN" in indexed.where
+        assert indexed.labels_tested == ()
 
 
 class _Store:

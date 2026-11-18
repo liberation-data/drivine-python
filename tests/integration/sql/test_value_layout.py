@@ -10,7 +10,6 @@ from __future__ import annotations
 import json
 import math
 import re
-from collections.abc import Awaitable, Callable
 from datetime import UTC, date, datetime, time, timedelta, timezone
 from typing import Annotated, Any
 from zoneinfo import ZoneInfo
@@ -240,34 +239,12 @@ class Dated(NodeFragment, labels=["DatedHeld"]):
     clocks: list[time] | None = None
 
 
-def refused(pm: PersistenceManager) -> str:
-    """
-    The refusal of a comparison with a date, datetime or time, or an order by one, by the query DSL on Oracle, which
-    compares one by its text until the DSL takes the shared module's fragments there (drivine-cypher-spec#235, step 4).
-    """
-    return r"aren't supported on Oracle yet .*drivine-cypher-spec#235"
-
-
-async def on_fragments_or_refused(pm: PersistenceManager, check: Callable[[], Awaitable[None]]) -> None:
-    """
-    Runs the check: on SQLite and Postgres, whose DSL is the shared module's fragments (drivine-cypher-spec#235, steps 2
-    and 3), its rows must be as it asserts; on Oracle its first comparison or order by a date, datetime or time must be
-    refused by name (see refused).
-    """
-    if pm.type is not DatabaseType.ORACLE:
-        await check()
-        return
-    with pytest.raises(DrivineError, match=refused(pm)):
-        await check()
-
-
-async def test_a_saved_date_or_moment_is_compared_and_ordered_by_the_query_dsl_as_it_is_or_refused_by_name(
+async def test_a_saved_date_or_moment_is_compared_and_ordered_by_the_query_dsl_as_it_is(
     gom: StatelessGraphObjectManager, pm: PersistenceManager
 ):
     """
-    SQLite's and Postgres's DSL reads the tag store layout 2 holds a date or moment as, through the shared module's
-    fragments (drivine-cypher-spec#235). Oracle's would compare it by its text until the DSL takes them there too, so it
-    refuses it by name, and Cypher compares it there.
+    Each SQL store's DSL reads the tag store layout 2 holds a date or moment as, through the shared module's fragments
+    (drivine-cypher-spec#235), as a Cypher statement compares it.
     """
     base = datetime(2024, 5, 6, 7, 8, 9, 123000, tzinfo=UTC)
     await gom.save_all(
@@ -283,19 +260,10 @@ async def test_a_saved_date_or_moment_is_compared_and_ordered_by_the_query_dsl_a
     )
     assert [it["id"] if isinstance(it, dict) else it for it in found] == ["t2"]
     q = refs(Dated)
-    if pm.type is not DatabaseType.ORACLE:
-        assert [it.id for it in await gom.load_all(Dated, q.on.eq(date(2024, 1, 2)))] == ["t2"]
-        assert [it.id for it in await gom.load_all(Dated, q.at.gt(base))] == ["t2"]
-        # Its own nodes alone: the tests beside it save other Dated nodes in the same graph.
-        assert [it.id for it in await gom.load_all(Dated, q.id.in_(["t1", "t2"]), order_by=q.on.desc())] == ["t2", "t1"]
-        return
-    with pytest.raises(DrivineError, match=refused(pm)) as raised:
-        await gom.load_all(Dated, q.on.eq(date(2024, 1, 2)))
-    assert "on is compared with" in str(raised.value)
-    with pytest.raises(DrivineError, match=refused(pm)):
-        await gom.load_all(Dated, q.at.gt(base))
-    with pytest.raises(DrivineError, match=refused(pm)):
-        await gom.load_all(Dated, q.id.in_(["t1", "t2"]), order_by=q.on.desc())
+    assert [it.id for it in await gom.load_all(Dated, q.on.eq(date(2024, 1, 2)))] == ["t2"]
+    assert [it.id for it in await gom.load_all(Dated, q.at.gt(base))] == ["t2"]
+    # Its own nodes alone: the tests beside it save other Dated nodes in the same graph.
+    assert [it.id for it in await gom.load_all(Dated, q.id.in_(["t1", "t2"]), order_by=q.on.desc())] == ["t2", "t1"]
 
 
 class Met(NodeFragment, labels=["MetHeld"]):
@@ -329,7 +297,7 @@ async def test_a_moment_in_a_patchs_where_and_in_a_grouped_reads_where_and_aggre
         assert groups == [{"name": "patched", "later": 0, "last": first}, {"name": "two", "later": 1, "last": second}]
         assert await gom.groups.load(Met, where=q.at.gt(first), keys={"name": key(q.name)}) == [{"name": "two"}]
 
-    await on_fragments_or_refused(pm, check)
+    await check()
 
 
 class Listed(NodeFragment, labels=["ListedHeld"]):
@@ -367,7 +335,7 @@ async def test_the_query_dsl_finds_a_saved_date_moment_or_time_in_a_list_by_has_
         assert await found(q.clocks.has_item(time(12))) == []
         assert await found(q.words.has_item("b")) == ["l2"]
 
-    await on_fragments_or_refused(pm, check)
+    await check()
 
 
 async def test_has_item_passes_over_a_text_a_list_holds_where_a_moment_is_asked_for_as_cypher_does(
@@ -384,7 +352,7 @@ async def test_has_item_passes_over_a_text_a_list_holds_where_a_moment_is_asked_
         moment = datetime(2024, 5, 6, 7, 8, 9, 123456, tzinfo=UTC)
         assert [it.id for it in await gom.load_all(Listed, refs(Listed).moments.has_item(moment))] == []
 
-    await on_fragments_or_refused(pm, check)
+    await check()
 
 
 class Clocked(NodeFragment, labels=["ClockedHeld"]):
@@ -446,7 +414,7 @@ async def test_the_query_dsl_compares_and_orders_times_at_different_offsets_as_c
         assert await found(q.clock.eq(time(8, 0, 0, 500000, tzinfo=UTC))) == []
         assert await found(q.clock.in_([time(8, 30, tzinfo=UTC), time(4, 30, tzinfo=offset(-5))])) == ["b", "c"]
 
-    await on_fragments_or_refused(pm, check)
+    await check()
 
 
 async def test_a_time_with_an_offset_is_compared_by_its_utc_time_unwrapped_at_midnight(
@@ -461,7 +429,7 @@ async def test_a_time_with_an_offset_is_compared_by_its_utc_time_unwrapped_at_mi
         assert [it.id for it in await gom.load_all(Midnight, q.clock.lt(time(0, 30, tzinfo=UTC)))] == ["early"]
         assert [it.id for it in await gom.load_all(Midnight, order_by=q.clock.asc())] == ["early", "late"]
 
-    await on_fragments_or_refused(pm, check)
+    await check()
 
 
 async def test_a_local_time_and_a_time_with_an_offset_are_unequal_and_neither_before_the_other(
@@ -490,7 +458,7 @@ async def test_a_local_time_and_a_time_with_an_offset_are_unequal_and_neither_be
         after = q.clock.after(time(8, tzinfo=UTC))
         assert [it.id for it in await gom.load_all(TwoKinds, order_by=q.clock.asc(), seek=after)] == []
 
-    await on_fragments_or_refused(pm, check)
+    await check()
 
 
 async def test_two_local_times_are_compared_and_ordered_as_the_times_they_are(
@@ -505,7 +473,7 @@ async def test_two_local_times_are_compared_and_ordered_as_the_times_they_are(
         assert [it.id for it in await gom.load_all(Local, q.clock.eq(time(10, 0, 0, 250000)))] == ["m"]
         assert [it.id for it in await gom.load_all(Local, order_by=q.clock.desc())] == ["m", "l"]
 
-    await on_fragments_or_refused(pm, check)
+    await check()
 
 
 async def test_has_item_finds_a_time_in_a_list_as_cypher_finds_one_at_its_offset(
@@ -526,7 +494,7 @@ async def test_has_item_finds_a_time_in_a_list_as_cypher_finds_one_at_its_offset
         assert await found(q.clocks.has_item(time(13, 30, tzinfo=offset(5)))) == []
         assert await found(q.clocks.has_item(time(8, 30))) == []
 
-    await on_fragments_or_refused(pm, check)
+    await check()
 
 
 async def test_a_date_is_never_a_moment_nor_a_local_moment_a_moment(
@@ -564,7 +532,7 @@ async def test_a_date_is_never_a_moment_nor_a_local_moment_a_moment(
         assert await lists(listed.days.has_item(datetime(2024, 5, 6, tzinfo=UTC))) == []
         assert await lists(listed.moments.has_item(moment.replace(tzinfo=None))) == []
 
-    await on_fragments_or_refused(pm, check)
+    await check()
 
 
 class Wall(NodeFragment, labels=["WallHeld"]):
@@ -597,7 +565,7 @@ async def test_a_saved_local_moment_is_compared_with_a_local_moment_as_the_momen
         assert await found(q.at.neq(local.replace(tzinfo=UTC))) == ["w"]
         assert await found(q.moments.has_item(local.replace(tzinfo=UTC))) == []
 
-    await on_fragments_or_refused(pm, check)
+    await check()
 
 
 class Ranked(NodeFragment, labels=["RankedHeld"]):
@@ -648,7 +616,7 @@ async def test_an_order_by_an_expression_compares_a_date_moment_or_time_as_a_con
         assert await ranked(not_equal_to(q.on, datetime(2025, 1, 1, tzinfo=UTC))) == ["r1", "r2", "r3", "r4"]
         assert await ranked(not_equal_to(q.clock, time(8))) == ["r2", "r3", "r1", "r4"]
 
-    await on_fragments_or_refused(pm, check)
+    await check()
 
 
 class Zoned(NodeFragment, labels=["ZonedHeld"]):
@@ -670,7 +638,7 @@ async def test_a_time_of_a_named_zone_is_compared_as_the_local_time_a_save_write
         assert [it.id for it in await gom.load_all(Zoned, q.clock.eq(time(8)))] == ["z"]
         assert [it.id for it in await gom.load_all(Zoned, q.clock.eq(time(8, tzinfo=UTC)))] == []
 
-    await on_fragments_or_refused(pm, check)
+    await check()
 
 
 @pytest.mark.parametrize("test", ["eq", "in", "has_item"])
@@ -679,7 +647,6 @@ async def test_the_query_dsl_refuses_a_time_at_an_offset_with_seconds_by_name_as
 ):
     """
     The store holds an offset to the minute (#517); the DSL wrote this one as a text no value of it matches (#523).
-    Oracle refuses any comparison with a time first, by the name of drivine-cypher-spec#235.
     """
     at = time(10, tzinfo=timezone(timedelta(hours=1, seconds=1)))
     dated = refs(Dated)
@@ -688,9 +655,7 @@ async def test_the_query_dsl_refuses_a_time_at_an_offset_with_seconds_by_name_as
         "in": lambda: dated.clock.in_([time(9), at]),
         "has_item": lambda: dated.clocks.has_item(at),
     }[test]()
-    with pytest.raises(
-        DrivineError, match=refused(pm) if pm.type is DatabaseType.ORACLE else "at an offset with seconds"
-    ):
+    with pytest.raises(DrivineError, match="at an offset with seconds"):
         await gom.load_all(Dated, tested)
 
 
@@ -705,4 +670,4 @@ async def test_the_query_dsl_finds_a_time_at_an_offset_of_whole_minutes_as_it_wa
         assert [it.id for it in await gom.load_all(Dated, dated.clock.eq(at))] == ["c1"]
         assert [it.id for it in await gom.load_all(Dated, dated.clock.in_([at]))] == ["c1"]
 
-    await on_fragments_or_refused(pm, check)
+    await check()

@@ -15,9 +15,11 @@ from drivine.backend.oracle.id_keyed_statement import (
     held_id,
     id_match,
 )
+from drivine.backend.oracle.oracle_fragments import called, hinted
 from drivine.backend.oracle.oracle_graph import OracleGraph, carries_labels, has_labels, json_key, node_document
 from drivine.backend.oracle.oracle_save_builder import prelude
 from drivine.backend.save_statement_builder import id_of, object_props
+from drivine.backend.sql.fragments import FRAGMENT_ROOT_ROW
 from drivine.backend.sql.node_ids import has_id
 from drivine.backend.sql.sql_json import to_json
 from drivine.backend.sql.value_layout import held_key, write, write_props
@@ -43,9 +45,14 @@ class OracleWrites:
         """Whether the next block writes lowercased copies, and so declares `lower_node`."""
 
     def patch_one(self, model: FragmentModel, where: str | None = None) -> GraphStatement:
-        """Writes `$set` (a merge patch) to the node with id `$id` if it meets `where`: `{found, applied, changed}`."""
+        """
+        Writes `$set` (a merge patch) to the node with id `$id` if it meets `where`, over its row `n_`, the row the
+        query DSL's fragments read (see FRAGMENT_ROOT_ROW), with the hints they ask for: `{found, applied, changed}`.
+        """
+        row = FRAGMENT_ROOT_ROW
         condition = (
-            f"SELECT COUNT(*) INTO v_meets FROM {self.graph.nodes} n WHERE n.nid = v_root AND ({where});"
+            hinted(f"SELECT COUNT(*) INTO v_meets FROM {self.graph.nodes} {row} WHERE {row}.nid = v_root AND ({where})")
+            + ";"
             if where
             else "v_meets := 1;"
         )
@@ -70,7 +77,8 @@ class OracleWrites:
                 "'changed' VALUE v_changed RETURNING CLOB) AS \"result:json\" FROM dual;",
             ],
         )
-        return _Patch(block.text, block.bindings)
+        text, calls = called(block.text, self.graph.name)
+        return _Patch(text, block.bindings, calls=calls)
 
     def patch_many(self, model: FragmentModel) -> GraphStatement:
         """

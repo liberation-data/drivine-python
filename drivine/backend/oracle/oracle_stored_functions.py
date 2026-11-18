@@ -4,7 +4,10 @@ import logging
 import threading
 import time
 from collections.abc import Callable
-from typing import ClassVar
+from typing import ClassVar, Literal
+
+from drivine.backend.store_statements import store_statements
+from drivine.drivine_error import DrivineError
 
 logger = logging.getLogger("drivine.oracle")
 
@@ -34,6 +37,29 @@ def era_date_name(graph: str) -> str:
     does: the shared module's, made with the graph (see OracleGraph.functions).
     """
     return f"{graph}_era_date"
+
+
+def temporal_key_name(graph: str) -> str:
+    """
+    The function the store keeps beside the graph `graph`'s tables that gives a temporal value's key, by which it is
+    compared and ordered: one of the era functions, the shared module's, made with the graph (see OracleGraph.functions).
+    """
+    return f"{graph}_temporal_key"
+
+
+def temporal_arithmetic_name(graph: str) -> str:
+    """
+    The function the store keeps beside the graph `graph`'s tables that works out `+`, `-`, `*` and `/` of a temporal
+    value read from the store: the shared module's, made with the graph (see OracleGraph.functions).
+    """
+    return f"{graph}_temporal_arith"
+
+
+StoredFunction = Literal["nulls_equal", "era", "temporal_arithmetic"]
+"""
+Which of a graph's stored functions a session is asked of: `<graph>_nulls_equal`, the era functions together, or
+`<graph>_temporal_arith`. Each is asked of apart, as a store made by an earlier version may have one and not another.
+"""
 
 
 NO_FUNCTION = frozenset({904, 942, 1031, 6575})
@@ -86,26 +112,44 @@ class OracleStoredFunctions:
     @classmethod
     def check(cls, graph: str) -> str:
         """The query that tells whether a session may call the graph `graph`'s `<graph>_nulls_equal`: it calls it."""
-        return f"SELECT {nulls_equal_name(graph)}(JSON('[1]'), JSON('[1]')) FROM DUAL"
+        return _probe(graph, "nullsEqualStored")
 
     @classmethod
     def era_check(cls, graph: str) -> str:
         """
-        The query that tells whether a session may call both the functions the graph `graph` renumbers a year that may
-        be BC by, `<graph>_era` and `<graph>_era_date`: it calls them. They are asked of together, as a statement that
-        calls either is compiled to call neither where the session may not call one: the graph is made with both at
-        once, and a store that has neither gives the same rows, planned more slowly. They are asked of apart from
-        `check`'s, which a store made by a version before them has.
+        The query that tells whether a session may call the functions the graph `graph` renumbers a year that may be BC
+        and keys a temporal value by, `<graph>_era`, `<graph>_era_date` and `<graph>_temporal_key`: the shared module's
+        probe, which calls them. They are asked of together, as a statement that calls one is compiled to call none
+        where the session may not call one: the graph is made with them at once, and a store that has none gives the
+        same rows, planned more slowly. They are asked of apart from `check`'s, which a store made by a version before
+        them has.
         """
-        return f"SELECT {era_name(graph)}('0000-01-01'), {era_date_name(graph)}('-0001-01-01') FROM DUAL"
+        return _probe(graph, "eraStored")
 
     @classmethod
-    def key(cls, database: str, graph: str, era: bool = False) -> str:
+    def temporal_arithmetic_check(cls, graph: str) -> str:
         """
-        What a session of the database and user `database` is remembered by for the graph `graph`'s `<graph>_nulls_equal`,
-        or where `era`, for its era functions: the function, then the database, the user and the graph, joined by `|`.
+        The query that tells whether a session may call the graph `graph`'s `<graph>_temporal_arith`: the shared
+        module's probe, which calls it. Asked of apart, as a store made by a version before it has the others.
         """
-        return f"{_era_names(graph) if era else nulls_equal_name(graph)}|{database}|{graph}"
+        return _probe(graph, "temporalArithmeticStored")
+
+    @classmethod
+    def checked(cls, graph: str, function: StoredFunction) -> str:
+        """The query that tells whether a session may call the graph `graph`'s `function` (see StoredFunction)."""
+        if function == "era":
+            return cls.era_check(graph)
+        if function == "temporal_arithmetic":
+            return cls.temporal_arithmetic_check(graph)
+        return cls.check(graph)
+
+    @classmethod
+    def key(cls, database: str, graph: str, function: StoredFunction = "nulls_equal") -> str:
+        """
+        What a session of the database and user `database` is remembered by for the graph `graph`'s `function`: the
+        function, then the database, the user and the graph, joined by `|`.
+        """
+        return f"{named(graph, function)}|{database}|{graph}"
 
     @classmethod
     def known(cls, key: str) -> bool | None:
@@ -120,10 +164,10 @@ class OracleStoredFunctions:
             return False if until is not None and clock() < until else None
 
     @classmethod
-    def found(cls, key: str, graph: str, callable_: bool, era: bool = False) -> bool:
+    def found(cls, key: str, graph: str, callable_: bool, function: StoredFunction = "nulls_equal") -> bool:
         """
         Remembers what the session `key` was found to call, and warns once for it where it may call no function: the
-        graph `graph`'s `<graph>_nulls_equal`, or where `era`, its era functions. `callable_` is given back.
+        graph `graph`'s `function`. `callable_` is given back.
         """
         with cls._lock:
             if callable_:
@@ -138,8 +182,8 @@ class OracleStoredFunctions:
                 "The Oracle graph '%s' has no function %s, which the graph is made with where its user may make a "
                 "function (CREATE PROCEDURE, which the RESOURCE role grants). %s",
                 graph,
-                _era_names(graph) if era else nulls_equal_name(graph),
-                _ERA_LOST if era else _NULLS_EQUAL_LOST,
+                named(graph, function),
+                _LOST[function],
             )
         return False
 
@@ -151,9 +195,22 @@ class OracleStoredFunctions:
                 del cls._absent[key]
 
 
-def _era_names(graph: str) -> str:
-    """The era functions of the graph `graph`, as a warning names them, and as `OracleStoredFunctions.key` keys them."""
-    return f"{era_name(graph)} and {era_date_name(graph)}"
+def _probe(graph: str, flag: str) -> str:
+    """The shared module's statement that finds whether a session may call the functions the compiler flag `flag` names."""
+    probes: dict[str, str] = (store_statements("oracle", graph).stored_functions or {}).get("probes", {})
+    probe = probes.get(flag)
+    if probe is None:
+        raise DrivineError(f"The shared module has no statement that finds whether a session may call {flag}.")
+    return probe
+
+
+def named(graph: str, function: StoredFunction) -> str:
+    """The graph `graph`'s `function`, as a warning names it, and as `OracleStoredFunctions.key` keys it."""
+    if function == "era":
+        return f"{era_name(graph)}, {era_date_name(graph)} and {temporal_key_name(graph)}"
+    if function == "temporal_arithmetic":
+        return temporal_arithmetic_name(graph)
+    return nulls_equal_name(graph)
 
 
 _NULLS_EQUAL_LOST = (
@@ -167,3 +224,16 @@ _ERA_LOST = (
     "date or a moment whose year may be before 1000; it gives the same rows."
 )
 """What a statement loses where the session may not call the era functions: time, and no rows."""
+
+_TEMPORAL_ARITHMETIC_LOST = (
+    "Until the graph is ensured by such a user, an order of the query DSL by arithmetic of a property's value is "
+    "refused."
+)
+"""What a statement loses where the session may not call `<graph>_temporal_arith`."""
+
+_LOST: dict[StoredFunction, str] = {
+    "nulls_equal": _NULLS_EQUAL_LOST,
+    "era": _ERA_LOST,
+    "temporal_arithmetic": _TEMPORAL_ARITHMETIC_LOST,
+}
+"""What a statement loses where the session may not call each function."""

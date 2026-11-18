@@ -199,11 +199,24 @@ def serialized_label(text: str) -> str:
     return f'"{escaped}"'
 
 
+def module_label_test(alias: str, label: str) -> str:
+    """
+    The test the shared module writes of whether the node row `alias` carries `label`, where it reads an equality of
+    the node's property through the labelled index of the label (`CASE WHEN <test> THEN …`): a condition that holds it
+    at its top implies the label, so a statement needn't test the label again (see oracle_backend.labels_implied).
+    """
+    return f"CASE WHEN JSON_EXISTS({alias}.labels, '$[*]?(@ == \"{_escaped(label)}\")') THEN"
+
+
 def labelled_value(alias: str, label: str, property: str) -> str:
     """
-    A property of the node row `alias` as a range index or a uniqueness constraint over the label holds it: as text,
-    for the label's nodes alone, and null for every other node, for a value that isn't a scalar, and for one longer
-    than 4,000 bytes. A predicate over this expression implies the label.
+    A property of the node row `alias` as Drivine 5.0's range index or uniqueness constraint over the label held it
+    (store layout 1): as text, for the label's nodes alone, and null for every other node, for a value that isn't a
+    scalar, and for one longer than 4,000 bytes.
+
+    Only OracleSchemaGrammar's statements of 5.0, kept for the golden statements, write it now: no statement this
+    version runs reads it, and no index it makes holds it. The query DSL's filters are the module's fragments
+    (drivine-cypher-spec#235), which read layout 2's indexes.
     """
     return (
         f"CASE WHEN {has_labels(alias, [label])} THEN JSON_VALUE({alias}.props, '${json_key(property)}' "

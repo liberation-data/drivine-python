@@ -230,8 +230,11 @@ async def test_a_text_id_is_read_as_the_float_a_float_id_is_and_a_null_id_runs_n
 ORACLE_HELD = '{"$numberDouble":"1.0E-7"}'
 """The id 1e-7 as Oracle's layout holds it, a binary double: extended JSON's double."""
 
-ORACLE_HAS_ID = id_sql("oracle", "hasId", "n", "id", "JSON($id EXTENDED)")
-"""The comparison an Oracle lookup by `$id` makes of Gauge's id, as the shared module writes it."""
+ORACLE_HAS_ID = id_sql("oracle", "hasId", FRAGMENT_ROOT_ROW, "id", "JSON($id EXTENDED)")
+"""
+The comparison an Oracle load or delete by `$id` makes of Gauge's id, as the shared module writes it, over the query
+DSL's row `n_`.
+"""
 
 
 async def test_a_float_id_on_oracle_is_bound_by_a_load_a_delete_and_a_cascade_as_the_json_oracle_holds_it_as():
@@ -245,8 +248,9 @@ async def test_a_float_id_on_oracle_is_bound_by_a_load_a_delete_and_a_cascade_as
 def test_oracle_binds_a_saves_reads_of_the_nodes_properties_and_stamp_as_the_json_oracle_holds_the_id_as():
     backend = OracleBackend(OracleGraph())
     model = ModelRegistry().fragment(Gauge)
+    # A write's own reads keep the row `n`.
     for statement in (backend.held_properties(model), backend.found_stamp(model)):
-        assert ORACLE_HAS_ID in statement.text
+        assert id_sql("oracle", "hasId", "n", "id", "JSON($id EXTENDED)") in statement.text
         assert statement.spec({"id": 1e-7}).parameters["id"] == ORACLE_HELD  # type: ignore[index]
 
 
@@ -404,7 +408,8 @@ LOOKUP_STORES = [
         "oracle",
         lambda: OracleBackend(OracleGraph()),
         lambda parameter: f"JSON({parameter} EXTENDED)",
-        "n",
+        # A load and a delete read the node as the query DSL's row, which a fragment's variable ends with `_`.
+        FRAGMENT_ROOT_ROW,
         lambda row: (
             f"""INSTR(',' || LTRIM(RTRIM(JSON_SERIALIZE({row}.labels), ']'), '[') || ',"', ',"Dial","') > 0 AND """
             f"""INSTR(',' || LTRIM(RTRIM(JSON_SERIALIZE({row}.labels), ']'), '[') || ',"', ',"Meter","') > 0"""

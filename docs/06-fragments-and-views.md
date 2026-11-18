@@ -98,17 +98,15 @@ q.employment_history.none(lambda it: it.role.eq("Lead"))
   that lacks the property, as `NOT (null IN [])` does in Cypher; with values in the list it doesn't. A property whose
   stored name begins with `$` is read as the store holds it. Text is compared and ordered by its code points, as Neo4j
   orders it: on Postgres that is a **behaviour change**, as the DSL's SQL is in the `C` collation (`COLLATE "C"`) where
-  it used the database's collation before, so `a, B, b` sorts as `B, a, b`, as on SQLite. On Oracle the DSL doesn't yet
-  compare a saved date, moment or time.
+  it used the database's collation before, so `a, B, b` sorts as `B, a, b`, as on SQLite and Oracle. A date, a moment
+  or a time is compared and ordered as Cypher compares it on every store.
 - `count`, `delete`, `delete_all` and `patch` take conditions too.
 - `eq_ignore_case` and `contains_ignore_case` lowercase the property, which no index reads. On a `CaseInsensitive`
   field whose index ignores case, they compare with a lowercased copy instead, which the index serves: see below.
-- **Dates and times on Oracle:** for now a comparison with a `date`, `datetime` or `time`, a cursor after one, and an
-  order by a field declared one, or by an expression that reads one, are refused by name there, until the DSL compares
-  them as the values they are
-  ([drivine-cypher-spec#235](https://github.com/liberation-data/drivine-cypher-spec/issues/235)): write the filter in
-  Cypher, which does (`MATCH (n:Event) WHERE n.at > $at RETURN n`). SQLite's and Postgres's DSL compares them, and a
-  `JsonPacked` field is compared by its packed text on every store.
+- **Dates and times:** a comparison with a `date`, `datetime` or `time`, a cursor after one, and an order by one are
+  the shared module's SQL on Oracle, Postgres and SQLite
+  ([drivine-cypher-spec#235](https://github.com/liberation-data/drivine-cypher-spec/issues/235)), which compares them
+  as the values they are. A `JsonPacked` field is compared by its packed text on every store.
 
 ### Lookups that ignore case
 
@@ -144,10 +142,9 @@ await gom.load_all(Account, where=refs(Account).email.eq_ignore_case("Ada@Exampl
   then, and for an empty value or a related node's field, they lowercase the property, as for any field: the same
   answer, without the index. A manager knows at once what it recorded, and reads what another recorded once a minute.
 - **A long text.** On Oracle the copy is written whole, as a `CLOB`, however long the text, but an index over it holds
-  no copy past 4,000 bytes. So a lookup by a value that may lowercase past that, one of more than 1,333 characters
-  (counted in UTF-16 units, as drivine4j counts them, so a character outside the BMP counts twice), compares the copy
-  as a `CLOB` on every node of the label instead of reading the index. Neo4j refuses to save a text too large for its
-  range index over the copy.
+  no copy past 4,000 bytes. So a lookup by a value that lowercases past that compares the copy as a `CLOB` on every node
+  of the label instead of reading the index; a shorter one, however many characters, reads the index. Neo4j refuses to
+  save a text too large for its range index over the copy.
 - <a id="cypher-of-your-own"></a>**Cypher of your own keeps no copy, on any store.** Drivine runs a statement you send
   as written on the graph engines, and on Postgres, Oracle and SQLite compiles it to SQL and adds nothing to it. So a
   `SET`, `CREATE`, `MERGE` or `REMOVE` of the property leaves the copy as it was, or leaves the node without one, and so
@@ -243,12 +240,11 @@ await gom.groups.count_by(Review, "page")                       # {"/pricing": 1
 ```
 
 Aggregates are `count`, `sum_`, `avg`, `min_` and `max_`, each with an optional filter. Ties in an order are broken by
-the keys, so a page of groups is the same every time. On SQLite and Postgres a key is ordered as Cypher orders it (on
-SQLite a text, then a boolean, then a number, no value last; on Postgres a key of mixed kinds still sorts a number
-before a boolean, until
-[drivine-cypher-spec#371](https://github.com/liberation-data/drivine-cypher-spec/issues/371)), a date by its moment,
-and `min_` and `max_` take a value of any kind, a text or a date as well as a number, read back as the type its field
-declares; on Oracle they still read numbers alone.
+the keys, so a page of groups is the same every time. On the SQL stores a key is ordered as Cypher orders it (a text,
+then a boolean, then a number, no value last; on Postgres a key of mixed kinds still sorts a number before a boolean,
+until [drivine-cypher-spec#371](https://github.com/liberation-data/drivine-cypher-spec/issues/371)), a date by its
+moment, and `min_` and `max_` take a value of any kind, a text or a date as well as a number, read back as the type its
+field declares. A text stored as `""` is kept by `min_` and `max_`, as Cypher keeps it, on Oracle too.
 
 - **Models are Pydantic.** A loaded fragment is validated, so a bad value fails at the load.
 - **The annotation says what a relationship holds**: a fragment, a relationship fragment or a view, one or a list. A

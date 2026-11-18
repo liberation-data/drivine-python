@@ -6,8 +6,10 @@ from typing import Any
 from drivine.backend.graph_statement import GraphStatement
 from drivine.backend.matching_search import MatchingSearch, searched_labels
 from drivine.backend.nearest_search import NearestSearch
+from drivine.backend.oracle.oracle_fragments import called, hinted
 from drivine.backend.oracle.oracle_graph import OracleGraph, has_labels, json_key, node_document
 from drivine.backend.oracle.oracle_views import OracleViews
+from drivine.backend.sql.fragments import FRAGMENT_ROOT_ROW, same_key
 from drivine.cypher.shared_compiler import full_text_search
 from drivine.model.graph_view_model import GraphViewModel
 from drivine.model.target_model import TargetModel
@@ -26,7 +28,9 @@ class OracleSearch:
     through the index, exact without. A full-text search's candidates are the shared module's (`full_text_search`), its
     query the core of Lucene's syntax: Oracle Text scores through the index, each property's score added, and sees only
     what has been committed; without one, each term is counted as a whole word and the counts scored by BM25, as Neo4j's
-    index scores them. Either is scaled by the best hit.
+    index scores them. Either is scaled by the best hit. A hit's row is the root's of a read of the query DSL, `n_`,
+    which its `where` reads, joined back by the keys Oracle keeps (`same_key`), with the hints the DSL's fragments in it
+    ask for (see oracle_fragments).
     """
 
     def __init__(self, graph: OracleGraph) -> None:
@@ -85,22 +89,27 @@ class OracleSearch:
     ) -> GraphStatement:
         root = target.root if isinstance(target, GraphViewModel) else target
         views = OracleViews(self.graph, depth)
+        row = FRAGMENT_ROOT_ROW
         filters = [
-            has_labels("n", root.labels),
+            has_labels(row, root.labels),
             *(["s.score >= $_threshold"] if threshold else []),
             *([f"({where})"] if where else []),
-            *(views.requirements(target, "n") if isinstance(target, GraphViewModel) else []),
+            *(views.requirements(target, row) if isinstance(target, GraphViewModel) else []),
         ]
-        value = views.document(target, "n") if isinstance(target, GraphViewModel) else node_document("n")
-        return GraphStatement(
-            "\n".join(
-                [
-                    f"SELECT JSON_OBJECT('value' VALUE {value}, 'score' VALUE s.score RETURNING JSON) AS \"result\"",
-                    f"FROM ({candidates}) s JOIN {self.graph.nodes} n ON n.nid = s.nid",
-                    f"WHERE {' AND '.join(filters)}",
-                    "ORDER BY s.score DESC",
-                    *([f"FETCH FIRST {limit} ROWS ONLY"] if limit is not None else []),
-                ]
+        value = views.document(target, row) if isinstance(target, GraphViewModel) else node_document(row)
+        text, calls = called(
+            hinted(
+                "\n".join(
+                    [
+                        f"SELECT JSON_OBJECT('value' VALUE {value}, 'score' VALUE s.score RETURNING JSON) "
+                        'AS "result"',
+                        f"FROM ({candidates}) s JOIN {self.graph.nodes} {row} ON {same_key(f'{row}.nid', 's.nid')}",
+                        f"WHERE {' AND '.join(filters)}",
+                        "ORDER BY s.score DESC",
+                        *([f"FETCH FIRST {limit} ROWS ONLY"] if limit is not None else []),
+                    ]
+                )
             ),
-            dict(bindings or {}),
+            self.graph.name,
         )
+        return GraphStatement(text, dict(bindings or {}), calls=calls)

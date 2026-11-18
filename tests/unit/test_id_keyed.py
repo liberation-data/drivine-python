@@ -712,6 +712,23 @@ def test_a_batch_hands_two_ids_that_read_back_as_one_float_each_its_own_stamp_wh
     assert [it.stamp for it in amounts] == [first, second]
 
 
+class StampedAmounts(GraphView):
+    target: Annotated[StampedKey, Root()]
+    amounts: Annotated[list[StampedAmount], Relationship("OF_AMOUNT")] = []
+
+
+def test_a_save_hands_two_related_ids_that_read_back_as_one_float_each_its_own_stamp_where_given_back_as_given():
+    # Postgres and SQLite give each related id back as the object gave it, and hold these two as two nodes.
+    model = ModelRegistry().fragment(StampedAmount)
+    amounts = [StampedAmount(id=Decimal("0.1")), StampedAmount(id=Decimal("0.10000000000000000001"))]
+    view = StampedAmounts(target=StampedKey(id=uuid.UUID(int=7)), amounts=amounts)
+    first, second = "a" * 16 + ":" + "b" * 16, "c" * 16 + ":" + "d" * 16
+    statement = SaveStatement("", {}, stamped_models=[model])
+    after = [{"id": amounts[0].id, "stamp": first}, {"id": amounts[1].id, "stamp": second}]
+    StatelessGraphObjectManager._hand_back(None, view, statement, {"related": [{"before": [], "after": after}]})  # pyright: ignore[reportArgumentType]
+    assert [it.stamp for it in view.amounts] == [first, second]
+
+
 class PatchedDay(NodeFragment, labels=["PatchedDay"]):
     on: Annotated[date, NodeId()]
     value: int | None = None

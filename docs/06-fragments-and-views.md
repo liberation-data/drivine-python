@@ -87,7 +87,7 @@ q.employment_history.none(lambda it: it.role.eq("Lead"))
   `order_by`, ending with a unique key.
 - **An order by an expression:** `plus`, `minus`, `times`, `div`, `negate`, `exp`, `floor`, `coalesce`, `case_of`
   with `above`, `below`, `at_least`, `at_most`, `equal_to`, `has_value` and the rest, all computed in the database.
-- **On SQLite the DSL is the shared module's SQL** for the Cypher it writes for Neo4j
+- **On SQLite and Postgres the DSL is the shared module's SQL** for the Cypher it writes for Neo4j
   ([drivine-cypher-spec#235](https://github.com/liberation-data/drivine-cypher-spec/issues/235)), so a filter, an
   order, a seek, a patch's `where` and a grouped read give the rows Neo4j does. Dates, moments and times compare as
   Cypher compares them: a moment by its instant, then its offset, so the same instant at two offsets is two values,
@@ -96,17 +96,19 @@ q.employment_history.none(lambda it: it.role.eq("Lead"))
   local moment never a moment, a local time never a time with an offset, and a text never any of them, though it names
   one. A time of a `ZoneInfo` has no offset, and is saved and compared as a local time. `not_in([])` holds for a node
   that lacks the property, as `NOT (null IN [])` does in Cypher; with values in the list it doesn't. A property whose
-  stored name begins with `$` is read as the store holds it. On Postgres and Oracle the DSL doesn't yet compare a saved
-  date, moment or time.
+  stored name begins with `$` is read as the store holds it. Text is compared and ordered by its code points, as Neo4j
+  orders it: on Postgres that is a **behaviour change**, as the DSL's SQL is in the `C` collation (`COLLATE "C"`) where
+  it used the database's collation before, so `a, B, b` sorts as `B, a, b`, as on SQLite. On Oracle the DSL doesn't yet
+  compare a saved date, moment or time.
 - `count`, `delete`, `delete_all` and `patch` take conditions too.
 - `eq_ignore_case` and `contains_ignore_case` lowercase the property, which no index reads. On a `CaseInsensitive`
   field whose index ignores case, they compare with a lowercased copy instead, which the index serves: see below.
-- **Dates and times on Postgres and Oracle:** for now a comparison with a `date`, `datetime` or `time`, a cursor after
-  one, and an order by a field declared one, or by an expression that reads one, are refused by name there, until the
-  DSL compares them as the values they are
+- **Dates and times on Oracle:** for now a comparison with a `date`, `datetime` or `time`, a cursor after one, and an
+  order by a field declared one, or by an expression that reads one, are refused by name there, until the DSL compares
+  them as the values they are
   ([drivine-cypher-spec#235](https://github.com/liberation-data/drivine-cypher-spec/issues/235)): write the filter in
-  Cypher, which does (`MATCH (n:Event) WHERE n.at > $at RETURN n`). SQLite's DSL compares them, and a `JsonPacked`
-  field is compared by its packed text on every store.
+  Cypher, which does (`MATCH (n:Event) WHERE n.at > $at RETURN n`). SQLite's and Postgres's DSL compares them, and a
+  `JsonPacked` field is compared by its packed text on every store.
 
 ### Lookups that ignore case
 
@@ -241,9 +243,12 @@ await gom.groups.count_by(Review, "page")                       # {"/pricing": 1
 ```
 
 Aggregates are `count`, `sum_`, `avg`, `min_` and `max_`, each with an optional filter. Ties in an order are broken by
-the keys, so a page of groups is the same every time. On SQLite a key is ordered as Cypher orders it (a text, then a
-boolean, then a number, no value last), and `min_` and `max_` take a value of any kind, a text or a date as well as a
-number, read back as the type its field declares; on Postgres and Oracle they still read numbers alone.
+the keys, so a page of groups is the same every time. On SQLite and Postgres a key is ordered as Cypher orders it (on
+SQLite a text, then a boolean, then a number, no value last; on Postgres a key of mixed kinds still sorts a number
+before a boolean, until
+[drivine-cypher-spec#371](https://github.com/liberation-data/drivine-cypher-spec/issues/371)), a date by its moment,
+and `min_` and `max_` take a value of any kind, a text or a date as well as a number, read back as the type its field
+declares; on Oracle they still read numbers alone.
 
 - **Models are Pydantic.** A loaded fragment is validated, so a bad value fails at the load.
 - **The annotation says what a relationship holds**: a fragment, a relationship fragment or a view, one or a list. A

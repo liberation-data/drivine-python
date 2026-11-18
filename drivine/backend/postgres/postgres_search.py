@@ -8,6 +8,7 @@ from drivine.backend.matching_search import MatchingSearch, searched_labels
 from drivine.backend.nearest_search import NearestSearch
 from drivine.backend.postgres.postgres_graph import PostgresGraph, has_labels, json_value, node_document, text_of
 from drivine.backend.postgres.postgres_views import PostgresViews
+from drivine.backend.sql.fragments import FRAGMENT_ROOT_ROW as ROW
 from drivine.cypher.shared_compiler import full_text_search
 from drivine.model.graph_view_model import GraphViewModel
 from drivine.model.target_model import TargetModel
@@ -26,6 +27,8 @@ class PostgresSearch:
     word as Oracle counts one without Oracle Text, scored by BM25 as Neo4j's index scores it, then scaled by the best
     hit; the trigram index of a full-text index narrows them first to the nodes whose text holds a scoring term's words,
     which changes no score.
+
+    A hit's row is the root's of a read of the query DSL, `n_`, which its `where` reads.
     """
 
     def __init__(self, graph: PostgresGraph) -> None:
@@ -83,19 +86,19 @@ class PostgresSearch:
         root = target.root if isinstance(target, GraphViewModel) else target
         views = PostgresViews(self.graph, depth)
         filters = [
-            has_labels("n", root.labels),
+            has_labels(ROW, root.labels),
             *(["s.score >= $_threshold"] if threshold else []),
             *([f"({where})"] if where else []),
-            *(views.requirements(target, "n") if isinstance(target, GraphViewModel) else []),
+            *(views.requirements(target, ROW) if isinstance(target, GraphViewModel) else []),
         ]
-        value = views.document(target, "n") if isinstance(target, GraphViewModel) else node_document("n")
+        value = views.document(target, ROW) if isinstance(target, GraphViewModel) else node_document(ROW)
         return GraphStatement(
             "\n".join(
                 [
                     f"SELECT jsonb_build_object('value', {value}, 'score', s.score) AS \"result\"",
-                    f"FROM ({candidates}) s JOIN {self.graph.nodes} n ON n.nid = s.nid",
+                    f"FROM ({candidates}) s JOIN {self.graph.nodes} {ROW} ON {ROW}.nid = s.nid",
                     f"WHERE {' AND '.join(filters)}",
-                    "ORDER BY s.score DESC, n.nid",
+                    f"ORDER BY s.score DESC, {ROW}.nid",
                     *([f"FETCH FIRST {limit} ROWS ONLY"] if limit is not None else []),
                 ]
             ),

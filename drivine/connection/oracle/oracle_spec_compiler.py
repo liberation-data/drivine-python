@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from collections.abc import Mapping
 from datetime import date, datetime
 from typing import Any
@@ -9,8 +8,7 @@ from drivine.backend.sql.sql_json import to_json
 from drivine.drivine_error import DrivineError
 from drivine.query.query_specification import QuerySpecification
 from drivine.query.query_specification_compiler import QuerySpecificationCompiler
-
-_PARAMETER = re.compile(r"\$([^\W\d]\w*)")
+from drivine.query.sql_parameters import parameter_names, replace_parameters
 
 
 class OracleSpecCompiler(QuerySpecificationCompiler):
@@ -30,22 +28,20 @@ class OracleSpecCompiler(QuerySpecificationCompiler):
     def formatted_statement(self) -> str:
         """
         Every `$name` the parameters hold becomes a bind, `:b0`, `:b1`, … (an Oracle bind name may not begin with `_`,
-        as Drivine's own parameters do); a name is never matched as the prefix of a longer one.
+        as Drivine's own parameters do); a name is never matched as the prefix of a longer one, nor inside quoted text,
+        such as the JSON path `'$."at"."$t"'`: see sql_parameters.
         """
         names = list(self._named())
-
-        def bound(match: re.Match[str]) -> str:
-            name = match.group(1)
-            return f":b{names.index(name)}" if name in names else match.group(0)
-
-        return _PARAMETER.sub(bound, self.applied_statement())
+        return replace_parameters(
+            self.applied_statement(), lambda name: f":b{names.index(name)}" if name in names else None
+        )
 
     def formatted_parameters(self) -> dict[str, Any]:
-        text = self.statement.text
+        used = parameter_names(self.statement.text)
         parameters: dict[str, Any] = {}
         for index, (name, value) in enumerate(self._named().items()):
-            # Oracle refuses a bind the statement doesn't name.
-            if re.search(rf"\${re.escape(name)}(?!\w)", text):
+            # Oracle refuses a bind the statement doesn't name outside its quoted text.
+            if name in used:
                 parameters[f"b{index}"] = _bindable(value)
         return parameters
 

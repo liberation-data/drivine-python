@@ -9,6 +9,7 @@ import contextlib
 import os
 import uuid
 from collections.abc import Iterator
+from enum import Enum
 from typing import Annotated, Any
 
 import pytest
@@ -208,7 +209,23 @@ class TestTheCopy:
         assert {k: v[COPY] for k, v in (stored(pm, label)).items()} == {"a1": "ada@x.com", "a2": "bo@x"}
 
 
+class _Status(str, Enum):  # noqa: UP042 - not a StrEnum: str() of this one is its name, "_Status.OPEN".
+    OPEN = "Open"
+
+
 class TestLookups:
+    def test_compare_a_str_enum_ignoring_case_as_the_value_a_save_stores(self, gom, pm, label, request):
+        # drivine-python#546: the DSL's Cypher lowered str() of the member, its name: on the graph engines, and on
+        # SQLite since #544 reads it (Postgres's own renderer stored the value first). Oracle's DSL is still its own
+        # renderer, which does the same, until #532's Oracle step reads it through the module's fragments.
+        if pm.type is DatabaseType.ORACLE:
+            request.applymarker(pytest.mark.xfail(strict=True, reason="drivine-python#546 on Oracle: #532 step 4"))
+        account = fragment(label)
+        gom.save_all([account(uuid="a1", email="Open"), account(uuid="a2", email="Shut")])
+        q = refs(account)
+        assert [it.uuid for it in gom.load_all(account, q.email.eq_ignore_case(_Status.OPEN))] == ["a1"]
+        assert [it.uuid for it in gom.load_all(account, q.email.contains_ignore_case(_Status.OPEN))] == ["a1"]
+
     def test_read_the_copy_once_it_is_filled_in_and_the_property_before(self, gom, pm, label):
         account = fragment(label)
         # Written outside Drivine, so no node has a copy until the index fills it in.

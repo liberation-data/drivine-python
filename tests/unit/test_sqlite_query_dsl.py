@@ -164,12 +164,6 @@ async def test_reads_a_least_or_greatest_value_through_the_node_of_the_group_tha
     assert statement.bindings["_cy_f6_value"] == "3"
 
 
-async def test_leaves_postgres_grouped_read_as_it_was_a_least_value_as_a_number_no_node_joined_back():
-    statement = await grouped(PostgresBackend(), keys={"name": key(q.name)}, aggregates={"high": max_(q.score)})
-    assert "LEFT JOIN" not in statement.text
-    assert "MAX(" in statement.text
-
-
 def test_writes_a_patchs_condition_over_n_a_value_in_the_path_of_a_dollar_named_property_left_as_it_is():
     where, bindings = backend.render_where(q.score.eq(2), scored, labels)
     patch = backend.patch_one(scored, where)

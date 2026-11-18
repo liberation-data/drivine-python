@@ -1,6 +1,7 @@
 """The parentheses of a query's WHERE, as TypeScript's Drivine's QueryRenderer.spec.ts holds them."""
 
 from collections.abc import Callable
+from enum import Enum
 from typing import Any
 
 from drivine import ModelRegistry, all_of, any_of, not_, plus, refs
@@ -89,3 +90,18 @@ def test_gives_a_cursors_keyset_and_an_order_terms_cypher_with_the_values_each_b
     assert renderer.order_expression(keys[0], scope, "n") == ("n.released", {})
     expression = RootKey(plus(m.released, 1).asc())
     assert renderer.order_expression(expression, scope, "n") == ("(n.released + $_q3)", {"_q3": 1})
+
+
+class _Status(str, Enum):  # noqa: UP042 - not a StrEnum: str() of this one is its name, "_Status.OPEN".
+    OPEN = "Open"
+
+
+def test_compares_text_ignoring_case_with_a_str_enum_as_the_value_it_is_stored_as():
+    rendered = [
+        QueryRenderer.render(Query(where=condition), movie, NEO4J_GRAMMAR, "n", labels)
+        for condition in (
+            refs(Movie).title.eq_ignore_case(_Status.OPEN),
+            refs(Movie).title.contains_ignore_case(_Status.OPEN),
+        )
+    ]
+    assert [list(it.bindings.values()) for it in rendered] == [["open"], ["open"]]

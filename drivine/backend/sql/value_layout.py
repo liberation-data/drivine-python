@@ -60,12 +60,12 @@ def held_key(name: str) -> str:
 
 def write(value: Any, store: SqlStore) -> Any:
     """`value` as a save writes it on `store` (see the module): as it is, or the module's text of it, `Held`."""
-    prepared = _prepared(value)
-    if _plain(prepared):
-        return prepared
+    made = prepared(value)
+    if _plain(made):
+        return made
     from drivine.cypher.shared_compiler import module_text, written
 
-    given = module_text({"write": written(prepared), "store": store}, store)
+    given = module_text({"write": written(made), "store": store}, store)
     opening = '{"value":'
     if not given.startswith(opening):
         error = json.loads(given).get("error", given)
@@ -78,7 +78,7 @@ def write_props(props: Mapping[str, Any], store: SqlStore) -> dict[str, Any]:
     return {held_key(name): write(value, store) for name, value in props.items()}
 
 
-def _prepared(value: Any) -> Any:
+def prepared(value: Any) -> Any:
     """
     `value` with what the module isn't given as it is made plain, as a save has written it: an Enum its value, a list,
     tuple, set or iterator the list of its items, a map's keys texts, and any other object (a UUID, a model) its JSON
@@ -89,12 +89,12 @@ def _prepared(value: Any) -> Any:
     if isinstance(value, (bytes, bytearray, memoryview)):
         return bytes(cast(Any, value))
     if isinstance(value, Enum):
-        return _prepared(value.value)
+        return prepared(value.value)
     if isinstance(value, Mapping):
-        return {str(key): _prepared(it) for key, it in cast(Mapping[Any, Any], value).items()}
+        return {str(key): prepared(it) for key, it in cast(Mapping[Any, Any], value).items()}
     if isinstance(value, (list, tuple, set, frozenset, Iterator)):
-        return [_prepared(it) for it in cast(Any, value)]
-    return _prepared(to_jsonable_python(value))
+        return [prepared(it) for it in cast(Any, value)]
+    return prepared(to_jsonable_python(value))
 
 
 def _plain(value: Any) -> bool:

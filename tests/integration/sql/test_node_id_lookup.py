@@ -36,6 +36,7 @@ from drivine import (
     StatelessGraphObjectManager,
     node_ref,
     range_index,
+    refs,
     uniqueness_constraint,
 )
 from drivine.backend.matched_node import MatchedNode
@@ -362,6 +363,24 @@ async def test_a_target_of_a_uuid_id_still_held_is_kept_by_its_text_unquoted(gom
     assert again is not None and again.stamp == held.stamp
 
 
+async def test_the_query_dsl_finds_a_uuid_id_by_the_text_a_save_holds_it_as(
+    gom: StatelessGraphObjectManager, pm: PersistenceManager, request: pytest.FixtureRequest
+):
+    # The module's parameters take no UUID: the DSL binds one as the text a save holds it as (value_layout.prepared).
+    # Oracle's DSL is still its own renderer, which finds none, until #532's Oracle step reads it through the fragments.
+    if pm.type is DatabaseType.ORACLE:
+        request.applymarker(pytest.mark.xfail(strict=True, reason="drivine-python#547 on Oracle: #532 step 4"))
+    await gom.save_all([LookupKey(id=uuid.UUID(int=it), name=f"key {it}") for it in (1, 2, 3)])
+    k = refs(LookupKey)
+    found = await gom.load_all(
+        LookupKey,
+        k.id.in_([uuid.UUID(int=2), uuid.UUID(int=3)]),
+        order_by=k.id.asc(),
+        seek=k.id.after(uuid.UUID(int=2)),
+    )
+    assert [it.name for it in found] == ["key 3"]
+
+
 async def test_a_cascade_delete_by_a_date_ids_text_checks_its_depth_and_deletes_the_tree(
     gom: StatelessGraphObjectManager,
 ):
@@ -476,8 +495,8 @@ async def assert_reads_index(
 
     index = rf"drivine_{made}_\w+"
     bound = {"id": to_json(write(id_, "sqlite" if sqlite else "postgres"))}
-    # A load and a delete read the node as the query DSL's row on SQLite, `n_`.
-    row = "n_" if sqlite else "n"
+    # A load and a delete read the node as the query DSL's row, `n_`, which SQLite's plan names.
+    row = "n_"
     assert reads(row).search(await explain(backend.load_fragment(model).text, bound))
     assert reads(row).search(await explain(backend.delete(model).text, bound))
     related = backend.related(

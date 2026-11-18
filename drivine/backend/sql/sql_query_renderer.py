@@ -45,11 +45,11 @@ from drivine.model.target_model import TargetModel
 
 class SqlQueryRenderer(ABC):
     """
-    Writes a query over a class's references as SQL over Postgres's or Oracle's tables, the root's row bound to an
-    alias, as TypeScript's Drivine writes it (SQLite's is the shared module's: FragmentQueryRenderer). A condition
-    across a relationship is an EXISTS over the relationship table. Values are bound (`$_q0`, …), never written in.
-    What is each store's own is how it compares a property, tests labels and reads a property for an order or an
-    expression.
+    Writes a query over a class's references as SQL over Oracle's tables, the root's row bound to an alias, as
+    TypeScript's Drivine writes it (SQLite's and Postgres's are the shared module's: FragmentQueryRenderer). A
+    condition across a relationship is an EXISTS over the relationship table. Values are bound (`$_q0`, …), never
+    written in. What is each store's own is how it compares a property, tests labels and reads a property for an order
+    or an expression.
 
     A comparison with a date, datetime or time, or an order by a field declared one or by an expression that reads one,
     is refused by name, unless the store `reads_temporals`.
@@ -61,9 +61,9 @@ class SqlQueryRenderer(ABC):
     reads_temporals: ClassVar[bool] = False
     """
     Whether the store's renderer compares and orders a saved date, datetime or time as the value it is. Store layout 2
-    holds one as its tag (`{"$t": "date", "v": …, "s": …}`), which Postgres's and Oracle's compare by its text until the
-    query DSL takes the shared module's fragments there (drivine-cypher-spec#235), as SQLite's has, so they refuse one
-    rather than give wrong rows, or none, and say nothing.
+    holds one as its tag (`{"$t": "date", "v": …, "s": …}`), which Oracle's compares by its text until the query DSL
+    takes the shared module's fragments there (drivine-cypher-spec#235), as SQLite's and Postgres's have, so it refuses
+    one rather than give wrong rows, or none, and say nothing.
     """
 
     def __init__(self, views: SqlViews, labels_of_class: Callable[[type], list[str]]) -> None:
@@ -134,11 +134,6 @@ class SqlQueryRenderer(ABC):
                 return group(parts, " OR ") if parts else "1 = 0"
             return f"NOT {group(parts, ' AND ', True)}"
         return self._walk(condition.path, 0, condition.test, scope, rows, top)
-
-    def _list(self, value: Any, path: tuple[str, ...]) -> list[Any]:
-        if not isinstance(value, list):
-            raise DrivineError(f"{described(path)} is tested against a list, not {value!r}.")
-        return value  # pyright: ignore[reportUnknownVariableType]
 
     def _bind(self, value: Any) -> str:
         name = f"_q{len(self.bindings)}"

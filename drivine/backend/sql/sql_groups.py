@@ -19,13 +19,23 @@ from drivine.model.fragment_model import FragmentModel
 
 class HeldAggregate(Protocol):
     """
-    A least or greatest value a store reads through the node of the group that has it, as drivine4j's SQLite does: the
-    aggregate's column is that node's `nid`, and the statement joins the node back, as the row `holder`, to give,
-    compare and order the value there.
+    A least or greatest value a store reads through the node of the group that has it, as drivine4j's SQLite and
+    Postgres do: the statement joins that node back, as the row `holder`, to compare and order the value there. On
+    SQLite the aggregate's column is that node's `nid`, and the value is given there too. Where the store `gives_value`,
+    as drivine4j's Postgres does, the value is the aggregate's column itself (see `given`), the node's `nid` a column of
+    its own, with `r` after the aggregate's, and the node is joined only where the groups are ordered or filtered by
+    the value.
     """
+
+    gives_value: bool
+    """Whether the aggregate's column is the value itself (see `given`), not the `nid` of the node that has it."""
 
     def column(self, filter: str | None) -> str:
         """The `nid` of the group's first node in the order the aggregate takes, of those that meet `filter`."""
+        ...
+
+    def given(self, filter: str | None) -> str:
+        """The value of that node, as the group's column gives it, where the store `gives_value`."""
         ...
 
     def value(self, holder: str) -> str:
@@ -107,6 +117,14 @@ class SqlGroups(ABC):
             return f"CASE WHEN {aggregate.filter} THEN {of} END" if aggregate.filter else of
 
         held = [self._held(aggregate) for _, aggregate in aggregates]
+        # Whether the groups are ordered or filtered by the aggregate: a given value is then joined back by its node.
+        ordered_or_filtered = [any(it[0] == name for it in [*query.order_by, *query.having]) for name, _ in aggregates]
+
+        def holds(i: int) -> bool:
+            """Whether the aggregate's value is read through its node, joined back as its holder."""
+            held_aggregate = held[i]
+            return held_aggregate is not None and (not held_aggregate.gives_value or ordered_or_filtered[i])
+
         held_keys = [
             self._held_path(path_targets[name])
             if isinstance(group_key, PathKey)
@@ -125,8 +143,24 @@ class SqlGroups(ABC):
             return f"k{i}_"
 
         aggregate_expressions: list[str] = []
+        aggregate_columns: list[str] = []
         for i, (_, aggregate) in enumerate(aggregates):
             held_aggregate = held[i]
+            if held_aggregate is not None and held_aggregate.gives_value:
+                aggregate_expressions.append(held_aggregate.given(aggregate.filter))
+                aggregate_columns.append(
+                    ", ".join(
+                        [
+                            f"{aggregate_expressions[i]} AS a{i}",
+                            *(
+                                [f"{held_aggregate.column(aggregate.filter)} AS a{i}r"]
+                                if ordered_or_filtered[i]
+                                else []
+                            ),
+                        ]
+                    )
+                )
+                continue
             if held_aggregate is not None:
                 aggregate_expressions.append(held_aggregate.column(aggregate.filter))
             elif aggregate.function == "COUNT":
@@ -137,7 +171,7 @@ class SqlGroups(ABC):
                 aggregate_expressions.append(views.zero_if_null(f"SUM({filtered(aggregate, value(aggregate))})"))
             else:
                 aggregate_expressions.append(f"{aggregate.function}({filtered(aggregate, value(aggregate))})")
-        aggregate_columns = [f"{it} AS a{i}" for i, it in enumerate(aggregate_expressions)]
+            aggregate_columns.append(f"{aggregate_expressions[i]} AS a{i}")
         names = {name: f"k{i}" for i, (name, _) in enumerate(keys)}
         names.update({name: f"a{i}" for i, (name, _) in enumerate(aggregates)})
         having: list[str] = []
@@ -188,7 +222,7 @@ class SqlGroups(ABC):
             if not isinstance(group_key, PathKey)
             else (f"k{i}", f"(SELECT {views.node_document('p')} FROM {self.graph.nodes} p WHERE p.nid = g.k{i})")
             for i, (_, group_key) in enumerate(keys)
-        ] + [(f"a{i}", f"g.a{i}" if it is None else it.value(holder(i))) for i, it in enumerate(held)]
+        ] + [(f"a{i}", f"g.a{i}" if it is None or it.gives_value else it.value(holder(i))) for i, it in enumerate(held)]
         holders = [
             *(
                 f"LEFT JOIN {self.graph.nodes} {key_holder(i)} ON {key_holder(i)}.nid = {held_by(i)}"
@@ -196,9 +230,9 @@ class SqlGroups(ABC):
                 if it is not None
             ),
             *(
-                f"LEFT JOIN {self.graph.nodes} {holder(i)} ON {holder(i)}.nid = g.a{i}"
+                f"LEFT JOIN {self.graph.nodes} {holder(i)} ON {holder(i)}.nid = g.a{i}{'r' if it.gives_value else ''}"
                 for i, it in enumerate(held)
-                if it is not None
+                if it is not None and holds(i)
             ),
         ]
         representatives = [

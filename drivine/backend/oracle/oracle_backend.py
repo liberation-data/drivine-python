@@ -79,7 +79,8 @@ class OracleBackend:
     def written(self, predicate: str) -> str:
         """
         A predicate the caller wrote, as the store reads it: each property of the root written as Cypher writes it,
-        `n.name`, read as that property (see CypherShorthand).
+        `n.name`, read as that property, by the name the layout holds it by, so `` n.`$score` `` is the property held
+        as `$$score` (see CypherShorthand).
         """
         return CypherShorthand(ROW_ALIAS, ROW_ALIAS, text_of).rewrite(predicate)
 

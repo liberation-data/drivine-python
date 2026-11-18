@@ -1,8 +1,8 @@
 """
-Postgres and Oracle refuse a query DSL comparison with a date, datetime or time, and an order by a field declared one,
-by name: store layout 2 holds such a value as its tag, which their DSL would compare by its text, until the DSL takes
-the shared module's fragments (drivine-cypher-spec#235, steps 3 and 4). SQLite's DSL is the module's fragments since
-step 2, which compare a date by its tag, and renders them.
+Oracle refuses a query DSL comparison with a date, datetime or time, and an order by a field declared one, by name:
+store layout 2 holds such a value as its tag, which its DSL would compare by its text, until the DSL takes the shared
+module's fragments (drivine-cypher-spec#235, step 4). SQLite's and Postgres's DSL is the module's fragments since steps
+2 and 3, which compare a date by its tag, and renders them.
 """
 
 import json
@@ -76,8 +76,9 @@ DAY = date(2024, 1, 2)
 AT = datetime(2024, 5, 6, 7, 8, 9, tzinfo=UTC)
 NINE = time(9)
 
-REFUSING = {"Postgres": PostgresBackend(), "Oracle": OracleBackend(OracleGraph())}
-SQLITE = SqliteBackend(SqliteGraph())
+REFUSING = {"Oracle": OracleBackend(OracleGraph())}
+FRAGMENTED = {"SQLite": SqliteBackend(SqliteGraph()), "Postgres": PostgresBackend()}
+"""The stores whose query DSL is the shared module's fragments, which compare a date by its tag."""
 
 
 def labels(type_: type) -> list[str]:
@@ -201,17 +202,19 @@ def test_an_order_by_a_jsonpacked_or_plain_field_renders(store: str):
         assert REFUSING[store].render_query(Query(order_by=term), model, labels).order_by
 
 
+@pytest.mark.parametrize("store", FRAGMENTED)
 @pytest.mark.parametrize("where", TEMPORAL.values(), ids=TEMPORAL.keys())
-def test_sqlite_renders_a_comparison_with_a_temporal_value(where: Callable[[], Any]):
-    written, _ = SQLITE.render_where(where(), model, labels)
+def test_the_fragments_render_a_comparison_with_a_temporal_value(store: str, where: Callable[[], Any]):
+    written, _ = FRAGMENTED[store].render_where(where(), model, labels)
     assert written
 
 
-def test_sqlite_renders_an_order_by_and_a_seek_after_a_temporal_value():
+@pytest.mark.parametrize("store", FRAGMENTED)
+def test_the_fragments_render_an_order_by_and_a_seek_after_a_temporal_value(store: str):
     for field in ("on", "at", "starts"):
-        assert SQLITE.render_query(Query(order_by=getattr(q, field).desc()), model, labels).order_by
+        assert FRAGMENTED[store].render_query(Query(order_by=getattr(q, field).desc()), model, labels).order_by
     seek = Query(order_by=q.on.asc(), seek=q.on.after(DAY))
-    assert SQLITE.render_query(seek, model, labels).where
+    assert FRAGMENTED[store].render_query(seek, model, labels).where
 
 
 def test_a_graph_engine_renders_a_comparison_with_a_temporal_value_and_an_order_by_one():
@@ -223,8 +226,9 @@ def test_a_graph_engine_renders_a_comparison_with_a_temporal_value_and_an_order_
     assert neo4j.render_query(Query(order_by=q.on.desc()), model, labels).order_by
 
 
-def test_sqlite_renders_an_order_expression_that_reads_a_field_declared_temporal():
-    assert SQLITE.render_query(Query(order_by=coalesce(q.at, 0).desc()), model, labels).order_by
+@pytest.mark.parametrize("store", FRAGMENTED)
+def test_the_fragments_render_an_order_expression_that_reads_a_field_declared_temporal(store: str):
+    assert FRAGMENTED[store].render_query(Query(order_by=coalesce(q.at, 0).desc()), model, labels).order_by
 
 
 GROUPS: dict[str, Callable[[], GroupQuery]] = {
@@ -243,9 +247,12 @@ def test_a_grouped_read_that_compares_with_a_temporal_value_is_refused_by_name(
         REFUSING[store].groups(model, grouped(), {}, labels)
 
 
+@pytest.mark.parametrize("store", FRAGMENTED)
 @pytest.mark.parametrize("grouped", GROUPS.values(), ids=GROUPS.keys())
-def test_sqlite_renders_a_grouped_read_that_compares_with_a_temporal_value(grouped: Callable[[], GroupQuery]):
-    assert SQLITE.groups(model, grouped(), {}, labels).text
+def test_the_fragments_render_a_grouped_read_that_compares_with_a_temporal_value(
+    store: str, grouped: Callable[[], GroupQuery]
+):
+    assert FRAGMENTED[store].groups(model, grouped(), {}, labels).text
 
 
 TAGGED = json.dumps(
@@ -267,38 +274,45 @@ FIRST = datetime(2026, 1, 1, tzinfo=UTC)
     ],
     ids=["eq", "gt", "not_in", "has_item", "by stored name"],
 )
-def test_sqlite_compares_a_moment_by_its_tag_bound_by_the_renderers_names(where: Callable[[], Any]):
-    written, bindings = SQLITE.render_where(where(), model, labels)
+@pytest.mark.parametrize("store", FRAGMENTED)
+def test_the_fragments_compare_a_moment_by_its_tag_bound_by_the_renderers_names(store: str, where: Callable[[], Any]):
+    written, bindings = FRAGMENTED[store].render_where(where(), model, labels)
     assert "n_.props" in written
     assert "$_cy__q0" in written
     assert list(bindings) == ["_cy__q0"]
     assert TAGGED in bindings["_cy__q0"]
 
 
-def test_sqlite_binds_a_list_of_moments_as_the_list_of_their_tags():
-    assert SQLITE.render_where(q.at.in_([FIRST]), model, labels)[1] == {"_cy__q0": f"[{TAGGED}]"}
+@pytest.mark.parametrize("store", FRAGMENTED)
+def test_the_fragments_bind_a_list_of_moments_as_the_list_of_their_tags(store: str):
+    assert FRAGMENTED[store].render_where(q.at.in_([FIRST]), model, labels)[1] == {"_cy__q0": f"[{TAGGED}]"}
 
 
-def test_sqlite_compares_a_moment_by_its_tag_in_a_seek_and_in_an_order_expression_named_apart_there():
-    seek = SQLITE.render_query(Query(order_by=q.at.asc(), seek=q.at.after(FIRST)), model, labels)
+@pytest.mark.parametrize("store", FRAGMENTED)
+def test_the_fragments_compare_a_moment_by_its_tag_in_a_seek_and_in_an_order_expression_named_apart_there(store: str):
+    seek = FRAGMENTED[store].render_query(Query(order_by=q.at.asc(), seek=q.at.after(FIRST)), model, labels)
     assert seek.bindings == {"_cy__q0": TAGGED}
-    order = SQLITE.render_query(Query(order_by=case_of([above(q.at, FIRST).then(1)], 2).asc()), model, labels)
+    order = FRAGMENTED[store].render_query(
+        Query(order_by=case_of([above(q.at, FIRST).then(1)], 2).asc()), model, labels
+    )
     assert order.where is None
     assert order.order_by is not None and "$_cy_f1__q0" in order.order_by
     assert order.bindings == {"_cy_f1__q0": TAGGED, "_cy_f1__q1": "1", "_cy_f1__q2": "2"}
 
 
-def test_sqlite_compares_a_moment_by_its_tag_in_a_grouped_reads_where_and_in_a_filtered_aggregate():
+@pytest.mark.parametrize("store", FRAGMENTED)
+def test_the_fragments_compare_a_moment_by_its_tag_in_a_grouped_reads_where_and_in_a_filtered_aggregate(store: str):
     grouped = GroupQuery({"name": key(q.name)}, {"since": count(q.at.gt(FIRST))}, where=q.at.gte(FIRST))
-    statement = SQLITE.groups(model, grouped, {}, labels)
+    statement = FRAGMENTED[store].groups(model, grouped, {}, labels)
     # The aggregates' filters are written before the where, each numbered on from the one before.
     assert statement.bindings == {"_cy__q0": TAGGED, "_cy__q1": TAGGED}
     assert "$_cy__q0" in statement.text and "$_cy__q1" in statement.text
 
 
-def test_sqlite_binds_a_jsonpacked_propertys_value_date_or_not_as_the_text_it_is_packed_as():
+@pytest.mark.parametrize("store", FRAGMENTED)
+def test_the_fragments_bind_a_jsonpacked_propertys_value_date_or_not_as_the_text_it_is_packed_as(store: str):
     def bound(where: Any) -> list[Any]:
-        return list(SQLITE.render_where(where, model, labels)[1].values())
+        return list(FRAGMENTED[store].render_where(where, model, labels)[1].values())
 
     # As a save packs it (see save_statement_builder.packed), then as the JSON text a fragment binds.
     assert bound(q.packed.eq(DAY)) == [json.dumps(packed(DAY))]

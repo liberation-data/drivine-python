@@ -30,6 +30,7 @@ from drivine import (
     Root,
     StatelessGraphObjectManager,
     VectorIndex,
+    above,
     case_of,
     cypher_statement,
     equal_to,
@@ -234,14 +235,30 @@ async def test_records_an_index_as_drivine4j_does_reads_a_filter_through_it_and_
     plan = await pm.query(
         QuerySpecification[Any](f"EXPLAIN {statement.text}").bind({**statement.bindings, **query.bindings})
     )
-    # Held: the DSL compares the property's text, and store layout 2's index is over its JSON, so the filter reads every
-    # node of the label until the DSL's comparisons come from the shared module's fragments (a later PR of #471).
-    assert name.lower() not in json.dumps(plan), "The DSL's filter reads through the index now: take out the hold"
+    # A DSL filter is the module's fragment, given the node's labels, which compares the property's JSON, the
+    # expression layout 2's index is over (drivine-cypher-spec#235, step 3), so Postgres reads it through the index.
+    assert name.lower() in json.dumps(plan)
     assert [it.id for it in await gom.load_all(Ticket, refs(Ticket).title.eq("title 7"))] == ["t7"]
     await gom.indexes.drop(spec)
     assert not await exists(pm, name)
     assert not any(it.label == "Ticket" for it in await gom.indexes.list("RANGE"))
     await gom.delete_all(Ticket)
+
+
+async def test_compares_and_orders_text_in_the_query_dsl_by_its_code_points_b_before_a(
+    gom: StatelessGraphObjectManager, seed: SqlSeed
+):
+    # The DSL's text is the module's, in the C collation (drivine-cypher-spec#235, step 3): by code point, as Neo4j
+    # compares and orders it, where the library's own SQL used the database's collation (`a, b, B`).
+    await gom.save_all([Ticket(id=f"c-{it}", title=it) for it in ("a", "B", "b")])
+    q = refs(Ticket)
+
+    async def titles(**query: Any) -> list[str | None]:
+        return [it.title for it in await gom.load_all(Ticket, **query)]
+
+    assert await titles(order_by=q.title.asc()) == ["B", "a", "b"]
+    assert await titles(where=q.title.gt("B"), order_by=q.title.asc()) == ["a", "b"]
+    assert await titles(order_by=q.title.asc(), seek=q.title.after("B")) == ["a", "b"]
 
 
 async def test_reports_the_values_a_uniqueness_constraint_would_refuse_and_refuses_a_second_node_once_made(
@@ -392,3 +409,79 @@ async def test_a_user_who_may_only_read_the_graphs_tables_reads_them_with_cypher
         await reader.close()
         await pm.execute(QuerySpecification[Any](drop))
         await pm.execute(QuerySpecification[Any](f"DROP ROLE IF EXISTS {role}"))
+
+
+class Opened(NodeFragment, labels=["PgStore", "Opened"]):
+    id: Annotated[str, NodeId()]
+    at: datetime | None = None
+    open: bool | None = None
+    flags: list[bool] | None = None
+    days: list[datetime] | None = None
+    count: int | None = None
+
+
+async def test_the_query_dsl_compares_seeks_orders_and_patches_a_boolean_and_a_moment_as_a_save_stores_them(
+    gom: StatelessGraphObjectManager, seed: SqlSeed
+):
+    # A DSL filter, seek and order is the module's fragment (drivine-cypher-spec#235, step 3), which compares a moment
+    # by the tag layout 2 holds it as and a boolean as the JSON boolean it is. A port of Drivine for TypeScript's
+    # PostgresStore.spec, as test_sqlite_store ports SqliteStore.spec's.
+    first, second = datetime(2026, 1, 1, tzinfo=UTC), datetime(2026, 2, 1, tzinfo=UTC)
+    await gom.save_all(
+        [
+            Opened(id="m1", at=first, open=True, flags=[True], days=[first], count=1),
+            Opened(id="m2", at=second, open=False, flags=[False], days=[second], count=2),
+        ]
+    )
+    q = refs(Opened)
+
+    async def found(where: Any) -> list[str]:
+        return sorted(it.id for it in await gom.load_all(Opened, where))
+
+    assert await found(q.at.eq(first)) == ["m1"]
+    assert await found(q.at.gt(first)) == ["m2"]
+    assert await found(q.at.in_([second])) == ["m2"]
+    assert await found(q.open.eq(True)) == ["m1"]
+    assert await found(q.open.in_([False])) == ["m2"]
+    assert await found(q.open.not_in([False])) == ["m1"]
+    assert await found(q.flags.has_item(True)) == ["m1"]
+    assert await found(q.days.has_item(second)) == ["m2"]
+    assert [it.id for it in await gom.load_all(Opened, order_by=q.at.asc(), seek=q.at.after(first))] == ["m2"]
+    assert [it.id for it in await gom.load_all(Opened, order_by=q.open.asc(), seek=q.open.after(False))] == ["m1"]
+    ordered = case_of([equal_to(q.open, False).then(0), above(q.at, first).then(1)], 2).asc()
+    assert [it.id for it in await gom.load_all(Opened, order_by=ordered)] == ["m2", "m1"]
+
+    async def patched(where: Any, bindings: dict[str, Any] | None = None) -> bool:
+        return (await gom.patch(Opened, "m1", set={"count": 3}, where=where, bindings=bindings)).applied
+
+    assert await patched(q.at.eq(first))
+    assert await patched(q.open.eq(True))
+    assert await patched(q.open.in_([True]))
+    assert await patched(q.days.has_item(first))
+    assert not await patched(q.open.eq(False))
+    assert await patched("(n.props ->> 'open') = $open", {"open": True})
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="A raw where is SQL, which the module's fragments don't write: n.props ->> 'at' reads the tag layout 2 "
+    "holds a moment as, and the moment is written in as its ISO text, so the two are never equal (drivine#782).",
+)
+async def test_a_raw_where_compares_a_moment_as_a_save_stores_it(gom: StatelessGraphObjectManager, seed: SqlSeed):
+    first = datetime(2026, 1, 1, tzinfo=UTC)
+    await gom.save(Opened(id="m1", at=first))
+    patched = await gom.patch(
+        Opened, "m1", set={"count": 3}, where="(n.props ->> 'at') = $when", bindings={"when": first}
+    )
+    assert patched.applied
+
+
+async def test_a_raw_wheres_binding_named_as_the_dsls_own_keeps_its_value_beside_a_seek(
+    gom: StatelessGraphObjectManager, seed: SqlSeed
+):
+    # The DSL's values are bound under the shared module's names (`_cy__q0`), so a caller's `_q0` is the caller's.
+    # Were the seek's value bound as `_q0` too, the where would keep every node but "a", and find "b" and "c".
+    await gom.save_all([Ticket(id=it) for it in ("a", "b", "c")])
+    q = refs(Ticket)
+    found = await gom.load_all(Ticket, "n.id <> $_q0", bindings={"_q0": "b"}, order_by=q.id.asc(), seek=q.id.after("a"))
+    assert [it.id for it in found] == ["c"]

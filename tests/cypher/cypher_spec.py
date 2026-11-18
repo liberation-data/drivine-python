@@ -193,6 +193,12 @@ class Hold:
     """The steps, from 1; every step of the case where None."""
     repository: str = "drivine-python"
     """The repository of liberation-data's that `issue` is in: the shared module's fixes are drivine-cypher-spec's."""
+    skip: bool = False
+    """
+    Whether the steps are skipped on those stores, not run, rather than run and expected to fail: for a store
+    that fails them only now and then, which a hold that checks they fail can't hold. The runner skips the rest of
+    the case from the first of them. As drivine4j's `CypherSpec.HELD` `skip`.
+    """
 
 
 def _steps(first: int, last: int) -> tuple[int, ...]:
@@ -206,13 +212,28 @@ HELD: dict[str, dict[str, list[Hold]]] = {
         "A regular expression with a backreference": [
             Hold(240, ("sqlite",), steps=(1, 3, 4), repository="drivine-cypher-spec"),
         ],
+        # Oracle's server sometimes ends the session mid-statement here (ORA-03113, DPY-4011), and passes it in most
+        # runs, so it is skipped on Oracle, as drivine4j skips it (liberation-data/drivine4j#838, #839).
+        "collect skips nulls": [Hold(838, ("oracle",), repository="drivine4j", skip=True)],
     },
 }
 """
 The steps of a spec tag past what drivine-python runs that a port here has yet to make pass, by file and case. Each is
 run, and must fail; one that passes fails, so that its hold is taken out when its port lands. As Drivine for
-TypeScript's.
+TypeScript's. A skip (`Hold.skip`) isn't run.
 """
+
+
+def skipped_for(file: str, case: Case, index: int, store: str) -> str | None:
+    """
+    The issue the step at `index` (from 0) of the case of `file` is skipped for on `store`, if it is, as `repository#n`:
+    see `Hold.skip`.
+    """
+    for hold in HELD.get(file, {}).get(case.name, []):
+        named = any(it == store or store in GROUPS.get(it, set()) for it in hold.on)
+        if hold.skip and named and (hold.steps is None or index + 1 in hold.steps):
+            return f"{hold.repository}#{hold.issue}"
+    return None
 
 
 def held_for(file: str, case: Case, index: int, store: str) -> str | None:
@@ -222,7 +243,7 @@ def held_for(file: str, case: Case, index: int, store: str) -> str | None:
     """
     for hold in HELD.get(file, {}).get(case.name, []):
         named = any(it == store or store in GROUPS.get(it, set()) for it in hold.on)
-        if named and (hold.steps is None or index + 1 in hold.steps):
+        if not hold.skip and named and (hold.steps is None or index + 1 in hold.steps):
             return f"{hold.repository}#{hold.issue}"
     return None
 

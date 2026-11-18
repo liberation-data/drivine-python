@@ -25,6 +25,7 @@ from tests.cypher.cypher_spec import (
     held_for,
     held_passes,
     load,
+    skipped_for,
 )
 
 NAMES = {
@@ -75,12 +76,15 @@ def clear(pm: PersistenceManager) -> None:
 def run(pm: PersistenceManager, file: str, case: Case) -> None:
     """
     Each step of the case of the spec file that runs on the store, in turn: its rows checked, or its failure. A step
-    held on the store (`HELD`) must fail, until its port lands.
+    held on the store (`HELD`) must fail, until its port lands; one skipped on it skips the rest of the case.
     """
     store = NAMES[pm.type]
     for index, step in enumerate(case.steps):
         if not step.runs_on(store):
             continue
+        skipped = skipped_for(file, case, index, store)
+        if skipped is not None:
+            pytest.skip(f"{case.name}, step {index + 1}, is skipped on {store} for liberation-data/{skipped}")
         issue = held_for(file, case, index, store)
         if issue is None:
             check(pm, case, index, store)

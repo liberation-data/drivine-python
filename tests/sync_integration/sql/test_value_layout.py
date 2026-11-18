@@ -325,11 +325,8 @@ def test_a_moment_in_a_patchs_where_and_in_a_grouped_reads_where_and_aggregate_i
             aggregates={"later": count(q.at.gt(first)), "last": max_(q.at)},
             order_by=[("name", "asc")],
         )
-        # A moment is given as its text, as the store gives it.
-        assert groups == [
-            {"name": "patched", "later": 0, "last": "2026-01-01T00:00:00Z"},
-            {"name": "two", "later": 1, "last": "2026-02-01T00:00:00Z"},
-        ]
+        # The greatest moment is read back as the type its field declares (drivine-python#537).
+        assert groups == [{"name": "patched", "later": 0, "last": first}, {"name": "two", "later": 1, "last": second}]
         assert gom.groups.load(Met, where=q.at.gt(first), keys={"name": key(q.name)}) == [{"name": "two"}]
 
     on_sqlite_or_refused(pm, check)

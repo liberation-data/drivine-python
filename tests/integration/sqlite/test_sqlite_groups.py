@@ -5,7 +5,7 @@ as the type its field declares. A port of Drivine for TypeScript's SqliteGroupsR
 """
 
 import json
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta, timezone
 from typing import Annotated, Any, Literal
 
 import pytest
@@ -94,28 +94,49 @@ async def test_orders_the_groups_by_a_key_it_was_not_asked_to_order_by_a_tie_bro
     assert [it["first"] for it in groups] == ["i1", "i0"]
 
 
-async def test_gives_a_least_and_greatest_text_and_moment_of_its_own_kind_in_cyphers_order_not_as_a_number(gom):
+async def test_gives_a_least_and_greatest_text_date_and_moment_as_the_type_its_field_declares(gom):
+    # drivine-python#537: each was None, as every value was read as a number.
+    at = datetime(2026, 1, 2, 3, 4, 5, 123000, tzinfo=UTC)
     await gom.save_all(
         [
-            Item(id="a", shelf="one", name="pear", at=datetime(2026, 3, 1, tzinfo=UTC)),
-            Item(id="b", shelf="one", name="apple", at=datetime(2026, 1, 1, tzinfo=UTC)),
-            Item(id="c", shelf="one", name="quince", at=datetime(2026, 2, 1, tzinfo=UTC)),
-            Item(id="d", shelf="one"),
+            Item(id="a", shelf="one", name="pear", at=datetime(2026, 1, 1, tzinfo=UTC), on=date(2026, 1, 1), rank=1),
+            Item(id="b", shelf="one", name="apple", at=at, on=date(2026, 1, 2), rank=5),
+            Item(id="c", shelf="one", name="quince"),
         ]
     )
+    q = refs(Item)
     [group] = await gom.groups.load(
         Item,
-        keys={"shelf": key("shelf")},
-        aggregates={"first": min_("name"), "last": max_("name"), "earliest": min_("at"), "latest": max_("at")},
+        keys={"shelf": key(q.shelf)},
+        aggregates={
+            "first": min_(q.name),
+            "last": max_(q.name),
+            "earliest": min_(q.at),
+            "latest": max_(q.at),
+            "day": max_(q.on),
+            "rank": max_(q.rank),
+        },
     )
-    # A moment is given as its text, Cypher's, as the store gives it.
     assert group == {
         "shelf": "one",
         "first": "apple",
         "last": "quince",
-        "earliest": "2026-01-01T00:00:00Z",
-        "latest": "2026-03-01T00:00:00Z",
+        "earliest": datetime(2026, 1, 1, tzinfo=UTC),
+        "latest": at,
+        "day": date(2026, 1, 2),
+        "rank": 5,
     }
+    assert isinstance(group["latest"], datetime) and isinstance(group["day"], date)
+
+
+async def test_gives_a_greatest_moment_of_its_own_offset_as_cypher_orders_moments(gom):
+    # A moment at +02:00 an hour after one in UTC: the greatest is the later instant, given at its own offset.
+    later = datetime(2026, 1, 1, 3, tzinfo=timezone(timedelta(hours=2)))
+    await gom.save_all(
+        [Item(id="a", shelf="one", at=datetime(2026, 1, 1, tzinfo=UTC)), Item(id="b", shelf="one", at=later)]
+    )
+    [group] = await gom.groups.load(Item, keys={"shelf": key("shelf")}, aggregates={"latest": max_("at")})
+    assert group["latest"] == later and group["latest"].utcoffset() == timedelta(hours=2)
 
 
 async def shelves(gom: StatelessGraphObjectManager, direction: Literal["asc", "desc"]) -> list[Any]:

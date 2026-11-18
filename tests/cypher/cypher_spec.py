@@ -196,8 +196,8 @@ class Hold:
     skip: bool = False
     """
     Whether the steps are skipped on those stores, not run, rather than run and expected to fail: for a store
-    that fails them only now and then, which a hold that checks they fail can't hold. As drivine4j's
-    `CypherSpec.HELD` `skip`.
+    that fails them only now and then, which a hold that checks they fail can't hold. The runner skips the rest of
+    the case from the first of them. As drivine4j's `CypherSpec.HELD` `skip`.
     """
 
 

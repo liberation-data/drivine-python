@@ -33,8 +33,9 @@ class PostgresStatement(GraphStatement):
     def keying_id(self, key: Callable[[Any], str]) -> PostgresStatement:
         """
         This statement, which finds a node by the id bound as `$id`, binding the id it is given as `key` writes it: the
-        text the store reads the node's id back as (see stored_key), so a float id is found by the text it is held as,
-        not by the text the driver writes the number as (`1e-07`). A null id is bound as it is, and finds no node.
+        JSON text the node holds its id as (see node_ids), so a float id is found as it is held, not by the text the
+        driver writes the number as (`1e-07`), and a temporal id by its tag. A null id is bound as it is, and finds no
+        node.
         """
         return replace(self, id_key=key)
 

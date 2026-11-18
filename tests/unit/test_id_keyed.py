@@ -30,13 +30,16 @@ from drivine import (
     GraphView,
     NodeFragment,
     NodeId,
+    NodeStamp,
     QuerySpecification,
     RelateMode,
     Relationship,
     Root,
+    SaveOptions,
     StatelessGraphObjectManager,
     node_ref,
 )
+from drivine.backend.fragment_group import FragmentGroup
 from drivine.backend.graph_backend import GraphBackend
 from drivine.backend.matched_node import MatchedNode
 from drivine.backend.oracle.id_keyed_statement import held_id
@@ -563,6 +566,42 @@ class TestALookupById:
         priced = ModelRegistry().fragment(Priced)
         has_id = id_sql(lookup.store, "hasId", "n", "$$code", lookup.json("$id"))
         assert has_id in lookup.backend().load_fragment(priced).text
+
+
+class StampedPriced(NodeFragment, labels=["StampedPriced"]):
+    code: Annotated[str, NodeId(), GraphProperty("$code")]
+    stamp: Annotated[str | None, NodeStamp()] = None
+
+
+class Prices(GraphView):
+    """A root of a `$`-named id holding a list of stamped nodes of one, which a save trims and reads the stamps of."""
+
+    priced: Annotated[Priced, Root()]
+    prices: Annotated[list[StampedPriced], Relationship("COSTS")] = []
+
+
+def test_oracles_write_blocks_name_a_dollar_named_id_by_the_key_the_layout_holds_it_under():
+    # The layout holds `$code` as `$$code`: a block naming it `$code` finds no node, and a second save makes a second.
+    registry = ModelRegistry()
+    backend = OracleBackend(OracleGraph())
+    priced, stamped = registry.fragment(Priced), registry.fragment(StampedPriced)
+    prices = Prices(priced=Priced(code="p1"), prices=[StampedPriced(code="s1")])
+    statements = {
+        "save": backend.save(priced, Priced(code="p1"), None, False, registry),
+        "save.view": backend.save(registry.view(Prices), prices, SaveOptions(replace=["prices"]), False, registry),
+        "fragment_batch": backend.fragment_batch([FragmentGroup(stamped, [StampedPriced(code="s1")])], SaveOptions()),
+        "relate": backend.relate(
+            MatchedNode(priced, "p1", ()), MatchedNode(stamped, "s1", ()), "COSTS", {}, RelateMode.MERGE
+        ),
+        "patch": backend.patch_one(priced),
+        "related": backend.related(MatchedNode(priced, "p1", ()), "COSTS", Direction.OUTGOING, stamped),
+    }
+    for name, statement in statements.items():
+        # A block names the node it finds in its text, or in a parameter that holds the SQL it is found by.
+        parameters: Any = statement.spec().parameters
+        text = "\n".join([statement.text, *(it for it in parameters.values() if isinstance(it, str))])
+        assert '"$$code"' in text, name
+        assert '"$code"' not in text, name
 
 
 def layout(value: Any, lookup: LookupStore) -> str:

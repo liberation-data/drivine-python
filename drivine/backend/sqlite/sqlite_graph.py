@@ -58,8 +58,17 @@ The names of the functions each connection is given, drivine4j's: the shared mod
 sqlite_extension) and drivine-python's own (see sqlite_functions).
 """
 
-Kind = Literal["TEXT", "NUMBER", "INSTANT", "DATE"]
-"""How a property is read: as text, as a number, as a moment (nanoseconds since the epoch) or as a date."""
+Kind = Literal["TEXT", "NUMBER", "INSTANT", "DATE", "TIME"]
+"""
+How a property is read: as text, as a number, as a moment (nanoseconds since the epoch), as a date, or as a time of
+day (its key, see time_key).
+"""
+
+TIME_KINDS = {"time": "4", "localtime": "5"}
+"""
+The tags of a time, a time with an offset and a local one, each with the digit its key opens with: the module orders a
+time before a local time, as Neo4j does, as these do.
+"""
 
 
 class SqliteGraph(SqlGraph):
@@ -257,27 +266,54 @@ def number_of(alias: str, property: str) -> str:
     )
 
 
-def temporal_text(alias: str, property: str) -> str:
+def temporal_text(alias: str, property: str, tag: str | None = None) -> str:
     """
     The text of the property of the row `alias` as a comparison reads a temporal value's: where store layout 2 holds it
     as its tag (`{"$t": "date", "v": "2024-01-01", "s": …}`, see value_layout), as a save writes a moment, a date, a
     time or a duration, the tag's text `v`; anything else as text_of reads it, as a moment written as text. A map is a
-    tag only where it has the key `$t`, which the layout escapes in a map of the user's (`$$t`).
+    tag only where it has the key `$t`, which the layout escapes in a map of the user's (`$$t`). Given the kind `tag`
+    names, a tag of another kind is null, as Cypher never finds a date equal to a moment, nor either before the other.
     """
     props, at = column(alias, "props"), f"$.{quoted(property)}"
-    tag, held = sql_text(at + '."$t"'), f"{props} ->> {sql_text(at + '.v')}"
-    return f"(CASE WHEN json_type({props}, {tag}) = 'text' THEN {held} ELSE {text_of(alias, property)} END)"
+    tag_at, held = sql_text(at + '."$t"'), f"{props} ->> {sql_text(at + '.v')}"
+    if tag is not None:
+        held = f"(CASE WHEN {props} ->> {tag_at} = {sql_text(tag)} THEN {held} END)"
+    return f"(CASE WHEN json_type({props}, {tag_at}) = 'text' THEN {held} ELSE {text_of(alias, property)} END)"
+
+
+def time_key(alias: str, property: str, tag: str | None = None) -> str:
+    """The property of the row `alias` as the key of the time it holds: see time_key_of."""
+    return time_key_of(column(alias, "props"), f"$.{quoted(property)}", tag)
+
+
+def time_key_of(json: str, at: str, tag: str | None = None) -> str:
+    """
+    The time the tag at the path `at` of the JSON `json` holds, as a key that compares and orders as Cypher compares
+    and orders times: the digit of its kind (see TIME_KINDS), then the tag's sort key `s`, which the module works out
+    of the time's UTC nanoseconds of the day, unwrapped at midnight, then its offset. So a time with an offset is before
+    another where it is earlier in UTC, as Neo4j has it, and equal to it only at the same offset, as two of a kind are
+    equal exactly where their texts are. Given the kind `tag` names, a time of the other kind is null: Cypher has a time
+    with an offset neither equal to a local one nor before or after it. Anything else is null, as a text is never a
+    time: a time held as text, as a statement of the user's may write one, is found by no comparison with a time.
+    """
+    tag_at, key = sql_text(at + '."$t"'), f"{json} ->> {sql_text(at + '.s')}"
+    kinds = [tag] if tag is not None else list(TIME_KINDS)
+    # `||` binds no tighter than `->>`, so the key is in parentheses of its own.
+    branches = " ".join(f"WHEN {sql_text(it)} THEN {sql_text(TIME_KINDS[it])} || ({key})" for it in kinds)
+    return f"(CASE {json} ->> {tag_at} {branches} END)"
 
 
 def typed(kind: Kind, text: str) -> str:
     """
     `text`, the text of a value, read as `kind` compares: a moment as nanoseconds since the epoch (see epoch), so two
-    written with different offsets compare as the moments they are, to the nanosecond; a date as SQLite writes one.
+    written with different offsets compare as the moments they are, to the nanosecond; a date as SQLite writes one,
+    where the text is a date's, as a moment's text names no date, as Cypher has a moment never equal to a date; a
+    time's key (see time_key) as it is.
     """
     if kind == "INSTANT":
         return epoch(text)
     if kind == "DATE":
-        return f"date({text})"
+        return f"(CASE WHEN date({text}) = {text} THEN {text} END)"
     return text
 
 

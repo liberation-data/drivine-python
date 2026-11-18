@@ -12,8 +12,10 @@ from __future__ import annotations
 import json
 import math
 import re
-from datetime import UTC, date, datetime
+from collections.abc import Callable
+from datetime import UTC, date, datetime, time, timedelta, timezone
 from typing import Annotated, Any
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -27,8 +29,13 @@ from drivine.sync import (
     PersistenceManager,
     QuerySpecification,
     StatelessGraphObjectManager,
+    above,
+    below,
+    case_of,
     cypher_statement,
+    equal_to,
     node_ref,
+    not_equal_to,
     refs,
 )
 
@@ -227,13 +234,15 @@ class Dated(NodeFragment, labels=["DatedHeld"]):
     id: Annotated[str, NodeId()]
     on: date | None = None
     at: datetime | None = None
+    clock: time | None = None
+    clocks: list[time] | None = None
 
 
 DSL_TEMPORALS = (
     "the query DSL compares a saved date or moment by its text, where store layout 2 holds it as its tag, until its "
     "comparisons come from the shared module's fragments (a later PR of drivine-python#471)"
 )
-"""The hold on Postgres and Oracle: SQLite's DSL reads the tag's text (see sqlite_graph.temporal_text)."""
+"""The hold on Postgres and Oracle: SQLite's DSL reads a tag's text or key (see temporal_text, time_key)."""
 
 
 def test_a_saved_date_or_moment_is_compared_and_ordered_by_the_query_dsl_as_it_is(
@@ -250,7 +259,8 @@ def test_a_saved_date_or_moment_is_compared_and_ordered_by_the_query_dsl_as_it_i
         q = refs(Dated)
         assert [it.id for it in gom.load_all(Dated, q.on.eq(date(2024, 1, 2)))] == ["t2"]
         assert [it.id for it in gom.load_all(Dated, q.at.gt(base))] == ["t2"]
-        assert [it.id for it in gom.load_all(Dated, order_by=q.on.desc())] == ["t2", "t1"]
+        # Its own nodes alone: the tests beside it save other Dated nodes in the same graph.
+        assert [it.id for it in gom.load_all(Dated, q.id.in_(["t1", "t2"]), order_by=q.on.desc())] == ["t2", "t1"]
 
     if pm.type is DatabaseType.SQLITE:
         check()
@@ -260,3 +270,391 @@ def test_a_saved_date_or_moment_is_compared_and_ordered_by_the_query_dsl_as_it_i
     except AssertionError:
         pytest.xfail(DSL_TEMPORALS)
     pytest.fail(f"Held, and passing: take the hold off. {DSL_TEMPORALS}")
+
+
+class Listed(NodeFragment, labels=["ListedHeld"]):
+    id: Annotated[str, NodeId()]
+    days: list[date] | None = None
+    moments: list[datetime] | None = None
+    clocks: list[time] | None = None
+    words: list[str] | None = None
+
+
+def test_the_query_dsl_finds_a_saved_date_moment_or_time_in_a_list_by_has_item(
+    gom: StatelessGraphObjectManager, pm: PersistenceManager
+):
+    def check() -> None:
+        moment = datetime(2024, 5, 6, 7, 8, 9, 123000, tzinfo=UTC)
+        clock = time(10, tzinfo=timezone(timedelta(hours=1)))
+        gom.save_all(
+            [
+                Listed(id="l1", days=[date(2024, 1, 2)], moments=[moment], clocks=[clock, time(11)], words=["a"]),
+                Listed(id="l2", days=[date(2024, 1, 3)], moments=[moment.replace(second=10)], clocks=[], words=["b"]),
+            ]
+        )
+        q = refs(Listed)
+
+        def found(condition: Any) -> list[str]:
+            return sorted(it.id for it in gom.load_all(Listed, condition))
+
+        assert found(q.days.has_item(date(2024, 1, 2))) == ["l1"]
+        # The same moment at another offset is the moment it is (#525).
+        assert found(q.moments.has_item(moment.astimezone(timezone(timedelta(hours=-5))))) == ["l1"]
+        assert found(q.clocks.has_item(clock)) == ["l1"]
+        assert found(q.clocks.has_item(time(11))) == ["l1"]
+        assert found(q.clocks.has_item(time(12))) == []
+        assert found(q.words.has_item("b")) == ["l2"]
+
+    if pm.type is DatabaseType.SQLITE:
+        check()
+        return
+    try:
+        check()
+    except AssertionError:
+        pytest.xfail(DSL_TEMPORALS)
+    pytest.fail(f"Held, and passing: take the hold off. {DSL_TEMPORALS}")
+
+
+def test_has_item_finds_a_moment_a_list_holds_as_text_and_passes_over_a_text_that_names_none(
+    gom: StatelessGraphObjectManager, pm: PersistenceManager
+):
+    def check() -> None:
+        # Written by the user's own Cypher, so each item is the text it was written as, and not a save's tag.
+        statement = (
+            "MERGE (a:ListedHeld {id: 'l3'}) SET a.moments = ['2024-05-06T09:08:09.123456+02:00'] "
+            "MERGE (b:ListedHeld {id: 'l4'}) SET b.moments = ['soon', '2024-05-06T07:08:10Z']"
+        )
+        pm.execute(QuerySpecification[Any](cypher_statement(statement)))
+        moment = datetime(2024, 5, 6, 7, 8, 9, 123456, tzinfo=UTC)
+        assert [it.id for it in gom.load_all(Listed, refs(Listed).moments.has_item(moment))] == ["l3"]
+
+    if pm.type is DatabaseType.SQLITE:
+        check()
+        return
+    try:
+        check()
+    except AssertionError:
+        pytest.xfail(DSL_TEMPORALS)
+    pytest.fail(f"Held, and passing: take the hold off. {DSL_TEMPORALS}")
+
+
+class Clocked(NodeFragment, labels=["ClockedHeld"]):
+    id: Annotated[str, NodeId()]
+    clock: time | None = None
+
+
+class Midnight(NodeFragment, labels=["MidnightHeld"]):
+    """A time of its own label, so its test orders only its own."""
+
+    id: Annotated[str, NodeId()]
+    clock: time | None = None
+
+
+class TwoKinds(NodeFragment, labels=["TwoKindsHeld"]):
+    """A time of its own label, so its test orders only its own."""
+
+    id: Annotated[str, NodeId()]
+    clock: time | None = None
+
+
+class Local(NodeFragment, labels=["LocalHeld"]):
+    """A time of its own label, so its test orders only its own."""
+
+    id: Annotated[str, NodeId()]
+    clock: time | None = None
+
+
+def offset(hours: int) -> timezone:
+    return timezone(timedelta(hours=hours))
+
+
+def held_or_failing(pm: PersistenceManager, check: Callable[[], None]) -> None:
+    """Runs the check: on SQLite it must pass; on Postgres and Oracle it is held (DSL_TEMPORALS) until it passes."""
+    if pm.type is DatabaseType.SQLITE:
+        check()
+        return
+    try:
+        check()
+    except AssertionError:
+        pytest.xfail(DSL_TEMPORALS)
+    pytest.fail(f"Held, and passing: take the hold off. {DSL_TEMPORALS}")
+
+
+def test_the_query_dsl_compares_and_orders_times_at_different_offsets_as_cypher_does(
+    gom: StatelessGraphObjectManager, pm: PersistenceManager
+):
+    def check() -> None:
+        # drivine-python#526: 08:00:00.5, 08:30 and 09:30 in UTC, each written at another offset.
+        gom.save_all(
+            [
+                Clocked(id="a", clock=time(9, 0, 0, 500000, tzinfo=offset(1))),
+                Clocked(id="b", clock=time(8, 30, tzinfo=UTC)),
+                Clocked(id="c", clock=time(4, 30, tzinfo=offset(-5))),
+            ]
+        )
+        q = refs(Clocked)
+
+        def found(condition: Any) -> list[str]:
+            return sorted(it.id for it in gom.load_all(Clocked, condition))
+
+        assert found(q.clock.gt(time(8, 15, tzinfo=UTC))) == ["b", "c"]
+        assert found(q.clock.lte(time(8, 30, tzinfo=UTC))) == ["a", "b"]
+        assert [it.id for it in gom.load_all(Clocked, order_by=q.clock.asc())] == ["a", "b", "c"]
+        assert [it.id for it in gom.load_all(Clocked, order_by=q.clock.desc())] == ["c", "b", "a"]
+        after = q.clock.after(time(8, 30, tzinfo=UTC))
+        assert [it.id for it in gom.load_all(Clocked, order_by=q.clock.asc(), seek=after)] == ["c"]
+        # Two times are equal as Neo4j has them: the same time at the same offset, whatever text wrote it.
+        assert found(q.clock.eq(time(8, 30, tzinfo=timezone(timedelta(0))))) == ["b"]
+        assert found(q.clock.eq(time(9, 0, 0, 500000, tzinfo=offset(1)))) == ["a"]
+        assert found(q.clock.eq(time(8, 0, 0, 500000, tzinfo=UTC))) == []
+        assert found(q.clock.in_([time(8, 30, tzinfo=UTC), time(4, 30, tzinfo=offset(-5))])) == ["b", "c"]
+
+    held_or_failing(pm, check)
+
+
+def test_a_time_with_an_offset_is_compared_by_its_utc_time_unwrapped_at_midnight(
+    gom: StatelessGraphObjectManager, pm: PersistenceManager
+):
+    def check() -> None:
+        # 01:00+02:00 is 23:00 the day before in UTC: Neo4j has it an hour before midnight, before any time of the day.
+        gom.save_all(
+            [Midnight(id="early", clock=time(1, tzinfo=offset(2))), Midnight(id="late", clock=time(22, tzinfo=UTC))]
+        )
+        q = refs(Midnight)
+        assert [it.id for it in gom.load_all(Midnight, q.clock.lt(time(0, 30, tzinfo=UTC)))] == ["early"]
+        assert [it.id for it in gom.load_all(Midnight, order_by=q.clock.asc())] == ["early", "late"]
+
+    held_or_failing(pm, check)
+
+
+def test_a_local_time_and_a_time_with_an_offset_are_unequal_and_neither_before_the_other(
+    gom: StatelessGraphObjectManager, pm: PersistenceManager
+):
+    def check() -> None:
+        gom.save_all([TwoKinds(id="local", clock=time(8)), TwoKinds(id="zoned", clock=time(8, tzinfo=UTC))])
+        q = refs(TwoKinds)
+
+        def found(condition: Any) -> list[str]:
+            return sorted(it.id for it in gom.load_all(TwoKinds, condition))
+
+        assert found(q.clock.eq(time(8))) == ["local"]
+        assert found(q.clock.eq(time(8, tzinfo=UTC))) == ["zoned"]
+        assert found(q.clock.gt(time(7))) == ["local"]
+        assert found(q.clock.gt(time(7, tzinfo=UTC))) == ["zoned"]
+        assert found(q.clock.in_([time(8)])) == ["local"]
+        assert found(q.clock.in_([time(8), time(8, tzinfo=UTC)])) == ["local", "zoned"]
+        # Unequal, as two values of two kinds are in Cypher, though neither is before the other.
+        assert found(q.clock.neq(time(8))) == ["zoned"]
+        assert found(q.clock.neq(time(8, tzinfo=UTC))) == ["local"]
+        # A time with an offset orders before a local one, as Neo4j orders them.
+        assert [it.id for it in gom.load_all(TwoKinds, order_by=q.clock.asc())] == ["zoned", "local"]
+        after = q.clock.after(time(8, tzinfo=UTC))
+        assert [it.id for it in gom.load_all(TwoKinds, order_by=q.clock.asc(), seek=after)] == ["local"]
+
+    held_or_failing(pm, check)
+
+
+def test_two_local_times_are_compared_and_ordered_as_the_times_they_are(
+    gom: StatelessGraphObjectManager, pm: PersistenceManager
+):
+    def check() -> None:
+        gom.save_all([Local(id="l", clock=time(9, 30)), Local(id="m", clock=time(10, 0, 0, 250000))])
+        q = refs(Local)
+        assert [it.id for it in gom.load_all(Local, q.clock.gt(time(9, 45)))] == ["m"]
+        assert [it.id for it in gom.load_all(Local, q.clock.eq(time(9, 30)))] == ["l"]
+        # Saved as the module writes its fraction, `10:00:00.250`, and found as the time it is.
+        assert [it.id for it in gom.load_all(Local, q.clock.eq(time(10, 0, 0, 250000)))] == ["m"]
+        assert [it.id for it in gom.load_all(Local, order_by=q.clock.desc())] == ["m", "l"]
+
+    held_or_failing(pm, check)
+
+
+def test_has_item_finds_a_time_in_a_list_as_cypher_finds_one_at_its_offset(
+    gom: StatelessGraphObjectManager, pm: PersistenceManager
+):
+    def check() -> None:
+        gom.save_all([Listed(id="l5", clocks=[time(8, 30, tzinfo=UTC), time(10, 0, 0, 500000, tzinfo=offset(-5))])])
+        q = refs(Listed)
+
+        def found(condition: Any) -> list[str]:
+            return sorted(it.id for it in gom.load_all(Listed, condition))
+
+        assert found(q.clocks.has_item(time(8, 30, tzinfo=timezone(timedelta(0))))) == ["l5"]
+        assert found(q.clocks.has_item(time(10, 0, 0, 500000, tzinfo=offset(-5)))) == ["l5"]
+        # The same instant at another offset is another time, and a local time no time with an offset.
+        assert found(q.clocks.has_item(time(13, 30, tzinfo=offset(5)))) == []
+        assert found(q.clocks.has_item(time(8, 30))) == []
+
+    held_or_failing(pm, check)
+
+
+def test_a_date_is_never_a_moment_nor_a_local_moment_a_moment(gom: StatelessGraphObjectManager, pm: PersistenceManager):
+    def check() -> None:
+        moment = datetime(2024, 5, 6, 7, 8, 9, tzinfo=UTC)
+        gom.save_all(
+            [
+                Dated(id="kinds1", on=date(2024, 5, 6), at=moment),
+                Listed(id="l6", days=[date(2024, 5, 6)], moments=[moment]),
+            ]
+        )
+        q, listed = refs(Dated), refs(Listed)
+
+        def dated(condition: Any) -> list[str]:
+            return [it.id for it in gom.load_all(Dated, condition)]
+
+        def lists(condition: Any) -> list[str]:
+            return [it.id for it in gom.load_all(Listed, condition)]
+
+        assert dated(q.on.eq(date(2024, 5, 6))) == ["kinds1"]
+        assert dated(q.at.eq(moment)) == ["kinds1"]
+        assert dated(q.at.eq(date(2024, 5, 6))) == []
+        assert dated(q.at.in_([date(2024, 5, 6)])) == []
+        assert dated(q.on.eq(datetime(2024, 5, 6, tzinfo=UTC))) == []
+        assert dated(q.at.eq(moment.replace(tzinfo=None))) == []
+        # Yet unequal, as in Cypher (Dated's label is shared with another test, so only kinds1 is asked of).
+        assert dated([q.id.eq("kinds1"), q.at.neq(date(2024, 5, 6))]) == ["kinds1"]
+        assert dated([q.id.eq("kinds1"), q.on.neq(moment)]) == ["kinds1"]
+        assert dated(q.at.in_([date(2024, 5, 6), moment])) == ["kinds1"]
+        assert dated(q.at.in_([date(2024, 5, 6), None, time(7, 8, 9, tzinfo=UTC)])) == []
+        assert lists(listed.moments.has_item(moment)) == ["l6"]
+        assert lists(listed.moments.has_item(date(2024, 5, 6))) == []
+        assert lists(listed.days.has_item(datetime(2024, 5, 6, tzinfo=UTC))) == []
+        assert lists(listed.moments.has_item(moment.replace(tzinfo=None))) == []
+
+    held_or_failing(pm, check)
+
+
+class Wall(NodeFragment, labels=["WallHeld"]):
+    """A moment of its own label, so its test finds only its own."""
+
+    id: Annotated[str, NodeId()]
+    at: datetime | None = None
+    moments: list[datetime] | None = None
+
+
+def test_a_saved_local_moment_is_compared_with_a_local_moment_as_the_moment_it_is(
+    gom: StatelessGraphObjectManager, pm: PersistenceManager
+):
+    def check() -> None:
+        # A naive moment is saved a local moment, and found only by another (see _tag_of).
+        local = datetime(2024, 5, 6, 7, 8, 9, 500000)
+        gom.save_all([Wall(id="w", at=local, moments=[local])])
+        q = refs(Wall)
+
+        def found(condition: Any) -> list[str]:
+            return [it.id for it in gom.load_all(Wall, condition)]
+
+        assert found(q.at.eq(local)) == ["w"]
+        assert found(q.at.gt(local - timedelta(microseconds=1))) == ["w"]
+        assert found(q.at.lt(local)) == []
+        assert found(q.at.in_([local, local.replace(tzinfo=UTC)])) == ["w"]
+        assert found(q.moments.has_item(local)) == ["w"]
+        assert found(q.at.eq(local.replace(tzinfo=UTC))) == []
+        assert found(q.at.lt(local.replace(tzinfo=offset(-1)))) == []
+        assert found(q.at.neq(local.replace(tzinfo=UTC))) == ["w"]
+        assert found(q.moments.has_item(local.replace(tzinfo=UTC))) == []
+
+    held_or_failing(pm, check)
+
+
+class Ranked(NodeFragment, labels=["RankedHeld"]):
+    """Dates, moments and times of their own label, so an order by an expression orders only its own."""
+
+    id: Annotated[str, NodeId()]
+    on: date | None = None
+    at: datetime | None = None
+    clock: time | None = None
+
+
+def test_an_order_by_an_expression_compares_a_date_moment_or_time_as_a_condition_does(
+    gom: StatelessGraphObjectManager, pm: PersistenceManager
+):
+    def check() -> None:
+        gom.save_all(
+            [
+                Ranked(id="r1", on=date(2024, 3, 1), at=datetime(2024, 5, 6, 8, tzinfo=UTC)),
+                # 07:00 and 09:30 in UTC.
+                Ranked(
+                    id="r2",
+                    on=date(2024, 1, 1),
+                    at=datetime(2024, 5, 6, 9, tzinfo=offset(2)),
+                    clock=time(4, 30, tzinfo=offset(-5)),
+                ),
+                # 08:00 in UTC.
+                Ranked(id="r3", clock=time(9, tzinfo=offset(1))),
+                Ranked(id="r4", clock=time(8)),
+            ]
+        )
+        q = refs(Ranked)
+
+        def ranked(branch: Any) -> list[str]:
+            """The ids, those the branch ranks 0 first, then the rest, each by id."""
+            ranking = case_of([branch.then(0)], 1)
+            return [it.id for it in gom.load_all(Ranked, order_by=[ranking.asc(), q.id.asc()])]
+
+        assert ranked(below(q.on, date(2024, 2, 1))) == ["r2", "r1", "r3", "r4"]
+        assert ranked(below(q.at, datetime(2024, 5, 6, 7, 30, tzinfo=UTC))) == ["r2", "r1", "r3", "r4"]
+        assert ranked(equal_to(q.at, datetime(2024, 5, 6, 9, tzinfo=offset(2)))) == ["r2", "r1", "r3", "r4"]
+        # Only 09:30 UTC is after 08:15 UTC, and a local time is neither before nor after a time with an offset.
+        assert ranked(above(q.clock, time(8, 15, tzinfo=UTC))) == ["r2", "r1", "r3", "r4"]
+        assert ranked(above(q.clock, time(7))) == ["r4", "r1", "r2", "r3"]
+        # A date is no moment, nor a moment a date.
+        assert ranked(equal_to(q.at, date(2024, 5, 6))) == ["r1", "r2", "r3", "r4"]
+        assert ranked(below(q.on, datetime(2025, 1, 1, tzinfo=UTC))) == ["r1", "r2", "r3", "r4"]
+        # Yet unequal, as in Cypher; a missing value is neither.
+        assert ranked(not_equal_to(q.on, datetime(2025, 1, 1, tzinfo=UTC))) == ["r1", "r2", "r3", "r4"]
+        assert ranked(not_equal_to(q.clock, time(8))) == ["r2", "r3", "r1", "r4"]
+
+    held_or_failing(pm, check)
+
+
+class Zoned(NodeFragment, labels=["ZonedHeld"]):
+    """A time of its own label, so its test finds only its own."""
+
+    id: Annotated[str, NodeId()]
+    clock: time | None = None
+
+
+def test_a_time_of_a_named_zone_is_compared_as_the_local_time_a_save_writes_of_it(
+    gom: StatelessGraphObjectManager, pm: PersistenceManager
+):
+    def check() -> None:
+        # A time has no offset of a named zone, whose offset changes with the date: a save writes it a local time.
+        paris = time(8, tzinfo=ZoneInfo("Europe/Paris"))
+        gom.save_all([Zoned(id="z", clock=paris)])
+        q = refs(Zoned)
+        assert [it.id for it in gom.load_all(Zoned, q.clock.eq(paris))] == ["z"]
+        assert [it.id for it in gom.load_all(Zoned, q.clock.eq(time(8)))] == ["z"]
+        assert [it.id for it in gom.load_all(Zoned, q.clock.eq(time(8, tzinfo=UTC)))] == []
+
+    held_or_failing(pm, check)
+
+
+@pytest.mark.parametrize("test", ["eq", "in", "has_item"])
+def test_the_query_dsl_refuses_a_time_at_an_offset_with_seconds_by_name_as_a_parameter_is(
+    gom: StatelessGraphObjectManager, test: str
+):
+    # The store holds an offset to the minute (#517); the DSL wrote this one as a text no value of it matches (#523).
+    at = time(10, tzinfo=timezone(timedelta(hours=1, seconds=1)))
+    dated = refs(Dated)
+    tested = {
+        "eq": lambda: dated.clock.eq(at),
+        "in": lambda: dated.clock.in_([time(9), at]),
+        "has_item": lambda: dated.clocks.has_item(at),
+    }[test]()
+    with pytest.raises(DrivineError, match="at an offset with seconds"):
+        gom.load_all(Dated, tested)
+
+
+def test_the_query_dsl_finds_a_time_at_an_offset_of_whole_minutes_as_it_was_before(
+    gom: StatelessGraphObjectManager, pm: PersistenceManager
+):
+    # Only an offset with seconds is refused (#523): one of whole minutes is found as before.
+    def check() -> None:
+        at = time(10, tzinfo=timezone(timedelta(hours=1)))
+        gom.save_all([Dated(id="c1", clock=at), Dated(id="c2", clock=time(9))])
+        dated = refs(Dated)
+        assert [it.id for it in gom.load_all(Dated, dated.clock.eq(at))] == ["c1"]
+        assert [it.id for it in gom.load_all(Dated, dated.clock.in_([at]))] == ["c1"]
+
+    held_or_failing(pm, check)

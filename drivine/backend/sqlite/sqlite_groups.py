@@ -3,11 +3,10 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from typing import Any, Literal, cast
 
-from drivine.backend.cypher import quote_name
 from drivine.backend.graph_statement import GraphStatement
 from drivine.backend.group_statement import COMPARISONS
 from drivine.backend.sql.fragment_query_renderer import FragmentQueryRenderer
-from drivine.backend.sql.fragments import FRAGMENT_ROOT_ROW, NODE, Fragments, Names
+from drivine.backend.sql.fragments import FRAGMENT_ROOT_ROW, Fragments, Names, property_of
 from drivine.backend.sql.sql_groups import HeldAggregate, HeldOrder, SqlGroups
 from drivine.backend.sql.sql_views import SqlViews
 from drivine.backend.sqlite.sqlite_graph import SqliteGraph, path
@@ -43,6 +42,10 @@ class SqliteGroups(SqlGroups):
         path_targets: Mapping[str, FragmentModel],
         labels_of_class: Callable[[type], list[str]],
     ) -> GraphStatement:
+        """
+        The statement, its fragments new for it, over the source's row and labels, so their names start from the first,
+        and what they bind bound beside the read's own.
+        """
         self._fragments = Fragments("SQLITE", cast(SqliteGraph, self.graph).name, self.row, source.labels)
         statement = super().build(source, given, path_targets, labels_of_class)
         return GraphStatement(statement.text, {**statement.bindings, **self._fragments.parameters})
@@ -55,14 +58,14 @@ class SqliteGroups(SqlGroups):
 
     def _key_column(self, property: str) -> str:
         """The property's value as the store holds it, as its JSON: the module's value of it."""
-        return self._fragments.value(_cypher_of(property))
+        return self._fragments.value(property_of(property))
 
     def _key_value(self, column: str) -> str:
         return column
 
     def _aggregated(self, views: SqlViews, property: str) -> str:
         """The property's value as the store holds it (see `_key_column`), where it is a number; null otherwise."""
-        value = self._fragments.value(_cypher_of(property))
+        value = self._fragments.value(property_of(property))
         return f"(CASE WHEN json_type({value}) IN ('integer', 'real') THEN {value} ->> '$' END)"
 
     def _held(self, aggregate: GroupAggregate) -> HeldAggregate | None:
@@ -72,14 +75,16 @@ class SqliteGroups(SqlGroups):
         """
         if aggregate.function not in ("MIN", "MAX"):
             return None
-        return _HeldExtreme(self._fragments, self.row, _cypher_of(str(aggregate.property)), aggregate.function == "MAX")
+        return _HeldExtreme(
+            self._fragments, self.row, property_of(str(aggregate.property)), aggregate.function == "MAX"
+        )
 
     def _held_key(self, property: str) -> HeldOrder:
         """
         A key is ordered as Cypher orders it, whatever its kind, a date included: read through the group's node of
         least `nid`, which has the key's value, as drivine4j's SQLite reads it.
         """
-        return lambda holder, descending: self._fragments.ordered(_cypher_of(property), descending, row=holder)
+        return lambda holder, descending: self._fragments.ordered(property_of(property), descending, row=holder)
 
     def _held_path(self, target: FragmentModel) -> HeldOrder:
         """
@@ -87,7 +92,7 @@ class SqliteGroups(SqlGroups):
         joined back, as drivine4j's SQLite reads it.
         """
         return lambda holder, descending: self._fragments.ordered(
-            _cypher_of(target.node_id_property or ""), descending, row=holder
+            property_of(target.node_id_property or ""), descending, row=holder
         )
 
     def _ordered(self, value: str, ascending: bool, kind: Literal["KEY", "PATH", "AGGREGATE"]) -> str:
@@ -129,8 +134,3 @@ class _HeldExtreme:
 
     def order(self, holder: str, descending: bool) -> list[str]:
         return self._fragments.order(self._cypher, descending, row=holder)
-
-
-def _cypher_of(property: str) -> str:
-    """The property of `n`, as Cypher reads it by its stored name."""
-    return f"{NODE}.{quote_name(property)}"

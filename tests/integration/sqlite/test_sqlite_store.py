@@ -23,6 +23,9 @@ from drivine import (
     QuerySpecification,
     StatelessGraphObjectManager,
     VectorIndex,
+    above,
+    case_of,
+    equal_to,
     full_text_index,
     range_index,
     refs,
@@ -393,3 +396,50 @@ async def test_a_patch_where_a_boolean_is_bound_meets_the_node_a_load_with_the_s
     assert patched.applied
     loaded = await gom.load(Flagged, "f1")
     assert loaded is not None and loaded.note == "met"
+
+
+class Opened(NodeFragment, labels=["Opened"]):
+    id: Annotated[str, NodeId()]
+    at: datetime | None = None
+    open: bool | None = None
+    flags: list[bool] | None = None
+    days: list[datetime] | None = None
+    count: int | None = None
+
+
+async def test_the_query_dsl_compares_seeks_orders_and_patches_a_boolean_and_a_moment_as_a_save_stores_them(gom):
+    # The DSL is the shared module's fragments, a patch's condition written into the statement the write function
+    # runs, each value as a literal. A port of Drivine for TypeScript's SqliteStore.spec.
+    first, second = datetime(2026, 1, 1, tzinfo=UTC), datetime(2026, 2, 1, tzinfo=UTC)
+    await gom.save_all(
+        [
+            Opened(id="m1", at=first, open=True, flags=[True], days=[first], count=1),
+            Opened(id="m2", at=second, open=False, flags=[False], days=[second], count=2),
+        ]
+    )
+    q = refs(Opened)
+
+    async def found(where: Any) -> list[str]:
+        return sorted(it.id for it in await gom.load_all(Opened, where))
+
+    assert await found(q.at.eq(first)) == ["m1"]
+    assert await found(q.at.gt(first)) == ["m2"]
+    assert await found(q.at.in_([second])) == ["m2"]
+    assert await found(q.open.eq(True)) == ["m1"]
+    assert await found(q.open.in_([False])) == ["m2"]
+    assert await found(q.open.not_in([False])) == ["m1"]
+    assert await found(q.flags.has_item(True)) == ["m1"]
+    assert await found(q.days.has_item(second)) == ["m2"]
+    assert [it.id for it in await gom.load_all(Opened, order_by=q.at.asc(), seek=q.at.after(first))] == ["m2"]
+    assert [it.id for it in await gom.load_all(Opened, order_by=q.open.asc(), seek=q.open.after(False))] == ["m1"]
+    ordered = case_of([equal_to(q.open, False).then(0), above(q.at, first).then(1)], 2).asc()
+    assert [it.id for it in await gom.load_all(Opened, order_by=ordered)] == ["m2", "m1"]
+
+    async def patched(where: Any) -> bool:
+        return (await gom.patch(Opened, "m1", set={"count": 3}, where=where)).applied
+
+    assert await patched(q.at.eq(first))
+    assert await patched(q.open.eq(True))
+    assert await patched(q.open.in_([True]))
+    assert await patched(q.days.has_item(first))
+    assert not await patched(q.open.eq(False))

@@ -12,6 +12,7 @@ import pytest
 
 from drivine import (
     Hop,
+    JsonPacked,
     NodeFragment,
     NodeId,
     PersistenceManager,
@@ -127,6 +128,22 @@ async def test_gives_a_least_and_greatest_text_date_and_moment_as_the_type_its_f
         "rank": 5,
     }
     assert isinstance(group["latest"], datetime) and isinstance(group["day"], date)
+
+
+class Packed(NodeFragment, labels=["GroupRun", "Packed"]):
+    id: Annotated[str, NodeId()]
+    shelf: str | None = None
+    meta: Annotated[dict[str, int] | None, JsonPacked()] = None
+
+
+async def test_gives_a_greatest_value_no_field_declares_or_a_field_holds_packed_as_the_store_gives_it(gom, pm):
+    await gom.save_all([Packed(id="a", shelf="one", meta={"n": 1}), Packed(id="b", shelf="one", meta={"n": 2})])
+    await pm.execute(QuerySpecification[Any](cypher_statement("MATCH (n:Packed {id: 'a'}) SET n.other = 'x'")))
+    [group] = await gom.groups.load(
+        Packed, keys={"shelf": key("shelf")}, aggregates={"meta": max_("meta"), "other": max_("other")}
+    )
+    # A packed field is held as its JSON text, which the group gives as it is; a property no field declares too.
+    assert group == {"shelf": "one", "meta": json.dumps({"n": 2}), "other": "x"}
 
 
 async def test_gives_a_greatest_moment_of_its_own_offset_as_cypher_orders_moments(gom):

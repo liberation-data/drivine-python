@@ -143,6 +143,27 @@ def test_the_same_request_is_answered_from_the_cache_and_the_cache_is_bounded(mo
     assert len(asked) == 5
 
 
+def test_a_request_answered_from_the_cache_is_kept_as_the_most_recent(monkeypatch: pytest.MonkeyPatch):
+    asked: list[str] = []
+    entry = shared_compiler._compiler(lambda: "")  # pyright: ignore[reportPrivateUsage]
+
+    def counted(request: str) -> str:
+        asked.append(request)
+        return entry(request)
+
+    monkeypatch.setattr(shared_compiler, "_compiler", lambda _: counted)
+    monkeypatch.setattr(shared_compiler, "FRAGMENTS_CACHED", 2)
+    monkeypatch.setattr(shared_compiler, "_fragments_answered", type(shared_compiler._fragments_answered)())  # pyright: ignore[reportPrivateUsage]
+    for k in (1, 2, 1, 3):
+        compile_fragment("SQLITE", "g", "condition", f"n.k = {k}", PEOPLE)
+    assert len(asked) == 3
+    # `n.k = 1`, asked again before `n.k = 3`, outlives `n.k = 2`, the least recent.
+    compile_fragment("SQLITE", "g", "condition", "n.k = 1", PEOPLE)
+    assert len(asked) == 3
+    compile_fragment("SQLITE", "g", "condition", "n.k = 2", PEOPLE)
+    assert len(asked) == 4
+
+
 def test_the_parameters_of_two_fragments_of_a_statement_are_named_apart():
     fragments = Fragments("SQLITE", "g", "people_", ["Person"])
     first = fragments.value("n.age + $p", {"p": 1})

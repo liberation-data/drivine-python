@@ -259,10 +259,10 @@ field declares. A text stored as `""` is kept by `min_` and `max_`, as Cypher ke
 - **More markers:** `GraphPath([hop(...), ...])` for the nodes at the end of several hops, `Count` and `Aggregate`
   computed in the query, `SortedBy`, `ReadOnly`, `Transient`, `NodeStamp`, `NodeLabels`, `PropertyBag`,
   `JsonPacked`, `NullAsDefault` and `EmptyWhenAbsent`, as in TypeScript's Drivine.
-- **A path in an order:** one hop of a `GraphPath` may name an order, a property of the node it reaches, lowest first
-  unless `ascending` is `False`: `hop("HAS_MESSAGE", Direction.OUTGOING, "Message", "sentAt")`. A list then holds its
-  targets in the order of the first node of that hop that leads to each, and a single field holds the target the first
-  such node leads to. A node of the ordered hop without the property comes last, whichever way the path is read.
+- **A path in an order:** one hop of a `GraphPath` may name an order, a property of the node it reaches by its stored
+  name (`sentAt` for a field `sent_at`), lowest first unless `ascending` is `False`:
+  `hop("HAS_MESSAGE", Direction.OUTGOING, "Message", "sentAt")`. A list then holds its targets in the order of the
+  first node of that hop that leads to each, and a single field holds the target the first such node leads to. A node of the ordered hop without the property comes last, whichever way the path is read.
   Targets whose first nodes hold equal values come in no set order. A text of digits such as `'0100'` is ordered as
   text, and an empty text as a text, the lowest one. On Neo4j and the SQL stores a date is ordered by its moment, an
   offset's included, not by its text. Where the property holds values of several kinds, Neo4j, Memgraph, SQLite and

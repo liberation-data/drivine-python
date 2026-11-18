@@ -15,7 +15,7 @@ import pytest
 from drivine import DrivineError
 from drivine.backend.sql.fragments import FRAGMENT_ROOT_ROW, Fragments, Names, property_of, same_key
 from drivine.cypher import shared_compiler
-from drivine.cypher.shared_compiler import FragmentPart, FragmentVariable, SharedStore, compile_fragment
+from drivine.cypher.shared_compiler import FragmentPart, FragmentVariable, SharedStore, SqlFragment, compile_fragment
 from tests.cypher.fragment_spec import CONDITIONS, ORDERS, SPEC, parameters, spec_indexed, spec_variables
 
 STORES: list[SharedStore] = ["POSTGRES", "ORACLE", "SQLITE"]
@@ -285,3 +285,18 @@ def test_a_callers_name_the_module_binds_on_oracle_is_refused_as_bound_already()
     assert "_cyk_f1_p" in fragments.parameters
     with pytest.raises(DrivineError, match="The parameter _cyk_f1_p is bound already."):
         fragments.bound_beside({"_cyk_f1_p": "Ada"})
+
+
+def test_oracle_says_which_of_the_graphs_functions_a_fragment_calls_and_calls_none_the_graph_lacks():
+    year = compile_fragment("ORACLE", "g", "value", "n.born.year", PEOPLE)
+    assert (year.calls_stored_era, year.calls_stored_nulls_equal) == (True, False)
+    assert compile_fragment("ORACLE", "g", "value", "n.a / 0.0", PEOPLE).calls_stored_temporal_arithmetic
+    # Where the graph was made without one, the module calls it not, as a statement's Fragments tells it.
+    assert "g_era(" in Fragments("ORACLE", "g", "people_").value("n.born.year")
+    assert "g_era(" not in Fragments("ORACLE", "g", "people_", era_stored=False).value("n.born.year")
+
+
+def test_an_order_of_several_terms_is_no_condition_or_value():
+    order = SqlFragment(("a", "b"), {})
+    with pytest.raises(DrivineError, match="A fragment of 2 terms is no condition or value"):
+        _ = order.term

@@ -83,8 +83,8 @@ class GroupOperations:
             where = self._lookups(model, where)
         query = GroupQuery(
             keys,
-            {name: self._written_filter(it) for name, it in (aggregates or {}).items()},
-            self._written(where),
+            {name: self._written_filter(it, bindings) for name, it in (aggregates or {}).items()},
+            self._written(where, bindings),
             bindings or {},
             having,
             order_by,
@@ -128,13 +128,16 @@ class GroupOperations:
         )
         return {it["value"]: it["count"] or 0 for it in rows}
 
-    def _written(self, where: str | Any | None) -> str | Any | None:
-        """A predicate the caller wrote, as the store reads it (see the backend's `written`); conditions as they are."""
-        return self._backend.written(where) if isinstance(where, str) and where else where
+    def _written(self, where: str | Any | None, bindings: Mapping[str, Any] | None) -> str | Any | None:
+        """
+        A predicate the caller wrote, as the store reads it given what the read binds (see the backend's `written`);
+        conditions as they are.
+        """
+        return self._backend.written(where, bindings) if isinstance(where, str) and where else where
 
-    def _written_filter(self, aggregate: GroupAggregate) -> GroupAggregate:
+    def _written_filter(self, aggregate: GroupAggregate, bindings: Mapping[str, Any] | None) -> GroupAggregate:
         """The aggregate with a filter the caller wrote read as the store reads it."""
-        return dataclasses.replace(aggregate, filter=self._written(aggregate.filter))
+        return dataclasses.replace(aggregate, filter=self._written(aggregate.filter, bindings))
 
 
 def _declared(model: FragmentModel, aggregate: GroupAggregate) -> Callable[[Any], Any]:

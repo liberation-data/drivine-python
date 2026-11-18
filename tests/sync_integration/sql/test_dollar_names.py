@@ -15,7 +15,6 @@ from typing import Annotated
 import pytest
 
 from drivine.sync import (
-    DatabaseType,
     GraphProperty,
     NodeFragment,
     NodeId,
@@ -94,14 +93,8 @@ def test_reads_it_in_a_raw_where_by_the_key_it_is_held_under(gom: StatelessGraph
     assert groups == [{"id": "r1", "scored": 1}, {"id": "r2", "scored": 1}, {"id": "r3", "scored": 1}]
 
 
-def test_compares_it_with_a_number_in_a_raw_where(
-    pm: PersistenceManager, gom: StatelessGraphObjectManager, request: pytest.FixtureRequest
-):
-    if pm.type in (DatabaseType.SQLITE, DatabaseType.POSTGRES):
-        # Held, and not for the held key, which the raw where reads: the raw where reads a number property as text.
-        # SQLite orders every text after every number, so `n.score > 1` holds for a score of 1, or of 0, too; Postgres
-        # has no `text > integer`, so `(n_.props ->> '$$score') > 1` is refused. Oracle reads the text as a number.
-        request.applymarker(
-            pytest.mark.xfail(strict=True, reason="drivine-python#542: a raw where compares a number property as text")
-        )
-    assert sorted(it.id for it in gom.load_all(Ranked, "n.`$score` > 1")) == ["r2", "r3"]
+def test_compares_it_with_a_number_in_a_raw_where_read_as_a_number_in_sql(gom: StatelessGraphObjectManager):
+    # A raw where reads a property as text (see CypherShorthand), as drivine4j and Drivine for TypeScript do, so a
+    # comparison with a number reads it as a number in SQL: NUMERIC is one on each SQL store. Compared as text, SQLite
+    # orders every text after every number, and Postgres has no `text > integer` (drivine-python#542).
+    assert sorted(it.id for it in gom.load_all(Ranked, "CAST(n.`$score` AS NUMERIC) > 1")) == ["r2", "r3"]

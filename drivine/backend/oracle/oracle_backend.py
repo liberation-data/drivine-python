@@ -117,13 +117,14 @@ class OracleBackend:
             ),
         )
 
-    def written(self, predicate: str) -> str:
+    def written(self, predicate: str, bindings: Mapping[str, Any] | None = None) -> str:
         """
         A predicate the caller wrote over `n`, as the store reads it over the row a read calls its root, `n_`: each
         property of the root written as Cypher writes it, `n.name`, read as that property, by the name the layout holds
-        it by, so `` n.`$score` `` is the property held as `$$score` (see CypherShorthand).
+        it by, so `` n.`$score` `` is the property held as `$$score`, and one compared with a boolean of `bindings` by
+        the boolean's text (see CypherShorthand).
         """
-        return CypherShorthand(NODE_ROW, ROW_ALIAS, text_of).rewrite(predicate)
+        return CypherShorthand(NODE_ROW, ROW_ALIAS, text_of).rewrite(predicate, bindings)
 
     def render_where(
         self, where: Any, target: TargetModel, labels_of_class: Callable[[type], list[str]]

@@ -39,9 +39,11 @@ through. A uniqueness constraint comes with a range index over its properties, w
 dropped. The object manager writes SQL for it, and the query DSL, grouped reads, search and schema management work as on
 the graph engines. A raw `where` is SQL over the node's row, `n`: its `labels`, `props` (a JSON object keyed by stored
 name) and `stamp`, say `JSON_VALUE(n.props, '$.name') = $name`. A property of the node may be written as Cypher writes
-it, `n.name = $name` (or ``n.`a name` ``), and is read as that property; a property compared with `true` or `false` is
-compared with the text a JSON boolean is read as. Your own statements are SQL too, unless written as
-Cypher (see [Cypher on Postgres, Oracle and SQLite](04-statements.md#cypher-on-postgres-oracle-and-sqlite)). `matches` takes a regular expression in
+it, `n.name = $name` (or ``n.`a name` ``), and is read as that property, one whose stored name begins with `$`,
+``n.`$score` ``, by the name the store holds it by; a property compared with `true` or `false` is compared with the text
+a JSON boolean is read as. Your own statements are SQL too, unless written as
+Cypher (see [Cypher on Postgres, Oracle and SQLite](04-statements.md#cypher-on-postgres-oracle-and-sqlite)), and a
+`$name` in quoted text or a comment, such as the JSON path `'$."$t"'`, is no parameter. `matches` takes a regular expression in
 Oracle's POSIX dialect, matched against the whole value. A leading `(?i)` ignores case; what Java adds, such as
 `(?:…)`, a look-around or `\b`, is not read. A backreference names the group the expression numbers it by,
 `\1` to `\8`; `\9` is refused, as the group that anchors the expression would make it the tenth, which POSIX does not
@@ -138,17 +140,22 @@ is applied whole or not at all.
 
 - A statement you write yourself is SQL, unless written as Cypher (see
   [Cypher on Postgres, Oracle and SQLite](04-statements.md#cypher-on-postgres-oracle-and-sqlite)). Parameters are named `$name`, as in Cypher, and a
-  statement is bound only the ones it names. A row comes back as a dict of its columns, a `jsonb` column as Python
-  values.
-- A raw `where`, for a load or a delete, is SQL over the root's row: its `props`, `labels` and `stamp`, say
-  `(n.props ->> 'name') = $name`. A property of the root may be written as Cypher writes it, `n.name = $name` (or
-  ``n.`a name` ``), and is read as that property, as text; a property compared with `true` or `false` is compared with
-  the text a JSON boolean is read as.
+  statement is bound only the ones it names outside quoted text and comments: the `$t` of `'$t'` or `$q$ $t $q$` is
+  none. A row comes back as a dict of its columns, a `jsonb` column as Python values.
+- A raw `where`, for a load or a delete, is SQL over the root's row `n`: its `props`, `labels` and `stamp`, say
+  `(n.props ->> 'name') = $name`, read over the row a statement calls it by, `n_` (the row the shared module's
+  fragments read). A property of the root may be written as Cypher writes it, `n.name = $name` (or ``n.`a name` ``),
+  and is read as that property, as text, and one whose stored name begins with `$`, ``n.`$score` ``, by the name the
+  store holds it by; a property compared with `true` or `false` is compared with the text a JSON boolean is read as.
+  A date in a raw `where` is compared with the property's JSON text, the tag a save holds it as, so
+  `(n.props ->> 'at') = $when` finds nothing: compare dates in the query DSL.
 - A number is compared as a number only where one is stored: `'7'` is not `7`, as on the graph engines.
-- Text is ordered by the database's collation, so a page of mixed-case text may not be in the order Neo4j gives
-  (`a, b, B` rather than `B, a, b`). The range indexes are made in that collation, so an order and a seek are read
-  through them. Compiled Cypher orders text by its code points instead
-  ([Cypher on Postgres, Oracle and SQLite](04-statements.md#cypher-on-postgres-oracle-and-sqlite)).
+- **Behaviour change:** text is compared and ordered by its code points, as Neo4j orders it, in the query DSL's
+  conditions (`gt`, `lt` and the rest on text), orders, seeks and grouped reads, as in compiled Cypher
+  ([Cypher on Postgres, Oracle and SQLite](04-statements.md#cypher-on-postgres-oracle-and-sqlite)): their SQL is the
+  shared module's ([drivine-cypher-spec#235](https://github.com/liberation-data/drivine-cypher-spec/issues/235)), in
+  the `C` collation (`COLLATE "C"`), where the DSL used the database's collation before. So `a, B, b` sorts as
+  `B, a, b`, as on SQLite and Neo4j, where it sorted `a, b, B`.
 - A save checks the stamp, as on the graph engines. A save turned away by a serialization failure (`40001`) or a
   deadlock (`40P01`) is run again.
 - Index the id of each class you save: a range index or a uniqueness constraint is a partial index over the label's

@@ -109,7 +109,15 @@ class SqlQueryRenderer(ABC):
         return []
 
     def _storable(self, value: Any) -> Any:
-        """A value as the store holds it: a date as ISO 8601 text, as a save writes it."""
+        """
+        A value as the store holds it: a date as ISO 8601 text, as a save writes it. A time at an offset with seconds
+        is refused, as a parameter is (#517): the store holds an offset to the minute, so no value of it would match
+        (#523). A datetime needn't be, as it is compared in UTC.
+        """
+        if isinstance(value, time):
+            from drivine.cypher.shared_compiler import _to_the_minute
+
+            return _to_the_minute(value.isoformat(), value.utcoffset())
         return storable(value)
 
     # ----- Conditions -----

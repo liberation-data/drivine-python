@@ -8,7 +8,6 @@ from drivine.backend.oracle.oracle_views import OracleViews
 from drivine.backend.save_statement_builder import packed as packed_
 from drivine.backend.save_statement_builder import stored
 from drivine.backend.sql.compared import Compared
-from drivine.backend.sql.sql_json import storable
 from drivine.backend.sql.sql_query_renderer import SqlQueryRenderer
 from drivine.drivine_error import DrivineError
 from drivine.dsl.compare_test import CompareTest
@@ -144,7 +143,7 @@ class OracleQueryRenderer(SqlQueryRenderer):
             return None
         lowered = test.operator == "EQ_LOWERED"
         operator = "=" if lowered else _SQL_OPERATORS.get(test.operator)
-        value = storable(stored(test.value))
+        value = self._storable(stored(test.value))
         if operator is None or not isinstance(value, str) or len(value.encode()) > 4000:
             return None
         if lowered and past_text(value):
@@ -168,7 +167,7 @@ class OracleQueryRenderer(SqlQueryRenderer):
         k = json_key(name)
 
         def packed(value: Any) -> Any:
-            return packed_(value) if json_packed else storable(stored(value))
+            return packed_(value) if json_packed else self._storable(stored(value))
 
         def filtered(expression: str, values: list[Any]) -> str:
             passing = ", ".join(f'{self._bind(packed(value))} AS "v{i}"' for i, value in enumerate(values))

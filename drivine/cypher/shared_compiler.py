@@ -52,8 +52,8 @@ _compiling = threading.Lock()
 Held while the native compiler runs, so one call runs at a time in the process. The wheel's `compile` releases the GIL,
 and the native compiler's parse caches are shared by every call and not yet safe for two at once: two threads compiling
 together could corrupt them (liberation-data/drivine-cypher-spec#385, drivine-python#558). Answers kept here, such as a
-fragment's, are read without it, and the compiler's SQLite functions run without it, on SQLite's threads, as they
-never parse. Comes out once the pinned compiler is safe for concurrent calls.
+fragment's, are read without it, and the compiler's SQLite functions (see sqlite_extension) run without it, on the
+threads running statements, as they never parse Cypher. Comes out once the pinned compiler is safe for concurrent calls.
 """
 
 

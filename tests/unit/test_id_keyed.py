@@ -122,6 +122,11 @@ def test_stored_key_is_a_temporal_ids_tag_text_as_the_module_reads_a_stored_targ
     assert stored_key(date(2024, 1, 2), "sqlite") == "2024-01-02"
 
 
+def test_stored_key_is_a_uuid_ids_text_unquoted_as_the_module_reads_a_stored_targets_text_id_back():
+    key = uuid.UUID("12345678-9abc-def0-1234-56789abcdef0")
+    assert [stored_key(key, "postgres"), stored_key(key, "sqlite")] == [str(key)] * 2
+
+
 def test_stored_key_on_sqlite_is_the_json_text_the_module_writes_which_sqlite_reads_the_property_back_as():
     assert [stored_key(it, "sqlite") for it in (1e-7, 1e21, float("inf"), 4.5, 7)] == [
         "1.0E-7",
@@ -440,12 +445,20 @@ class TestALookupById:
         await gom.load(Dial, "6")
         await gom.load(Coded, "6")
         await gom.edges.load_related(node_ref(Dial, "6"), "READS", Coded)
-        await gom.load(Dial, "6.0")
-        await gom.load(Dial, "6e1")
-        assert ids(pm) == ["6", '"6"', "6", "6", "60"]
-        for nothing in ("6.5", " 6", "+6", "0x6", "", "six", "1e"):
+        await gom.load(Dial, "-0")
+        assert ids(pm) == ["6", '"6"', "6", "0"]
+        # Whole-number text alone, as drivine4j's Jackson reads a Long field's: "6.0" and "6e1" too are refused there.
+        for nothing in ("6.0", "6e1", "6.5", " 6", "+6", "06", "0x6", "", "six", "1e", "1\u0666"):
             assert await gom.load(Dial, nothing) is None, nothing
-        assert len(pm.bound) == 5
+        assert len(pm.bound) == 4
+
+    async def test_reads_json_number_text_alone_as_the_float_a_float_id_is(self, lookup: LookupStore):
+        gom, pm = manager(lookup.type)
+        await gom.load(Gauge, "6")
+        await gom.load(Gauge, "6e1")
+        for nothing in ("1\u0666", "1e999", "NaN", " 6"):
+            assert await gom.load(Gauge, nothing) is None, nothing
+        assert len(pm.bound) == 2
 
     async def test_reads_iso_text_as_the_date_moment_or_time_the_id_is(self, lookup: LookupStore):
         gom, pm = manager(lookup.type)

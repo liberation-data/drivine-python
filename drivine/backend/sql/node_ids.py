@@ -43,8 +43,14 @@ class _NoNode:
 NO_NODE: Any = _NoNode()
 """What `typed_id` gives for an id that finds no node: None, or text that is no value of the id's type."""
 
-_NUMBER = re.compile(r"-?(0|[1-9]\d*)(\.\d+)?([eE][+-]?\d+)?")
-"""A decimal number's text, as JSON writes one: no hexadecimal, no spaces, no sign but a minus, no empty text."""
+_NUMBER = re.compile(r"-?(0|[1-9]\d*)(\.\d+)?([eE][+-]?\d+)?", re.ASCII)
+"""
+A decimal number's text, as JSON writes one: no hexadecimal, no spaces, no sign but a minus, no empty text, and only
+ASCII digits (`\\d` alone matches any script's, which `int` and `float` read too).
+"""
+
+_INTEGER = re.compile(r"-?(0|[1-9]\d*)", re.ASCII)
+"""A whole number's text, as JSON writes one: no fraction and no exponent."""
 
 _DATE = r"\d{4}-\d{2}-\d{2}"
 _TIME = r"(?P<hour>\d{2}):\d{2}(:\d{2}(\.\d{1,6})?)?(Z|[+-]\d{2}:\d{2})?"
@@ -97,13 +103,12 @@ def _unwrapped(kind: Any) -> Any:
 
 
 def _int(text: str) -> Any:
-    """JSON number text of a whole number as the int it is: `"6"`, and `"6.0"` or `"6e2"` too; NO_NODE otherwise."""
-    if not _NUMBER.fullmatch(text):
-        return NO_NODE
-    if re.fullmatch(r"-?\d+", text):
-        return int(text)
-    number = Decimal(text)
-    return int(number) if number == number.to_integral_value() else NO_NODE
+    """
+    A whole number's text as the int it is, `"6"`; NO_NODE otherwise, `"6.0"` and `"6e1"` too, as drivine4j's Jackson
+    refuses them for a Long field. Drivine for TypeScript reads them for a `number` field, a double, as it does for a
+    float field here; its `bigint` field is read as this is.
+    """
+    return int(text) if _INTEGER.fullmatch(text) else NO_NODE
 
 
 def _float(text: str) -> Any:

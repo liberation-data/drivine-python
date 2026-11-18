@@ -304,7 +304,8 @@ class PostgresSaveBuilder:
 def stored_key(id: Any, store: SqlStore) -> str:
     """
     An id as the text a write plan keys its node by, within the plan (a step's `k`, an unlink's `ids` and `held`), which
-    is how the store's write reads a stored target's id back (the module's `keyText`): text as it is; a temporal value
+    is how the store's write reads a stored target's id back (the module's `keyText`): text as it is, and a value the
+    layout holds as text, a UUID, as that text, unquoted, as drivine4j's `PostgresSql.key` keys it; a temporal value
     as its tag's text `v`, as the module writes it (drivine4j's `NodeIds.temporalText`); and anything else as the JSON
     text `store`'s layout holds it as (see value_layout.write), as a save writes it, so a float id is keyed by the text
     it is held as (`1.0E-7` on SQLite, where Python's JSON writes `1e-07`). On Postgres a number is the text `jsonb`
@@ -313,7 +314,10 @@ def stored_key(id: Any, store: SqlStore) -> str:
     """
     if isinstance(id, str):
         return id
-    text = to_json(write(id, store))
+    written = write(id, store)
+    if isinstance(written, str):
+        return written
+    text = to_json(written)
     temporal = temporal_text(text)
     if temporal is not None:
         return temporal

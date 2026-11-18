@@ -12,6 +12,7 @@ and a str id is the text given.
 from __future__ import annotations
 
 import re
+import uuid
 from collections.abc import Iterator
 from datetime import date, timedelta
 from typing import Annotated, Any
@@ -85,6 +86,19 @@ class LookupTargetDays(GraphView):
 
     target: Annotated[LookupTarget, Root()]
     days: Annotated[list[LookupDate], Relationship("ON_DAY")] = []
+
+
+class LookupKey(NodeFragment, labels=["SqlLookup", "LookupKey"]):
+    id: Annotated[uuid.UUID, NodeId()]
+    name: str | None = None
+    stamp: Annotated[str | None, NodeStamp()] = None
+
+
+class LookupTargetKeys(GraphView):
+    """The target joined to keys of a UUID id, which a save that replaces the list unlinks by their ids."""
+
+    target: Annotated[LookupTarget, Root()]
+    keys: Annotated[list[LookupKey], Relationship("HAS_KEY")] = []
 
 
 class LookupDateTree(GraphView):
@@ -225,6 +239,24 @@ def test_a_target_of_a_date_id_is_unlinked_by_its_tags_text_and_the_one_still_he
     assert again is not None and again.stamp == held.stamp
     dropped = gom.load(LookupDate, "2025-01-01")
     assert dropped is not None and dropped.name == "first day"
+
+
+def test_a_target_of_a_uuid_id_still_held_is_kept_by_its_text_unquoted(gom: StatelessGraphObjectManager):
+    # A UUID is held as its text, which the plan's `ids` key it by, unquoted: keyed by its JSON, the held key would be
+    # unlinked and joined again, which gives it a new relationship token, its stamp's second.
+    keys = LookupTarget(id="keys", name="a target of keys")
+    first = LookupKey(id=uuid.UUID(int=1), name="first key")
+    second = LookupKey(id=uuid.UUID(int=2), name="second key")
+    gom.save(LookupTargetKeys(target=keys, keys=[first, second]), replace=["keys"])
+    held = gom.load(LookupKey, str(uuid.UUID(int=2)))
+    assert held is not None
+
+    gom.save(LookupTargetKeys(target=keys, keys=[LookupKey(id=uuid.UUID(int=2), name="second key")]), replace=["keys"])
+
+    loaded = gom.load(LookupTargetKeys, "keys")
+    assert loaded is not None and [it.name for it in loaded.keys] == ["second key"]
+    again = gom.load(LookupKey, uuid.UUID(int=2))
+    assert again is not None and again.stamp == held.stamp
 
 
 def test_a_cascade_delete_by_a_date_ids_text_checks_its_depth_and_deletes_the_tree(

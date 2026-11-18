@@ -368,19 +368,29 @@ class TestLookups:
         assert lowered_where(unfilled, self.registry.fragment(Account), set()) == unfilled
 
     @pytest.mark.parametrize(
-        "backend, written",
+        "backend, written, bound",
         [
-            (CypherBackend(NEO4J_GRAMMAR), "n.`__drivine.lower.email` = toLower($_q0)"),
-            (OracleBackend(OracleGraph()), "JSON_VALUE(n.props, '$.\"__drivine.lower.email\"') = LOWER($_q0)"),
-            (PostgresBackend(PostgresGraph()), "(n.props ->> '__drivine.lower.email') = lower(CAST($_q0 AS text))"),
+            (CypherBackend(NEO4J_GRAMMAR), "n.`__drivine.lower.email` = toLower($_q0)", "Ada@X.com"),
+            (
+                OracleBackend(OracleGraph()),
+                "JSON_VALUE(n.props, '$.\"__drivine.lower.email\"') = LOWER($_q0)",
+                "Ada@X.com",
+            ),
+            # Postgres's is the module's fragment over the row `n_`: the copy compared, as JSON, with the value lowered,
+            # which the module binds as its JSON.
+            (
+                PostgresBackend(PostgresGraph()),
+                "(n_.props -> '__drivine.lower.email') = to_jsonb(lower(",
+                '"Ada@X.com"',
+            ),
         ],
     )
-    def test_compare_with_the_value_as_the_store_lowercases_it(self, backend: Any, written: str):
+    def test_compare_with_the_value_as_the_store_lowercases_it(self, backend: Any, written: str, bound: str):
         account = self.registry.fragment(Account)
         where = lowered_where(refs(Account).email.eq_ignore_case("Ada@X.com"), account, {"email"})
         rendered = backend.render_query(Query(where=where), account, lambda it: self.registry.fragment(it).labels)
         assert written in rendered.where
-        assert "Ada@X.com" in rendered.bindings.values()
+        assert bound in rendered.bindings.values()
 
     def test_on_oracle_compare_a_value_that_may_lowercase_past_the_index_as_a_clob(self):
         # As drivine4j's pastText: a value of more than 1,333 UTF-16 units, three bytes each at most, may lowercase past

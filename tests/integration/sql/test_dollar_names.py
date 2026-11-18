@@ -2,7 +2,7 @@
 A query DSL filter, order and grouped read of a property whose name begins with `$`, which store layout 2 holds as
 `$$score` (drivine-cypher-spec#161). The DSL's own SQL named it as it is, `$score`, so it found no node, ordered by
 nothing and grouped every node under no value, silently. The shared module's fragments read it as the layout holds it:
-on SQLite since drivine-cypher-spec#235 step 2. A port of Drivine for TypeScript's
+on SQLite since drivine-cypher-spec#235 step 2, and on Postgres since step 3. A port of Drivine for TypeScript's
 StatelessGraphObjectManager.dollarNames.spec.
 """
 
@@ -43,11 +43,11 @@ async def ranked(pm: PersistenceManager, gom: StatelessGraphObjectManager) -> As
 @pytest.fixture
 def held(pm: PersistenceManager, request: pytest.FixtureRequest) -> None:
     """
-    Held where the DSL's SQL is still the library's own, which names the property as it is: Postgres until
-    drivine-cypher-spec#235 step 3, Oracle until step 4. Take the hold out as each step lands.
+    Held where the DSL's SQL is still the library's own, which names the property as it is: Oracle until
+    drivine-cypher-spec#235 step 4. Take the hold out when that step lands.
     """
-    if pm.type is not DatabaseType.SQLITE:
-        request.applymarker(pytest.mark.xfail(strict=True, reason="drivine-cypher-spec#235 steps 3 and 4"))
+    if pm.type is DatabaseType.ORACLE:
+        request.applymarker(pytest.mark.xfail(strict=True, reason="drivine-cypher-spec#235 step 4"))
 
 
 async def test_saves_and_loads_it_by_its_own_name(gom: StatelessGraphObjectManager):
@@ -80,3 +80,4 @@ async def test_groups_and_adds_by_it(gom: StatelessGraphObjectManager, held: Non
         {"score": 2, "nodes": 1, "total": 2},
         {"score": 1, "nodes": 1, "total": 1},
     ]
+

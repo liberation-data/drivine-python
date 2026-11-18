@@ -476,8 +476,8 @@ async def assert_reads_index(
 
     index = rf"drivine_{made}_\w+"
     bound = {"id": to_json(write(id_, "sqlite" if sqlite else "postgres"))}
-    # A load and a delete read the node as the query DSL's row on SQLite, `n_`.
-    row = "n_" if sqlite else "n"
+    # A load and a delete read the node as the query DSL's row, `n_`, which SQLite's plan names.
+    row = "n_"
     assert reads(row).search(await explain(backend.load_fragment(model).text, bound))
     assert reads(row).search(await explain(backend.delete(model).text, bound))
     related = backend.related(

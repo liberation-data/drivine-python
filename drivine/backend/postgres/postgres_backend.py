@@ -13,7 +13,6 @@ from drivine.backend.nearest_search import NearestSearch
 from drivine.backend.page import Page
 from drivine.backend.postgres.postgres_graph import PostgresGraph, has_labels, node_document, text_of
 from drivine.backend.postgres.postgres_groups import PostgresGroups
-from drivine.backend.postgres.postgres_query_renderer import PostgresQueryRenderer
 from drivine.backend.postgres.postgres_save_builder import PostgresSaveBuilder
 from drivine.backend.postgres.postgres_search import PostgresSearch
 from drivine.backend.postgres.postgres_statement import PostgresStatement
@@ -21,6 +20,8 @@ from drivine.backend.postgres.postgres_views import PostgresViews
 from drivine.backend.postgres.postgres_writes import PostgresWrites
 from drivine.backend.save_statement import SaveStatement
 from drivine.backend.sql.cypher_shorthand import CypherShorthand
+from drivine.backend.sql.fragment_query_renderer import FragmentQueryRenderer, root_labels
+from drivine.backend.sql.fragments import FRAGMENT_ROOT_ROW, Fragments
 from drivine.backend.sql.node_ids import has_id
 from drivine.backend.sql.sql_cascade import beyond_count, kept_targets
 from drivine.backend.sql.sql_catalog import CATALOG_KINDS, catalog_properties
@@ -52,15 +53,23 @@ SCHEMA_MARKER = "_DrivineSchema"
 _CONTENDED = ("40001", "40P01")
 """A serialization failure and a deadlock: another writer's doing."""
 
-ROW_ALIAS = "n"
-"""What a statement over a fragment calls its node's row. A raw `where` is SQL over it."""
+ROW_ALIAS = FRAGMENT_ROOT_ROW
+"""
+What a load, a count, a delete, a patch's where, a grouped read and a search call their root's row: `n_`, the row the
+query DSL's fragments read (see FragmentQueryRenderer). A raw `where` is SQL over `n`, which `written` reads as it.
+"""
+
+NODE_ROW = "n"
+"""What the statements that read a node by its id alone call its row: `held_properties` and `found_stamp`."""
 
 
 class PostgresBackend:
     """
     Statements for Postgres, over the tables of a PostgresGraph: drivine4j's store, so a graph written from the JVM,
     from Node and from Python is one. A load returns the rows the graph engines do, `{props, labels}` for a fragment,
-    as `jsonb`. A raw `where` is an SQL predicate over the node's row, `n` (its `labels`, `props` and `stamp`).
+    as `jsonb`. A raw `where` is an SQL predicate over the node's row, `n` (its `labels`, `props` and `stamp`), in
+    which a property of the node may be written as Cypher writes it, `n.name` (see `written`). A filter, a seek and an
+    order of the query DSL are the shared module's SQL (FragmentQueryRenderer), over the row `n_`.
 
     The store is made by the connection provider, on its first connection (see GraphTables).
     """
@@ -75,23 +84,29 @@ class PostgresBackend:
         labels_of_class: Callable[[type], list[str]],
         indexed: Sequence[SchemaItem] = (),
     ) -> RenderedQuery:
-        """A query over a class's references, written for the store: its predicate, order and paging, and values."""
-        return PostgresQueryRenderer.render(
-            query, target, lambda depth: PostgresViews(self.graph, depth), ROW_ALIAS, labels_of_class
-        )
+        """
+        A query over a class's references, written for the store by the shared module's fragments (see
+        FragmentQueryRenderer): an equality compares the property's JSON, given the root's labels, which is what store
+        layout 2's range index is over, so `indexed` changes nothing here.
+        """
+        return FragmentQueryRenderer.render(query, target, self._fragments(target), labels_of_class)
 
     def written(self, predicate: str) -> str:
         """
-        A predicate the caller wrote, as the store reads it: each property of the root written as Cypher writes it,
-        `n.name`, read as that property (see CypherShorthand).
+        A predicate the caller wrote over `n`, as the store reads it over the row a read calls its root, `n_`: each
+        property of the root written as Cypher writes it, `n.name`, read as that property (see CypherShorthand).
         """
-        return CypherShorthand(ROW_ALIAS, ROW_ALIAS, text_of).rewrite(predicate)
+        return CypherShorthand(NODE_ROW, ROW_ALIAS, text_of).rewrite(predicate)
 
     def render_where(
         self, where: Any, target: TargetModel, labels_of_class: Callable[[type], list[str]]
     ) -> tuple[str, dict[str, Any]]:
-        """A condition over a class's references, written for the store, with its values."""
-        return PostgresQueryRenderer.render_where(where, target, PostgresViews(self.graph), ROW_ALIAS, labels_of_class)
+        """A condition over a class's references, written for the store by the shared module's fragments."""
+        return FragmentQueryRenderer.render_where(where, target, self._fragments(target), labels_of_class)
+
+    def _fragments(self, target: TargetModel) -> Fragments:
+        """The fragments of one statement over the target's root, its row `n_`."""
+        return Fragments("POSTGRES", self.graph.name, ROW_ALIAS, root_labels(target))
 
     def load_all_fragments(
         self, model: FragmentModel, where: str | None = None, page: Page | None = None, tested: Sequence[str] = ()
@@ -271,7 +286,12 @@ class PostgresBackend:
     def held_properties(self, model: FragmentModel) -> GraphStatement:
         return self._by_id(
             PostgresStatement(
-                "\n".join([f'SELECT {ROW_ALIAS}.props AS "props"', self._from(model, self._id_predicate(model))])
+                "\n".join(
+                    [
+                        f'SELECT {NODE_ROW}.props AS "props"',
+                        self._from(model, self._id_predicate(model, NODE_ROW), NODE_ROW),
+                    ]
+                )
             )
         )
 
@@ -280,8 +300,8 @@ class PostgresBackend:
             PostgresStatement(
                 "\n".join(
                     [
-                        f"SELECT COALESCE({ROW_ALIAS}.stamp, '{stamps.NEVER_STAMPED}') AS \"found\"",
-                        self._from(model, self._id_predicate(model)),
+                        f"SELECT COALESCE({NODE_ROW}.stamp, '{stamps.NEVER_STAMPED}') AS \"found\"",
+                        self._from(model, self._id_predicate(model, NODE_ROW), NODE_ROW),
                     ]
                 )
             )
@@ -391,10 +411,10 @@ class PostgresBackend:
         parts = [*([f"({where})"] if where else []), *PostgresViews(self.graph, depth).requirements(model, ROW_ALIAS)]
         return " AND ".join(parts) if parts else None
 
-    def _from(self, model: FragmentModel, where: str | None = None) -> str:
-        """The nodes of the fragment's labels that meet `where`, as the row `n`."""
-        tests = [has_labels(ROW_ALIAS, model.labels), *([f"({where})"] if where else [])]
-        return f"FROM {self.graph.nodes} {ROW_ALIAS}\nWHERE {' AND '.join(tests)}"
+    def _from(self, model: FragmentModel, where: str | None = None, row: str = ROW_ALIAS) -> str:
+        """The nodes of the fragment's labels that meet `where`, as the row `row`."""
+        tests = [has_labels(row, model.labels), *([f"({where})"] if where else [])]
+        return f"FROM {self.graph.nodes} {row}\nWHERE {' AND '.join(tests)}"
 
     def _deleting(self, model: FragmentModel, where: str | None) -> GraphStatement:
         """Deletes the nodes `where` selects, with their relationships, and returns how many: `{deleted}`."""
@@ -409,14 +429,14 @@ class PostgresBackend:
         return PostgresStatement.of(statement).keying_id(id_json)
 
     @staticmethod
-    def _id_predicate(model: FragmentModel) -> str:
+    def _id_predicate(model: FragmentModel, row: str = ROW_ALIAS) -> str:
         """
         The node whose id is `$id`, the JSON the node holds it as, as `_by_id` binds it: the property's JSON compared
         with it, as the shared module writes the comparison, which the index over the id answers (see node_ids).
         """
         if not model.node_id_property:
             raise DrivineError(f"{model.type.__name__} has no NodeId field, so it can't be found by id.")
-        return has_id("postgres", ROW_ALIAS, model.node_id_property, "$id")
+        return has_id("postgres", row, model.node_id_property, "$id")
 
     @staticmethod
     def _page(page: Page | None) -> list[str]:

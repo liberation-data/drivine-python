@@ -184,17 +184,16 @@ class PostgresWrites:
 
     def _meeting(self, where: str, bound: Mapping[str, Any]) -> str:
         """
-        The query a patch step asks of the node it found, by its `nid`, the function's `$1`: whether its row meets
-        `where`, `n`, or on SQLite `n_`, the row the query DSL's fragments read (see SqliteBackend's ROW_ALIAS). The
-        function runs it on its own, where no value can be bound, so each value `where` names is written in. A name
-        within a quoted text, as the path of a property whose name begins with `$` is (`'$."$$id"'`), is the text's,
-        not a value's.
+        The query a patch step asks of the node it found, by its `nid`, the function's `$1`: whether its row `n_`, the
+        row the query DSL's fragments read (see FRAGMENT_ROOT_ROW), meets `where`. The function runs it on its own,
+        where no value can be bound, so each value `where` names is written in. A name within a quoted text, as the
+        path of a property whose name begins with `$` is (`'$."$$id"'`), is the text's, not a value's.
         """
         written = _PARAMETER.sub(
             lambda it: _literal(bound[it[1]], self.graph.booleans) if it[1] is not None and it[1] in bound else it[0],
             where,
         )
-        row = FRAGMENT_ROOT_ROW if store_of(self.graph) == "sqlite" else "n"
+        row = FRAGMENT_ROOT_ROW
         return f"SELECT COUNT(*) FROM {self.graph.nodes} {row} WHERE {row}.nid = $1 AND ({written})"
 
 

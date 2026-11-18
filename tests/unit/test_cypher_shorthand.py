@@ -81,8 +81,9 @@ def test_a_property_compared_with_a_boolean_is_compared_with_the_text_a_json_boo
 
 
 def test_postgres_reads_a_property_as_it_reads_one_and_a_graph_engine_keeps_cypher():
+    # Over `n_`, the row a read of the query DSL calls its root.
     assert PostgresBackend().written("n.name = 'x' AND n.locked = true AND n.stamp IS NULL") == (
-        "(n.props ->> 'name') = 'x' AND (n.props ->> 'locked') = 'true' AND n.stamp IS NULL"
+        "(n_.props ->> 'name') = 'x' AND (n_.props ->> 'locked') = 'true' AND n_.stamp IS NULL"
     )
     assert CypherBackend(NEO4J_GRAMMAR).written("n.name = 'x'") == "n.name = 'x'"
 
@@ -91,4 +92,4 @@ def test_a_quote_in_a_name_in_backticks_stays_inside_the_literal_it_is_written_i
     assert rewrite("n.`it's` = 1") == "JSON_VALUE(n_.props, '$.\"it''s\"') = 1"
     assert rewrite('n.`a"b\\c` = 1') == 'JSON_VALUE(n_.props, \'$."a\\"b\\\\c"\') = 1'
     assert rewrite("n.`a\n` = 1") == "JSON_VALUE(n_.props, '$.\"a\n\"') = 1"
-    assert PostgresBackend().written("n.`it's` = 1") == "(n.props ->> 'it''s') = 1"
+    assert PostgresBackend().written("n.`it's` = 1") == "(n_.props ->> 'it''s') = 1"

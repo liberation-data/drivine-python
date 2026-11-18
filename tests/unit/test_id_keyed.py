@@ -386,7 +386,8 @@ LOOKUP_STORES = [
         "postgres",
         lambda: PostgresBackend(PostgresGraph()),
         lambda parameter: parameter,
-        "n",
+        # A load and a delete read the node as the query DSL's row, which a fragment's variable ends with `_`.
+        "n_",
         lambda row: f"""{row}.labels @> '["Dial"]' AND {row}.labels @> '["Meter"]'""",
     ),
     LookupStore(

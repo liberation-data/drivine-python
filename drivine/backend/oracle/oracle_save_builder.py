@@ -240,7 +240,7 @@ class OracleSaveBuilder:
                 for item in items(it, getattr(obj, it.field, None))
             ]
             assert into.node_id_property is not None
-            k = json_key(into.node_id_property)
+            k = json_key(held_key(into.node_id_property))
 
             def not_in(listed: str, k: str = k) -> str:
                 return (
@@ -276,7 +276,7 @@ class OracleSaveBuilder:
         reads: list[str] = []
         for i, it in enumerate(self._stamped):
             assert it.model.node_id_property is not None
-            k = json_key(it.model.node_id_property)
+            k = json_key(held_key(it.model.node_id_property))
             variable = f"v_{when}{i}"
             if f"{variable} CLOB;" not in self._declarations:
                 self._declarations.append(f"{variable} CLOB;")
@@ -371,7 +371,7 @@ END;"""
 
     def _node_params(self, write: _NodeWrite) -> dict[str, str]:
         assert write.model.node_id_property is not None
-        k = json_key(write.model.node_id_property)
+        k = json_key(held_key(write.model.node_id_property))
         labels = has_labels("n", write.model.labels)
         match = f"{labels} AND JSON_EXISTS(n.props, '$?(@{k} == $v)' PASSING JSON(:1 EXTENDED) AS \"v\")"
         return {

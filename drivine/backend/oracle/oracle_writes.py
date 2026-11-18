@@ -126,7 +126,7 @@ class OracleWrites:
 
         def reads(when: str) -> None:
             for i, group in enumerate(groups):
-                k = json_key(_id_property(group.model))
+                k = json_key(held_key(_id_property(group.model)))
                 variable = f"v_{when}{i}"
                 if when == "before":
                     declarations.extend([f"{variable} CLOB;", f"v_after{i} CLOB;"])
@@ -282,7 +282,7 @@ class OracleWrites:
 
     def _match_of(self, node: MatchedNode, name: str = "x_frommatch") -> str:
         labels = list(dict.fromkeys([*node.model.labels, *node.labels]))
-        k = json_key(_id_property(node.model))
+        k = json_key(held_key(_id_property(node.model)))
         self._pending[name] = (
             f"{has_labels('n', labels)} AND JSON_EXISTS(n.props, '$?(@{k} == $v)' PASSING JSON(:1 EXTENDED) AS \"v\")"
         )
@@ -295,7 +295,7 @@ class OracleWrites:
 
     @staticmethod
     def _match_text(model: FragmentModel) -> str:
-        k = json_key(_id_property(model))
+        k = json_key(held_key(_id_property(model)))
         return (
             f"{has_labels('n', model.labels)} AND JSON_EXISTS(n.props, '$?(@{k} == $v)' "
             'PASSING JSON(:1 EXTENDED) AS "v")'

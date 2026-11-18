@@ -25,6 +25,7 @@ from tests.cypher.cypher_spec import (
     held_for,
     held_passes,
     load,
+    skipped_for,
 )
 
 NAMES = {
@@ -81,6 +82,9 @@ def run(pm: PersistenceManager, file: str, case: Case) -> None:
     for index, step in enumerate(case.steps):
         if not step.runs_on(store):
             continue
+        skipped = skipped_for(file, case, index, store)
+        if skipped is not None:
+            pytest.skip(f"{case.name}, step {index + 1}, is skipped on {store} for liberation-data/{skipped}")
         issue = held_for(file, case, index, store)
         if issue is None:
             check(pm, case, index, store)

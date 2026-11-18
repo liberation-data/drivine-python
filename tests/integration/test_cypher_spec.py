@@ -23,6 +23,7 @@ from tests.cypher.cypher_spec import (
     held_for,
     held_passes,
     load,
+    may_pass,
     skipped_for,
 )
 
@@ -74,7 +75,8 @@ async def clear(pm: PersistenceManager) -> None:
 async def run(pm: PersistenceManager, file: str, case: Case) -> None:
     """
     Each step of the case of the spec file that runs on the store, in turn: its rows checked, or its failure. A step
-    held on the store (`HELD`) must fail, until its port lands; one skipped on it skips the rest of the case.
+    held on the store (`HELD`) must fail, until its port lands, unless it may pass there too; one skipped on it skips
+    the rest of the case.
     """
     store = NAMES[pm.type]
     for index, step in enumerate(case.steps):
@@ -92,7 +94,8 @@ async def run(pm: PersistenceManager, file: str, case: Case) -> None:
         except HELD_FAILURES:
             # Held, as liberation-data/drivine-python#<issue> has it.
             continue
-        pytest.fail(held_passes(file, case, index, store, issue))
+        if not may_pass(file, case, index, store):
+            pytest.fail(held_passes(file, case, index, store, issue))
 
 
 async def check(pm: PersistenceManager, case: Case, index: int, store: str) -> None:

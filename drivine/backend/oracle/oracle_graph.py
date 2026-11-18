@@ -118,16 +118,6 @@ def text_of(alias: str, property: str) -> str:
     return f"JSON_VALUE({alias}.props, '$.{drivine4j_step(property)}')"
 
 
-def holding(alias: str, property: str) -> str:
-    """
-    The JSON the property of the node row `alias` is read from: its properties, or, for the stamp, which is a column
-    of its own, a document of that column under the stamp's property, so a query reads it as any other.
-    """
-    if property == stamps.PROPERTY:
-        return f"JSON_OBJECT({sql_text(property)} VALUE {alias}.stamp ABSENT ON NULL RETURNING JSON)"
-    return f"{alias}.props"
-
-
 def node_document(alias: str) -> str:
     """The map a load returns for the node row `alias`: its properties, its stamp among them, and its labels apart."""
     return (

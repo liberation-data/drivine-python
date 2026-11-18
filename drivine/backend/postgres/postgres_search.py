@@ -102,7 +102,7 @@ class PostgresSearch:
                     *([f"FETCH FIRST {limit} ROWS ONLY"] if limit is not None else []),
                 ]
             ),
-            dict(bindings or {}),
+            {**(bindings or {}), **views.fragments.parameters},
         )
 
 

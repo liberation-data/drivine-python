@@ -1,21 +1,17 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 
 from drivine.annotation.direction import Direction
 from drivine.backend.sql.nodes_of import NodesOf
-from drivine.backend.sql.order_reads import OrderReads
 from drivine.backend.sql.sql_graph import sql_text
 from drivine.backend.sql.sql_views import SqlViews
 from drivine.backend.sqlite.sqlite_graph import (
     SqliteGraph,
     has_labels,
-    json_type,
     node_document,
     number_of,
-    text_of,
 )
-from drivine.model import stamps
 
 
 class SqliteViews(SqlViews):
@@ -29,7 +25,7 @@ class SqliteViews(SqlViews):
     first_row = "LIMIT 1"
 
     def __init__(self, graph: SqliteGraph, depth: Mapping[str, int] | None = None) -> None:
-        super().__init__(graph, depth)
+        super().__init__(graph, depth, "SQLITE")
 
     def object(self, entries: Sequence[tuple[str, str]]) -> str:
         return f"json_object({', '.join(f'{sql_text(key)}, json({value})' for key, value in entries)})"
@@ -76,12 +72,14 @@ class SqliteViews(SqlViews):
     def _select(self, hint: str) -> str:
         return "SELECT "
 
-    def _order_reads(self, node: str, property: str) -> OrderReads:
-        """A stored `""` is read as `""`, so it is a text and needs no reading of its own."""
-        if property == stamps.PROPERTY:
-            return OrderReads("CAST(NULL AS REAL)", text_of(node, property), "CAST(NULL AS INTEGER)")
-        return OrderReads(
-            number_of(node, property),
-            f"CASE WHEN {json_type(node, property)} = 'text' THEN {text_of(node, property)} END",
-            "CAST(NULL AS INTEGER)",
+    def _first_of_ways(self, ways: str, terms: Callable[[str], str]) -> str:
+        """
+        The first hop of each node reached in the order `terms`, over the node of the hop joined back by its id: the
+        first of the ids gathered in that order (drivine4j's `SqliteSelect.pathOrder`).
+        """
+        w = self.next_alias("w")
+        s = f"{self.next_alias('s')}_"
+        return (
+            f"SELECT {w}.nid, json_group_array({s}.nid ORDER BY {terms(s)}) ->> '$[0]' AS hop "
+            f"FROM ({ways}) {w} JOIN {self.graph.nodes} {s} ON {s}.nid = {w}.hop GROUP BY {w}.nid"
         )

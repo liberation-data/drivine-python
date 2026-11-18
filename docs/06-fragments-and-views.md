@@ -260,6 +260,19 @@ field declares. A text stored as `""` is kept by `min_` and `max_`, as Cypher ke
 - **More markers:** `GraphPath([hop(...), ...])` for the nodes at the end of several hops, `Count` and `Aggregate`
   computed in the query, `SortedBy`, `ReadOnly`, `Transient`, `NodeStamp`, `NodeLabels`, `PropertyBag`,
   `JsonPacked`, `NullAsDefault` and `EmptyWhenAbsent`, as in TypeScript's Drivine.
+- **A path in an order:** one hop of a `GraphPath` may name an order, a property of the node it reaches by its stored
+  name (`sentAt` for a field `sent_at`), lowest first unless `ascending` is `False`: `hop("HAS_MESSAGE",
+  Direction.OUTGOING, "Message", "sentAt")`. A list then holds its targets in the order of the first node of that hop
+  that leads to each, and a single field holds the target the first such node leads to. A node of the ordered hop
+  without the property comes last, whichever way the path is read. Targets whose first nodes hold equal values come in
+  no set order. A text of digits such as `'0100'` is ordered as text, and an empty text as a text, the lowest one. On
+  Neo4j and the SQL stores a date is ordered by its moment, an offset's included, not by its text. Where the property
+  holds values of several kinds, Neo4j, Memgraph, SQLite and Oracle order them by kind as Cypher's ORDER BY does: lowest
+  first a map, a list, a temporal value, a text, a boolean, then a number, and the other way highest first. On Neo4j and
+  Memgraph the path is sorted by the engine's own ORDER BY. Postgres will once Drivine takes the compiler's fix of
+  liberation-data/drivine-cypher-spec#371; until then it orders them as jsonb does, a text before a number before a
+  boolean, and a temporal value after them. FalkorDB orders them as its own ORDER BY does. A group key's path names no
+  order: `path_key` refuses one.
 - **A set field** is stored as a list of its items, sorted where they order (as the set iterates where they don't), and
   a `JsonPacked` one packed so: a set is written alike in every process, whatever order it iterates in. `patch` writes
   one so too, and `edges.relate` writes a set property so. One that 0.1.0 wrote, in the order it iterated in, loads and

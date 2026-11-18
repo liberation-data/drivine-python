@@ -1,21 +1,17 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 
 from drivine.annotation.direction import Direction
 from drivine.backend.postgres.postgres_graph import (
     PostgresGraph,
     has_labels,
-    json_value,
     node_document,
     number_of,
-    text_of,
 )
 from drivine.backend.sql.nodes_of import NodesOf
-from drivine.backend.sql.order_reads import OrderReads
 from drivine.backend.sql.sql_graph import sql_text
 from drivine.backend.sql.sql_views import SqlViews
-from drivine.model import stamps
 
 
 class PostgresViews(SqlViews):
@@ -27,7 +23,7 @@ class PostgresViews(SqlViews):
     empty_object = "'{}'::jsonb"
 
     def __init__(self, graph: PostgresGraph, depth: Mapping[str, int] | None = None) -> None:
-        super().__init__(graph, depth)
+        super().__init__(graph, depth, "POSTGRES")
 
     def object(self, entries: Sequence[tuple[str, str]]) -> str:
         return f"jsonb_build_object({', '.join(f'{sql_text(key)}, {value}' for key, value in entries)})"
@@ -73,12 +69,14 @@ class PostgresViews(SqlViews):
     def _select(self, hint: str) -> str:
         return "SELECT "
 
-    def _order_reads(self, node: str, property: str) -> OrderReads:
-        """`->>` reads a stored `""` as `""`, so it is a text and needs no reading of its own."""
-        if property == stamps.PROPERTY:
-            return OrderReads("CAST(NULL AS numeric)", text_of(node, property), "CAST(NULL AS integer)")
-        return OrderReads(
-            number_of(node, property),
-            f"CASE WHEN jsonb_typeof({json_value(node, property)}) = 'string' THEN {text_of(node, property)} END",
-            "CAST(NULL AS integer)",
+    def _first_of_ways(self, ways: str, terms: Callable[[str], str]) -> str:
+        """
+        The first hop of each node reached in the order `terms`, over the node of the hop joined back by its id: the
+        first of the ids gathered in that order (drivine4j's `PostgresSelect.pathOrder`).
+        """
+        w = self.next_alias("w")
+        s = f"{self.next_alias('s')}_"
+        return (
+            f"SELECT {w}.nid, (array_agg({s}.nid ORDER BY {terms(s)}))[1] AS hop "
+            f"FROM ({ways}) {w} JOIN {self.graph.nodes} {s} ON {s}.nid = {w}.hop GROUP BY {w}.nid"
         )

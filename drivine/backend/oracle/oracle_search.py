@@ -108,8 +108,10 @@ class OracleSearch:
                         "ORDER BY s.score DESC",
                         *([f"FETCH FIRST {limit} ROWS ONLY"] if limit is not None else []),
                     ]
-                )
+                ),
+                views.fragments.hints,
             ),
             self.graph.name,
+            views.fragments,
         )
-        return GraphStatement(text, dict(bindings or {}), calls=calls)
+        return GraphStatement(text, {**(bindings or {}), **views.fragments.parameters}, calls=calls)

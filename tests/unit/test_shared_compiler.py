@@ -7,10 +7,12 @@ and warnings, and iterators read once, so a statement compiled again binds their
 
 import logging
 import math
+import threading
 from collections.abc import Iterator
 from datetime import UTC, date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from enum import Enum, IntEnum
+from time import sleep
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -248,3 +250,62 @@ def test_a_temporal_parameter_at_an_offset_with_seconds_is_refused_by_name_as_th
 def test_a_temporal_parameter_at_an_offset_of_whole_minutes_is_bound_as_its_kind():
     compiled = compile_cypher("RETURN $t AS t", {"t": time(10, 0, tzinfo=timezone(timedelta(hours=-1)))}, "SQLITE", "g")
     assert '"10:00:00-01:00"' in compiled.parameters["_cy_t"]
+
+
+def test_the_native_compiler_runs_one_call_at_a_time_however_many_threads_compile(monkeypatch: pytest.MonkeyPatch):
+    # drivine-python#558: the native compiler's parse caches aren't safe for two calls at once
+    # (liberation-data/drivine-cypher-spec#385), and its compile releases the GIL, so the calls are serialized here.
+    import drivine_cypher_compiler
+
+    running: list[int] = []
+    most = [0]
+    guard = threading.Lock()
+
+    def native(request: str) -> str:
+        with guard:
+            running.append(1)
+            most[0] = max(most[0], len(running))
+        sleep(0.005)
+        with guard:
+            running.pop()
+        return request
+
+    monkeypatch.setattr(drivine_cypher_compiler, "compile", native)
+    monkeypatch.setattr(shared_compiler, "_compile", None)
+    entry = shared_compiler._compiler(lambda: "")  # pyright: ignore[reportPrivateUsage]
+    answers: list[str] = []
+
+    def compile_some(thread: int) -> None:
+        for it in range(10):
+            answers.append(entry(f"{thread}:{it}"))
+
+    threads = [threading.Thread(target=compile_some, args=(it,)) for it in range(6)]
+    for it in threads:
+        it.start()
+    for it in threads:
+        it.join()
+    assert most[0] == 1
+    assert sorted(answers) == sorted(f"{thread}:{it}" for thread in range(6) for it in range(10))
+
+
+def test_statements_compiled_from_several_threads_at_once_are_each_compiled_as_alone():
+    statements = [f"MATCH (n:L{it}) WHERE n.k{it} > $x RETURN n.k{it} AS v ORDER BY v" for it in range(12)]
+    alone = {it: compile_cypher(it, {"x": 1}, "SQLITE", "g").sql for it in statements}
+    found: list[tuple[str, str]] = []
+    failed: list[BaseException] = []
+
+    def compile_all(offset: int) -> None:
+        try:
+            for round_ in range(5):
+                for it in statements[offset:] + statements[:offset]:
+                    found.append((it, compile_cypher(it, {"x": round_}, "SQLITE", "g").sql))
+        except BaseException as error:  # noqa: BLE001 - every failure is the test's
+            failed.append(error)
+
+    threads = [threading.Thread(target=compile_all, args=(it,)) for it in range(8)]
+    for it in threads:
+        it.start()
+    for it in threads:
+        it.join()
+    assert failed == []
+    assert all(sql == alone[it] for it, sql in found)

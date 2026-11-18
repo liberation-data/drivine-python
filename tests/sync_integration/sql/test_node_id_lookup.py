@@ -466,19 +466,24 @@ def assert_reads_index(
         )
         return "\n".join(str(it["detail"] if sqlite else next(iter(it.values()))) for it in rows)
 
+    def reads(row: str) -> re.Pattern[str]:
+        """The plan's read of the index for the row `row`: on SQLite, the row each statement's FROM declares."""
+        if sqlite:
+            return re.compile(
+                rf"SEARCH {row} USING (COVERING )?INDEX {index} \(<expr>=\? AND <expr>=\?\)", re.IGNORECASE
+            )
+        return re.compile(rf"Index (Only )?Scan using {index} on drivine_node", re.IGNORECASE)
+
     index = rf"drivine_{made}_\w+"
-    reads = (
-        re.compile(rf"SEARCH \w+ USING (COVERING )?INDEX {index} \(<expr>=\? AND <expr>=\?\)", re.IGNORECASE)
-        if sqlite
-        else re.compile(rf"Index (Only )?Scan using {index} on drivine_node", re.IGNORECASE)
-    )
     bound = {"id": to_json(write(id_, "sqlite" if sqlite else "postgres"))}
-    assert reads.search(explain(backend.load_fragment(model).text, bound))
-    assert reads.search(explain(backend.delete(model).text, bound))
+    # A load and a delete read the node as the query DSL's row on SQLite, `n_`.
+    row = "n_" if sqlite else "n"
+    assert reads(row).search(explain(backend.load_fragment(model).text, bound))
+    assert reads(row).search(explain(backend.delete(model).text, bound))
     related = backend.related(
         MatchedNode(model, id_, ()), "POINTS_TO", Direction.OUTGOING, registry.fragment(LookupTarget)
     )
-    assert reads.search(explain(related.text, dict(related.bindings)))
+    assert reads("a").search(explain(related.text, dict(related.bindings)))
 
 
 def test_a_lookup_by_a_number_id_reads_the_uniqueness_constraints_index(
@@ -516,5 +521,46 @@ def test_a_lookup_by_a_date_id_reads_the_range_index_where_it_is_made_over_the_i
     gom.indexes.ensure(index)
     try:
         assert_reads_index(gom, pm, LookupDate, date(2001, 1, 1), "ix2_LookupDateid")
+    finally:
+        gom.indexes.drop(index)
+
+
+def test_each_lookup_by_id_reads_the_index_by_the_row_its_statements_from_declares(
+    gom: StatelessGraphObjectManager, pm: PersistenceManager
+):
+    """
+    A view's load and its deletes, a cascade's included, read the node as the query DSL's row, `n_`; a write's reads of
+    the node it saves, held_properties and found_stamp, read it as `n`, as the write itself does. Each reads the index.
+    """
+    if pm.type is not DatabaseType.SQLITE:
+        pytest.skip("SQLite's rows: Postgres's and Oracle's read the node as n.")
+    index = range_index("LookupDate", "id")
+    gom.save_all([LookupDate(id=date(2000, 1, 1) + timedelta(days=i), name="filler") for i in range(3000)])
+    gom.indexes.ensure(index)
+    try:
+        pm.execute(QuerySpecification[Any]("ANALYZE"))
+        registry = ModelRegistry()
+        model, view = registry.fragment(LookupDate), registry.view(LookupDateTree)
+        backend = gom.backend
+        bound = {"id": to_json(write(date(2001, 1, 1), "sqlite"))}
+
+        def plan(text: str) -> str:
+            rows = pm.query(QuerySpecification[Any](f"EXPLAIN QUERY PLAN {text}").bind(bound))
+            return "\n".join(str(it["detail"]) for it in rows)
+
+        def reads(row: str) -> re.Pattern[str]:
+            return re.compile(
+                rf"SEARCH {row} USING (COVERING )?INDEX drivine_ix2_LookupDateid_\w+ \(<expr>=\? AND <expr>=\?\)"
+            )
+
+        for statement in (
+            backend.load_view(view),
+            backend.delete(view),
+            backend.delete(view, None, CascadeType.DELETE_ALL),
+            backend.delete(view, None, CascadeType.DELETE_ORPHAN),
+        ):
+            assert reads("n_").search(plan(statement.text))
+        assert reads("n").search(plan(backend.held_properties(model).text))
+        assert reads("n").search(plan(backend.found_stamp(model).text))
     finally:
         gom.indexes.drop(index)

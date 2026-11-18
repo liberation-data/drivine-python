@@ -16,8 +16,10 @@ import pytest
 from drivine.cypher.shared_compiler import compile_cypher
 from drivine.query.statement import cypher_statement
 from drivine.sync import (
+    CascadeType,
     DatabaseRegistry,
     DatabaseType,
+    DrivineError,
     FullTextIndex,
     NodeFragment,
     NodeId,
@@ -26,6 +28,9 @@ from drivine.sync import (
     QuerySpecification,
     StatelessGraphObjectManager,
     VectorIndex,
+    above,
+    case_of,
+    equal_to,
     full_text_index,
     range_index,
     refs,
@@ -33,6 +38,7 @@ from drivine.sync import (
     vector_index,
 )
 from tests.models import Organization, Person, PersonCareer, WorkHistory
+from tests.sync_integration.test_recursive_cascade import DeletableSessionTree, chain, seed
 
 
 class Reading(NodeFragment, labels=["Reading"]):
@@ -106,9 +112,9 @@ def test_a_property_no_save_writes_keeps_the_text_it_was_stored_with(gom, pm):
     assert row["props"] == f'{{"id":"r1","value":1.5,"extra":1e3,"nested":{{"x":2.0}},"at":{moment}}}'
 
 
-def test_moments_a_microsecond_apart_order_compare_and_seek_as_the_moments_they_are(gom, pm):
+def test_a_moment_held_as_text_is_a_text_to_the_query_dsl_as_cypher_has_it(gom, pm):
     base = datetime(2024, 5, 6, 7, 8, 9, 123456, tzinfo=UTC)
-    # As drivine4j writes a moment: to the microsecond, at one offset or another.
+    # A moment held as its text, as no save writes one since store layout 2, which holds a moment as its tag.
     for id, text in (
         ("a", "2024-05-06T07:08:09.123456Z"),
         ("b", "2024-05-06T09:08:09.123457+02:00"),
@@ -120,11 +126,12 @@ def test_moments_a_microsecond_apart_order_compare_and_seek_as_the_moments_they_
             props=json.dumps({"id": id, "at": text}),
         )
     q = refs(Reading)
-    assert [it.id for it in gom.load_all(Reading, q.at.gt(base))] == ["b", "c"]
-    assert [it.id for it in gom.load_all(Reading, q.at.eq(base + timedelta(microseconds=1)))] == ["b"]
-    assert [it.id for it in gom.load_all(Reading, order_by=q.at.desc())] == ["c", "b", "a"]
-    later = base.astimezone(timezone(timedelta(hours=-5)))
-    assert [it.id for it in gom.load_all(Reading, q.at.gte(later))] == ["a", "b", "c"]
+    # A text is no moment, so it meets no comparison with one, as in Cypher (the shared module's fragments).
+    assert [it.id for it in gom.load_all(Reading, q.at.gt(base))] == []
+    assert [it.id for it in gom.load_all(Reading, q.at.eq(base + timedelta(microseconds=1)))] == []
+    assert [it.id for it in gom.load_all(Reading, q.at.gte(base.astimezone(timezone(timedelta(hours=-5)))))] == []
+    # And it is ordered as the text it is.
+    assert [it.id for it in gom.load_all(Reading, order_by=q.at.desc())] == ["b", "c", "a"]
 
 
 class Dated(NodeFragment, labels=["Dated"]):
@@ -145,7 +152,11 @@ def test_saved_moments_and_dates_held_as_their_tags_compare_order_and_are_among_
     )
     q = refs(Reading)
     assert [it.id for it in gom.load_all(Reading, q.at.gt(base))] == ["b", "c"]
-    assert [it.id for it in gom.load_all(Reading, q.at.eq(base + timedelta(microseconds=1)))] == ["b"]
+    # Equal only at its own offset: the same instant at another is another value, as Neo4j has it (the spec's "Zoned
+    # values at one instant", drivine-cypher-spec#161).
+    later = base + timedelta(microseconds=1)
+    assert [it.id for it in gom.load_all(Reading, q.at.eq(later.astimezone(timezone(timedelta(hours=2)))))] == ["b"]
+    assert [it.id for it in gom.load_all(Reading, q.at.eq(later))] == []
     assert [it.id for it in gom.load_all(Reading, order_by=q.at.desc())] == ["c", "b", "a"]
     among = [base, base + timedelta(microseconds=2)]
     assert sorted(it.id for it in gom.load_all(Reading, q.at.in_(among))) == ["a", "c"]
@@ -322,8 +333,8 @@ class Tagged(NodeFragment, labels=["Tagged"]):
     size: int | None = None
 
 
-def test_a_grouped_read_orders_a_text_before_a_number_before_a_boolean_and_nulls_last_ascending(gom, pm):
-    # As Postgres's jsonb, the graph engines and drivine4j's SQLite (SqliteSelect.groupOrder) order a group.
+def test_a_grouped_read_orders_a_text_before_a_boolean_before_a_number_and_nulls_last_ascending(gom, pm):
+    # As Cypher orders a key, as drivine4j's SQLite does (SqliteSelect.groups): through a node of the group.
     for id, props in (
         ("t1", {"code": 2, "size": 5}),
         ("t2", {"code": "b"}),
@@ -343,9 +354,9 @@ def test_a_grouped_read_orders_a_text_before_a_number_before_a_boolean_and_nulls
         return [it["code"] for it in found]
 
     keyed = {"code": key("code")}
-    assert codes(gom.groups.load(Tagged, keys=keyed, aggregates={"n": count()})) == ["a", "b", 2, 10, True, None]
+    assert codes(gom.groups.load(Tagged, keys=keyed, aggregates={"n": count()})) == ["a", "b", True, 2, 10, None]
     descending = gom.groups.load(Tagged, keys=keyed, aggregates={"n": count()}, order_by=[("code", "desc")])
-    assert codes(descending) == [None, True, 10, 2, "b", "a"]
+    assert codes(descending) == [None, 10, 2, True, "b", "a"]
     biggest = {"n": count(), "biggest": max_("size")}
     by_size = gom.groups.load(Tagged, keys=keyed, aggregates=biggest, order_by=[("biggest", "asc")])
     assert [it["biggest"] for it in by_size] == [1, 2, 3, 5, None, None]
@@ -367,3 +378,72 @@ def test_a_patch_where_a_boolean_is_bound_meets_the_node_a_load_with_the_same_wh
     assert patched.applied
     loaded = gom.load(Flagged, "f1")
     assert loaded is not None and loaded.note == "met"
+
+
+class Opened(NodeFragment, labels=["Opened"]):
+    id: Annotated[str, NodeId()]
+    at: datetime | None = None
+    open: bool | None = None
+    flags: list[bool] | None = None
+    days: list[datetime] | None = None
+    count: int | None = None
+
+
+def test_the_query_dsl_compares_seeks_orders_and_patches_a_boolean_and_a_moment_as_a_save_stores_them(gom):
+    # The DSL is the shared module's fragments, a patch's condition written into the statement the write function
+    # runs, each value as a literal. A port of Drivine for TypeScript's SqliteStore.spec.
+    first, second = datetime(2026, 1, 1, tzinfo=UTC), datetime(2026, 2, 1, tzinfo=UTC)
+    gom.save_all(
+        [
+            Opened(id="m1", at=first, open=True, flags=[True], days=[first], count=1),
+            Opened(id="m2", at=second, open=False, flags=[False], days=[second], count=2),
+        ]
+    )
+    q = refs(Opened)
+
+    def found(where: Any) -> list[str]:
+        return sorted(it.id for it in gom.load_all(Opened, where))
+
+    assert found(q.at.eq(first)) == ["m1"]
+    assert found(q.at.gt(first)) == ["m2"]
+    assert found(q.at.in_([second])) == ["m2"]
+    assert found(q.open.eq(True)) == ["m1"]
+    assert found(q.open.in_([False])) == ["m2"]
+    assert found(q.open.not_in([False])) == ["m1"]
+    assert found(q.flags.has_item(True)) == ["m1"]
+    assert found(q.days.has_item(second)) == ["m2"]
+    assert [it.id for it in gom.load_all(Opened, order_by=q.at.asc(), seek=q.at.after(first))] == ["m2"]
+    assert [it.id for it in gom.load_all(Opened, order_by=q.open.asc(), seek=q.open.after(False))] == ["m1"]
+    ordered = case_of([equal_to(q.open, False).then(0), above(q.at, first).then(1)], 2).asc()
+    assert [it.id for it in gom.load_all(Opened, order_by=ordered)] == ["m2", "m1"]
+
+    def patched(where: Any) -> bool:
+        return (gom.patch(Opened, "m1", set={"count": 3}, where=where)).applied
+
+    assert patched(q.at.eq(first))
+    assert patched(q.open.eq(True))
+    assert patched(q.open.in_([True]))
+    assert patched(q.days.has_item(first))
+    assert not patched(q.open.eq(False))
+
+
+def test_a_cascade_and_its_depth_check_read_the_dsls_where_over_the_roots_row_n_(gom, pm):
+    # The roots are the row n_, which the DSL's fragments read; what the cascade reaches from them is SQL over n.
+    seed(pm, chain(4))
+    q = refs(DeletableSessionTree)
+    for cascade in (CascadeType.DELETE_ALL, CascadeType.DELETE_ORPHAN):
+        with pytest.raises(DrivineError, match="reaches 3 levels deep"):
+            gom.delete(DeletableSessionTree, "rc-s0", where=q.session.id.eq("rc-s0"), cascade=cascade)
+        assert gom.delete(DeletableSessionTree, "rc-s0", where=q.session.id.eq("other"), cascade=cascade) == 0
+    assert (
+        gom.delete(DeletableSessionTree, "rc-s1", where=q.session.id.eq("rc-s1"), cascade=CascadeType.DELETE_ALL) == 8
+    )
+
+
+def test_a_raw_wheres_binding_named_as_the_dsls_own_keeps_its_value_beside_a_seek(gom):
+    # The DSL's values are bound under the shared module's names (`_cy__q0`), so a caller's `_q0` is the caller's.
+    # Were the seek's value bound as `_q0` too, the where would keep every node but "a", and find "b" and "c".
+    gom.save_all([Reading(id=it) for it in ("a", "b", "c")])
+    q = refs(Reading)
+    found = gom.load_all(Reading, "n.id <> $_q0", bindings={"_q0": "b"}, order_by=q.id.asc(), seek=q.id.after("a"))
+    assert [it.id for it in found] == ["c"]

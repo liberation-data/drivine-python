@@ -13,6 +13,7 @@ from drivine.backend.postgres.found_stamp import FoundStamp, stamps_by_place
 from drivine.backend.postgres.postgres_save_builder import absent, present, stored_key, without_key
 from drivine.backend.postgres.postgres_write_statement import PostgresWriteStatement
 from drivine.backend.save_statement_builder import id_of, object_props
+from drivine.backend.sql.fragments import FRAGMENT_ROOT_ROW
 from drivine.backend.sql.node_writes import NodeWrites
 from drivine.backend.sql.plan_graph import PlanGraph
 from drivine.backend.sql.sql_graph import sql_text
@@ -30,7 +31,8 @@ CHANGED = "1"
 UNMET = "-"
 """In a patch step's entry: the node is there and does not meet the patch's condition, so nothing was written."""
 
-_PARAMETER = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)")
+_PARAMETER = re.compile(r"'(?:[^']|'')*'|\$([A-Za-z_][A-Za-z0-9_]*)")
+"""A quoted text of SQL, a quote doubled in it, which is left as it is, or a parameter, `$name`, its name the group."""
 
 
 class PostgresWrites:
@@ -182,14 +184,18 @@ class PostgresWrites:
 
     def _meeting(self, where: str, bound: Mapping[str, Any]) -> str:
         """
-        The query a patch step asks of the node it found, by its `nid`, the function's `$1`: whether its row `n` meets
-        `where`. The function runs it on its own, where no value can be bound, so each value `where` names is written
-        in.
+        The query a patch step asks of the node it found, by its `nid`, the function's `$1`: whether its row meets
+        `where`, `n`, or on SQLite `n_`, the row the query DSL's fragments read (see SqliteBackend's ROW_ALIAS). The
+        function runs it on its own, where no value can be bound, so each value `where` names is written in. A name
+        within a quoted text, as the path of a property whose name begins with `$` is (`'$."$$id"'`), is the text's,
+        not a value's.
         """
         written = _PARAMETER.sub(
-            lambda it: _literal(bound[it[1]], self.graph.booleans) if it[1] in bound else it[0], where
+            lambda it: _literal(bound[it[1]], self.graph.booleans) if it[1] is not None and it[1] in bound else it[0],
+            where,
         )
-        return f"SELECT COUNT(*) FROM {self.graph.nodes} n WHERE n.nid = $1 AND ({written})"
+        row = FRAGMENT_ROOT_ROW if store_of(self.graph) == "sqlite" else "n"
+        return f"SELECT COUNT(*) FROM {self.graph.nodes} {row} WHERE {row}.nid = $1 AND ({written})"
 
 
 def _writes(props: Mapping[str, Any], lower: Sequence[str] = ()) -> NodeWrites:

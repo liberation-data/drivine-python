@@ -4,9 +4,14 @@ import dataclasses
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any, Literal
 
+from pydantic import TypeAdapter
+
 from drivine.backend.graph_backend import GraphBackend
 from drivine.backend.graph_statement import GraphStatement
 from drivine.drivine_error import DrivineError
+from drivine.dsl.model_scope import scope_of
+from drivine.dsl.query_renderer import root_property
+from drivine.dsl.ref import Ref
 from drivine.manager.group_aggregate import GroupAggregate
 from drivine.manager.group_query import Comparison, GroupQuery
 from drivine.manager.groups import count, key
@@ -68,7 +73,8 @@ class GroupOperations:
                 limit=10,
             )
 
-        A path key's value is the node it reaches, mapped to its class.
+        A path key's value is the node it reaches, mapped to its class. A least or greatest value (`min_`, `max_`) is
+        read as the type its property's field declares, as drivine4j's GroupRow reads one: a datetime as a datetime.
         """
         model = self._registry.fragment(source)
         if where is not None and not isinstance(where, str) and self._lookups is not None:
@@ -92,6 +98,7 @@ class GroupOperations:
         rows = await self._query(self._backend.groups(model, query, targets, self._labels))
         key_names = list(keys)
         aggregate_names = list(aggregates or {})
+        readers = [_declared(model, it) for it in (aggregates or {}).values()]
         results: list[dict[str, Any]] = []
         for row in rows:
             result: dict[str, Any] = {}
@@ -99,7 +106,7 @@ class GroupOperations:
                 target = targets.get(name)
                 result[name] = self._mapper.fragment(target, row[f"k{i}"]) if target else row.get(f"k{i}")
             for i, name in enumerate(aggregate_names):
-                result[name] = row.get(f"a{i}")
+                result[name] = readers[i](row.get(f"a{i}"))
             results.append(result)
         return results
 
@@ -126,3 +133,26 @@ class GroupOperations:
     def _written_filter(self, aggregate: GroupAggregate) -> GroupAggregate:
         """The aggregate with a filter the caller wrote read as the store reads it."""
         return dataclasses.replace(aggregate, filter=self._written(aggregate.filter))
+
+
+def _declared(model: FragmentModel, aggregate: GroupAggregate) -> Callable[[Any], Any]:
+    """
+    How a group's value of `aggregate` is read: a least or greatest value as the type the source's field of its property
+    declares, which a store may give as the text it holds (SQLite gives a date's ISO text), where a field declares it
+    and holds it as the value it is; any other value, and one no field declares, as the store gives it.
+    """
+    if aggregate.function not in ("MIN", "MAX") or aggregate.property is None:
+        return _as_given
+    property_ = aggregate.property
+    if isinstance(property_, Ref):
+        property_ = root_property(property_.path, scope_of(model), "An aggregate")
+    field = model.fields_by_property.get(str(property_))
+    info = getattr(model.type, "model_fields", {}).get(field) if field is not None else None
+    if info is None or field in model.json_packed or field in model.bytes_fields:
+        return _as_given
+    adapter: TypeAdapter[Any] = TypeAdapter(info.annotation)
+    return lambda value: None if value is None else adapter.validate_python(value)
+
+
+def _as_given(value: Any) -> Any:
+    return value

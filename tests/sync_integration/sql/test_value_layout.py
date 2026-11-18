@@ -32,8 +32,11 @@ from drivine.sync import (
     above,
     below,
     case_of,
+    count,
     cypher_statement,
     equal_to,
+    key,
+    max_,
     node_ref,
     not_equal_to,
     refs,
@@ -187,11 +190,10 @@ def test_a_dollar_named_case_insensitive_property_is_found_ignoring_case(
     if pm.type is not DatabaseType.SQLITE:
         pytest.skip("Measured on SQLite only so far (drivine-cypher-spec#355)")
     gom.save(CaseHeld(id="c1", mail="A@X.com"))
+    # The query DSL's filter on SQLite is the shared module's fragment, which reads the property as the layout holds
+    # it, `$$mail` (drivine-cypher-spec#235).
     found = [it.id for it in gom.load_all(CaseHeld, where=refs(CaseHeld).mail.eq_ignore_case("a@x.COM"))]
-    if found != ["c1"]:
-        # How the lowercased copy of a $-named property is named is unsettled across the libraries.
-        pytest.xfail("the lowercased copy of a $-named property is named otherwise (drivine-cypher-spec#355)")
-    pytest.fail("A $-named case-insensitive property is found ignoring case now: take out the hold (#355)")
+    assert found == ["c1"]
 
 
 def test_a_patch_that_removes_a_dollar_named_property_removes_it_as_the_layout_holds_it(
@@ -263,8 +265,8 @@ def test_a_saved_date_or_moment_is_compared_and_ordered_by_the_query_dsl_as_it_i
     gom: StatelessGraphObjectManager, pm: PersistenceManager
 ):
     """
-    SQLite's DSL reads the tag store layout 2 holds a date or moment as (see sqlite_graph.temporal_text). Postgres's and
-    Oracle's would compare it by its text until the DSL takes the shared module's fragments (drivine-cypher-spec#235),
+    SQLite's DSL reads the tag store layout 2 holds a date or moment as, through the shared module's fragments
+    (drivine-cypher-spec#235). Postgres's and Oracle's would compare it by its text until the DSL takes them there too,
     so they refuse it by name, and Cypher compares it there.
     """
     base = datetime(2024, 5, 6, 7, 8, 9, 123000, tzinfo=UTC)
@@ -296,6 +298,40 @@ def test_a_saved_date_or_moment_is_compared_and_ordered_by_the_query_dsl_as_it_i
         gom.load_all(Dated, q.id.in_(["t1", "t2"]), order_by=q.on.desc())
 
 
+class Met(NodeFragment, labels=["MetHeld"]):
+    """A moment of its own label, so its test groups only its own."""
+
+    id: Annotated[str, NodeId()]
+    name: str | None = None
+    at: datetime | None = None
+
+
+def test_a_moment_in_a_patchs_where_and_in_a_grouped_reads_where_and_aggregate_is_compared_by_its_tag(
+    gom: StatelessGraphObjectManager, pm: PersistenceManager
+):
+    first, second = datetime(2026, 1, 1, tzinfo=UTC), datetime(2026, 2, 1, tzinfo=UTC)
+    gom.save_all([Met(id="d1", name="one", at=first), Met(id="d2", name="two", at=second)])
+    q = refs(Met)
+
+    def check() -> None:
+        assert not (gom.patch(Met, "d1", set={"name": "missed"}, where=q.at.eq(second))).applied
+        assert (gom.patch(Met, "d1", set={"name": "patched"}, where=q.at.eq(first))).applied
+        loaded = gom.load(Met, "d1")
+        assert loaded is not None and loaded.name == "patched"
+        groups = gom.groups.load(
+            Met,
+            where=q.at.gte(first),
+            keys={"name": key(q.name)},
+            aggregates={"later": count(q.at.gt(first)), "last": max_(q.at)},
+            order_by=[("name", "asc")],
+        )
+        # The greatest moment is read back as the type its field declares (drivine-python#537).
+        assert groups == [{"name": "patched", "later": 0, "last": first}, {"name": "two", "later": 1, "last": second}]
+        assert gom.groups.load(Met, where=q.at.gt(first), keys={"name": key(q.name)}) == [{"name": "two"}]
+
+    on_sqlite_or_refused(pm, check)
+
+
 class Listed(NodeFragment, labels=["ListedHeld"]):
     id: Annotated[str, NodeId()]
     days: list[date] | None = None
@@ -322,8 +358,10 @@ def test_the_query_dsl_finds_a_saved_date_moment_or_time_in_a_list_by_has_item(
             return sorted(it.id for it in gom.load_all(Listed, condition))
 
         assert found(q.days.has_item(date(2024, 1, 2))) == ["l1"]
-        # The same moment at another offset is the moment it is (#525).
-        assert found(q.moments.has_item(moment.astimezone(timezone(timedelta(hours=-5))))) == ["l1"]
+        assert found(q.moments.has_item(moment)) == ["l1"]
+        # The same instant at another offset is another value, as Neo4j has it: the spec's "Zoned values at one
+        # instant", where `b IN [a]` is false (drivine-cypher-spec#161).
+        assert found(q.moments.has_item(moment.astimezone(timezone(timedelta(hours=-5))))) == []
         assert found(q.clocks.has_item(clock)) == ["l1"]
         assert found(q.clocks.has_item(time(11))) == ["l1"]
         assert found(q.clocks.has_item(time(12))) == []
@@ -332,18 +370,19 @@ def test_the_query_dsl_finds_a_saved_date_moment_or_time_in_a_list_by_has_item(
     on_sqlite_or_refused(pm, check)
 
 
-def test_has_item_finds_a_moment_a_list_holds_as_text_and_passes_over_a_text_that_names_none(
+def test_has_item_passes_over_a_text_a_list_holds_where_a_moment_is_asked_for_as_cypher_does(
     gom: StatelessGraphObjectManager, pm: PersistenceManager
 ):
     def check() -> None:
-        # Written by the user's own Cypher, so each item is the text it was written as, and not a save's tag.
+        # Written by the user's own Cypher, so each item is the text it was written as, and not a save's tag: a text,
+        # which Cypher never finds equal to a moment, though it names one.
         statement = (
             "MERGE (a:ListedHeld {id: 'l3'}) SET a.moments = ['2024-05-06T09:08:09.123456+02:00'] "
             "MERGE (b:ListedHeld {id: 'l4'}) SET b.moments = ['soon', '2024-05-06T07:08:10Z']"
         )
         pm.execute(QuerySpecification[Any](cypher_statement(statement)))
         moment = datetime(2024, 5, 6, 7, 8, 9, 123456, tzinfo=UTC)
-        assert [it.id for it in gom.load_all(Listed, refs(Listed).moments.has_item(moment))] == ["l3"]
+        assert [it.id for it in gom.load_all(Listed, refs(Listed).moments.has_item(moment))] == []
 
     on_sqlite_or_refused(pm, check)
 
@@ -446,8 +485,10 @@ def test_a_local_time_and_a_time_with_an_offset_are_unequal_and_neither_before_t
         assert found(q.clock.neq(time(8, tzinfo=UTC))) == ["local"]
         # A time with an offset orders before a local one, as Neo4j orders them.
         assert [it.id for it in gom.load_all(TwoKinds, order_by=q.clock.asc())] == ["zoned", "local"]
+        # A seek is a comparison with the cursor, which a local time doesn't meet with a time with an offset, being
+        # neither before nor after it, as a graph engine seeks.
         after = q.clock.after(time(8, tzinfo=UTC))
-        assert [it.id for it in gom.load_all(TwoKinds, order_by=q.clock.asc(), seek=after)] == ["local"]
+        assert [it.id for it in gom.load_all(TwoKinds, order_by=q.clock.asc(), seek=after)] == []
 
     on_sqlite_or_refused(pm, check)
 

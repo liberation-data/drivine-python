@@ -1,9 +1,11 @@
 """
 Postgres and Oracle refuse a query DSL comparison with a date, datetime or time, and an order by a field declared one,
 by name: store layout 2 holds such a value as its tag, which their DSL would compare by its text, until the DSL takes
-the shared module's fragments (drivine-cypher-spec#235). SQLite's DSL reads the tag, and renders them.
+the shared module's fragments (drivine-cypher-spec#235, steps 3 and 4). SQLite's DSL is the module's fragments since
+step 2, which compare a date by its tag, and renders them.
 """
 
+import json
 from collections.abc import Callable
 from datetime import UTC, date, datetime, time
 from typing import Annotated, Any
@@ -37,6 +39,7 @@ from drivine.backend.cypher_grammar import NEO4J_GRAMMAR
 from drivine.backend.oracle.oracle_backend import OracleBackend
 from drivine.backend.oracle.oracle_graph import OracleGraph
 from drivine.backend.postgres.postgres_backend import PostgresBackend
+from drivine.backend.save_statement_builder import packed
 from drivine.backend.sqlite.sqlite_backend import SqliteBackend
 from drivine.backend.sqlite.sqlite_graph import SqliteGraph
 from drivine.dsl.query import Query
@@ -243,3 +246,62 @@ def test_a_grouped_read_that_compares_with_a_temporal_value_is_refused_by_name(
 @pytest.mark.parametrize("grouped", GROUPS.values(), ids=GROUPS.keys())
 def test_sqlite_renders_a_grouped_read_that_compares_with_a_temporal_value(grouped: Callable[[], GroupQuery]):
     assert SQLITE.groups(model, grouped(), {}, labels).text
+
+
+TAGGED = json.dumps(
+    {"$t": "datetime", "v": "2026-01-01T00:00:00Z", "s": "10000020260101000000000000000064800"}, separators=(",", ":")
+)
+"""The JSON a fragment binds a moment as: the tag store layout 2 holds it as (drivine-cypher-spec#161)."""
+
+FIRST = datetime(2026, 1, 1, tzinfo=UTC)
+
+
+@pytest.mark.parametrize(
+    "where",
+    [
+        lambda: q.at.eq(FIRST),
+        lambda: q.at.gt(FIRST),
+        lambda: q.at.not_in([FIRST]),
+        lambda: q.days.has_item(FIRST),
+        lambda: q.property("at").eq(FIRST),
+    ],
+    ids=["eq", "gt", "not_in", "has_item", "by stored name"],
+)
+def test_sqlite_compares_a_moment_by_its_tag_bound_by_the_renderers_names(where: Callable[[], Any]):
+    written, bindings = SQLITE.render_where(where(), model, labels)
+    assert "n_.props" in written
+    assert "$_cy__q0" in written
+    assert list(bindings) == ["_cy__q0"]
+    assert TAGGED in bindings["_cy__q0"]
+
+
+def test_sqlite_binds_a_list_of_moments_as_the_list_of_their_tags():
+    assert SQLITE.render_where(q.at.in_([FIRST]), model, labels)[1] == {"_cy__q0": f"[{TAGGED}]"}
+
+
+def test_sqlite_compares_a_moment_by_its_tag_in_a_seek_and_in_an_order_expression_named_apart_there():
+    seek = SQLITE.render_query(Query(order_by=q.at.asc(), seek=q.at.after(FIRST)), model, labels)
+    assert seek.bindings == {"_cy__q0": TAGGED}
+    order = SQLITE.render_query(Query(order_by=case_of([above(q.at, FIRST).then(1)], 2).asc()), model, labels)
+    assert order.where is None
+    assert order.order_by is not None and "$_cy_f1__q0" in order.order_by
+    assert order.bindings == {"_cy_f1__q0": TAGGED, "_cy_f1__q1": "1", "_cy_f1__q2": "2"}
+
+
+def test_sqlite_compares_a_moment_by_its_tag_in_a_grouped_reads_where_and_in_a_filtered_aggregate():
+    grouped = GroupQuery({"name": key(q.name)}, {"since": count(q.at.gt(FIRST))}, where=q.at.gte(FIRST))
+    statement = SQLITE.groups(model, grouped, {}, labels)
+    # The aggregates' filters are written before the where, each numbered on from the one before.
+    assert statement.bindings == {"_cy__q0": TAGGED, "_cy__q1": TAGGED}
+    assert "$_cy__q0" in statement.text and "$_cy__q1" in statement.text
+
+
+def test_sqlite_binds_a_jsonpacked_propertys_value_date_or_not_as_the_text_it_is_packed_as():
+    def bound(where: Any) -> list[Any]:
+        return list(SQLITE.render_where(where, model, labels)[1].values())
+
+    # As a save packs it (see save_statement_builder.packed), then as the JSON text a fragment binds.
+    assert bound(q.packed.eq(DAY)) == [json.dumps(packed(DAY))]
+    assert bound(q.packed.eq({"n": 1})) == [json.dumps(packed({"n": 1}))]
+    assert bound(q.name.eq("two")) == ['"two"']
+    assert bound(q.at.is_not_null()) == []

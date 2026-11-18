@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, TypeVar
@@ -58,6 +59,35 @@ class _Aliases:
     rel: str | None = None
 
 
+@dataclass(frozen=True)
+class WrittenPart:
+    """A part of a query's Cypher, with the values it binds by their names in it (`_q0`, …)."""
+
+    cypher: str
+    bindings: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class OrderPart(WrittenPart):
+    """The expression an order of the roots sorts by, with its term: its direction and where it places its nulls."""
+
+    term: OrderTerm
+
+
+@dataclass(frozen=True)
+class QueryParts:
+    """A query's Cypher in its parts (see QueryRenderer.parts)."""
+
+    filter: WrittenPart | None
+    """The query's `where`, as the condition it is."""
+    keyset: WrittenPart | None
+    """The condition that continues after the query's cursor."""
+    orders: tuple[OrderPart, ...]
+    """The expression each order of the roots sorts by."""
+    rendered: RenderedQuery
+    """What else the rendered query says: all but its `where` and its `order_by`."""
+
+
 class QueryRenderer:
     """
     Writes a query as Cypher for one engine, as TypeScript's Drivine writes it. Values are bound as parameters (`$_q0`,
@@ -94,31 +124,60 @@ class QueryRenderer:
         alias: str,
         labels_of_class: Callable[[type], list[str]],
     ) -> RenderedQuery:
+        parts = QueryRenderer.parts(query, model, grammar, alias, labels_of_class)
+        order_by = ", ".join(_order(it.term, it.cypher) for it in parts.orders) if parts.orders else None
+        return dataclasses.replace(
+            parts.rendered,
+            where=" AND ".join(it.cypher for it in (parts.filter, parts.keyset) if it is not None) or None,
+            order_by=order_by,
+        )
+
+    @staticmethod
+    def parts(
+        query: Query,
+        model: TargetModel,
+        grammar: CypherGrammar,
+        alias: str,
+        labels_of_class: Callable[[type], list[str]],
+    ) -> QueryParts:
+        """
+        The query as the parts of its Cypher over the root, bound to `alias`: its filter and its seek, each the
+        condition it is, and the expression of each of its orders, each with the values it binds, in the order `render`
+        binds them; and what else a rendered query says of it. A SQL store compiles each part by the shared module's
+        fragments (see FragmentQueryRenderer); `render` joins them for a graph engine.
+        """
         scope = scope_of(model)
         renderer = QueryRenderer(grammar, labels_of_class, query.depth)
         condition = all_of_one(query.where) if query.where is not None else None
-        written = renderer.where(condition, scope, alias) if condition is not None else None
+        filter_ = renderer.bound(lambda: renderer.where(condition, scope, alias)) if condition is not None else None
         terms = [classify(it, scope) for it in list_of(query.order_by)]
         keys = [it for it in terms if isinstance(it, RootKey)]
         seek = list_of(query.seek)
-        keyset = renderer.keyset(keys, seek, query, alias)[0] if query.seek is not None else None
+        keyset = WrittenPart(*renderer.keyset(keys, seek, query, alias)) if query.seek is not None else None
         by_expression = any(it.term.expression is not None for it in keys)
-        order_by = None
-        if keys:
-            order_by = ", ".join(_order(it.term, renderer.order_expression(it, scope, alias)[0]) for it in keys)
-        return RenderedQuery(
-            where=" AND ".join(it for it in (written, keyset) if it is not None) or None,
-            order_by=order_by,
-            limit=count("limit", query.limit),
-            skip=count("skip", query.skip),
-            depth=query.depth or {},
-            bindings=renderer.bindings,
-            ordered=() if by_expression else tuple(it.property or "" for it in keys),
-            collection_sorts=tuple(it for it in terms if isinstance(it, CollectionSort)),
-            pinned=tuple(pinned_properties(condition, scope)) if condition is not None else (),
-            paged=any(it is not None for it in (query.order_by, query.limit, query.skip, query.seek)),
-            seeks=query.seek is not None,
+        orders = tuple(OrderPart(*renderer.order_expression(it, scope, alias), it.term) for it in keys)
+        return QueryParts(
+            filter=filter_,
+            keyset=keyset,
+            orders=orders,
+            rendered=RenderedQuery(
+                limit=count("limit", query.limit),
+                skip=count("skip", query.skip),
+                depth=query.depth or {},
+                bindings=renderer.bindings,
+                ordered=() if by_expression else tuple(it.property or "" for it in keys),
+                collection_sorts=tuple(it for it in terms if isinstance(it, CollectionSort)),
+                pinned=tuple(pinned_properties(condition, scope)) if condition is not None else (),
+                paged=any(it is not None for it in (query.order_by, query.limit, query.skip, query.seek)),
+                seeks=query.seek is not None,
+            ),
         )
+
+    def bound(self, write: Callable[[], str]) -> WrittenPart:
+        """The Cypher `write` gives, with the values it binds: those it adds to what the renderer bound before."""
+        before = set(self.bindings)
+        written = write()
+        return WrittenPart(written, self._bound_since(before))
 
     def where(self, condition: Condition, scope: Scope, alias: str) -> str:
         """

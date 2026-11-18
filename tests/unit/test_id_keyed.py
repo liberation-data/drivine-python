@@ -52,6 +52,7 @@ from drivine.backend.postgres.postgres_backend import PostgresBackend
 from drivine.backend.postgres.postgres_graph import PostgresGraph
 from drivine.backend.postgres.postgres_save_builder import numeric_text, stored_key
 from drivine.backend.save_statement import SaveStatement
+from drivine.backend.sql.fragments import FRAGMENT_ROOT_ROW
 from drivine.backend.sql.node_ids import NO_NODE, read_back_key, typed_id
 from drivine.backend.sql.sql_json import to_json
 from drivine.backend.sql.value_layout import write
@@ -363,13 +364,17 @@ class DialView(GraphView):
 
 @dataclass(frozen=True)
 class LookupStore:
-    """A SQL store a lookup by id is written for: its backend, the SQL its id is read as, its test of Dial's labels."""
+    """
+    A SQL store a lookup by id is written for: its backend, the SQL its id is read as, the row a load and a delete by id
+    read the node as, and its test of Dial's labels on a row.
+    """
 
     type: DatabaseType
     store: Literal["postgres", "sqlite", "oracle"]
     backend: Callable[[], GraphBackend]
     json: Callable[[str], str]
-    labels: str
+    row: str
+    labels: Callable[[str], str]
 
     def __repr__(self) -> str:
         return self.store
@@ -381,22 +386,28 @@ LOOKUP_STORES = [
         "postgres",
         lambda: PostgresBackend(PostgresGraph()),
         lambda parameter: parameter,
-        """n.labels @> '["Dial"]' AND n.labels @> '["Meter"]'""",
+        "n",
+        lambda row: f"""{row}.labels @> '["Dial"]' AND {row}.labels @> '["Meter"]'""",
     ),
     LookupStore(
         DatabaseType.SQLITE,
         "sqlite",
         lambda: SqliteBackend(SqliteGraph()),
         lambda parameter: parameter,
-        """instr(n.labels, '"Dial"') > 0 AND instr(n.labels, '"Meter"') > 0""",
+        # A load and a delete read the node as the query DSL's row, which a fragment's variable ends with `_`.
+        FRAGMENT_ROOT_ROW,
+        lambda row: f"""instr({row}.labels, '"Dial"') > 0 AND instr({row}.labels, '"Meter"') > 0""",
     ),
     LookupStore(
         DatabaseType.ORACLE,
         "oracle",
         lambda: OracleBackend(OracleGraph()),
         lambda parameter: f"JSON({parameter} EXTENDED)",
-        """INSTR(',' || LTRIM(RTRIM(JSON_SERIALIZE(n.labels), ']'), '[') || ',"', ',"Dial","') > 0 AND """
-        """INSTR(',' || LTRIM(RTRIM(JSON_SERIALIZE(n.labels), ']'), '[') || ',"', ',"Meter","') > 0""",
+        "n",
+        lambda row: (
+            f"""INSTR(',' || LTRIM(RTRIM(JSON_SERIALIZE({row}.labels), ']'), '[') || ',"', ',"Dial","') > 0 AND """
+            f"""INSTR(',' || LTRIM(RTRIM(JSON_SERIALIZE({row}.labels), ']'), '[') || ',"', ',"Meter","') > 0"""
+        ),
     ),
 ]
 """
@@ -417,21 +428,24 @@ class TestALookupById:
     def test_compares_the_id_as_the_module_writes_it_beside_a_test_of_each_label(self, lookup: LookupStore):
         registry = ModelRegistry()
         dial, view = registry.fragment(Dial), registry.view(DialView)
-        has_id = id_sql(lookup.store, "hasId", "n", "id", lookup.json("$id"))
         backend = lookup.backend()
+        row = lookup.row
+        # A write's reads, held_properties and found_stamp, read the node as `n` on every store.
         statements = [
-            backend.load_fragment(dial),
-            backend.load_view(view),
-            backend.delete(dial),
-            backend.delete(view, None, CascadeType.DELETE_ALL),
-            backend.held_properties(dial),
-            backend.found_stamp(dial),
-            *(it.statement for it in backend.cascade_depth_checks(view)),
+            (backend.load_fragment(dial), row),
+            (backend.load_view(view), row),
+            (backend.delete(dial), row),
+            (backend.delete(view, None, CascadeType.DELETE_ALL), row),
+            (backend.held_properties(dial), "n"),
+            (backend.found_stamp(dial), "n"),
+            *((it.statement, row) for it in backend.cascade_depth_checks(view)),
         ]
-        for statement in statements:
+        for statement, alias in statements:
+            has_id = id_sql(lookup.store, "hasId", alias, "id", lookup.json("$id"))
+            labels = lookup.labels(alias)
             # A view's requirements are joined to the id's test, which is in parentheses of its own there.
-            text = statement.text.replace(f"{lookup.labels} AND (({has_id}", f"{lookup.labels} AND ({has_id}")
-            assert f"{lookup.labels} AND ({has_id}" in text
+            text = statement.text.replace(f"{labels} AND (({has_id}", f"{labels} AND ({has_id}")
+            assert f"{labels} AND ({has_id}" in text
 
     def test_finds_the_node_load_related_is_from_by_its_id_beside_each_of_its_labels(self, lookup: LookupStore):
         registry = ModelRegistry()
@@ -439,7 +453,7 @@ class TestALookupById:
             MatchedNode(registry.fragment(Dial), 7, ()), "READS", Direction.OUTGOING, registry.fragment(Coded)
         )
         has_id = id_sql(lookup.store, "hasId", "a", "id", lookup.json("$x_from"))
-        assert f"{has_id} AND {lookup.labels.replace('n.labels', 'a.labels')}" in related.text
+        assert f"{has_id} AND {lookup.labels('a')}" in related.text
         assert related.spec().parameters["x_from"] == "7"  # type: ignore[index]
 
     async def test_binds_a_number_a_date_a_moment_a_text_and_a_bool_id_as_the_json_the_node_holds_each_as(
@@ -577,7 +591,7 @@ class TestALookupById:
 
     def test_finds_a_node_of_a_dollar_named_id_by_the_key_the_layout_holds_it_under(self, lookup: LookupStore):
         priced = ModelRegistry().fragment(Priced)
-        has_id = id_sql(lookup.store, "hasId", "n", "$$code", lookup.json("$id"))
+        has_id = id_sql(lookup.store, "hasId", lookup.row, "$$code", lookup.json("$id"))
         assert has_id in lookup.backend().load_fragment(priced).text
 
 

@@ -8,7 +8,13 @@ from drivine.annotation.direction import Direction
 from drivine.backend.fragment_group import FragmentGroup
 from drivine.backend.graph_statement import GraphStatement
 from drivine.backend.matched_node import MatchedNode
-from drivine.backend.oracle.id_keyed_statement import held_id
+from drivine.backend.oracle.id_keyed_statement import (
+    NO_JSON_TABLE_TRANSFORM,
+    bound_id_rows,
+    found_by_ids,
+    held_id,
+    id_match,
+)
 from drivine.backend.oracle.oracle_graph import OracleGraph, carries_labels, has_labels, json_key, node_document
 from drivine.backend.oracle.oracle_save_builder import prelude
 from drivine.backend.save_statement_builder import id_of, object_props
@@ -131,12 +137,14 @@ class OracleWrites:
                 if when == "before":
                     declarations.extend([f"{variable} CLOB;", f"v_after{i} CLOB;"])
                 ids = bind(held_id([id_of(group.model, it) for it in group.objects]))
+                found = found_by_ids(
+                    self.graph.nodes, "n", _id_property(group.model), group.model.labels, bound_id_rows(ids)
+                )
+                # Hinted as the lookup is: it reads the node's props beside the lookup's, once Oracle unnests it.
                 body.append(
-                    f"SELECT NVL(JSON_ARRAYAGG(JSON_OBJECT('id' VALUE JSON_QUERY(n.props, '${k}'), 'stamp' VALUE "
-                    f"NVL(n.stamp, '{stamps.NEVER_STAMPED}')) RETURNING CLOB), '[]') INTO {variable} FROM "
-                    f"{self.graph.nodes} n WHERE {has_labels('n', group.model.labels)} AND EXISTS (SELECT 1 FROM "
-                    f"JSON_TABLE(JSON({ids} EXTENDED), '$[*]' COLUMNS (v JSON PATH '$')) t WHERE JSON_EXISTS(n.props, "
-                    f"'$?(@{k} == $v)' PASSING t.v AS \"v\"));"
+                    f"SELECT {NO_JSON_TABLE_TRANSFORM} NVL(JSON_ARRAYAGG(JSON_OBJECT('id' VALUE "
+                    f"JSON_QUERY(n.props, '${k}'), 'stamp' VALUE NVL(n.stamp, '{stamps.NEVER_STAMPED}')) "
+                    f"RETURNING CLOB), '[]') INTO {variable} FROM {self.graph.nodes} n WHERE {found};"
                 )
 
         reads("before")
@@ -282,10 +290,7 @@ class OracleWrites:
 
     def _match_of(self, node: MatchedNode, name: str = "x_frommatch") -> str:
         labels = list(dict.fromkeys([*node.model.labels, *node.labels]))
-        k = json_key(held_key(_id_property(node.model)))
-        self._pending[name] = (
-            f"{has_labels('n', labels)} AND JSON_EXISTS(n.props, '$?(@{k} == $v)' PASSING JSON(:1 EXTENDED) AS \"v\")"
-        )
+        self._pending[name] = id_match(self.graph.nodes, _id_property(node.model), labels)
         self._pending["x_from" if name == "x_frommatch" else "x_to"] = held_id(node.id)
         return f"${name}"
 
@@ -293,13 +298,8 @@ class OracleWrites:
         self._pending["x_match"] = self._match_text(model)
         return "$x_match"
 
-    @staticmethod
-    def _match_text(model: FragmentModel) -> str:
-        k = json_key(held_key(_id_property(model)))
-        return (
-            f"{has_labels('n', model.labels)} AND JSON_EXISTS(n.props, '$?(@{k} == $v)' "
-            'PASSING JSON(:1 EXTENDED) AS "v")'
-        )
+    def _match_text(self, model: FragmentModel) -> str:
+        return id_match(self.graph.nodes, _id_property(model), model.labels)
 
     def _lowering(self, model: FragmentModel, before: str = "", after: str = "") -> list[str]:
         """

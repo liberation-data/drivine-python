@@ -82,11 +82,12 @@ class OracleStoredFunctions:
     Whether a session may call the functions a graph's store keeps beside its tables (see `OracleGraph.functions`). A
     store made by an earlier version lacks those added since until the graph is ensured again, and a user who may not
     make a function (`CREATE PROCEDURE`) has none at all: a Cypher statement is then compiled to call none of those it
-    lacks, and says so once for each graph and function. drivine4j's `OracleStoredFunctions`.
+    lacks, and a statement of the query DSL that calls one is refused; a warning says so once for each graph and function.
+    drivine4j's `OracleStoredFunctions`.
 
     Asked only by a statement that would call one (see `OracleConnection`), which calls the function to find out:
-    `<graph>_nulls_equal` by `check`, and `<graph>_era` and `<graph>_era_date` together by `era_check`. A session that
-    may call it is remembered for the function, the database, its user and the graph, for as long as the process runs:
+    `<graph>_nulls_equal` by `check`, `<graph>_era`, `<graph>_era_date` and `<graph>_temporal_key` together by
+    `era_check`, and `<graph>_temporal_arith` by `temporal_arithmetic_check`. A session that may call it is remembered for the function, the database, its user and the graph, for as long as the process runs:
     a function dropped after that is not noticed, and a statement that calls it fails until the process restarts. One
     that may not is remembered for ABSENT_FOR seconds, or until the graph is ensured in this process (see `ensured`), so
     a store without the function is not asked on every statement, and a graph ensured later still gains it.

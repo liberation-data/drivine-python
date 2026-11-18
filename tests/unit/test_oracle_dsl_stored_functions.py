@@ -5,6 +5,7 @@ them, as a Cypher statement is, so the session is asked first, and the statement
 call one. Drivine for TypeScript's OracleConnection.spec of liberation-data/drivine#797.
 """
 
+import logging
 from typing import Annotated, Any
 
 import pytest
@@ -13,6 +14,7 @@ from drivine import CursorSpecification, NodeFragment, NodeId, QuerySpecificatio
 from drivine.backend.graph_statement import StoredFunctionCalls
 from drivine.backend.oracle.oracle_backend import OracleBackend
 from drivine.backend.oracle.oracle_graph import OracleGraph
+from drivine.backend.oracle.oracle_stored_functions import OracleStoredFunctions
 from drivine.backend.page import Page
 from drivine.drivine_error import DrivineError
 from drivine.dsl.query import Query
@@ -96,6 +98,28 @@ async def test_one_that_calls_the_graphs_temporal_arithmetic_is_refused_where_th
         await connection(session, g).query(statement.spec(query.bindings))
     assert f"calls {g}_temporal_arith, a function the Oracle graph '{g}' keeps" in str(refused.value)
     assert session.statements == []
+
+
+async def test_the_temporal_arithmetic_is_asked_of_apart_from_the_others_and_warned_of_once_saying_what_is_lost(
+    caplog: pytest.LogCaptureFixture,
+    now: list[float],  # noqa: F811 (the fixture imported above)
+):
+    # A store ensured by a version before it has nulls_equal and the era functions, and not this.
+    g = a_graph()
+    session = Session(nulls_equal=("found",), era=("found",), temporal_arithmetic=(904, 904))
+    arithmetic = connection(session, g)
+    with caplog.at_level(logging.WARNING, logger="drivine.oracle"):
+        assert await arithmetic._calls("nulls_equal")
+        assert await arithmetic._calls("era")
+        assert not await arithmetic._calls("temporal_arithmetic")
+        assert not await arithmetic._calls("temporal_arithmetic")
+        now[0] += OracleStoredFunctions.ABSENT_FOR
+        assert not await arithmetic._calls("temporal_arithmetic")
+    assert len(session.checks) == 4
+    assert f"{g}_temporal_arith('+', JSON(" in session.checks[2]
+    warned = [it.getMessage() for it in caplog.records if f"has no function {g}_temporal_arith," in it.getMessage()]
+    assert len(warned) == 1, caplog.records
+    assert "an order of the query DSL by arithmetic of a property's value is refused" in warned[0]
 
 
 async def test_one_is_refused_naming_each_of_the_graphs_era_functions_where_it_calls_them_and_the_session_may_not():

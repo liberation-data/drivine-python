@@ -130,6 +130,11 @@ def test_a_property_compared_with_a_parameter_bound_to_a_boolean_is_compared_wit
         "JSON_VALUE(n_.props, '$.open') = $missing"
     )
     assert rewrite("n.open = $opened", {"open": True, "opened": 1}) == "JSON_VALUE(n_.props, '$.open') = $opened"
+    # Each SQL store reads it so given the bindings; a graph engine reads the predicate as it is.
+    assert OracleBackend().written("n.open = $open", bound) == "JSON_VALUE(n_.props, '$.open') = 'true'"
+    assert PostgresBackend().written("n.open = $open", bound) == "(n_.props ->> 'open') = 'true'"
+    assert SqliteBackend().written("n.open = $open", bound) == SqliteBackend().written("n.open = true")
+    assert CypherBackend(NEO4J_GRAMMAR).written("n.open = $open", bound) == "n.open = $open"
     # SQL of the caller's own over the row reads the boolean as the driver binds it.
     assert SqliteBackend().written("(n.props ->> '$.open') = $open", bound) == "(n_.props ->> '$.open') = $open"
     # Without the bindings the predicate is read as before.

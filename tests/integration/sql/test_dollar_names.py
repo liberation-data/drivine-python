@@ -2,9 +2,9 @@
 A query DSL filter, order and grouped read of a property whose name begins with `$`, which store layout 2 holds as
 `$$score` (drivine-cypher-spec#161). The DSL's own SQL named it as it is, `$score`, so it found no node, ordered by
 nothing and grouped every node under no value, silently. The shared module's fragments read it as the layout holds it:
-on SQLite since drivine-cypher-spec#235 step 2, and on Postgres since step 3. A raw where reads it by the key it is held
-under on each SQL store (drivine-python#543, liberation-data/drivine#793). A port of Drivine for TypeScript's
-StatelessGraphObjectManager.dollarNames.spec.
+on SQLite since drivine-cypher-spec#235 step 2, on Postgres since step 3 and on Oracle since step 4. A raw where reads
+it by the key it is held under on each SQL store (drivine-python#543, liberation-data/drivine#793). A port of Drivine
+for TypeScript's StatelessGraphObjectManager.dollarNames.spec.
 """
 
 from collections.abc import AsyncIterator

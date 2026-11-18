@@ -87,7 +87,7 @@ q.employment_history.none(lambda it: it.role.eq("Lead"))
   `order_by`, ending with a unique key.
 - **An order by an expression:** `plus`, `minus`, `times`, `div`, `negate`, `exp`, `floor`, `coalesce`, `case_of`
   with `above`, `below`, `at_least`, `at_most`, `equal_to`, `has_value` and the rest, all computed in the database.
-- **On SQLite and Postgres the DSL is the shared module's SQL** for the Cypher it writes for Neo4j
+- **On SQLite, Postgres and Oracle the DSL is the shared module's SQL** for the Cypher it writes for Neo4j
   ([drivine-cypher-spec#235](https://github.com/liberation-data/drivine-cypher-spec/issues/235)), so a filter, an
   order, a seek, a patch's `where` and a grouped read give the rows Neo4j does. Dates, moments and times compare as
   Cypher compares them: a moment by its instant, then its offset, so the same instant at two offsets is two values,

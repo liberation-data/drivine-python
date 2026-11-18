@@ -12,7 +12,7 @@ from drivine.backend.matched_node import MatchedNode
 from drivine.backend.matching_search import FullTextIndexLookup, MatchingSearch
 from drivine.backend.nearest_search import NearestSearch
 from drivine.backend.oracle.id_keyed_statement import IdKeyedStatement
-from drivine.backend.oracle.oracle_graph import OracleGraph, has_labels, json_key, node_document, text_of
+from drivine.backend.oracle.oracle_graph import OracleGraph, carries_labels, has_labels, node_document, text_of
 from drivine.backend.oracle.oracle_groups import OracleGroups
 from drivine.backend.oracle.oracle_query_renderer import OracleQueryRenderer
 from drivine.backend.oracle.oracle_save_builder import OracleSaveBuilder
@@ -23,6 +23,7 @@ from drivine.backend.oracle.oracle_writes import OracleWrites
 from drivine.backend.page import Page
 from drivine.backend.save_statement import SaveStatement
 from drivine.backend.sql.cypher_shorthand import CypherShorthand
+from drivine.backend.sql.node_ids import has_id
 from drivine.backend.sql.sql_cascade import beyond_count, kept_targets
 from drivine.backend.sql.sql_catalog import catalog_properties
 from drivine.backend.store_statements import StampAndMarker
@@ -98,7 +99,11 @@ class OracleBackend:
         )
 
     def load_fragment(self, model: FragmentModel) -> GraphStatement:
-        return IdKeyedStatement.of(self.load_all_fragments(model, self._id_predicate(model)))
+        return IdKeyedStatement(
+            "\n".join(
+                [f'SELECT {node_document(ROW_ALIAS)} AS "result"', self._found_by_id(model, self._id_predicate(model))]
+            )
+        )
 
     def count_fragments(
         self, model: FragmentModel, where: str | None = None, tested: Sequence[str] = ()
@@ -125,7 +130,15 @@ class OracleBackend:
         )
 
     def load_view(self, model: GraphViewModel, depth: Mapping[str, int] | None = None) -> GraphStatement:
-        return IdKeyedStatement.of(self.load_all_views(model, self._id_predicate(model.root), depth))
+        views = OracleViews(self.graph, depth)
+        return IdKeyedStatement(
+            "\n".join(
+                [
+                    f'SELECT {views.document(model, ROW_ALIAS)} AS "result"',
+                    self._found_by_id(model.root, self._view_where(model, self._id_predicate(model.root), depth)),
+                ]
+            )
+        )
 
     def count_views(
         self,
@@ -152,7 +165,7 @@ class OracleBackend:
         root = target.root if isinstance(target, GraphViewModel) else target
         filter_ = self._deleted_where(target, where)
         if cascade is CascadeType.NONE:
-            return IdKeyedStatement.of(self._deleting(root, filter_))
+            return IdKeyedStatement.of(self._deleting(root, filter_, by_id=True))
         if not isinstance(target, GraphViewModel):
             raise DrivineError(f"A cascade follows a view's relationships. {root.type.__name__} is a NodeFragment.")
         cascaded = OracleViews(self.graph).cascade(target, "n.nid IN (SELECT column_value FROM TABLE(v_roots))")
@@ -182,7 +195,7 @@ class OracleBackend:
     v_deleted NUMBER;
     c SYS_REFCURSOR;
 BEGIN
-    SELECT {ROW_ALIAS}.nid BULK COLLECT INTO v_roots {self._from(root, filter_)};
+    SELECT {ROW_ALIAS}.nid BULK COLLECT INTO v_roots {self._found_by_id(root, filter_)};
     {targets}
     DELETE FROM {self.graph.nodes} WHERE nid IN (SELECT column_value FROM TABLE(v_roots));
     v_deleted := SQL%ROWCOUNT;
@@ -195,7 +208,7 @@ END;""")
     def cascade_depth_checks(self, target: TargetModel, where: str | None = None) -> list[CascadeDepthCheck]:
         if not isinstance(target, GraphViewModel):
             return []
-        roots = f"SELECT {ROW_ALIAS}.nid {self._from(target.root, self._deleted_where(target, where))}"
+        roots = f"SELECT {ROW_ALIAS}.nid {self._found_by_id(target.root, self._deleted_where(target, where))}"
         cascaded = OracleViews(self.graph).cascade(target, "n.nid IN (SELECT nid FROM cascade_roots)")
         return [
             CascadeDepthCheck(
@@ -275,7 +288,7 @@ END;""")
             "\n".join(
                 [
                     f"SELECT JSON_TRANSFORM({ROW_ALIAS}.props, KEEP '$') AS \"props\"",
-                    self._from(model, self._id_predicate(model)),
+                    self._found_by_id(model, self._id_predicate(model)),
                 ]
             )
         )
@@ -285,7 +298,7 @@ END;""")
             "\n".join(
                 [
                     f"SELECT NVL({ROW_ALIAS}.stamp, '{stamps.NEVER_STAMPED}') AS \"found\"",
-                    self._from(model, self._id_predicate(model)),
+                    self._found_by_id(model, self._id_predicate(model)),
                 ]
             )
         )
@@ -382,28 +395,44 @@ END;""")
         tests = [*labels, *([f"({where})"] if where else [])]
         return f"FROM {self.graph.nodes} {ROW_ALIAS}\nWHERE {' AND '.join(tests)}"
 
-    def _deleting(self, model: FragmentModel, where: str | None, tested: Sequence[str] = ()) -> GraphStatement:
-        """Deletes the nodes `where` selects, with their relationships, and returns how many: `{deleted}`."""
+    def _deleting(
+        self, model: FragmentModel, where: str | None, tested: Sequence[str] = (), by_id: bool = False
+    ) -> GraphStatement:
+        """
+        Deletes the nodes `where` selects, with their relationships, and returns how many: `{deleted}`. `by_id` says
+        `where` finds the node by its id (see _found_by_id).
+        """
+        found = self._found_by_id(model, where) if by_id else self._from(model, where, tested)
         return GraphStatement(f"""DECLARE
     v_deleted NUMBER;
     c SYS_REFCURSOR;
 BEGIN
-    DELETE {self._from(model, where, tested)};
+    DELETE {found};
     v_deleted := SQL%ROWCOUNT;
     OPEN c FOR SELECT v_deleted AS "deleted" FROM dual;
     DBMS_SQL.RETURN_RESULT(c);
 END;""")
 
+    def _found_by_id(self, model: FragmentModel, where: str | None = None) -> str:
+        """
+        The node of the fragment's labels found by its id in `where` (see _id_predicate), as the row `n`: each label
+        told by the labels' text (`carries_labels`), so Oracle reads the index over the id for the one node, and not
+        every node of the first label, as drivine4j's `OracleSelect.hasId` narrows it.
+        """
+        tests = [carries_labels(ROW_ALIAS, model.labels), *([f"({where})"] if where else [])]
+        return f"FROM {self.graph.nodes} {ROW_ALIAS}\nWHERE {' AND '.join(tests)}"
+
     @staticmethod
     def _id_predicate(model: FragmentModel) -> str:
         """
-        The node whose id is `$id`, compared as JSON compares, so a number is not taken for text. The id is bound as the
-        JSON text Oracle's layout holds it as, read `EXTENDED`, as a save finds the node (see IdKeyedStatement).
+        The node whose id is `$id`, compared as the shared module writes the comparison: the property's class and key
+        with the id's, which the index over the property of every node is made over and answers (see node_ids). The id
+        is bound as the JSON text Oracle's layout holds it as, read `EXTENDED`, as a save finds the node (see
+        IdKeyedStatement); the comparison reads it more than once, so it is bound by name.
         """
         if not model.node_id_property:
             raise DrivineError(f"{model.type.__name__} has no NodeId field, so it can't be found by id.")
-        k = json_key(model.node_id_property)
-        return f"JSON_EXISTS({ROW_ALIAS}.props, '$?(@{k} == $id__)' PASSING JSON($id EXTENDED) AS \"id__\")"
+        return has_id("oracle", ROW_ALIAS, model.node_id_property, "JSON($id EXTENDED)")
 
     @staticmethod
     def _page(page: Page | None) -> list[str]:

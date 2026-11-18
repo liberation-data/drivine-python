@@ -21,6 +21,11 @@ class FragmentModel(FieldMapping):
     """The class's own labels first, then those it inherits."""
     node_id_field: str | None = None
     node_id_property: str | None = None
+    node_id_type: Any = None
+    """
+    The NodeId field's annotation, as Pydantic resolves it (`int`, `date`, `int | None`), where there is one: an id
+    given as text is read as it on a SQL store (see node_ids).
+    """
     stamp_field: str | None = None
     node_labels: NodeLabelsModel | None = None
     property_bags: list[PropertyBagModel] = field(default_factory=lambda: [])

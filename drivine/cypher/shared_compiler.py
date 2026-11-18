@@ -281,6 +281,42 @@ def module_text(request: Mapping[str, Any], store: str) -> str:
     return entry(json.dumps(request, ensure_ascii=False, separators=(",", ":")))
 
 
+IdSqlHelper = Literal["hasId", "keyText", "property", "hasProperty"]
+"""
+What the module's `idSql` request writes (its `IdSql`): `hasId`, whether the node's id is the id whose JSON, as the node
+holds it, is `json`; `keyText`, the id held as the text a write plan keys a node by (a temporal value's tag read as its
+text `v`); `property`, the property read as text, which a range index is made over; and `hasProperty`, whether the node
+has the property at all.
+"""
+
+_id_sql_written: dict[tuple[str, str, str, str, str | None], str] = {}
+"""The SQL the module wrote for each request asked of `id_sql`, by the request: it is the same every time."""
+
+
+def id_sql(store: str, helper: IdSqlHelper, alias: str, key: str, json_sql: str | None = None) -> str:
+    """
+    The SQL of `helper` over the property `key` of the node row `alias` on `store` ("postgres", "oracle" or "sqlite"),
+    as the shared module writes it, each comparison of an id written over the expressions the store's range index and
+    uniqueness constraint are made over, so the index answers it, and a temporal id's tag is equal only to the same
+    value's (liberation-data/drivine-cypher-spec#107). `key` is given as the node holds it (see value_layout.held_key).
+    `json_sql`, for `hasId`, is the SQL of the id's JSON as it is bound, written in as given: on Oracle and SQLite more
+    than once, so it is bound by name. Cached, since the SQL is static.
+    """
+    request = (store, helper, alias, key, json_sql)
+    sql = _id_sql_written.get(request)
+    if sql is None:
+        asked: dict[str, Any] = {"store": store, "helper": helper, "alias": alias, "key": key}
+        if json_sql is not None:
+            asked["json"] = json_sql
+        answer = module_answer({"idSql": asked}, store)
+        written_sql = answer.get("sql")
+        if not isinstance(written_sql, str):
+            raise DrivineError(f"The shared module wrote no {helper} for {store}: {answer.get('error', 'no SQL')}")
+        sql = written_sql
+        _id_sql_written[request] = sql
+    return sql
+
+
 def _search_answer(store: SearchStore, graph: str | None, asked: dict[str, Any]) -> dict[str, Any]:
     """The module's answer to a full-text request; its refusal, or its error, a DrivineError."""
     request = json.dumps(

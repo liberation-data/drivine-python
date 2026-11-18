@@ -10,7 +10,8 @@ import apsw
 
 from drivine.backend.sql.write_plan import WriteReturns
 from drivine.backend.sqlite import exact_json
-from drivine.backend.sqlite.sqlite_graph import SqliteGraph, has_labels, text_of
+from drivine.backend.sqlite.sqlite_graph import SqliteGraph, has_labels
+from drivine.cypher.shared_compiler import id_sql
 from drivine.model import lower_copies, stamps
 
 R = TypeVar("R")
@@ -195,7 +196,7 @@ class SqlitePlanWriter:
         made = False
         found: str | None = None
         while True:
-            row = self._find(shape, str(step["k"]))
+            row = self._find(shape, step.get("id"))
             made = row is None
             if row is None:
                 # A checked save does not make the node again: it is gone, and the object is stale. Nor does a step
@@ -324,7 +325,7 @@ class SqlitePlanWriter:
 
     def _ref(self, step: dict[str, Any]) -> None:
         """Finds a node that must be there."""
-        row = self._find(self._shapes[int(step["s"])], str(step["k"]))
+        row = self._find(self._shapes[int(step["s"])], step.get("id"))
         if row is None:
             raise Stopped(0)
         self._nodes[int(step["r"])] = row.nid
@@ -391,7 +392,8 @@ class SqlitePlanWriter:
         held = set(_strings(step.get("held")))
         keep = _flag(step, "keep", False)
         delete = _flag(step, "delete", False)
-        key = text_of("t", shape.key)
+        # Each target's id as the text the plan keys it by in `ids` and `held`: a temporal value's tag as its text.
+        key = id_sql("sqlite", "keyText", "t", shape.key)
         labels = f" AND {has_labels('t', shape.labels)}" if shape.labels else ""
         # A relationship from the node to itself is read as leaving it, and so once when both directions are read.
         reached = self._rows(
@@ -492,7 +494,7 @@ class SqlitePlanWriter:
         Writes properties to a node that is there, and makes none. One that is not there is left out of what the call
         hands back; one that does not meet the query is left as it is, and said to.
         """
-        row = self._find(self._shapes[int(step["s"])], str(step["k"]))
+        row = self._find(self._shapes[int(step["s"])], step.get("id"))
         if row is None:
             return
         fresh = str(step["fresh"])
@@ -524,14 +526,23 @@ class SqlitePlanWriter:
 
     # ----- Reading -----
 
-    def _find(self, shape: _Shape, id_: str) -> _Row | None:
-        """The node of the shape whose id is stored as `id_`, the first made where there are several."""
+    def _find(self, shape: _Shape, id_: Any) -> _Row | None:
+        """
+        The node of the shape whose id is `id_`, the JSON the node holds it as (a step's `id`), the first made where
+        there are several; None where there is none, or where the step gives no id. The id's class and key are compared
+        with the property's, as the shared module writes the comparison (`hasId`), as a range index or a uniqueness
+        constraint is made over them, so the index answers the lookup, and a temporal id's tag is equal only to the
+        same value's: found by the text of the key, a date saved twice was two nodes (#519).
+        """
+        if id_ is None:
+            return None
         labels = f" AND {has_labels('n', shape.labels)}" if shape.labels else ""
         found = self._rows(
+            # The one value, numbered, so each place the comparison reads it is bound to it.
             f"SELECT n.nid, n.labels, n.props, n.stamp FROM {self._nodes_table} n "
-            f"WHERE {text_of('n', shape.key)} = ?{labels} ORDER BY n.nid LIMIT 1",
+            f"WHERE {id_sql('sqlite', 'hasId', 'n', shape.key, '?1')}{labels} ORDER BY n.nid LIMIT 1",
             lambda it: _Row(int(it[0]), [str(label) for label in exact_json.loads(it[1])], _object(it[2]), it[3]),
-            id_,
+            exact_json.dumps(id_),
         )
         return found[0] if found else None
 

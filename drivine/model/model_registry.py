@@ -261,6 +261,7 @@ class ModelRegistry:
             labels=labels,
             node_id_field=id_field,
             node_id_property=mapping.graph_properties.get(id_field) if id_field else None,
+            node_id_type=fields[id_field][0].annotation if id_field else None,
             stamp_field=stamp,
             node_labels=node_labels,
             property_bags=bags,

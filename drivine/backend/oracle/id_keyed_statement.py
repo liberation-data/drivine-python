@@ -10,13 +10,15 @@ from drivine.backend.sql.value_layout import write
 from drivine.query.query_specification import QuerySpecification
 
 
-def held_id(id: Any) -> str:
+def held_id(id: Any) -> str | None:
     """
     An id as the JSON text Oracle's layout holds it as (see value_layout.write), as a save writes it: a float extended
     JSON's double (`{"$numberDouble": "1.0E-7"}`), which a statement reads `JSON(… EXTENDED)` so that it compares equal
-    to the binary double the node holds, a text its JSON (`"a"`), and a whole number its digits.
+    to the binary double the node holds, a text its JSON (`"a"`), and a whole number its digits. A null id is bound as
+    it is, None, and finds no node: not as the text `null`, which is a JSON value (Drivine for TypeScript's `oracleId`,
+    liberation-data/drivine#777).
     """
-    return to_json(write(id, "oracle"))
+    return None if id is None else to_json(write(id, "oracle"))
 
 
 @dataclass(frozen=True)
@@ -34,6 +36,6 @@ class IdKeyedStatement(GraphStatement):
 
     def spec(self, more: Mapping[str, Any] | None = None) -> QuerySpecification[Any]:
         given = dict(more or {})
-        if given.get("id") is not None:
+        if "id" in given:
             given["id"] = held_id(given["id"])
         return super().spec(given)

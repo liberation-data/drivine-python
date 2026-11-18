@@ -19,6 +19,7 @@ from drivine.backend.save_statement_builder import (
     replaced_fields,
     root_of,
 )
+from drivine.backend.sql.node_ids import temporal_text
 from drivine.backend.sql.node_writes import NodeWrites
 from drivine.backend.sql.owned_labels import OwnedLabels
 from drivine.backend.sql.plan_graph import PlanGraph
@@ -302,15 +303,20 @@ class PostgresSaveBuilder:
 
 def stored_key(id: Any, store: SqlStore) -> str:
     """
-    An id as the store reads its property back as text (`->>`): text as it is, and anything else as the JSON text
-    `store`'s layout holds it as (see value_layout.write), as a save writes it, so a float id is keyed by the text it
-    is held as (`1.0E-7` on SQLite, where Python's JSON writes `1e-07`). On Postgres a number is the text `jsonb` gives
-    back for it, `numeric`'s, with no exponent (`0.00000010` for `1.0E-7`): `jsonb` holds a number as a `numeric`, not
-    as the text it was written as.
+    An id as the text a write plan keys its node by, within the plan (a step's `k`, an unlink's `ids` and `held`), which
+    is how the store's write reads a stored target's id back (the module's `keyText`): text as it is; a temporal value
+    as its tag's text `v`, as the module writes it (drivine4j's `NodeIds.temporalText`); and anything else as the JSON
+    text `store`'s layout holds it as (see value_layout.write), as a save writes it, so a float id is keyed by the text
+    it is held as (`1.0E-7` on SQLite, where Python's JSON writes `1e-07`). On Postgres a number is the text `jsonb`
+    gives back for it, `numeric`'s, with no exponent (`0.00000010` for `1.0E-7`): `jsonb` holds a number as a
+    `numeric`, not as the text it was written as. A node is found by its id's JSON, not by this text: see node_ids.
     """
     if isinstance(id, str):
         return id
     text = to_json(write(id, store))
+    temporal = temporal_text(text)
+    if temporal is not None:
+        return temporal
     return numeric_text(text) if store == "postgres" else text
 
 

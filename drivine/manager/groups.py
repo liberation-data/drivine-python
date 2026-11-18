@@ -20,7 +20,8 @@ def key(property: str | Any) -> PropertyKey:
 def path_key(target: type, hops: Sequence[Hop]) -> PathKey:
     """
     Groups by the node of `target` the source reaches through the hops. The key comes back as that node, mapped. A key
-    is the node at the end, which every way to it gives alike, so no hop may name an order.
+    is the node at the end, which every way to it gives alike, so no hop may name an order. Its groups are ordered by
+    the node's id, so `target` needs a NodeId field.
     """
     if any(it.order_by for it in hops):
         raise DrivineError("A path a key is read by is read in no order; no hop of it may name one.")

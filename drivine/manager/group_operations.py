@@ -78,6 +78,16 @@ class GroupOperations:
         read as the type its property's field declares, as drivine4j's GroupRow reads one: a datetime as a datetime.
         """
         model = self._registry.fragment(source)
+        targets: dict[str, FragmentModel] = {}
+        # Checked before anything is looked up or written, so every store refuses the same keys: a path key's groups are
+        # ordered by its node's id, so its fragment must have a NodeId (path_key_id; drivine4j's GroupQuery.check).
+        for name, group_key in keys.items():
+            if isinstance(group_key, PathKey):
+                if not group_key.hops:
+                    raise DrivineError(f"The path key {name} needs at least one hop.")
+                target = self._registry.fragment(group_key.target)
+                path_key_id(target)
+                targets[name] = target
         if where is not None and not isinstance(where, str) and self._lookups is not None:
             where = await self._lookups(model, where)
         query = GroupQuery(
@@ -90,16 +100,6 @@ class GroupOperations:
             limit,
             skip,
         )
-        targets: dict[str, FragmentModel] = {}
-        # Checked before anything is written, so every store refuses the same keys: a path key's groups are ordered by
-        # its node's id, so its fragment must have a NodeId (path_key_id; drivine4j's GroupQuery.check).
-        for name, group_key in keys.items():
-            if isinstance(group_key, PathKey):
-                if not group_key.hops:
-                    raise DrivineError(f"The path key {name} needs at least one hop.")
-                target = self._registry.fragment(group_key.target)
-                path_key_id(target)
-                targets[name] = target
         rows = await self._query(self._backend.groups(model, query, targets, self._labels))
         key_names = list(keys)
         aggregate_names = list(aggregates or {})

@@ -8,6 +8,7 @@ import contextlib
 import os
 import uuid
 from collections.abc import AsyncIterator, Iterator
+from enum import Enum
 from typing import Annotated, Any
 
 import pytest
@@ -207,7 +208,19 @@ class TestTheCopy:
         assert {k: v[COPY] for k, v in (await stored(pm, label)).items()} == {"a1": "ada@x.com", "a2": "bo@x"}
 
 
+class _Status(str, Enum):  # noqa: UP042 - not a StrEnum: str() of this one is its name, "_Status.OPEN".
+    OPEN = "Open"
+
+
 class TestLookups:
+    async def test_compare_a_str_enum_ignoring_case_as_the_value_a_save_stores(self, gom, label):
+        # drivine-python#546: the DSL lowered str() of the member, its name, on every store.
+        account = fragment(label)
+        await gom.save_all([account(uuid="a1", email="Open"), account(uuid="a2", email="Shut")])
+        q = refs(account)
+        assert [it.uuid for it in await gom.load_all(account, q.email.eq_ignore_case(_Status.OPEN))] == ["a1"]
+        assert [it.uuid for it in await gom.load_all(account, q.email.contains_ignore_case(_Status.OPEN))] == ["a1"]
+
     async def test_read_the_copy_once_it_is_filled_in_and_the_property_before(self, gom, pm, label):
         account = fragment(label)
         # Written outside Drivine, so no node has a copy until the index fills it in.

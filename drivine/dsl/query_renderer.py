@@ -101,19 +101,11 @@ class QueryRenderer:
         terms = [classify(it, scope) for it in list_of(query.order_by)]
         keys = [it for it in terms if isinstance(it, RootKey)]
         seek = list_of(query.seek)
-        keyset = renderer._keyset(keys, seek, query, alias) if query.seek is not None else None
+        keyset = renderer.keyset(keys, seek, query, alias)[0] if query.seek is not None else None
         by_expression = any(it.term.expression is not None for it in keys)
         order_by = None
         if keys:
-            order_by = ", ".join(
-                _order(
-                    it.term,
-                    renderer._expression(it.term.expression, scope, alias)
-                    if it.term.expression is not None
-                    else f"{alias}.{quote_name(it.property or '')}",
-                )
-                for it in keys
-            )
+            order_by = ", ".join(_order(it.term, renderer.order_expression(it, scope, alias)[0]) for it in keys)
         return RenderedQuery(
             where=" AND ".join(it for it in (written, keyset) if it is not None) or None,
             order_by=order_by,
@@ -144,13 +136,18 @@ class QueryRenderer:
 
         return " AND ".join(self._condition(it, scope, aliases) for it in conjuncts(condition))
 
-    def _keyset(self, keys: list[RootKey], seek: list[SeekValue], query: Query, alias: str) -> str:
+    def keyset(
+        self, keys: list[RootKey], seek: list[SeekValue], query: Query, alias: str
+    ) -> tuple[str, dict[str, Any]]:
         """
-        The predicate that continues after a cursor. For `a DESC, b DESC` after `(A, B)`:
+        The predicate that continues after a cursor, with the values it binds. For `a DESC, b DESC` after `(A, B)`:
         `a <= $A AND (a < $A OR (a = $A AND b < $B))`, each key first held not null where the engine wants it. The
         leading bound, redundant beside the branches, gives the planner a range to seek on, as a top-level OR doesn't.
+        Public, as a SQL store asks the shared module for this Cypher, written on the Neo4j grammar, as one fragment
+        (see drivine.backend.sql.fragments), and so seeks as the graph engines do.
         """
         check_keyset(keys, seek, query)
+        before = set(self.bindings)
 
         def expression(i: int) -> str:
             return f"{alias}.{quote_name(keys[i].property or '')}"
@@ -167,13 +164,32 @@ class QueryRenderer:
             branches.append(branch if i == 0 else f"({branch})")
         # Joined by AND with no parentheses around the whole: in them, FalkorDB 6 scans the label rather than seeking
         # on the bound (FalkorDB/FalkorDB#3331).
-        return " AND ".join(
+        written = " AND ".join(
             [
                 *([f"{expression(i)} IS NOT NULL" for i in range(len(keys))] if self.grammar.keyset_null_guard else []),
                 *([compare(0, False)] if len(keys) > 1 else []),
                 f"({' OR '.join(branches)})" if len(branches) > 1 else branches[0],
             ]
         )
+        return written, self._bound_since(before)
+
+    def order_expression(self, key: RootKey, scope: Scope, alias: str) -> tuple[str, dict[str, Any]]:
+        """
+        The Cypher an order term sorts by, over the root `alias`, without its direction or its nulls' placement, with
+        the values it binds: a property, or an expression of the root's properties. Public, as a SQL store asks the
+        shared module for each order term as a fragment (see drivine.backend.sql.fragments), its nulls' placement a
+        fragment of its own, and so sorts as the graph engines do.
+        """
+        before = set(self.bindings)
+        if key.term.expression is not None:
+            written = self._expression(key.term.expression, scope, alias)
+        else:
+            written = f"{alias}.{quote_name(key.property or '')}"
+        return written, self._bound_since(before)
+
+    def _bound_since(self, before: set[str]) -> dict[str, Any]:
+        """The values bound since the renderer bound those named `before`."""
+        return {name: value for name, value in self.bindings.items() if name not in before}
 
     def _expression(self, node: ExpressionNode, scope: Scope, alias: str) -> str:
         """An order expression as Cypher over the root's properties, its values bound."""

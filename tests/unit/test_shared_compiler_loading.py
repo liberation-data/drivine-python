@@ -134,3 +134,22 @@ def test_a_graph_engines_full_text_search_where_the_module_has_no_wheel_is_refus
         f"Full-text search on {engine}" for engine in ("Neo4j", "Memgraph", "FalkorDB")
     ]
     assert all(f"{platform.system()} {platform.machine()}" in it and "Every other statement" in it for it in lines)
+
+
+def test_a_fragment_without_the_compiler_names_the_extra_that_installs_it():
+    # The query DSL's fragments on a SQL store are the module's, as a compiled statement is, and refused alike.
+    script = (
+        "import sys\n"
+        "sys.modules['drivine_cypher_compiler'] = None\n"
+        "import drivine.cypher.shared_compiler as shared\n"
+        "shared.has_wheel = lambda: True\n"
+        "from drivine import DrivineError\n"
+        "from drivine.cypher.shared_compiler import FragmentVariable, compile_fragment, not_installed\n"
+        "for store in ('POSTGRES', 'ORACLE', 'SQLITE'):\n"
+        "    try:\n"
+        "        compile_fragment(store, 'g', 'condition', 'n.k = 1', {'n': FragmentVariable('n_')})\n"
+        "        print('compiled')\n"
+        "    except DrivineError as error:\n"
+        "        print(str(error) == not_installed(store))\n"
+    )
+    assert run(script).splitlines() == ["True", "True", "True"]

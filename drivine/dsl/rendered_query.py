@@ -31,3 +31,10 @@ class RenderedQuery:
     The root's labels the predicate tests itself, as it reads a property through a labelled index: a statement needn't
     test them again, and testing them on their own would have the store read the label instead (Oracle).
     """
+    hints: tuple[str, ...] = ()
+    """
+    The optimizer hints the statement that holds the predicate and the order carries in its outermost `SELECT` or
+    `DELETE`, as the shared module's fragments ask for them (on Oracle): each once, in the order first asked.
+    """
+    non_finite: bool = False
+    """Whether a value the predicate or the order reads may be NaN or an infinity, as a fragment of them says."""

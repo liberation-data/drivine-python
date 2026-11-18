@@ -7,6 +7,10 @@ Full-text search is the module's too (its README, "Full-text search"): the user'
 ranked candidates and each graph engine's search head, and the catalog lookup of the index (see `full_text_search` and
 `full_text_index_lookup`), which the backends run, joining back their own projection.
 
+The parts of a statement the object manager writes itself, which compare, sort or bind a value, are the module's too
+(its README, "Fragments"): see `compile_fragment`, which the query DSL's statements ask for each condition and order
+term, so they compare a value on each store as a compiled statement does.
+
 The library is loaded on the first compile for a SQL store, or the first full-text search, not on `import drivine`, so
 an application on the graph engines that doesn't search by text never loads it, and runs where it has no wheel.
 """
@@ -20,6 +24,7 @@ import math
 import platform
 import sys
 import threading
+from collections import OrderedDict
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
@@ -150,6 +155,137 @@ def compile_cypher(
         calls_stored_nulls_equal=bool(stored.get("nullsEqual", False)),
         calls_stored_era=bool(stored.get("era", False)),
         non_finite=bool(answer.get("nonFinite", False)),
+    )
+
+
+FragmentPart = Literal["condition", "value", "order"]
+"""
+What a fragment is (the module's README, "Fragments"): a `condition` a `WHERE` keeps rows by, a `value` the library's
+SQL groups or binds by, or an `order`, the terms an `ORDER BY` sorts by.
+"""
+
+
+@dataclass(frozen=True)
+class FragmentVariable:
+    """
+    A row of the library's own SQL that a fragment's Cypher names: a node's row, with the labels the statement matched
+    it by, so an equality of its property is written through that label's index; or a relationship's. The row's alias
+    ends with `_`, as none the compiler names its own rows does, so a subquery the fragment writes doesn't take the
+    library's row for one of its own: the module refuses any other.
+    """
+
+    row: str
+    labels: tuple[str, ...] = ()
+    relationship: bool = False
+
+    def written(self) -> dict[str, Any]:
+        """The variable as the request has it."""
+        if self.relationship:
+            return {"relationship": self.row}
+        return {"node": self.row, "labels": list(self.labels)}
+
+
+@dataclass(frozen=True)
+class SqlFragment:
+    """
+    A part of a statement the library writes itself, as the module compiles it: its `terms`, one for a condition or a
+    value and an order's in their order, and the values its parameters are bound to, under the names the module gives
+    them (`$p` as `_cy_p`, and on Oracle a key compared by its index as `_cyk_p`), which the library binds beside its
+    own and no other. `hints` are the optimizer hints the statement that holds the terms carries in its outermost
+    `SELECT` (on Oracle; none on Postgres and SQLite); `non_finite` says a value it gives may be NaN or an infinity,
+    read back as a statement's rows are. The `calls_stored_*` flags say, on Oracle, which of the graph's functions it
+    calls, as a compiled statement's do.
+    """
+
+    terms: tuple[str, ...]
+    parameters: Mapping[str, Any]
+    non_finite: bool = False
+    hints: tuple[str, ...] = ()
+    calls_stored_nulls_equal: bool = False
+    calls_stored_era: bool = False
+    calls_stored_temporal_arithmetic: bool = False
+
+    @property
+    def term(self) -> str:
+        """The one term of a condition or a value."""
+        if len(self.terms) != 1:
+            raise DrivineError(f"A fragment of {len(self.terms)} terms is no condition or value: {self.terms}")
+        return self.terms[0]
+
+
+FRAGMENTS_CACHED = 2048
+"""
+How many of the module's answers to a fragment request are kept, by the request's text: a statement's fragments are
+asked again for each load of the same query, and the module is called for each otherwise.
+"""
+
+_fragments_answered: OrderedDict[str, str] = OrderedDict()
+"""The module's answer to each fragment request asked lately, by the request's exact text, the least recent first."""
+
+_fragments_lock = threading.Lock()
+
+
+def compile_fragment(
+    store: SharedStore,
+    graph: str,
+    part: FragmentPart,
+    cypher: str,
+    variables: Mapping[str, FragmentVariable],
+    parameters: Mapping[str, Any] | None = None,
+    descending: bool = False,
+    indexed_properties: Iterable[tuple[str, str]] = (),
+    nulls_equal_stored: bool = True,
+    era_stored: bool = True,
+) -> SqlFragment:
+    """
+    The `part` the Cypher expression `cypher` is, over the library's rows `variables`, compiled to the store's SQL over
+    the graph's tables, as the module's `fragment` request answers it (its README, "Fragments"), with the values
+    `parameters` bind, written as a statement's are. An order is `descending` where asked. On Oracle
+    `indexed_properties`, each a label and a property, are the indexes an equality may be read through, and
+    `nulls_equal_stored` and `era_stored` whether it may call the functions the graph is made with. An expression the
+    module refuses, of a form no object manager writes among them, is a DrivineError of its refusal.
+
+    The answer is kept for the same request (`FRAGMENTS_CACHED`): a query's fragments are the same each time it runs.
+    """
+    fragment: dict[str, Any] = {part: cypher}
+    if part == "order" and descending:
+        fragment["descending"] = True
+    fragment["variables"] = {name: it.written() for name, it in variables.items()}
+    request = json.dumps(
+        {
+            "store": store.lower(),
+            "graph": _graph(store, graph, nulls_equal_stored, era_stored, sorted(set(indexed_properties))),
+            "fragment": fragment,
+            "parameters": written(parameters or {}),
+        },
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+    )
+    with _fragments_lock:
+        text = _fragments_answered.get(request)
+        if text is not None:
+            _fragments_answered.move_to_end(request)
+    if text is None:
+        text = _compiler(lambda: not_installed(store))(request)
+        with _fragments_lock:
+            _fragments_answered[request] = text
+            while len(_fragments_answered) > FRAGMENTS_CACHED:
+                _fragments_answered.popitem(last=False)
+    answer: dict[str, Any] = json.loads(text)
+    if "refusal" in answer:
+        raise DrivineError(answer["refusal"])
+    if "error" in answer:
+        raise DrivineError(f"The Cypher compiler can't read the fragment request: {answer['error']}")
+    stored: dict[str, Any] = answer.get("storedFunctions") or {}
+    return SqlFragment(
+        terms=tuple(answer["terms"]),
+        parameters=decoded(answer.get("parameters") or {}),
+        non_finite=bool(answer.get("nonFinite", False)),
+        hints=tuple(answer.get("hints") or ()),
+        calls_stored_nulls_equal=bool(stored.get("nullsEqual", False)),
+        calls_stored_era=bool(stored.get("era", False)),
+        calls_stored_temporal_arithmetic=bool(stored.get("temporalArithmetic", False)),
     )
 
 
@@ -332,8 +468,19 @@ def _search_answer(store: SearchStore, graph: str | None, asked: dict[str, Any])
     return answer
 
 
-def _graph(store: SharedStore, graph: str, nulls_equal_stored: bool, era_stored: bool) -> dict[str, Any]:
-    """The graph as the request has it: Oracle's options only on Oracle, where they mean something."""
+def _graph(
+    store: SharedStore,
+    graph: str,
+    nulls_equal_stored: bool,
+    era_stored: bool,
+    indexed_properties: Sequence[tuple[str, str]] = (),
+) -> dict[str, Any]:
+    """
+    The graph as the request has it: Oracle's options only on Oracle, where they mean something. `indexed_properties`,
+    each a label and a property its index is made over, is written where there are any: Oracle's indexes are a label's,
+    so the module writes an equality with a value through that index only where it is told it is there (its README,
+    "Fragments"); Postgres's and SQLite's answer it without being told.
+    """
     if store != "ORACLE":
         return {"name": graph}
     # A write's rows as a row of JSON each (oracleRowsAsText left false), as python-oracledb reads an implicit result's
@@ -341,12 +488,15 @@ def _graph(store: SharedStore, graph: str, nulls_equal_stored: bool, era_stored:
     # is encoded again (oracleReencodeJson): a document updated in place comes back as OSON version 2, which
     # python-oracledb's thin mode can't read (oracle/python-oracledb#622, liberation-data/drivine-cypher-spec#165),
     # as the compiler Drivine had before encoded it again too.
-    return {
+    written_graph: dict[str, Any] = {
         "name": graph,
         "nullsEqualStored": nulls_equal_stored,
         "eraStored": era_stored,
         "oracleReencodeJson": True,
     }
+    if indexed_properties:
+        written_graph["indexedProperties"] = [[label, key] for label, key in indexed_properties]
+    return written_graph
 
 
 def decoded(value: Any) -> Any:

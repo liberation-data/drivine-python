@@ -73,3 +73,15 @@ def test_reads_a_lone_dollar_two_dollars_or_q_quote_at_the_end_as_it_is():
 
 def test_names_the_parameters_outside_quoted_text():
     assert parameter_names("""select $a, '$b', "$c", $a, $d""") == {"a", "d"}
+
+
+def test_reads_a_name_past_the_bmp_and_no_parameter_after_a_letter_past_it():
+    assert marked("select $𝑥, 𝑥$a, $b") == "select <𝑥>, 𝑥$a, <b>"
+
+
+def test_reads_a_parameter_beside_a_postgres_cast_and_after_one():
+    assert marked("select $a::text, x::$b, $c::jsonb") == "select <a>::text, x::<b>, <c>::jsonb"
+
+
+def test_reads_no_dollar_quote_whose_tag_begins_with_a_digit_and_leaves_a_positional_one_in_a_quote_as_it_is():
+    assert marked("select $1$ $a $1$, $t$ $1 $b $t$, $c") == "select $1$ <a> $1$, $t$ $1 $b $t$, <c>"

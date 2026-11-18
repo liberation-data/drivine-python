@@ -11,6 +11,7 @@ from drivine.backend.graph_statement import GraphStatement
 from drivine.backend.matched_node import MatchedNode
 from drivine.backend.matching_search import FullTextIndexLookup, MatchingSearch
 from drivine.backend.nearest_search import NearestSearch
+from drivine.backend.oracle.id_keyed_statement import IdKeyedStatement
 from drivine.backend.oracle.oracle_graph import OracleGraph, has_labels, json_key, node_document, text_of
 from drivine.backend.oracle.oracle_groups import OracleGroups
 from drivine.backend.oracle.oracle_query_renderer import OracleQueryRenderer
@@ -97,7 +98,7 @@ class OracleBackend:
         )
 
     def load_fragment(self, model: FragmentModel) -> GraphStatement:
-        return self.load_all_fragments(model, self._id_predicate(model))
+        return IdKeyedStatement.of(self.load_all_fragments(model, self._id_predicate(model)))
 
     def count_fragments(
         self, model: FragmentModel, where: str | None = None, tested: Sequence[str] = ()
@@ -124,7 +125,7 @@ class OracleBackend:
         )
 
     def load_view(self, model: GraphViewModel, depth: Mapping[str, int] | None = None) -> GraphStatement:
-        return self.load_all_views(model, self._id_predicate(model.root), depth)
+        return IdKeyedStatement.of(self.load_all_views(model, self._id_predicate(model.root), depth))
 
     def count_views(
         self,
@@ -151,7 +152,7 @@ class OracleBackend:
         root = target.root if isinstance(target, GraphViewModel) else target
         filter_ = self._deleted_where(target, where)
         if cascade is CascadeType.NONE:
-            return self._deleting(root, filter_)
+            return IdKeyedStatement.of(self._deleting(root, filter_))
         if not isinstance(target, GraphViewModel):
             raise DrivineError(f"A cascade follows a view's relationships. {root.type.__name__} is a NodeFragment.")
         cascaded = OracleViews(self.graph).cascade(target, "n.nid IN (SELECT column_value FROM TABLE(v_roots))")
@@ -175,7 +176,7 @@ class OracleBackend:
             )
         else:
             targets = f"SELECT DISTINCT nid BULK COLLECT INTO v_targets FROM ({reached});"
-        return GraphStatement(f"""DECLARE
+        return IdKeyedStatement(f"""DECLARE
     v_roots SYS.ODCINUMBERLIST;
     v_targets SYS.ODCINUMBERLIST := SYS.ODCINUMBERLIST();
     v_deleted NUMBER;
@@ -197,7 +198,9 @@ END;""")
         roots = f"SELECT {ROW_ALIAS}.nid {self._from(target.root, self._deleted_where(target, where))}"
         cascaded = OracleViews(self.graph).cascade(target, "n.nid IN (SELECT nid FROM cascade_roots)")
         return [
-            CascadeDepthCheck(it.view, it.field, it.max_depth, GraphStatement(beyond_count(roots, it.within, it.nodes)))
+            CascadeDepthCheck(
+                it.view, it.field, it.max_depth, IdKeyedStatement(beyond_count(roots, it.within, it.nodes))
+            )
             for it in cascaded.beyond
         ]
 
@@ -268,7 +271,7 @@ END;""")
         Re-encoded with JSON_TRANSFORM: a document updated in place, as every save updates one, comes back as OSON
         version 2, which the thin drivers can't read (oracle/python-oracledb#622, oracle/node-oracledb#1796).
         """
-        return GraphStatement(
+        return IdKeyedStatement(
             "\n".join(
                 [
                     f"SELECT JSON_TRANSFORM({ROW_ALIAS}.props, KEEP '$') AS \"props\"",
@@ -278,7 +281,7 @@ END;""")
         )
 
     def found_stamp(self, model: FragmentModel) -> GraphStatement:
-        return GraphStatement(
+        return IdKeyedStatement(
             "\n".join(
                 [
                     f"SELECT NVL({ROW_ALIAS}.stamp, '{stamps.NEVER_STAMPED}') AS \"found\"",
@@ -393,11 +396,14 @@ END;""")
 
     @staticmethod
     def _id_predicate(model: FragmentModel) -> str:
-        """The node whose id is `$id`, compared as JSON compares, so a number is not taken for text."""
+        """
+        The node whose id is `$id`, compared as JSON compares, so a number is not taken for text. The id is bound as the
+        JSON text Oracle's layout holds it as, read `EXTENDED`, as a save finds the node (see IdKeyedStatement).
+        """
         if not model.node_id_property:
             raise DrivineError(f"{model.type.__name__} has no NodeId field, so it can't be found by id.")
         k = json_key(model.node_id_property)
-        return f"JSON_EXISTS({ROW_ALIAS}.props, '$?(@{k} == $id__)' PASSING $id AS \"id__\")"
+        return f"JSON_EXISTS({ROW_ALIAS}.props, '$?(@{k} == $id__)' PASSING JSON($id EXTENDED) AS \"id__\")"
 
     @staticmethod
     def _page(page: Page | None) -> list[str]:

@@ -89,7 +89,11 @@ see [Postgres](#postgres). On either, Cypher you write is compiled to SQL: see
 
 **Store layout.** Oracle, Postgres and SQLite hold a graph in store layout 2, as drivine4j and Drivine for TypeScript
 do: a temporal value is kept as a tagged map, a map key that begins with `$` gains one more, and bytes are kept as the
-list of their signed values. The store's stamp records the layout. On a provider's first connection, before anything is
+list of their signed values. A float is held as a Cypher `CREATE` holds it: on Oracle as a binary double, NaN and the
+infinities too, on Postgres a whole one with its fraction (`2.0`), and on SQLite an infinity as `9e999`; Postgres's NaN
+and infinities, and SQLite's NaN, which their JSON holds as no number, are refused with a `DrivineError` before anything
+is written. A `NodeId` that is a float is found by a load, a delete, `edges.relate` and `edges.load_related` as the store
+holds it, as a save finds it. The store's stamp records the layout. On a provider's first connection, before anything is
 made, the shared module judges the graph: a new one is made in this layout, and one in an earlier layout, or none, that
 holds none of your nodes is made this layout's (what the earlier layout left is dropped; nothing is migrated). A graph
 in an earlier layout that holds nodes, or one a later Drivine wrote, is refused on that connection and every one after

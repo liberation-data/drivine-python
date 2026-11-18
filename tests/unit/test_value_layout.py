@@ -43,8 +43,9 @@ def test_each_float_is_written_as_the_store_holds_it():
     assert write(math.inf, "sqlite") == Held("9e999")
     assert write(-0.0, "sqlite") == Held("-0.0")
     assert write(2.0, "postgres") == Held("2.0")
-    # Until drivine4j settles a save's floats on Oracle (drivine4j#830): a JSON number, as on Postgres.
-    assert write(1.5, "oracle") == Held("1.5")
+    # On Oracle every float is extended JSON's double, which Oracle's statements read EXTENDED as a binary double.
+    assert write(1.5, "oracle") == Held('{"$numberDouble":"1.5"}')
+    assert write(2.0, "oracle") == Held('{"$numberDouble":"2.0"}')
 
 
 @pytest.mark.parametrize(("store", "value"), [("postgres", math.nan), ("postgres", math.inf), ("sqlite", math.nan)])
@@ -53,11 +54,12 @@ def test_a_float_the_store_holds_as_no_number_is_refused_by_name(store: str, val
         write(value, store)  # pyright: ignore[reportArgumentType]
 
 
-def test_a_float_a_save_on_oracle_holds_as_no_number_is_refused_naming_oracle_not_postgres():
-    # Written as on Postgres until drivine4j#830 (ORACLE_SAVES_AS), and refused naming the store it is written on.
-    with pytest.raises(DrivineError, match="on Oracle") as refused:
-        write(math.inf, "oracle")
-    assert "Postgres" not in str(refused.value)
+def test_nan_and_the_infinities_are_written_on_oracle_as_the_binary_doubles_it_holds_them_as():
+    assert [write(it, "oracle") for it in (math.nan, math.inf, -math.inf)] == [
+        Held('{"$numberDouble":"NaN"}'),
+        Held('{"$numberDouble":"Infinity"}'),
+        Held('{"$numberDouble":"-Infinity"}'),
+    ]
 
 
 def test_an_object_pydantic_writes_is_written_as_its_json_and_a_set_as_a_list():

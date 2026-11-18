@@ -1,6 +1,9 @@
 """The spec runner's holds (tests/cypher/cypher_spec.py `HELD`): a held step must fail, and a skipped one isn't run."""
 
-from tests.cypher.cypher_spec import held_for, load, skipped_for
+import pytest
+
+from tests.cypher import cypher_spec
+from tests.cypher.cypher_spec import Hold, held_for, load, skipped_for
 
 QUERIES = load("queries.yaml")
 
@@ -13,3 +16,17 @@ def test_collect_skips_nulls_is_skipped_on_oracle_alone_and_held_on_no_store():
         assert skipped_for("queries.yaml", case, 0, store) is None
     for store in ("oracle", "postgres", "sqlite", "neo4j"):
         assert held_for("queries.yaml", case, 0, store) is None
+
+
+def test_a_skip_on_some_steps_skips_those_steps_alone(monkeypatch: pytest.MonkeyPatch):
+    case = next(it for it in QUERIES.cases if it.name == "collect skips nulls")
+    hold = Hold(1, ("sql",), steps=(2, 4), skip=True)
+    monkeypatch.setattr(cypher_spec, "HELD", {"queries.yaml": {case.name: [hold]}})
+    assert [skipped_for("queries.yaml", case, index, "oracle") for index in range(4)] == [
+        None,
+        "drivine-python#1",
+        None,
+        "drivine-python#1",
+    ]
+    assert [skipped_for("queries.yaml", case, index, "neo4j") for index in range(4)] == [None] * 4
+    assert [held_for("queries.yaml", case, index, "oracle") for index in range(4)] == [None] * 4

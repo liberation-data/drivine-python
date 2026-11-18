@@ -36,6 +36,7 @@ from drivine import (
     StatelessGraphObjectManager,
     node_ref,
     range_index,
+    refs,
     uniqueness_constraint,
 )
 from drivine.backend.matched_node import MatchedNode
@@ -360,6 +361,19 @@ async def test_a_target_of_a_uuid_id_still_held_is_kept_by_its_text_unquoted(gom
     assert loaded is not None and [it.name for it in loaded.keys] == ["second key"]
     again = await gom.load(LookupKey, uuid.UUID(int=2))
     assert again is not None and again.stamp == held.stamp
+
+
+async def test_the_query_dsl_finds_a_uuid_id_by_the_text_a_save_holds_it_as(gom: StatelessGraphObjectManager):
+    # The module's parameters take no UUID: the DSL binds one as the text a save holds it as (value_layout.prepared).
+    await gom.save_all([LookupKey(id=uuid.UUID(int=it), name=f"key {it}") for it in (1, 2, 3)])
+    k = refs(LookupKey)
+    found = await gom.load_all(
+        LookupKey,
+        k.id.in_([uuid.UUID(int=2), uuid.UUID(int=3)]),
+        order_by=k.id.asc(),
+        seek=k.id.after(uuid.UUID(int=2)),
+    )
+    assert [it.name for it in found] == ["key 3"]
 
 
 async def test_a_cascade_delete_by_a_date_ids_text_checks_its_depth_and_deletes_the_tree(

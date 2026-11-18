@@ -7,7 +7,10 @@ them. A port of Drivine for TypeScript's PostgresQueryDsl.spec.
 """
 
 import re
+import uuid
 from typing import Annotated, Any
+
+from pydantic import BaseModel
 
 from drivine import (
     GraphProperty,
@@ -223,3 +226,30 @@ def test_binds_a_callers_name_beside_the_dsls_own_which_the_module_names_apart()
     query = backend.render_query(Query(where=q.name.eq("Ada")), scored, labels)
     assert "_q0" not in query.bindings
     assert "$_q0" not in (query.where or "").replace("$_cy__q0", "")
+
+
+class Place(BaseModel):
+    city: str
+
+
+class Keyed(NodeFragment, labels=["Keyed"]):
+    id: Annotated[uuid.UUID, NodeId()]
+    place: Place | None = None
+
+
+def test_binds_a_uuid_and_a_model_as_the_json_a_save_holds_them_as_in_a_condition_and_a_seek():
+    # A save holds a UUID as its text and a model as the JSON pydantic writes it (value_layout.write): the old renderer
+    # bound them so, which the module's parameters can't take as they are.
+    keyed = registry.fragment(Keyed)
+    k = refs(Keyed)
+    one = uuid.UUID(int=1)
+    query = backend.render_query(
+        Query(where=[k.id.in_([one]), k.place.eq(Place(city="Oslo"))], order_by=[k.id.asc()], seek=[k.id.after(one)]),
+        keyed,
+        labels,
+    )
+    assert query.bindings == {
+        "_cy__q0": f'["{one}"]',
+        "_cy__q1": '{"city":"Oslo"}',
+        "_cy__q2": f'"{one}"',
+    }

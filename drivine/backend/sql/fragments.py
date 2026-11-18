@@ -15,6 +15,7 @@ import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any, Literal
 
+from drivine.backend.sql.value_layout import prepared
 from drivine.cypher.shared_compiler import (
     FragmentPart,
     FragmentVariable,
@@ -213,7 +214,8 @@ class Fragments:
     ) -> SqlFragment:
         """
         The fragment `cypher` is, over the node `row` (the root's by default) that it calls `alias`, of `labels`,
-        compiled and taken: its parameters bound, its hints and whether it may give NaN kept.
+        compiled and taken: its parameters bound as a save holds them (a UUID as its text, a model as its JSON: see
+        value_layout.prepared), its hints and whether it may give NaN kept.
         """
         fragment = compile_fragment(
             self.store,
@@ -221,7 +223,7 @@ class Fragments:
             part,
             cypher,
             {alias: FragmentVariable(row or self.row, tuple(labels))},
-            parameters,
+            {name: prepared(it) for name, it in parameters.items()},
             descending=descending,
             indexed_properties=self.indexed,
             nulls_equal_stored=self.nulls_equal_stored,

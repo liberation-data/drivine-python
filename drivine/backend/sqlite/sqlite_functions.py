@@ -12,7 +12,6 @@ drivine4j's `SqliteFunctions`, function for function, so a statement either libr
 - `drivine_regexp_count` counts the matches of a regular expression. SQLite's `REGEXP` operator is the shared
   module's, from its extension (see sqlite_extension).
 - `drivine_lower` lowers text as Unicode does.
-- `drivine_epoch` reads a moment as nanoseconds since the epoch.
 
 Compiled Cypher calls the rest, for what Cypher does with its values, JSON text each, that SQLite does not: see
 sqlite_cypher_functions.
@@ -27,8 +26,6 @@ from __future__ import annotations
 
 import json
 import math
-import re
-from datetime import UTC, datetime
 from functools import partial
 from typing import Any, cast
 
@@ -60,7 +57,6 @@ def register(connection: apsw.Connection) -> None:
     add(sqlite_graph.SIMILARITY, similarity.score, 3, deterministic=True)
     add(sqlite_graph.REGEXP_COUNT, patterns.count, 2, deterministic=True)
     add(sqlite_graph.LOWER, _lower, 1, deterministic=True)
-    add(sqlite_graph.EPOCH, epoch, 1, deterministic=True)
     sqlite_cypher_functions.register(connection)
 
 
@@ -164,58 +160,6 @@ def _lower(text: str | None) -> str | None:
     search or a comparison that ignores case lowers what it is given as the application does.
     """
     return None if text is None else str(text).lower()
-
-
-_INSTANT = re.compile(
-    r"^(?P<date>[+-]?\d{4,}-\d{2}-\d{2})[Tt](?P<hour>\d{2}):(?P<minute>\d{2})(?::(?P<second>\d{2})(?:\.(?P<fraction>\d{0,9}))?)?"
-    r"(?P<zone>[Zz]|[+-]\d{2}(?::\d{2}(?::\d{2})?)?)?$",
-    re.ASCII,
-)
-"""
-A moment as Java's ISO parsers read one: `T` and `Z` in either case, a fraction after a point alone, and an offset of
-hours alone or with minutes and seconds.
-"""
-
-MAX_OFFSET_SECONDS = 18 * 3600
-"""The largest offset Java takes, ±18:00."""
-
-
-def epoch(text: Any) -> int | None:
-    """
-    `drivine_epoch(text)`: the moment the text names, as nanoseconds since the epoch, an integer; null for text that
-    names no moment. A moment with an offset or `Z` is the instant it is; a date-time with none is read as if at UTC,
-    so two of them compare as their clocks do. As drivine4j reads one: ISO 8601, to the nanosecond.
-
-    SQLite's own `unixepoch(…, 'subsec')` keeps milliseconds, and a moment that moves forward by less than one would
-    compare as unmoved. An integer of nanoseconds holds every moment from 1677 to 2262 exactly, and compares and orders
-    as the moments do.
-    """
-    if not isinstance(text, str):
-        return None
-    found = _INSTANT.match(text.strip())
-    if found is None:
-        return None
-    try:
-        moment = datetime.fromisoformat(
-            f"{found['date']}T{found['hour']}:{found['minute']}:{found['second'] or '00'}"
-        ).replace(tzinfo=UTC)
-    except ValueError:
-        return None
-    zone = found["zone"]
-    offset = 0
-    if zone and zone not in ("Z", "z"):
-        sign = -1 if zone[0] == "-" else 1
-        hours, minutes, seconds_ = ([int(it) for it in zone[1:].split(":")] + [0, 0])[:3]
-        if minutes > 59 or seconds_ > 59 or hours * 3600 + minutes * 60 + seconds_ > MAX_OFFSET_SECONDS:
-            return None
-        offset = sign * (hours * 3600 + minutes * 60 + seconds_)
-    seconds = int((moment - datetime(1970, 1, 1, tzinfo=UTC)).total_seconds()) - offset
-    nanos = int((found["fraction"] or "").ljust(9, "0"))
-    # As Java's multiplyExact then addExact: whole seconds that overflow are null, even where the fraction brings the
-    # sum back in range.
-    whole = seconds * 1_000_000_000
-    value = whole + nanos
-    return value if -(2**63) <= whole and value < 2**63 else None
 
 
 class _Patterns(Patterns):

@@ -32,7 +32,6 @@ from drivine.backend.sqlite.sqlite_functions import (
     _lower,
     _Patterns,
     _Similarity,
-    epoch,
     register,
 )
 from drivine.backend.sqlite.sqlite_graph import (
@@ -243,48 +242,6 @@ class TestTheSchemaGrammar:
 
 
 class TestTheFunctions:
-    def test_epoch_reads_a_moment_to_the_nanosecond_its_offset_taken_and_none_as_utc(self):
-        assert epoch("1970-01-01T00:00:00Z") == 0
-        assert epoch("1970-01-01T00:00:01.000000001Z") == 1_000_000_001
-        assert epoch("1970-01-01T01:00:00+01:00") == 0
-        assert epoch("1970-01-01T00:00:00.5") == 500_000_000
-        assert epoch("1969-12-31T23:59:59.999999999Z") == -1
-        assert epoch("2024-05-06T07:08:09.123456Z") < epoch("2024-05-06T09:08:09.123457+02:00")  # type: ignore[operator]
-        for text in ("not a moment", "2024-13-01T00:00:00Z", None, 7):
-            assert epoch(text) is None
-
-    def test_epoch_is_null_wherever_javas_parser_refuses_the_text_and_reads_what_it_takes(self):
-        hour = 1_704_103_200_000_000_000  # 2024-01-01T10:00:00Z
-        for text in ("2024-01-01t10:00:00z", "2024-01-01T10:00:00z", "2024-01-01T10:00:00.", "2024-01-01T10:00:00.Z"):
-            assert epoch(text) == hour
-        assert epoch("2024-01-01T10:00:00+01") == hour - 3_600_000_000_000
-        assert epoch("2024-01-01T10:00+01") == hour - 3_600_000_000_000
-        assert epoch("2024-01-01T10:00:00+18") == hour - 18 * 3_600_000_000_000
-        assert epoch("2024-01-01T10:00:00-18:00") == hour + 18 * 3_600_000_000_000
-        assert epoch("2024-01-01T10:00:00+01:00:30") == hour - 3_630_000_000_000
-        assert epoch("1677-09-21T00:12:44Z") == -9_223_372_036_000_000_000
-        assert epoch("2262-04-11T23:47:16.854775807Z") == 2**63 - 1
-        for text in (
-            "2024-01-01T10:00:00,5Z",
-            "2024-01-01T10:00:00+18:30",
-            "2024-01-01T10:00:00+25:00",
-            "2024-01-01T10:00:00+01:60",
-            "2024-01-01T10:00:00.\u0665Z",
-            "2024-01-01T10:00:00+\u0660\u0661:00",
-            "2024-01-01T10:00:00.0000000001Z",
-            "2024-01-01 10:00:00Z",
-            "2024-01-01",
-            "2024-01-01T10:00:00,5",
-            "2024-01-01T10:00.",
-            "2024-01-01T10:00:00+0100",
-            "2024-01-01T10:00:00+01:00:60",
-            "2024-01-01T10:00:00-18:00:01",
-            "1677-09-21T00:12:43.145224192Z",
-            "1677-09-21T00:12:43.999999999Z",
-            "2262-04-11T23:47:16.854775808Z",
-        ):
-            assert epoch(text) is None, text
-
     def test_lower_lowers_as_javas_root_locale_does(self):
         assert _lower("\u0130") == "i\u0307"
         assert _lower("\u1e9e") == "\u00df"

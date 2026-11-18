@@ -61,10 +61,8 @@ def test_every_connection_of_the_pool_is_opened_so_with_the_functions_registered
     connections = [provider.connect() for _ in range(3)]
     try:
         for connection in connections:
-            [row] = connection.query(
-                QuerySpecification[Any]("SELECT drivine_epoch('1970-01-01T00:00:01.000000001Z') AS epoch")
-            )
-            assert row["epoch"] == 1_000_000_001
+            [row] = connection.query(QuerySpecification[Any]("SELECT drivine_lower('ÉCOLE') AS lowered"))
+            assert row["lowered"] == "école"
             [row] = connection.query(QuerySpecification[Any]("PRAGMA foreign_keys"))
             assert row["foreign_keys"] == 1
     finally:

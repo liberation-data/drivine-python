@@ -39,6 +39,16 @@ leads = await gom.load_all(PersonCareer, "n.bio CONTAINS $text", {"text": "Lead"
 total = await gom.count(Person)
 ```
 
+On Oracle, Postgres and SQLite a node is found by its id as the store's range index and uniqueness constraint over the
+id are made, so a lookup by id reads that index, and a `date` id is one node however often it is saved. An id given as
+text to `load`, `update`, `patch`, `delete` or `edges` is read as the NodeId field's annotated type: `"6"` finds the
+node whose `int` id is 6, ISO 8601 text the node whose `date`, `datetime` or `time` id is that value (in the extended
+form a save writes, of a real day and an hour before 24), `"true"` the node whose `bool` id is true, and a UUID's text
+the node whose `UUID` id it is. A `str` id is the text given, so `"6"` doesn't find a node of the same labels whose id
+is the number 6. Text that is no value of the type, such as `"abc"` for an `int` id, finds no node: nothing is run, and
+a DEBUG line on the `drivine.node_ids` logger says why. A `None` id finds none either, and runs nothing. Neo4j, Memgraph
+and FalkorDB compare the id as it is given.
+
 ### Queries
 
 A query is built from a class's **references**, which mirror its fields:

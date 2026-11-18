@@ -19,6 +19,7 @@ from drivine.backend.nearest_search import NearestSearch
 from drivine.backend.page import Page
 from drivine.backend.save_statement import SaveStatement
 from drivine.backend.save_statement_builder import id_of, items, packed, props_of, root_of, stored, target
+from drivine.backend.sql.node_ids import NO_NODE, lookup_id
 from drivine.backend.vector_writes import split_vectors
 from drivine.connection.database_type import DatabaseType
 from drivine.connection.transaction_mode import TransactionMode
@@ -241,6 +242,9 @@ class StatelessGraphObjectManager:
     def _load_row(self, type_: type[T], id: Any, depth: Mapping[str, int] | None = None) -> tuple[T, Any] | None:
         """The object whose root has the id, and the row it was mapped from; None when there is none."""
         target = self.registry.model_of(type_)
+        id = self._lookup_id(target, id)
+        if id is NO_NODE:
+            return None
         if isinstance(target, GraphViewModel):
             statement = self.backend.load_view(target, depth)
         else:
@@ -481,6 +485,9 @@ class StatelessGraphObjectManager:
         meanwhile.
         """
         target_ = self.registry.model_of(type_)
+        id = self._lookup_id(target_, id)
+        if id is NO_NODE:
+            return None
         attempt = 0
         while True:
             attempt += 1
@@ -531,6 +538,9 @@ class StatelessGraphObjectManager:
         after a pause, as a save is.
         """
         target = self.registry.model_of(type_)
+        id = self._lookup_id(target, id)
+        if id is NO_NODE:
+            return 0
         predicate, values = self._condition(target, where, bindings)
         statement = self.backend.delete(target, predicate, cascade)
         values = {**values, "id": id}
@@ -538,6 +548,13 @@ class StatelessGraphObjectManager:
             self._refuse_cascade_below_depth(target, predicate, values)
         # FalkorDB gives DELETE_ORPHAN's sum as a float (#375).
         return int(self._when_uncontended(lambda: self.persistence_manager.get_one(statement.spec(values))))
+
+    def _lookup_id(self, target: TargetModel, given: Any) -> Any:
+        """
+        The id a lookup of the target's root by `given` binds: on a SQL store read as the NodeId field's type, and
+        NO_NODE where no node can have it, for which no statement is run (see node_ids).
+        """
+        return lookup_id(self.backend, root_of(target), given)
 
     def _refuse_cascade_below_depth(self, target: TargetModel, where: str | None, values: Mapping[str, Any]) -> None:
         """
@@ -640,7 +657,6 @@ class StatelessGraphObjectManager:
         """
         target = self.registry.model_of(type_)
         root = root_of(target)
-        predicate, values_bound = self._condition(target, self._lookups(where, target), bindings)
         named = [*(set or {}), *clear]
         self._assert_patchable(root, named)
         values: dict[str, Any] = {}
@@ -648,6 +664,12 @@ class StatelessGraphObjectManager:
             value = (set or {}).get(field)
             is_packed = value is not None and field in root.json_packed
             values[root.graph_properties.get(field, field)] = packed(value) if is_packed else stored(value)
+        # After the fields are checked, so a patch no store takes is refused whatever its id finds.
+        id = self._lookup_id(target, id)
+        if id is NO_NODE:
+            # A None id, or text that is no value of the id's type, finds no node (#528): nothing is run.
+            return PatchResult(False, False, False)
+        predicate, values_bound = self._condition(target, self._lookups(where, target), bindings)
         props, vectors = split_vectors(root, values)
         statement = self.backend.patch_one(root, predicate)
         spec = statement.spec({**values_bound, "id": id, "set": props, "vectors": vectors})

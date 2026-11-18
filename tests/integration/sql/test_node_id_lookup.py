@@ -1,0 +1,383 @@
+"""
+A node found by its id on each SQL store, under the store layout 2 (liberation-data/drivine-cypher-spec#245): Drivine
+for TypeScript's SqlNodeIdLookup.spec.ts, and drivine4j's NodeIdLookupCrossEngineTest. A save, a load, a delete by id,
+load_related, a relate and a patch compare the id as the store's index is made over it, the property's JSON on Postgres
+and its class and key on Oracle and SQLite. So a temporal id, held as its tag, is found: a date id saved twice is one
+node (#519). An id given as text is read as the NodeId field's type first; text that is no value of it finds nothing,
+and a str id is the text given.
+"""
+
+from __future__ import annotations
+
+import re
+from collections.abc import AsyncIterator
+from datetime import date, timedelta
+from typing import Annotated, Any
+
+import pytest
+
+from drivine import (
+    CascadeType,
+    DatabaseType,
+    Direction,
+    DrivineError,
+    GraphProperty,
+    GraphView,
+    NodeFragment,
+    NodeId,
+    NodeStamp,
+    PersistenceManager,
+    QuerySpecification,
+    RelateMode,
+    Relationship,
+    Root,
+    StatelessGraphObjectManager,
+    node_ref,
+    range_index,
+    uniqueness_constraint,
+)
+from drivine.backend.matched_node import MatchedNode
+from drivine.backend.sql.sql_json import to_json
+from drivine.backend.sql.value_layout import write
+from drivine.model.model_registry import ModelRegistry
+from tests.integration.sql.sql_seed import SqlSeed
+
+
+class LookupNumber(NodeFragment, labels=["SqlLookup", "LookupNumber"]):
+    id: Annotated[int, NodeId()]
+    name: str | None = None
+
+
+class LookupDate(NodeFragment, labels=["SqlLookup", "LookupDate"]):
+    id: Annotated[date, NodeId()]
+    name: str | None = None
+    stamp: Annotated[str | None, NodeStamp()] = None
+
+
+class LookupText(NodeFragment, labels=["SqlLookup", "LookupText"]):
+    id: Annotated[str, NodeId()]
+    name: str | None = None
+
+
+class LookupTextNumber(NodeFragment, labels=["SqlLookup", "LookupText"]):
+    """A node of LookupText's labels whose id is a number: what a text id must not find by the same text."""
+
+    id: Annotated[int, NodeId()]
+    name: str | None = None
+
+
+class LookupTarget(NodeFragment, labels=["SqlLookup", "LookupTarget"]):
+    id: Annotated[str, NodeId()]
+    name: str | None = None
+
+
+class LookupPriced(NodeFragment, labels=["SqlLookup", "LookupPriced"]):
+    """A `$`-named NodeId, which the store layout holds under `$$code`."""
+
+    code: Annotated[str, NodeId(), GraphProperty("$code")]
+    name: str | None = None
+
+
+class LookupTargetDays(GraphView):
+    """The target joined to days, which a save that replaces the list unlinks by their ids."""
+
+    target: Annotated[LookupTarget, Root()]
+    days: Annotated[list[LookupDate], Relationship("ON_DAY")] = []
+
+
+class LookupDateTree(GraphView):
+    """Days, each with the days that are part of it, one level deep: a cascade delete refuses a deeper tree."""
+
+    day: Annotated[LookupDate, Root()]
+    parts: Annotated[list[LookupDateTree], Relationship("DAY_PART_OF", Direction.INCOMING, max_depth=1)] = []
+
+
+TARGET = node_ref(LookupTarget, "x")
+
+
+@pytest.fixture(autouse=True)
+async def cleared(gom: StatelessGraphObjectManager, pm: PersistenceManager) -> AsyncIterator[None]:
+    seed = SqlSeed(pm, "SqlLookup")
+    await seed.clear()
+    await gom.save(LookupTarget(id="x", name="the target"))
+    yield
+    await seed.clear()
+
+
+async def names(gom: StatelessGraphObjectManager, type_: type[Any]) -> list[str]:
+    """The names of the nodes of `type_`'s labels, in order."""
+    return sorted(it.name for it in await gom.load_all(type_))
+
+
+# ----- A temporal id -----
+
+
+async def test_a_date_id_saved_twice_is_one_node_loaded_by_the_ids_text(gom: StatelessGraphObjectManager):
+    await gom.save(LookupDate(id=date(2024, 1, 2), name="first"))
+    await gom.save(LookupDate(id=date(2024, 1, 2), name="second"))
+    assert await names(gom, LookupDate) == ["second"]
+    loaded = await gom.load(LookupDate, "2024-01-02")
+    assert loaded is not None and loaded.name == "second"
+
+
+async def test_a_date_id_saved_twice_in_one_save_all_is_one_node(gom: StatelessGraphObjectManager):
+    await gom.save_all(
+        [LookupDate(id=date(2024, 1, 3), name="batch first"), LookupDate(id=date(2024, 1, 3), name="batch second")]
+    )
+    assert await names(gom, LookupDate) == ["batch second"]
+    loaded = await gom.load(LookupDate, date(2024, 1, 3))
+    assert loaded is not None and loaded.id == date(2024, 1, 3)
+
+
+# ----- Load, delete by id and load_related, for a number, a date and a str id -----
+
+
+async def lookups(gom: StatelessGraphObjectManager, type_: type[Any], node: Any, text: str) -> None:
+    """Saves `node`, joins it to the target, and finds it by `text` through a load, load_related and a delete."""
+    await gom.save(node)
+    assert await gom.edges.relate(node_ref(type_, text), TARGET, "POINTS_TO")
+    loaded = await gom.load(type_, text)
+    assert loaded is not None and loaded.name == node.name
+    related = await gom.edges.load_related(node_ref(type_, text), "POINTS_TO", LookupTarget)
+    assert [it.id for it in related] == ["x"]
+    assert await gom.delete(type_, text) == 1
+    assert await gom.load(type_, text) is None
+
+
+async def test_a_number_id_is_found_by_its_text(gom: StatelessGraphObjectManager):
+    await lookups(gom, LookupNumber, LookupNumber(id=5, name="five"), "5")
+
+
+async def test_a_date_id_is_found_by_its_text(gom: StatelessGraphObjectManager):
+    await lookups(gom, LookupDate, LookupDate(id=date(2024, 3, 4), name="march"), "2024-03-04")
+
+
+async def test_a_str_id_is_found_by_its_text(gom: StatelessGraphObjectManager):
+    await lookups(gom, LookupText, LookupText(id="t5", name="text"), "t5")
+
+
+# ----- Relate (a `ref` step) and patch (a `patch` step), each finding its node by the id's JSON -----
+
+
+async def refs_and_patches(gom: StatelessGraphObjectManager, type_: type[Any], node: Any, text: str, absent: str):
+    """
+    Joins `node`, saved, to the target by refs given the id as text and as its value; patches its name; and refers to
+    a node of the class that isn't there, `absent`, which is not made, and joins nothing.
+    """
+    await gom.save(node)
+    id_ = node.id
+    assert await gom.edges.relate(node_ref(type_, text), TARGET, "REFERS_TO")
+    assert await gom.edges.relate(node_ref(type_, id_), TARGET, "REFERS_TO", {}, RelateMode.CREATE)
+    assert await gom.edges.unrelate(node_ref(type_, text), TARGET, "REFERS_TO") == 2
+    assert await gom.edges.relate(node_ref(type_, id_), TARGET, "REFERS_TO")
+
+    patched = await gom.patch(type_, text, set={"name": "renamed"})
+    assert (patched.found, patched.applied, patched.changed) == (True, True, True)
+    loaded = await gom.load(type_, text)
+    assert loaded is not None and loaded.name == "renamed"
+    [all_] = await gom.patch_all([type_(id=id_, name="patched all")], only=["name"])
+    assert (all_.found, all_.applied, all_.changed) == (True, True, True)
+    loaded = await gom.load(type_, id_)
+    assert loaded is not None and loaded.name == "patched all"
+
+    assert not await gom.edges.relate(node_ref(type_, absent), TARGET, "REFERS_TO")
+    assert not await gom.edges.relate(TARGET, node_ref(type_, absent), "REFERS_TO")
+    assert await gom.edges.load_related(TARGET, "REFERS_TO", type_) == []
+    assert await gom.edges.unrelate_all(node_ref(type_, text), "REFERS_TO") == 1
+
+
+async def test_a_node_of_a_number_id_is_related_and_patched(gom: StatelessGraphObjectManager):
+    await refs_and_patches(gom, LookupNumber, LookupNumber(id=21, name="a"), "21", "22")
+
+
+async def test_a_node_of_a_date_id_is_related_and_patched(gom: StatelessGraphObjectManager):
+    await refs_and_patches(gom, LookupDate, LookupDate(id=date(2024, 5, 6), name="a"), "2024-05-06", "2024-05-07")
+
+
+async def test_a_node_of_a_str_id_is_related_and_patched(gom: StatelessGraphObjectManager):
+    await refs_and_patches(gom, LookupText, LookupText(id="t21", name="a"), "t21", "t22")
+
+
+async def test_a_target_of_a_date_id_is_unlinked_by_its_tags_text_and_the_one_still_held_kept(
+    gom: StatelessGraphObjectManager,
+):
+    # A save that replaces a list keeps the targets the object still holds, told by their ids as the plan keys them,
+    # and unlinks the rest: a target of a date id is read back by its tag's text `v`, which the plan's `ids` hold. Read
+    # as anything else, the dropped day would be kept, or the held one unlinked and joined again, which gives it a new
+    # relationship token, its stamp's second.
+    days = LookupTarget(id="days", name="a target of days")
+    first = LookupDate(id=date(2025, 1, 1), name="first day")
+    second = LookupDate(id=date(2025, 1, 2), name="second day")
+    await gom.save(LookupTargetDays(target=days, days=[first, second]), replace=["days"])
+    loaded = await gom.load(LookupTargetDays, "days")
+    assert loaded is not None and sorted(it.name or "" for it in loaded.days) == ["first day", "second day"]
+    held = await gom.load(LookupDate, "2025-01-02")
+    assert held is not None
+
+    kept = LookupDate(id=date(2025, 1, 2), name="second day")
+    await gom.save(LookupTargetDays(target=days, days=[kept]), replace=["days"])
+
+    loaded = await gom.load(LookupTargetDays, "days")
+    assert loaded is not None and [it.name for it in loaded.days] == ["second day"]
+    again = await gom.load(LookupDate, "2025-01-02")
+    assert again is not None and again.stamp == held.stamp
+    dropped = await gom.load(LookupDate, "2025-01-01")
+    assert dropped is not None and dropped.name == "first day"
+
+
+async def test_a_cascade_delete_by_a_date_ids_text_checks_its_depth_and_deletes_the_tree(
+    gom: StatelessGraphObjectManager,
+):
+    # The root is found as a load finds it, both in the check that refuses a tree deeper than the view reads and in
+    # the delete itself.
+    isos = ["2026-02-01", "2026-02-02", "2026-02-03"]
+    for i, iso in enumerate(isos):
+        await gom.save(LookupDate(id=date.fromisoformat(iso), name=f"tree day {i}"))
+    for i in range(1, len(isos)):
+        assert await gom.edges.relate(node_ref(LookupDate, isos[i]), node_ref(LookupDate, isos[i - 1]), "DAY_PART_OF")
+    with pytest.raises(DrivineError, match="1 node below that would be left behind"):
+        await gom.delete(LookupDateTree, "2026-02-01", cascade=CascadeType.DELETE_ALL)
+    assert len(await names(gom, LookupDate)) == 3
+
+    assert await gom.delete(LookupDate, "2026-02-03") == 1
+    assert await gom.delete(LookupDateTree, "2026-02-01", cascade=CascadeType.DELETE_ALL) == 2
+    assert await names(gom, LookupDate) == []
+
+
+async def test_a_patch_of_a_node_that_isnt_there_finds_none(gom: StatelessGraphObjectManager):
+    patched = await gom.patch(LookupDate, "1999-01-01", set={"name": "none"})
+    assert (patched.found, patched.applied, patched.changed) == (False, False, False)
+    assert await names(gom, LookupDate) == []
+
+
+async def test_a_str_id_finds_only_the_str_not_a_number_of_the_same_text(gom: StatelessGraphObjectManager):
+    await gom.save(LookupTextNumber(id=6, name="number"))
+    await gom.save(LookupText(id="6", name="string"))
+
+    loaded = await gom.load(LookupText, "6")
+    assert loaded is not None and loaded.name == "string"
+    assert await gom.delete(LookupText, "6") == 1
+    number = await gom.load(LookupTextNumber, 6)
+    assert number is not None and number.name == "number"
+    assert await gom.load(LookupText, "6") is None
+
+
+async def test_text_that_is_no_number_finds_nothing_on_a_number_id_and_raises_nothing(
+    gom: StatelessGraphObjectManager,
+):
+    await gom.save(LookupNumber(id=7, name="seven"))
+    nowhere = node_ref(LookupNumber, "abc")
+
+    assert await gom.load(LookupNumber, "abc") is None
+    assert await gom.delete(LookupNumber, "abc") == 0
+    assert await gom.edges.load_related(nowhere, "POINTS_TO", LookupTarget) == []
+    assert not await gom.edges.relate(nowhere, TARGET, "POINTS_TO")
+    patched = await gom.patch(LookupNumber, "abc", set={"name": "x"})
+    assert (patched.found, patched.applied, patched.changed) == (False, False, False)
+    seven = await gom.load(LookupNumber, "7")
+    assert seven is not None and seven.name == "seven"
+
+
+async def test_a_patch_by_a_null_id_finds_no_node_beside_one_whose_id_is_the_text_null(
+    gom: StatelessGraphObjectManager,
+):
+    # #528: the plan keyed a null id as the text "null", and found the node whose id is that text.
+    await gom.save(LookupText(id="null", name="the text null"))
+    patched = await gom.patch(LookupText, None, set={"name": "patched"})
+    assert (patched.found, patched.applied, patched.changed) == (False, False, False)
+    loaded = await gom.load(LookupText, "null")
+    assert loaded is not None and loaded.name == "the text null"
+
+
+async def test_a_node_of_a_dollar_named_id_is_found_by_its_id(gom: StatelessGraphObjectManager):
+    await gom.save(LookupPriced(code="p1", name="priced"))
+    loaded = await gom.load(LookupPriced, "p1")
+    assert loaded is not None and loaded.name == "priced"
+    # A second save finds the node under the key the layout holds it as, and makes no second one.
+    await gom.save(LookupPriced(code="p1", name="saved again"))
+    assert await names(gom, LookupPriced) == ["saved again"]
+    # So does a save_all, which writes a batch, and a relate, which finds both ends by their ids.
+    await gom.save_all([LookupPriced(code="p1", name="batched")])
+    assert await names(gom, LookupPriced) == ["batched"]
+    assert await gom.edges.relate(node_ref(LookupPriced, "p1"), TARGET, "POINTS_TO")
+    related = await gom.edges.load_related(node_ref(LookupPriced, "p1"), "POINTS_TO", LookupTarget)
+    assert [it.id for it in related] == ["x"]
+    patched = await gom.patch(LookupPriced, "p1", set={"name": "repriced"})
+    assert patched.found
+    loaded = await gom.load(LookupPriced, "p1")
+    assert loaded is not None and loaded.name == "repriced"
+    assert await gom.delete(LookupPriced, "p1") == 1
+    assert await gom.load(LookupPriced, "p1") is None
+
+
+# ----- Each lookup reads the index -----
+
+
+async def assert_reads_index(
+    gom: StatelessGraphObjectManager, pm: PersistenceManager, type_: type[Any], id_: Any, made: str
+) -> None:
+    """A load, a delete by id and load_related of a node of `type_` by `id_` each read the index named `made`."""
+    sqlite = pm.type is DatabaseType.SQLITE
+    await pm.execute(QuerySpecification[Any]("ANALYZE" if sqlite else "ANALYZE drivine_node"))
+    registry = ModelRegistry()
+    model = registry.fragment(type_)
+    backend = gom.backend
+
+    async def explain(text: str, bindings: dict[str, Any]) -> str:
+        rows = await pm.query(
+            QuerySpecification[Any](f"{'EXPLAIN QUERY PLAN' if sqlite else 'EXPLAIN'} {text}").bind(bindings)
+        )
+        return "\n".join(str(it["detail"] if sqlite else next(iter(it.values()))) for it in rows)
+
+    index = rf"drivine_{made}_\w+"
+    reads = (
+        re.compile(rf"SEARCH \w+ USING (COVERING )?INDEX {index} \(<expr>=\? AND <expr>=\?\)", re.IGNORECASE)
+        if sqlite
+        else re.compile(rf"Index (Only )?Scan using {index} on drivine_node", re.IGNORECASE)
+    )
+    bound = {"id": to_json(write(id_, "sqlite" if sqlite else "postgres"))}
+    assert reads.search(await explain(backend.load_fragment(model).text, bound))
+    assert reads.search(await explain(backend.delete(model).text, bound))
+    related = backend.related(
+        MatchedNode(model, id_, ()), "POINTS_TO", Direction.OUTGOING, registry.fragment(LookupTarget)
+    )
+    assert reads.search(await explain(related.text, dict(related.bindings)))
+
+
+async def test_a_lookup_by_a_number_id_reads_the_uniqueness_constraints_index(
+    gom: StatelessGraphObjectManager, pm: PersistenceManager
+):
+    """
+    A load, a delete by id and load_related read the index the library makes over the id, a uniqueness constraint's
+    ensured through `gom.constraints`, which the shared module's schema plan makes as layout 2 makes it: over the
+    property's JSON on Postgres, and its class and key on SQLite, which the module's hasId compares. On Postgres and
+    SQLite, whose planners are read here; Oracle's lookups are planned in drivine4j's suite.
+    """
+    if pm.type is DatabaseType.ORACLE:
+        pytest.skip("Oracle's lookups by id are planned in drivine4j's suite.")
+    constraint = uniqueness_constraint("LookupNumber", "id")
+    await gom.save_all([LookupNumber(id=1000 + i, name="filler") for i in range(3000)])
+    await gom.constraints.ensure(constraint)
+    try:
+        await assert_reads_index(gom, pm, LookupNumber, 1500, "uq2_LookupNumberid")
+    finally:
+        await gom.constraints.drop(constraint)
+
+
+async def test_a_lookup_by_a_date_id_reads_the_range_index_where_it_is_made_over_the_ids_class_and_key(
+    gom: StatelessGraphObjectManager, pm: PersistenceManager
+):
+    """
+    On SQLite, a range index ensured through `gom.indexes` over a date id, made over the value's class and key as the
+    module's hasId compares them, is read by a load, a delete by id and load_related. Postgres's range index is over
+    the property's text, which a lookup by the id's JSON doesn't read: its uniqueness constraint's index is.
+    """
+    if pm.type is not DatabaseType.SQLITE:
+        pytest.skip("Postgres's range index is over the property's text, not its JSON.")
+    index = range_index("LookupDate", "id")
+    await gom.save_all([LookupDate(id=date(2000, 1, 1) + timedelta(days=i), name="filler") for i in range(3000)])
+    await gom.indexes.ensure(index)
+    try:
+        await assert_reads_index(gom, pm, LookupDate, date(2001, 1, 1), "ix2_LookupDateid")
+    finally:
+        await gom.indexes.drop(index)

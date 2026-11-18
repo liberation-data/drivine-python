@@ -48,12 +48,14 @@ class IssueView(GraphView):
 ISSUES = 20_000
 BY_REPO = range_index("OraIssue", "repoKey")
 UNIQUE_CODE = uniqueness_constraint("OraIssue", "code")
+BY_CODE = range_index("OraIssue", "code")
 
 q = refs(Issue)
 
 
 def tidy(gom: StatelessGraphObjectManager) -> None:
     gom.indexes.drop(BY_REPO)
+    gom.indexes.drop(BY_CODE)
     gom.constraints.drop(UNIQUE_CODE)
     OracleSeed(gom.persistence_manager, "OraIssue").clear()
     OracleSeed(gom.persistence_manager, "OraComment").clear()
@@ -139,14 +141,21 @@ def test_finds_through_the_index_what_it_finds_without_it(gom: StatelessGraphObj
 def test_reads_the_index_and_not_the_label_for_a_comparison_every_root_meets(
     gom: StatelessGraphObjectManager, pm: PersistenceManager
 ):
-    gom.indexes.ensure(BY_REPO)
-    labelled = OracleGraph().object_name("lx2", ["OraIssue", "repoKey"]).upper()
-    indexed = plan_of(gom, pm, [q.repo_key.eq("r7"), q.state.eq("closed")])
-    assert labelled in indexed
-    assert "DRIVINE_NODE_LABELS" not in indexed
-    # Inside an or, the label is read as before.
-    either = plan_of(gom, pm, any_of(q.repo_key.eq("r1"), q.repo_key.eq("r2")))
-    assert labelled not in either
+    # Of a property each node holds a value of its own of, where the index wins on cost. For one of a few values, such
+    # as the repo key, a 50th of the label each, one node a block, Oracle rightly reads the table instead: the plan is
+    # then a matter of cost, and no proof of the index being read.
+    gom.indexes.ensure(BY_CODE)
+    try:
+        labelled = OracleGraph().object_name("lx2", ["OraIssue", "code"]).upper()
+        indexed = plan_of(gom, pm, q.code.eq("c42"))
+        assert labelled in indexed
+        assert "DRIVINE_NODE_LABELS" not in indexed
+        assert ids(gom, q.code.eq("c42")) == ["i42"]
+        # Inside an or, the label is read as before.
+        either = plan_of(gom, pm, any_of(q.code.eq("c1"), q.code.eq("c2")))
+        assert labelled not in either
+    finally:
+        gom.indexes.drop(BY_CODE)
 
 
 def test_reads_a_uniqueness_constraint_over_the_property_as_it_reads_a_range_index(

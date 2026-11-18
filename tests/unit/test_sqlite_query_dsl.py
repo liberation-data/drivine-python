@@ -197,6 +197,8 @@ def test_reads_a_property_written_as_cypher_writes_it_as_the_store_reads_it_over
     assert backend.written("n.title = 'x'") == f"{text_of('n_', 'title')} = 'x'"
     # A column of the row is the row's, which a read of the query DSL calls n_ (see SqliteBackend's ROW_ALIAS).
     assert backend.written("n.props ->> '$.title' = 'x'") == "n_.props ->> '$.title' = 'x'"
+    # A property whose name begins with `$` is read by the name the layout holds it by, `$$score`.
+    assert backend.written("n.`$score` > 1") == f"{text_of('n_', '$$score')} > 1"
 
 
 @pytest.mark.parametrize(

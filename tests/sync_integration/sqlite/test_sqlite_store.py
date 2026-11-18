@@ -380,6 +380,25 @@ def test_a_patch_where_a_boolean_is_bound_meets_the_node_a_load_with_the_same_wh
     assert loaded is not None and loaded.note == "met"
 
 
+def test_a_property_compared_in_the_shorthand_with_a_bound_boolean_meets_the_nodes_that_hold_it(gom):
+    # drivine-python#542: SQLite binds True as 1, and the shorthand reads `n.flag` as the text "true", so a load, a
+    # count, a delete and a patch found nothing; the shorthand compares it with the boolean's text, as `= true`.
+    from drivine.sync import key
+
+    gom.save_all([Flagged(id="b1", flag=True), Flagged(id="b2", flag=False)])
+    where = "n.flag = $flag"
+    assert [it.id for it in gom.load_all(Flagged, where, {"flag": True})] == ["b1"]
+    assert [it.id for it in gom.load_all(Flagged, "n.flag <> $flag", {"flag": True})] == ["b2"]
+    assert gom.count(Flagged, where, {"flag": False}) == 1
+    patched = gom.patch(Flagged, "b1", set={"note": "met"}, where=where, bindings={"flag": True})
+    assert patched.applied
+    assert not (gom.patch(Flagged, "b1", set={"note": "missed"}, where=where, bindings={"flag": False})).applied
+    groups = gom.groups.load(Flagged, where=where, bindings={"flag": True}, keys={"id": key("id")})
+    assert groups == [{"id": "b1"}]
+    assert gom.delete_all(Flagged, where, {"flag": False}) == 1
+    assert [it.id for it in gom.load_all(Flagged)] == ["b1"]
+
+
 class Opened(NodeFragment, labels=["Opened"]):
     id: Annotated[str, NodeId()]
     at: datetime | None = None

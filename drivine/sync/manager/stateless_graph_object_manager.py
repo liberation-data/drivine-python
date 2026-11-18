@@ -741,7 +741,7 @@ class StatelessGraphObjectManager:
         backend's `written`), or conditions written for the store.
         """
         if where is None or isinstance(where, str):
-            return self.backend.written(where) if where else where, dict(bindings or {})
+            return self.backend.written(where, bindings) if where else where, dict(bindings or {})
         written, values = self.backend.render_where(where, target_, self._labels)
         return written, {**(bindings or {}), **values}
 
@@ -765,7 +765,7 @@ class StatelessGraphObjectManager:
         )
         if not isinstance(where, str):
             return dataclasses.replace(rendered, bindings={**(bindings or {}), **rendered.bindings})
-        where = self.backend.written(where) if where else where
+        where = self.backend.written(where, bindings) if where else where
         predicate = f"({where}) AND {rendered.where}" if rendered.where else where
         return dataclasses.replace(rendered, where=predicate, bindings={**(bindings or {}), **rendered.bindings})
 

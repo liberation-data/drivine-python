@@ -3,6 +3,9 @@ drivine4j's CypherShorthandTest, ported as TypeScript's Drivine ported it: a pre
 properties written as Cypher writes them, read on Oracle, as drivine4j reads it.
 """
 
+from collections.abc import Mapping
+from typing import Any
+
 from drivine.backend.cypher_backend import CypherBackend
 from drivine.backend.cypher_grammar import NEO4J_GRAMMAR
 from drivine.backend.oracle.oracle_backend import OracleBackend
@@ -14,8 +17,8 @@ from drivine.backend.sqlite.sqlite_backend import SqliteBackend
 shorthand = CypherShorthand("n", "n_", oracle)
 
 
-def rewrite(predicate: str) -> str:
-    return shorthand.rewrite(predicate)
+def rewrite(predicate: str, bindings: Mapping[str, Any] | None = None) -> str:
+    return shorthand.rewrite(predicate, bindings)
 
 
 def test_a_property_of_the_root_is_read_from_its_document():
@@ -109,3 +112,22 @@ def test_a_quote_in_a_name_in_backticks_stays_inside_the_literal_it_is_written_i
     assert rewrite('n.`a"b\\c` = 1') == 'JSON_VALUE(n_.props, \'$."a\\"b\\\\c"\') = 1'
     assert rewrite("n.`a\n` = 1") == "JSON_VALUE(n_.props, '$.\"a\n\"') = 1"
     assert PostgresBackend().written("n.`it's` = 1") == "(n_.props ->> 'it''s') = 1"
+
+
+def test_a_property_compared_with_a_parameter_bound_to_a_boolean_is_compared_with_the_booleans_text():
+    # drivine-python#542: a driver binds a boolean as no text a property is read as (SQLite's as 1), so the comparison
+    # would hold for no node; it is compared as `n.open = true` is.
+    bound = {"open": True, "shut": False, "count": 1, "name": "x"}
+    assert rewrite("n.open = $open AND n.shut <> $shut", bound) == (
+        "JSON_VALUE(n_.props, '$.open') = 'true' AND JSON_VALUE(n_.props, '$.shut') <> 'false'"
+    )
+    # A parameter bound to anything else, one bound to none, and a longer name are read as they are.
+    assert rewrite("n.count = $count AND n.name = $name AND n.open = $missing", bound) == (
+        "JSON_VALUE(n_.props, '$.count') = $count AND JSON_VALUE(n_.props, '$.name') = $name AND "
+        "JSON_VALUE(n_.props, '$.open') = $missing"
+    )
+    assert rewrite("n.open = $opened", {"open": True, "opened": 1}) == "JSON_VALUE(n_.props, '$.open') = $opened"
+    # SQL of the caller's own over the row reads the boolean as the driver binds it.
+    assert SqliteBackend().written("(n.props ->> '$.open') = $open", bound) == "(n_.props ->> '$.open') = $open"
+    # Without the bindings the predicate is read as before.
+    assert rewrite("n.open = $open") == "JSON_VALUE(n_.props, '$.open') = $open"

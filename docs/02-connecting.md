@@ -155,8 +155,9 @@ is applied whole or not at all.
   `(n.props ->> 'name') = $name`, read over the row a statement calls it by, `n_` (the row the shared module's
   fragments read). A property of the root may be written as Cypher writes it, `n.name = $name` (or ``n.`a name` ``),
   and is read as that property, as text, and one whose stored name begins with `$`, ``n.`$score` ``, by the name the
-  store holds it by; a property compared with `true` or `false` is compared with the text a JSON boolean is read as.
-  A date in a raw `where` is compared with the property's JSON text, the tag a save holds it as, so
+  store holds it by; a property compared with `true` or `false`, or with a parameter bound to `True` or `False`, is
+  compared with the text a JSON boolean is read as. To compare one with a number, read it as a number in SQL:
+  ``CAST(n.`$score` AS NUMERIC) > $least``. A date in a raw `where` is compared with the property's JSON text, the tag a save holds it as, so
   `(n.props ->> 'at') = $when` finds nothing: compare dates in the query DSL.
 - A number is compared as a number only where one is stored: `'7'` is not `7`, as on the graph engines.
 - **Behaviour change:** text is compared and ordered by its code points, as Neo4j orders it, in the query DSL's
@@ -255,7 +256,10 @@ database in memory or in a temporary file. There is no migration: make a new fil
   as JSON. One you write is read as it is: a row is a dict of its columns, and `labels` and `props` are text.
 - A raw `where` is SQL over the root's row `n`, as on Postgres, read over the row a statement calls it by, `n_` (the
   row the shared module's fragments read); a property written as Cypher writes it, `n.name`, is read as that property,
-  as text, and one whose stored name begins with `$`, ``n.`$score` ``, by the name the store holds it by. A date in a
+  as text, and one whose stored name begins with `$`, ``n.`$score` ``, by the name the store holds it by; one compared
+  with `true` or `false`, or with a parameter bound to `True` or `False`, is compared with the text a JSON boolean is
+  read as, while SQL of your own over `n.props` reads one as SQLite does, `1` or `0`, as the parameter is bound. To
+  compare one with a number, read it as a number in SQL: ``CAST(n.`$score` AS NUMERIC) > $least``. A date in a
   raw `where` is compared with the property's JSON, the tag a save holds it as, so `n.at = $when` finds nothing: compare
   dates in the query DSL.
 - A range index or a uniqueness constraint is a partial index over the property as a statement reads it, for the

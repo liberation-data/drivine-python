@@ -53,10 +53,11 @@ class GraphBackend(Protocol):
         self, where: Any, target: TargetModel, labels_of_class: Callable[[type], list[str]]
     ) -> tuple[str, dict[str, Any]]: ...
 
-    def written(self, predicate: str) -> str:
+    def written(self, predicate: str, bindings: Mapping[str, Any] | None = None) -> str:
         """
-        A predicate the caller wrote, as the store reads it. A SQL store reads each property of the root written as
-        Cypher writes it, `n.name`, as that property (see CypherShorthand); a graph engine reads it as it is.
+        A predicate the caller wrote, as the store reads it, given what the statement binds. A SQL store reads each
+        property of the root written as Cypher writes it, `n.name`, as that property (see CypherShorthand); a graph
+        engine reads it as it is.
         """
         ...
 

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
-from typing import NamedTuple
+from collections.abc import Callable, Mapping
+from typing import Any, NamedTuple
 
 from drivine.backend.sql.value_layout import held_key
 
@@ -14,6 +14,10 @@ _BOOLEAN_COMPARED = re.compile(
 )
 """An equality or inequality with `true` or `false` that follows a property, in any case: the operator with its
 space, and the boolean."""
+
+_BOUND_COMPARED = re.compile(r"([ \t\n\x0b\f\r]*(?:=|<>|!=)[ \t\n\x0b\f\r]*)\$([A-Za-z_][A-Za-z0-9_]*)(?![A-Za-z0-9_])")
+"""An equality or inequality with a parameter, `$name`, that follows a property: the operator with its space, and the
+name."""
 
 _COLUMNS = frozenset({"nid", "labels", "props", "stamp"})
 """What a row of a node has of its own; a predicate that names one means the column."""
@@ -35,11 +39,13 @@ class CypherShorthand:
     """
     Rewrites a predicate the caller wrote, with a property of the root written as Cypher writes it, `issue.state` or
     ``issue.`metadata.source` ``, to read that property. So the plain comparisons a Cypher predicate makes are the same
-    text on a SQL store; anything more is SQL, over the root's columns `issue.props`, `issue.labels` and
-    `issue.stamp`. Text inside a string literal is left as it is. A property compared with `true` or `false`
-    (`issue.locked = true`) is compared with the text a store reads a JSON boolean as, since SQL compares no text with
-    a boolean. A property whose name begins with `$` is read under the key store layout 2 holds it by, the `$`
-    doubled (`` n.`$score` `` is `$$score`, see held_key). drivine4j's `CypherShorthand`, rule for rule.
+    text on a SQL store; anything more is SQL, over the root's columns `issue.props`, `issue.labels` and `issue.stamp`.
+    Text inside a string literal is left as it is. A property compared with `true` or `false` (`issue.locked = true`) is
+    compared with the text a store reads a JSON boolean as, since SQL compares no text with a boolean, and so is one
+    compared with a parameter bound to a boolean (`issue.locked = $locked`): a driver binds it as no such text (SQLite's
+    as 1), and the comparison would hold for no node (drivine-python#542, liberation-data/drivine4j#849). A property
+    whose name begins with `$` is read under the key store layout 2 holds it by, the `$` doubled (`` n.`$score` `` is
+    `$$score`, see held_key). drivine4j's `CypherShorthand`, rule for rule.
     """
 
     def __init__(self, alias: str, row: str, property: Callable[[str, str], str]) -> None:
@@ -51,9 +57,15 @@ class CypherShorthand:
         self._alias = alias
         self._row = row
         self._property = property
+        self._bindings: Mapping[str, Any] = {}
 
-    def rewrite(self, predicate: str) -> str:
-        """`predicate` with each `alias.name` of the root read as that property, or as that column of the row."""
+    def rewrite(self, predicate: str, bindings: Mapping[str, Any] | None = None) -> str:
+        """
+        `predicate` with each `alias.name` of the root read as that property, or as that column of the row. `bindings`
+        are what the statement binds: a property compared with one of them that is a boolean is compared with the
+        boolean's text.
+        """
+        self._bindings = bindings or {}
         out: list[str] = []
         at = 0
         while at < len(predicate):
@@ -89,9 +101,14 @@ class CypherShorthand:
         property = self._property(self._row, held_key(key))
         # A property compared with a boolean is compared with the boolean's text, which is what a property is read as.
         compared = _BOOLEAN_COMPARED.match(predicate, match.end())
-        if compared is None:
-            return _Read(property, match.end())
-        return _Read(f"{property}{compared.group(1)}'{compared.group(2).lower()}'", compared.end())
+        if compared is not None:
+            return _Read(f"{property}{compared.group(1)}'{compared.group(2).lower()}'", compared.end())
+        # And so is one compared with a parameter bound to a boolean, which is then no longer read.
+        bound = _BOUND_COMPARED.match(predicate, match.end())
+        if bound is not None and isinstance(self._bindings.get(bound.group(2)), bool):
+            text = "true" if self._bindings[bound.group(2)] else "false"
+            return _Read(f"{property}{bound.group(1)}'{text}'", bound.end())
+        return _Read(property, match.end())
 
     @staticmethod
     def _end_of_literal(predicate: str, start: int) -> int:

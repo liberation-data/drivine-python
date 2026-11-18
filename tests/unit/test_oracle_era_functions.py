@@ -25,7 +25,11 @@ from drivine.connection.oracle.oracle_spec_compiler import OracleSpecCompiler
 from drivine.cypher.cypher_specification import cypher_compiled
 from tests.unit.test_oracle_stored_functions import ora
 
-CHECKS = (("nulls_equal", "_nulls_equal(JSON('[1]'), JSON('[1]'))"), ("era", "_era('0000-01-01')"))
+CHECKS = (
+    ("nulls_equal", "_nulls_equal(JSON('[1]'), JSON('[1]'))"),
+    ("era", "_era('0000-01-01')"),
+    ("temporal_arithmetic", "_temporal_arith('+', JSON("),
+)
 """What each check calls, by the function it asks of."""
 
 
@@ -57,10 +61,22 @@ class Cursor:
 
 
 class Session:
-    """A session whose checks of each function, `nulls_equal` and `era`, give their outcomes in turn."""
+    """
+    A session whose checks of each function, `nulls_equal`, `era` and `temporal_arithmetic`, give their outcomes in
+    turn, and whose every other statement gives no rows.
+    """
 
-    def __init__(self, nulls_equal: tuple[int | str, ...] = (), era: tuple[int | str, ...] = ()) -> None:
-        self.outcomes = {"nulls_equal": list(nulls_equal), "era": list(era)}
+    def __init__(
+        self,
+        nulls_equal: tuple[int | str, ...] = (),
+        era: tuple[int | str, ...] = (),
+        temporal_arithmetic: tuple[int | str, ...] = (),
+    ) -> None:
+        self.outcomes = {
+            "nulls_equal": list(nulls_equal),
+            "era": list(era),
+            "temporal_arithmetic": list(temporal_arithmetic),
+        }
         self.run: list[str] = []
         self.autocommit = True
 
@@ -100,7 +116,10 @@ async def test_both_era_functions_are_asked_of_in_one_query_and_a_yes_is_remembe
     found = Session(era=("found",))
     assert await connection(found, g)._calls_era()
     assert await connection(found, g)._calls_era()
-    assert found.checks == [f"SELECT {g}_era('0000-01-01'), {g}_era_date('-0001-01-01') FROM DUAL"]
+    # The shared module's probe, which calls each of them.
+    assert found.checks == [
+        f"SELECT {g}_era('0000-01-01'), {g}_era_date('-0001-01-01'), {g}_temporal_key('date', '2024-01-01') FROM DUAL"
+    ]
 
 
 async def test_the_era_functions_are_asked_of_apart_from_nulls_equal_and_warned_of_once(
@@ -118,9 +137,10 @@ async def test_the_era_functions_are_asked_of_apart_from_nulls_equal_and_warned_
         assert await connection(asked, g)._calls_nulls_equal()
     assert len(asked.checks) == 3
     warned = [it.getMessage() for it in caplog.records]
-    assert len([it for it in warned if f"has no function {g}_era and {g}_era_date" in it]) == 1, warned
+    names = f"{g}_era, {g}_era_date and {g}_temporal_key"
+    assert len([it for it in warned if f"has no function {names}" in it]) == 1, warned
     assert not [it for it in warned if f"{g}_nulls_equal" in it], warned
-    assert "it gives the same rows" in next(it for it in warned if f"{g}_era and" in it)
+    assert "it gives the same rows" in next(it for it in warned if names in it)
 
 
 @pytest.mark.parametrize("code", [904, 942, 1031, 6575])

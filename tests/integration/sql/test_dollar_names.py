@@ -2,9 +2,9 @@
 A query DSL filter, order and grouped read of a property whose name begins with `$`, which store layout 2 holds as
 `$$score` (drivine-cypher-spec#161). The DSL's own SQL named it as it is, `$score`, so it found no node, ordered by
 nothing and grouped every node under no value, silently. The shared module's fragments read it as the layout holds it:
-on SQLite since drivine-cypher-spec#235 step 2, and on Postgres since step 3. A raw where reads it by the key it is held
-under on each SQL store (drivine-python#543, liberation-data/drivine#793). A port of Drivine for TypeScript's
-StatelessGraphObjectManager.dollarNames.spec.
+on SQLite since drivine-cypher-spec#235 step 2, on Postgres since step 3 and on Oracle since step 4. A raw where reads
+it by the key it is held under on each SQL store (drivine-python#543, liberation-data/drivine#793). A port of Drivine
+for TypeScript's StatelessGraphObjectManager.dollarNames.spec.
 """
 
 from collections.abc import AsyncIterator
@@ -41,34 +41,24 @@ async def ranked(pm: PersistenceManager, gom: StatelessGraphObjectManager) -> As
     await seed.clear()
 
 
-@pytest.fixture
-def held(pm: PersistenceManager, request: pytest.FixtureRequest) -> None:
-    """
-    Held where the DSL's SQL is still the library's own, which names the property as it is: Oracle until
-    drivine-cypher-spec#235 step 4. Take the hold out when that step lands.
-    """
-    if pm.type is DatabaseType.ORACLE:
-        request.applymarker(pytest.mark.xfail(strict=True, reason="drivine-cypher-spec#235 step 4"))
-
-
 async def test_saves_and_loads_it_by_its_own_name(gom: StatelessGraphObjectManager):
     loaded = await gom.load(Ranked, "r2")
     assert loaded is not None and loaded.score == 2
 
 
-async def test_filters_by_it(gom: StatelessGraphObjectManager, held: None):
+async def test_filters_by_it(gom: StatelessGraphObjectManager):
     q = refs(Ranked)
     assert sorted(it.id for it in await gom.load_all(Ranked, q.score.gt(1))) == ["r2", "r3"]
     assert await gom.count(Ranked, q.score.eq(3)) == 1
 
 
-async def test_orders_and_seeks_by_it(gom: StatelessGraphObjectManager, held: None):
+async def test_orders_and_seeks_by_it(gom: StatelessGraphObjectManager):
     q = refs(Ranked)
     assert [it.id for it in await gom.load_all(Ranked, order_by=q.score.desc())] == ["r3", "r2", "r1"]
     assert [it.id for it in await gom.load_all(Ranked, order_by=q.score.asc(), seek=q.score.after(1))] == ["r2", "r3"]
 
 
-async def test_groups_and_adds_by_it(gom: StatelessGraphObjectManager, held: None):
+async def test_groups_and_adds_by_it(gom: StatelessGraphObjectManager):
     q = refs(Ranked)
     groups = await gom.groups.load(
         Ranked,

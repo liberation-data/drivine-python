@@ -68,6 +68,13 @@ class SqlGroups(ABC):
 
     def __init__(self, graph: SqlGraph) -> None:
         self.graph = graph
+        self._grouping = ""
+        """
+        The key columns of the rows grouped, `m.k0, …`, which a `_window` over them is partitioned by: set as the
+        statement is built.
+        """
+        self._windows: list[str] = []
+        """The windows over the rows grouped, each with its column's name, asked for so far (see `_window`)."""
 
     def build(
         self,
@@ -76,6 +83,7 @@ class SqlGroups(ABC):
         path_targets: Mapping[str, FragmentModel],
         labels_of_class: Callable[[type], list[str]],
     ) -> GraphStatement:
+        self._windows = []
         views = self._views()
         query = GroupStatement.resolved(source, given, self._renderer(views, labels_of_class))
         keys = list(query.keys.items())
@@ -109,6 +117,8 @@ class SqlGroups(ABC):
                 wheres.extend([where_clause, step.x])
                 at = step.node
             key_columns.append(f"{at}.nid AS k{i}")
+        key_names = [f"m.k{i}" for i in range(len(keys))]
+        self._grouping = ", ".join(key_names)
 
         def value(aggregate: GroupAggregate) -> str:
             return self._aggregated(views, str(aggregate.property)) if aggregate.property else "1"
@@ -225,12 +235,13 @@ class SqlGroups(ABC):
         ] + [(f"a{i}", f"g.a{i}" if it is None or it.gives_value else it.value(holder(i))) for i, it in enumerate(held)]
         holders = [
             *(
-                f"LEFT JOIN {self.graph.nodes} {key_holder(i)} ON {key_holder(i)}.nid = {held_by(i)}"
+                f"LEFT JOIN {self.graph.nodes} {key_holder(i)} ON {self._same_node(f'{key_holder(i)}.nid', held_by(i))}"
                 for i, it in enumerate(held_keys)
                 if it is not None
             ),
             *(
-                f"LEFT JOIN {self.graph.nodes} {holder(i)} ON {holder(i)}.nid = g.a{i}{'r' if it.gives_value else ''}"
+                f"LEFT JOIN {self.graph.nodes} {holder(i)} "
+                f"ON {self._same_node(f'{holder(i)}.nid', f'g.a{i}' + ('r' if it.gives_value else ''))}"
                 for i, it in enumerate(held)
                 if it is not None and holds(i)
             ),
@@ -240,15 +251,27 @@ class SqlGroups(ABC):
             for i, it in enumerate(held_keys)
             if it is not None and not isinstance(keys[i][1], PathKey)
         ]
-        key_names = [f"m.k{i}" for i in range(len(keys))]
+        pairs = f"(SELECT DISTINCT {n}.nid, {', '.join(key_columns)} {' '.join(froms)} WHERE {' AND '.join(wheres)}) m"
+        joined = f"JOIN {self.graph.nodes} {n} ON {self._same_node(f'{n}.nid', 'm.nid')}"
+        # With windows, the rows grouped are each node's row with its keys and its windows' columns, under its own name.
+        grouped = [f"{n}.k{i}" for i in range(len(keys))] if self._windows else key_names
+        rows = (
+            [
+                "    FROM (",
+                f"        SELECT {', '.join([*key_names, f'{n}.*', *self._windows])}",
+                f"        FROM {pairs}",
+                f"        {joined}",
+                f"    ) {n}",
+            ]
+            if self._windows
+            else [f"    FROM {pairs}", f"    {joined}"]
+        )
         text = [
             f'SELECT {views.object(projected)} AS "row"',
             "FROM (",
-            f"    SELECT {', '.join([*key_names, *aggregate_columns, *representatives])}",
-            f"    FROM (SELECT DISTINCT {n}.nid, {', '.join(key_columns)} {' '.join(froms)} "
-            f"WHERE {' AND '.join(wheres)}) m",
-            f"    JOIN {self.graph.nodes} {n} ON {n}.nid = m.nid",
-            f"    GROUP BY {', '.join(key_names)}",
+            f"    SELECT {', '.join([*grouped, *aggregate_columns, *representatives])}",
+            *rows,
+            f"    GROUP BY {', '.join(grouped)}",
             *([f"    HAVING {' AND '.join(having)}"] if having else []),
             ") g",
             *holders,
@@ -278,6 +301,21 @@ class SqlGroups(ABC):
         value: null where it holds anything else.
         """
         return views.number(self.row, property)
+
+    def _window(self, expression: str) -> str:
+        """
+        The column of a window over the rows grouped, `expression` (`FIRST_VALUE(…) OVER (PARTITION BY …)`, partitioned
+        by `_grouping`), which the statement then computes over each node's row before it groups them, and an aggregate
+        reads, on the row of the node: for a store that takes a group's first node by a window, as drivine4j's Oracle
+        does.
+        """
+        column = f"w{len(self._windows)}"
+        self._windows.append(f"{expression} AS {column}")
+        return f"{self.row}.{column}"
+
+    def _same_node(self, a: str, b: str) -> str:
+        """Whether the nodes `a` and `b`, each a node's `nid`, are one: a node is joined back to its row so."""
+        return f"{a} = {b}"
 
     def _held(self, aggregate: GroupAggregate) -> HeldAggregate | None:
         """How a least or greatest value is read through the node that has it, where the store does so; else None."""

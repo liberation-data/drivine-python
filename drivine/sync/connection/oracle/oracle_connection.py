@@ -8,7 +8,17 @@ import time
 from collections.abc import Mapping
 from typing import Any, TypeVar
 
-from drivine.backend.oracle.oracle_stored_functions import OracleStoredFunctions, is_missing
+from drivine.backend.graph_statement import StoredFunctionCalls
+from drivine.backend.oracle.oracle_stored_functions import (
+    OracleStoredFunctions,
+    StoredFunction,
+    era_date_name,
+    era_name,
+    is_missing,
+    nulls_equal_name,
+    temporal_arithmetic_name,
+    temporal_key_name,
+)
 from drivine.backend.sql.sql_graph import DEFAULT_GRAPH
 from drivine.connection.oracle.oracle_result_mapper import OracleResultMapper
 from drivine.connection.oracle.oracle_spec_compiler import OracleSpecCompiler
@@ -109,7 +119,8 @@ class OracleConnection(Connection):
         The specification, a Cypher statement compiled for Oracle, calling the functions the graph's store keeps where
         the statement needs one and the session may call it, and compiled again to call none it may not call: see
         OracleStoredFunctions. On an Oracle older than 23.9, which has no UUID() for randomUUID(), plain SQL runs, and
-        Cypher is refused with why.
+        Cypher is refused with why. The object manager's own statement that calls one is refused where the session may
+        not call it (see `_callable`).
         """
         if self.cypher_refusal and finalized.statement is not None and finalized.statement.language == "CYPHER":
             raise DrivineError(self.cypher_refusal, finalized)
@@ -118,6 +129,8 @@ class OracleConnection(Connection):
             finalized.parameters = drained(finalized.parameters)
         sql, compiled = cypher_compiled(finalized, "ORACLE", self.graph)
         if compiled is None:
+            if finalized.stored_functions is not None:
+                self._callable(finalized.stored_functions, finalized)
             return sql
         # Each is asked of apart: a store an earlier version made may have the one and not the others.
         nulls_equal = not compiled.calls_stored_nulls_equal or self._calls_nulls_equal()
@@ -126,33 +139,61 @@ class OracleConnection(Connection):
             return sql
         return cypher_compiled(finalized, "ORACLE", self.graph, nulls_equal_stored=nulls_equal, era_stored=era)[0]
 
+    def _callable(self, calls: StoredFunctionCalls, spec: QuerySpecification[Any]) -> None:
+        """
+        Makes sure the session may call the stored functions of the graph that the object manager's statement calls,
+        as the shared module's fragments in it say (`calls`): the module compiles a fragment to call those a graph is
+        made with, and the library's own SQL can't be compiled again without them, as a Cypher statement is (see
+        `_compiled`). Where it may not call one, the statement is refused, saying why, before it runs.
+        """
+        missing = [
+            *([nulls_equal_name(calls.graph)] if calls.nulls_equal and not self._calls("nulls_equal") else []),
+            *(
+                [era_name(calls.graph), era_date_name(calls.graph), temporal_key_name(calls.graph)]
+                if calls.era and not self._calls("era")
+                else []
+            ),
+            *(
+                [temporal_arithmetic_name(calls.graph)]
+                if calls.temporal_arithmetic and not self._calls("temporal_arithmetic")
+                else []
+            ),
+        ]
+        if missing:
+            raise DrivineError(
+                f"The query DSL's statement calls {_listed(missing)}, "
+                f"{'functions' if len(missing) > 1 else 'a function'} the Oracle graph '{calls.graph}' keeps, which "
+                "this session may not call. Ensure the graph as a user who may make a function (CREATE PROCEDURE, "
+                "which the RESOURCE role grants), or compare the value in a Cypher statement.",
+                spec,
+            )
+
     def _calls_nulls_equal(self) -> bool:
         """
         Whether this session may call the graph's function `<graph>_nulls_equal`, as remembered, or as calling it
         finds. A query that fails rolls back only itself, so an open transaction is left as it was.
         """
-        return self._calls(False)
+        return self._calls("nulls_equal")
 
     def _calls_era(self) -> bool:
         """
-        Whether this session may call both the graph's functions `<graph>_era` and `<graph>_era_date`, as remembered,
-        or as calling them finds: see `OracleStoredFunctions.era_check`.
+        Whether this session may call the graph's era functions, `<graph>_era`, `<graph>_era_date` and
+        `<graph>_temporal_key`, as remembered, or as calling them finds: see `OracleStoredFunctions.era_check`.
         """
-        return self._calls(True)
+        return self._calls("era")
 
-    def _calls(self, era: bool) -> bool:
-        """Whether this session may call the graph's era functions where `era`, else its `<graph>_nulls_equal`."""
+    def _calls(self, function: StoredFunction) -> bool:
+        """Whether this session may call the graph's `function` (see StoredFunction), as remembered or as found."""
         import oracledb
 
-        key = OracleStoredFunctions.key(self.database, self.graph, era)
+        key = OracleStoredFunctions.key(self.database, self.graph, function)
         known = OracleStoredFunctions.known(key)
         if known is not None:
             return known
         self.connection.autocommit = not self._in_transaction
         cursor = self.connection.cursor()
         try:
-            check = OracleStoredFunctions.era_check if era else OracleStoredFunctions.check
-            cursor.execute(check(self.graph))
+            cursor.execute(OracleStoredFunctions.checked(self.graph, function))
             cursor.fetchall()
             found = True
         except oracledb.DatabaseError as error:
@@ -161,7 +202,7 @@ class OracleConnection(Connection):
             found = False
         finally:
             cursor.close()
-        return OracleStoredFunctions.found(key, self.graph, found, era)
+        return OracleStoredFunctions.found(key, self.graph, found, function)
 
     def _bindable(self, parameters: dict[str, Any]) -> dict[str, Any]:
         """
@@ -243,3 +284,8 @@ def _read_lobs(rows: list[Any]) -> list[Any]:
     for row in rows:
         read.append([value.read() if hasattr(value, "read") else value for value in row])
     return read
+
+
+def _listed(names: list[str]) -> str:
+    """The names, the last joined by `and`, the others by commas, as OracleStoredFunctions names the era functions."""
+    return f"{', '.join(names[:-1])} and {names[-1]}" if len(names) > 1 else names[0]

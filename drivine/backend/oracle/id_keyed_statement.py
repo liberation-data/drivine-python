@@ -97,7 +97,7 @@ class IdKeyedStatement(GraphStatement):
 
     @staticmethod
     def of(statement: GraphStatement) -> IdKeyedStatement:
-        return IdKeyedStatement(statement.text, statement.bindings)
+        return IdKeyedStatement(statement.text, statement.bindings, calls=statement.calls)
 
     def spec(self, more: Mapping[str, Any] | None = None) -> QuerySpecification[Any]:
         given = dict(more or {})

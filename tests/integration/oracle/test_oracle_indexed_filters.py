@@ -1,7 +1,9 @@
 """
 drivine4j#65: Oracle takes a test of a node's labels for a lookup of one row, so a filter on a property with a range
-index read every node of the label. A comparison with text that every root meets is now read through the index's
-expression, which tests the label too.
+index read every node of the label. An equality every root meets is written over the index's expression, which tests
+the label too: the shared module's fragment writes it so for the labels it is given (drivine-cypher-spec#235, step 4),
+over the expressions layout 2's labelled index (lx2) and unique index (uq2) are made over, so Oracle reads them
+(liberation-data/drivine#696).
 """
 
 from collections.abc import AsyncIterator
@@ -44,12 +46,14 @@ class IssueView(GraphView):
 ISSUES = 20_000
 BY_REPO = range_index("OraIssue", "repoKey")
 UNIQUE_CODE = uniqueness_constraint("OraIssue", "code")
+BY_CODE = range_index("OraIssue", "code")
 
 q = refs(Issue)
 
 
 async def tidy(gom: StatelessGraphObjectManager) -> None:
     await gom.indexes.drop(BY_REPO)
+    await gom.indexes.drop(BY_CODE)
     await gom.constraints.drop(UNIQUE_CODE)
     await OracleSeed(gom.persistence_manager, "OraIssue").clear()
     await OracleSeed(gom.persistence_manager, "OraComment").clear()
@@ -132,33 +136,36 @@ async def test_finds_through_the_index_what_it_finds_without_it(gom: StatelessGr
     assert sorted(it.issue.id for it in views) == without[0]
 
 
-@pytest.mark.xfail(
-    reason="Oracle's DSL filters read the module's layout 2 indexes once they come from its fragments (a later PR)",
-    strict=True,
-)
 async def test_reads_the_index_and_not_the_label_for_a_comparison_every_root_meets(
     gom: StatelessGraphObjectManager, pm: PersistenceManager
 ):
-    await gom.indexes.ensure(BY_REPO)
-    labelled = OracleGraph().object_name("lx", ["OraIssue", "repoKey"]).upper()
-    indexed = await plan_of(gom, pm, [q.repo_key.eq("r7"), q.state.eq("closed")])
-    assert labelled in indexed
-    assert "DRIVINE_NODE_LABELS" not in indexed
-    # Inside an or, the label is read as before.
-    either = await plan_of(gom, pm, any_of(q.repo_key.eq("r1"), q.repo_key.eq("r2")))
-    assert labelled not in either
+    # Of a property each node holds a value of its own of, where the index wins on cost. For one of a few values, such
+    # as the repo key, a 50th of the label each, one node a block, Oracle rightly reads the table instead: the plan is
+    # then a matter of cost, and no proof of the index being read.
+    await gom.indexes.ensure(BY_CODE)
+    try:
+        labelled = OracleGraph().object_name("lx2", ["OraIssue", "code"]).upper()
+        # Beside another condition, so its statement isn't the uniqueness constraint's test's: the driver's statement
+        # cache keeps the EXPLAIN PLAN it ran prepared, and running it again once the indexes changed is refused
+        # (ORA-00900).
+        closed: Where = [q.code.eq("c42"), q.state.eq("closed")]
+        indexed = await plan_of(gom, pm, closed)
+        assert labelled in indexed
+        assert "DRIVINE_NODE_LABELS" not in indexed
+        assert await ids(gom, closed) == ["i42"]
+        # Inside an or, the label is read as before.
+        either = await plan_of(gom, pm, any_of(q.code.eq("c1"), q.code.eq("c2")))
+        assert labelled not in either
+    finally:
+        await gom.indexes.drop(BY_CODE)
 
 
-@pytest.mark.xfail(
-    reason="Oracle's DSL filters read the module's layout 2 indexes once they come from its fragments (a later PR)",
-    strict=True,
-)
 async def test_reads_a_uniqueness_constraint_over_the_property_as_it_reads_a_range_index(
     gom: StatelessGraphObjectManager, pm: PersistenceManager
 ):
     await gom.constraints.ensure(UNIQUE_CODE)
     plan = await plan_of(gom, pm, q.code.eq("c42"))
-    assert OracleGraph().object_name("uq", ["OraIssue", "code"]).upper() in plan
+    assert OracleGraph().object_name("uq2", ["OraIssue", "code"]).upper() in plan
     assert "DRIVINE_NODE_LABELS" not in plan
     assert await ids(gom, q.code.eq("c42")) == ["i42"]
 

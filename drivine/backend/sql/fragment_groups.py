@@ -20,12 +20,13 @@ from drivine.model.fragment_model import FragmentModel
 class FragmentGroups(SqlGroups):
     """
     A grouped read whose values are the shared module's (drivine-cypher-spec#235, its fragments; drivine4j's
-    `SqliteSelect.groups` and `PostgresSelect.groups`), on SQLite and Postgres: a filter is the module's SQL for the
-    Cypher the DSL writes, over the row `n_`; a property key is the property's value as the store holds it, so values
-    Cypher tells apart are grouped apart. A least or greatest value is the first of the group's nodes in Cypher's order
-    of those that have one, joined back to be compared by a `having` and ordered there as Cypher does, whatever its
-    kind, a date included. A key is ordered as Cypher orders it, through a node of the group that has its value, joined
-    back so too. What is each store's own is how it takes the first of a group's values in an order, and adds a number.
+    `SqliteSelect.groups`, `PostgresSelect.groups` and `OracleSelect.groups`), on each SQL store: a filter is the
+    module's SQL for the Cypher the DSL writes, over the row `n_`; a property key is the property's value as the
+    store holds it, so values Cypher tells apart are grouped apart. A least or greatest value is the first of the
+    group's nodes in Cypher's order of those that have one, joined back to be compared by a `having` and ordered
+    there as Cypher does, whatever its kind, a date included. A key is ordered as Cypher orders it, through a node
+    of the group that has its value, joined back so too. What is each store's own is how it takes the first of a
+    group's values in an order, and adds a number.
 
     One statement is built by one instance, whose fragments name their parameters apart.
     """
@@ -58,7 +59,11 @@ class FragmentGroups(SqlGroups):
         """
         self._fragments = Fragments(self.store, self.graph.name, self.row, source.labels)
         statement = super().build(source, given, path_targets, labels_of_class)
-        return GraphStatement(statement.text, {**statement.bindings, **self._fragments.parameters})
+        return self._made(statement.text, {**statement.bindings, **self._fragments.parameters})
+
+    def _made(self, text: str, bindings: Mapping[str, Any]) -> GraphStatement:
+        """The statement of the text built, and what it binds: what the fragments ask of it is the store's to write."""
+        return GraphStatement(text, bindings)
 
     def _renderer(self, views: SqlViews, labels_of_class: Callable[[type], list[str]]) -> FragmentQueryRenderer:
         return FragmentQueryRenderer(self._fragments, labels_of_class)

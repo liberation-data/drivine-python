@@ -90,8 +90,9 @@ class Fragments:
 
     `parameters` are what the fragments written so far bind, under the names the module gives them (`_cy_<name>`), for
     the statement to bind beside its own (see `bound_beside`); `hints`, in the order they were first asked for and each
-    once, are the optimizer hints the statement's outermost `SELECT` or `DELETE` carries (see `hinted`); `non_finite`
-    whether a value one gives may be NaN or an infinity.
+    once, are the optimizer hints the statement's outermost `SELECT` or `DELETE` carries (see oracle_fragments.hinted);
+    `non_finite` whether a value one gives may be NaN or an infinity; and on Oracle the `calls_stored_*` flags whether
+    one calls the graph's stored function of that name, which the session must be able to call (see OracleConnection).
     """
 
     def __init__(
@@ -114,6 +115,9 @@ class Fragments:
         self.parameters: dict[str, Any] = {}
         self.hints: list[str] = []
         self.non_finite = False
+        self.calls_stored_nulls_equal = False
+        self.calls_stored_era = False
+        self.calls_stored_temporal_arithmetic = False
         self._count = 0
 
     def names(self) -> Names:
@@ -233,7 +237,10 @@ class Fragments:
         return fragment
 
     def take(self, fragment: SqlFragment) -> None:
-        """`fragment`'s parameters bound in the statement, each once, and its hints and NaN kept for it."""
+        """
+        `fragment`'s parameters bound in the statement, each once, and its hints, its NaN and the stored functions it
+        calls kept for it.
+        """
         # Each name checked before any is bound, so a fragment refused binds none of its own.
         for name in fragment.parameters:
             if name in self.parameters:
@@ -243,6 +250,11 @@ class Fragments:
             if hint not in self.hints:
                 self.hints.append(hint)
         self.non_finite = self.non_finite or fragment.non_finite
+        self.calls_stored_nulls_equal = self.calls_stored_nulls_equal or fragment.calls_stored_nulls_equal
+        self.calls_stored_era = self.calls_stored_era or fragment.calls_stored_era
+        self.calls_stored_temporal_arithmetic = (
+            self.calls_stored_temporal_arithmetic or fragment.calls_stored_temporal_arithmetic
+        )
 
     def bound_beside(self, own: Mapping[str, Any]) -> dict[str, Any]:
         """
@@ -258,25 +270,6 @@ class Fragments:
             if name in self.parameters:
                 raise DrivineError(f"The parameter {name} is bound already.")
         return {**own, **self.parameters}
-
-    def hint(self) -> str:
-        """The comment of the fragments' hints, a space before it, `/*+ A B */`; empty where there are none."""
-        return f" /*+ {' '.join(self.hints)} */" if self.hints else ""
-
-    def hinted(self, sql: str) -> str:
-        """
-        `sql`, one statement the fragments are in, with their hints right after the first `SELECT` or `DELETE` that
-        begins it, the outermost statement's, as Oracle reads a hint only there: drivine4j's OracleSelect.hinted.
-        """
-        if not self.hints:
-            return sql
-        keyword = _LEADING_KEYWORD.match(sql)
-        if keyword is None:
-            raise DrivineError(f"No SELECT or DELETE begins the statement to hint: {sql}")
-        return sql[: keyword.end()] + self.hint() + sql[keyword.end() :]
-
-
-_LEADING_KEYWORD = re.compile(r"^\s*(SELECT|DELETE)\b", re.IGNORECASE)
 
 
 def property_of(key: str, alias: str = NODE) -> str:

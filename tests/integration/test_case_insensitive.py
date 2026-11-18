@@ -213,12 +213,9 @@ class _Status(str, Enum):  # noqa: UP042 - not a StrEnum: str() of this one is i
 
 
 class TestLookups:
-    async def test_compare_a_str_enum_ignoring_case_as_the_value_a_save_stores(self, gom, pm, label, request):
-        # drivine-python#546: the DSL's Cypher lowered str() of the member, its name: on the graph engines, and on
-        # SQLite since #544 reads it (Postgres's own renderer stored the value first). Oracle's DSL is still its own
-        # renderer, which does the same, until #532's Oracle step reads it through the module's fragments.
-        if pm.type is DatabaseType.ORACLE:
-            request.applymarker(pytest.mark.xfail(strict=True, reason="drivine-python#546 on Oracle: #532 step 4"))
+    async def test_compare_a_str_enum_ignoring_case_as_the_value_a_save_stores(self, gom, label):
+        # drivine-python#546: the DSL's Cypher lowered str() of the member, its name, where it lowers the value the
+        # save stores, the member's value.
         account = fragment(label)
         await gom.save_all([account(uuid="a1", email="Open"), account(uuid="a2", email="Shut")])
         q = refs(account)

@@ -1,8 +1,7 @@
 """
-Oracle refuses a query DSL comparison with a date, datetime or time, and an order by a field declared one, by name:
-store layout 2 holds such a value as its tag, which its DSL would compare by its text, until the DSL takes the shared
-module's fragments (drivine-cypher-spec#235, step 4). SQLite's and Postgres's DSL is the module's fragments since steps
-2 and 3, which compare a date by its tag, and renders them.
+A query DSL comparison with a date, datetime or time, and an order by a field declared one, on each SQL store: its DSL
+is the shared module's fragments (drivine-cypher-spec#235), which compare a date by its tag, as store layout 2 holds it,
+so no SQL store refuses one (drivine#771). Drivine for TypeScript's SqlTemporalFilters.spec.
 """
 
 import json
@@ -13,7 +12,6 @@ from typing import Annotated, Any
 import pytest
 
 from drivine import (
-    DrivineError,
     GraphView,
     JsonPacked,
     ModelRegistry,
@@ -27,7 +25,6 @@ from drivine import (
     case_of,
     coalesce,
     count,
-    equal_to,
     has_no_value,
     has_value,
     key,
@@ -76,20 +73,16 @@ DAY = date(2024, 1, 2)
 AT = datetime(2024, 5, 6, 7, 8, 9, tzinfo=UTC)
 NINE = time(9)
 
-REFUSING = {"Oracle": OracleBackend(OracleGraph())}
-FRAGMENTED = {"SQLite": SqliteBackend(SqliteGraph()), "Postgres": PostgresBackend()}
+FRAGMENTED = {
+    "SQLite": SqliteBackend(SqliteGraph()),
+    "Postgres": PostgresBackend(),
+    "Oracle": OracleBackend(OracleGraph()),
+}
 """The stores whose query DSL is the shared module's fragments, which compare a date by its tag."""
 
 
 def labels(type_: type) -> list[str]:
     return registry.fragment(type_).labels
-
-
-def refused(store: str) -> str:
-    return (
-        rf"^Temporal filters via the query DSL aren't supported on {store} yet \(.*\): use Cypher "
-        r"\(drivine-cypher-spec#235\)\.$"
-    )
 
 
 TEMPORAL: dict[str, Callable[[], Any]] = {
@@ -129,77 +122,23 @@ PLAIN: dict[str, Callable[[], Any]] = {
 }
 
 
-@pytest.mark.parametrize("store", REFUSING)
-@pytest.mark.parametrize("where", TEMPORAL.values(), ids=TEMPORAL.keys())
-def test_a_comparison_with_a_temporal_value_is_refused_by_name(store: str, where: Callable[[], Any]):
-    with pytest.raises(DrivineError, match=refused(store)):
-        REFUSING[store].render_where(where(), model, labels)
-
-
-@pytest.mark.parametrize("store", REFUSING)
-@pytest.mark.parametrize("where", IN_A_VIEW.values(), ids=IN_A_VIEW.keys())
-def test_a_comparison_with_a_temporal_value_in_a_view_is_refused_by_name(store: str, where: Callable[[], Any]):
-    with pytest.raises(DrivineError, match=refused(store)):
-        REFUSING[store].render_where(where(), view, labels)
-
-
-@pytest.mark.parametrize("store", REFUSING)
-def test_the_refusal_names_the_property_and_the_value(store: str):
-    with pytest.raises(DrivineError, match=r"\(on is compared with datetime\.date\(2024, 1, 2\)\)"):
-        REFUSING[store].render_where(q.on.eq(DAY), model, labels)
-
-
-@pytest.mark.parametrize("store", REFUSING)
+@pytest.mark.parametrize("store", FRAGMENTED)
 @pytest.mark.parametrize("where", PLAIN.values(), ids=PLAIN.keys())
 def test_a_comparison_with_no_temporal_value_renders(store: str, where: Callable[[], Any]):
-    written, _ = REFUSING[store].render_where(where(), model, labels)
+    written, _ = FRAGMENTED[store].render_where(where(), model, labels)
     assert written
 
 
-@pytest.mark.parametrize("store", REFUSING)
-@pytest.mark.parametrize("field", ["on", "at", "starts"])
-def test_an_order_by_a_field_declared_temporal_is_refused_by_name(store: str, field: str):
-    with pytest.raises(DrivineError, match=refused(store)) as raised:
-        REFUSING[store].render_query(Query(order_by=getattr(q, field).desc()), model, labels)
-    assert f"an order is by {field}" in str(raised.value)
-    # By its stored name, the field is the one that declares it.
-    with pytest.raises(DrivineError, match=refused(store)):
-        REFUSING[store].render_query(Query(order_by=q.property(field).asc()), model, labels)
-    # By a view's root's field.
-    with pytest.raises(DrivineError, match=refused(store)):
-        REFUSING[store].render_query(Query(order_by=getattr(qv.dated, field).asc()), view, labels)
-
-
-@pytest.mark.parametrize("store", REFUSING)
-def test_an_order_expression_that_reads_a_field_declared_temporal_is_refused_by_name(store: str):
-    for term in (case_of([above(q.on, q.at).then(0)], 1).asc(), coalesce(q.at, 0).desc()):
-        with pytest.raises(DrivineError, match=refused(store)) as raised:
-            REFUSING[store].render_query(Query(order_by=term), model, labels)
-        assert "an order's expression reads" in str(raised.value)
-
-
-@pytest.mark.parametrize("store", REFUSING)
+@pytest.mark.parametrize("store", FRAGMENTED)
 def test_an_order_expression_that_tests_whether_a_field_declared_temporal_has_a_value_renders(store: str):
-    # Whether it has a value compares nothing, as is_null doesn't, so it isn't refused.
     for term in (case_of([has_value(q.on).then(0)], 1).asc(), case_of([has_no_value(q.at).then(0)], 1).desc()):
-        assert REFUSING[store].render_query(Query(order_by=term), model, labels).order_by
+        assert FRAGMENTED[store].render_query(Query(order_by=term), model, labels).order_by
 
 
-@pytest.mark.parametrize("store", REFUSING)
-def test_a_seek_or_an_order_expression_with_a_temporal_value_is_refused_by_name(store: str):
-    # An order by a property no field declares, so only the cursor's value is temporal.
-    seek = Query(order_by=q.property("other").asc(), seek=q.property("other").after(DAY))
-    with pytest.raises(DrivineError, match=refused(store)):
-        REFUSING[store].render_query(seek, model, labels)
-    ranked = Query(order_by=case_of([equal_to(q.name, DAY).then(0)], 1).asc())
-    with pytest.raises(DrivineError, match=refused(store)):
-        REFUSING[store].render_query(ranked, model, labels)
-
-
-@pytest.mark.parametrize("store", REFUSING)
+@pytest.mark.parametrize("store", FRAGMENTED)
 def test_an_order_by_a_jsonpacked_or_plain_field_renders(store: str):
     for term in (q.packed.asc(), q.name.asc(), q.property("other").asc()):
-        assert REFUSING[store].render_query(Query(order_by=term), model, labels).order_by
+        assert FRAGMENTED[store].render_query(Query(order_by=term), model, labels).order_by
 
 
 @pytest.mark.parametrize("store", FRAGMENTED)
@@ -218,7 +157,7 @@ def test_the_fragments_render_an_order_by_and_a_seek_after_a_temporal_value(stor
 
 
 def test_a_graph_engine_renders_a_comparison_with_a_temporal_value_and_an_order_by_one():
-    # The refusal is the SQL stores' own: the graph engines compare and order a temporal value as it is.
+    # As the SQL stores do, the graph engines compare and order a temporal value as it is.
     neo4j = CypherBackend(NEO4J_GRAMMAR)
     for where in TEMPORAL.values():
         written, _ = neo4j.render_where(where(), model, labels)
@@ -236,15 +175,6 @@ GROUPS: dict[str, Callable[[], GroupQuery]] = {
     "a filtered count": lambda: GroupQuery({"name": key("name")}, {"late": count(q.at.gt(AT))}),
     "a filtered sum": lambda: GroupQuery({"name": key("name")}, {"days": sum_("id", q.on.lte(DAY))}),
 }
-
-
-@pytest.mark.parametrize("store", REFUSING)
-@pytest.mark.parametrize("grouped", GROUPS.values(), ids=GROUPS.keys())
-def test_a_grouped_read_that_compares_with_a_temporal_value_is_refused_by_name(
-    store: str, grouped: Callable[[], GroupQuery]
-):
-    with pytest.raises(DrivineError, match=refused(store)):
-        REFUSING[store].groups(model, grouped(), {}, labels)
 
 
 @pytest.mark.parametrize("store", FRAGMENTED)
@@ -311,11 +241,15 @@ def test_the_fragments_compare_a_moment_by_its_tag_in_a_grouped_reads_where_and_
 
 @pytest.mark.parametrize("store", FRAGMENTED)
 def test_the_fragments_bind_a_jsonpacked_propertys_value_date_or_not_as_the_text_it_is_packed_as(store: str):
-    def bound(where: Any) -> list[Any]:
-        return list(FRAGMENTED[store].render_where(where, model, labels)[1].values())
+    def bound(where: Any) -> dict[str, Any]:
+        return FRAGMENTED[store].render_where(where, model, labels)[1]
 
-    # As a save packs it (see save_statement_builder.packed), then as the JSON text a fragment binds.
-    assert bound(q.packed.eq(DAY)) == [json.dumps(packed(DAY))]
-    assert bound(q.packed.eq({"n": 1})) == [json.dumps(packed({"n": 1}))]
-    assert bound(q.name.eq("two")) == ['"two"']
-    assert bound(q.at.is_not_null()) == []
+    def text(it: str) -> dict[str, Any]:
+        """On Oracle an equality with a text binds its key alone, as plain text (drivine#761): its JSON elsewhere."""
+        return {"_cyk__q0": it} if store == "Oracle" else {"_cy__q0": json.dumps(it)}
+
+    # As a save packs it (see save_statement_builder.packed), then as the text a fragment binds.
+    assert bound(q.packed.eq(DAY)) == text(packed(DAY))
+    assert bound(q.packed.eq({"n": 1})) == text(packed({"n": 1}))
+    assert bound(q.name.eq("two")) == text("two")
+    assert bound(q.at.is_not_null()) == {}

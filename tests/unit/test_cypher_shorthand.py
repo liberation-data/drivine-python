@@ -32,7 +32,7 @@ def test_a_property_whose_name_begins_with_dollar_is_read_by_the_key_the_layout_
     assert rewrite("n.`$open` = true") == "JSON_VALUE(n_.props, '$.\"$$open\"') = 'true'"
     assert rewrite("n.`a$b` = 'x'") == "JSON_VALUE(n_.props, '$.\"a$b\"') = 'x'"
     # Each SQL store's raw where reads it so.
-    assert OracleBackend().written("n.`$score` > 1") == "JSON_VALUE(n.props, '$.\"$$score\"') > 1"
+    assert OracleBackend().written("n.`$score` > 1") == "JSON_VALUE(n_.props, '$.\"$$score\"') > 1"
     assert PostgresBackend().written("n.`$score` > 1") == "(n_.props ->> '$$score') > 1"
     assert SqliteBackend().written("n.`$score` > 1") == (
         "(CASE json_type(n_.props, '$.\"$$score\"') WHEN 'text' THEN n_.props ->> '$.\"$$score\"' "
@@ -75,8 +75,9 @@ def test_a_views_root_is_read_by_what_the_predicate_calls_it_and_no_related_node
         CypherShorthand("claim", "claim_", oracle).rewrite("claim.id = 'c1'")
         == "JSON_VALUE(claim_.props, '$.id') = 'c1'"
     )
+    # Over `n_`, the row a read of the query DSL calls its root.
     assert OracleBackend().written("n.id = 'c1' AND people.name = 'x'") == (
-        "JSON_VALUE(n.props, '$.id') = 'c1' AND people.name = 'x'"
+        "JSON_VALUE(n_.props, '$.id') = 'c1' AND people.name = 'x'"
     )
 
 

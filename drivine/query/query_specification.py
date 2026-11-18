@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import copy
 from collections.abc import Callable, Mapping, Sequence
-from typing import Any, Generic, Self, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, Self, TypeVar
 
 from drivine.mapper.filter_post_processor import FilterPostProcessor
 from drivine.mapper.map_post_processor import MapPostProcessor
 from drivine.mapper.result_post_processor import ResultPostProcessor
 from drivine.mapper.transform_post_processor import TransformPostProcessor
 from drivine.query.statement import QueryLanguage, Statement
+
+if TYPE_CHECKING:
+    from drivine.backend.graph_statement import StoredFunctionCalls
 
 T = TypeVar("T")
 
@@ -36,6 +39,12 @@ class QuerySpecification(Generic[T]):
         """
         Whether the statement's JSON is read in the store layout on a SQL store, as a compiled statement's is: the
         object manager's own statements (see GraphStatement.spec). A user's own SQL is read as the driver reads it.
+        """
+        self.stored_functions: StoredFunctionCalls | None = None
+        """
+        The stored functions of an Oracle graph the statement calls, where the object manager wrote it and the shared
+        module's fragments in it call any: the connection makes sure its session may call them first (see
+        OracleConnection).
         """
         if statement is not None:
             self.with_statement(statement)

@@ -47,6 +47,14 @@ logger = logging.getLogger(__name__)
 _lock = threading.Lock()
 _compile: Callable[[str], str] | None = None
 
+_compiling = threading.Lock()
+"""
+Held while the native compiler runs, so one call runs at a time in the process. The wheel's `compile` releases the GIL,
+and the native compiler's parse caches are shared by every call and not yet safe for two at once: two threads compiling
+together could corrupt them (liberation-data/drivine-cypher-spec#385, drivine-python#558). Answers kept here, such as a
+fragment's, are read without it. Comes out once the pinned compiler is safe for concurrent calls.
+"""
+
 
 def shared_compiler_loaded() -> bool:
     """Whether the shared compiler has been loaded in this process: a graph engine's application never loads it."""
@@ -54,7 +62,10 @@ def shared_compiler_loaded() -> bool:
 
 
 def _compiler(missing: Callable[[], str]) -> Callable[[str], str]:
-    """The shared compiler's entry, loaded on the first call; where it isn't installed, a DrivineError of `missing`."""
+    """
+    The shared compiler's entry, loaded on the first call, which runs one call at a time (see `_compiling`); where it
+    isn't installed, a DrivineError of `missing`.
+    """
     global _compile
     if _compile is None:
         with _lock:
@@ -65,7 +76,13 @@ def _compiler(missing: Callable[[], str]) -> Callable[[str], str]:
                     if error.name != PACKAGE:
                         raise
                     raise DrivineError(missing()) from error
-                _compile = drivine_cypher_compiler.compile
+                native = drivine_cypher_compiler.compile
+
+                def compile_one_at_a_time(request: str) -> str:
+                    with _compiling:
+                        return native(request)
+
+                _compile = compile_one_at_a_time
     return _compile
 
 

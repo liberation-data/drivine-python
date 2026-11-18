@@ -16,6 +16,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta, timezone
 from decimal import Decimal
+from enum import Enum
 from typing import Annotated, Any, Literal, TypeVar
 
 import apsw
@@ -702,6 +703,25 @@ def test_a_batch_hands_each_stamped_node_its_stamp_by_its_duration_ids_text_as_t
     result = {"groups": [{"before": [], "after": [{"id": "P1DT5S", "stamp": stamp}]}]}
     StatelessGraphObjectManager._hand_back_fragments(None, [FragmentGroup(model, spans)], result)  # pyright: ignore[reportArgumentType]
     assert spans[0].stamp == stamp
+
+
+class Shade(Enum):
+    DARK = "dark"
+
+
+class StampedShade(NodeFragment, labels=["StampedShade"]):
+    shade: Annotated[Shade, NodeId()]
+    stamp: Annotated[str | None, NodeStamp()] = None
+
+
+def test_a_batch_hands_each_stamped_node_its_stamp_by_its_enum_ids_value_as_the_store_reads_it_back():
+    # A plain Enum is written as its value, which Oracle's fragment batch reads back, and is equal to no member.
+    model = ModelRegistry().fragment(StampedShade)
+    shades = [StampedShade(shade=Shade.DARK)]
+    stamp = "a" * 16 + ":" + "b" * 16
+    result = {"groups": [{"before": [], "after": [{"id": "dark", "stamp": stamp}]}]}
+    StatelessGraphObjectManager._hand_back_fragments(None, [FragmentGroup(model, shades)], result)  # pyright: ignore[reportArgumentType]
+    assert shades[0].stamp == stamp
 
 
 def test_an_id_is_read_back_as_the_store_reads_it_a_decimal_with_a_fraction_as_the_float_it_is_held_as():

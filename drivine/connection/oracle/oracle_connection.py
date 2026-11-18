@@ -175,8 +175,8 @@ class OracleConnection(Connection):
 
     async def _calls_era(self) -> bool:
         """
-        Whether this session may call both the graph's functions `<graph>_era` and `<graph>_era_date`, as remembered,
-        or as calling them finds: see `OracleStoredFunctions.era_check`.
+        Whether this session may call the graph's era functions, `<graph>_era`, `<graph>_era_date` and
+        `<graph>_temporal_key`, as remembered, or as calling them finds: see `OracleStoredFunctions.era_check`.
         """
         return await self._calls("era")
 

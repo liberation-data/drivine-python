@@ -48,7 +48,8 @@ from drivine.backend.oracle.oracle_graph import OracleGraph
 from drivine.backend.postgres.postgres_backend import PostgresBackend
 from drivine.backend.postgres.postgres_graph import PostgresGraph
 from drivine.backend.postgres.postgres_save_builder import numeric_text, stored_key
-from drivine.backend.sql.node_ids import NO_NODE, typed_id
+from drivine.backend.save_statement import SaveStatement
+from drivine.backend.sql.node_ids import NO_NODE, read_back_key, typed_id
 from drivine.backend.sql.sql_json import to_json
 from drivine.backend.sql.value_layout import write
 from drivine.backend.sqlite.sqlite_backend import SqliteBackend
@@ -654,3 +655,41 @@ def test_a_batch_hands_each_stamped_node_its_stamp_by_its_date_ids_text_as_the_s
     result = {"groups": [{"before": [], "after": [{"id": "2024-01-03", "stamp": stamp}]}]}
     StatelessGraphObjectManager._hand_back_fragments(None, [FragmentGroup(model, days)], result)  # pyright: ignore[reportArgumentType]
     assert [it.stamp for it in days] == [stamp, stamp]
+
+
+class StampedKey(NodeFragment, labels=["StampedKey"]):
+    id: Annotated[uuid.UUID, NodeId()]
+    stamp: Annotated[str | None, NodeStamp()] = None
+
+
+def test_a_batch_hands_each_stamped_node_its_stamp_by_its_uuid_ids_text_as_the_store_reads_it_back():
+    # Oracle's fragment batch reads a UUID id back as its text, where the object holds a UUID.
+    model = ModelRegistry().fragment(StampedKey)
+    keys = [StampedKey(id=uuid.UUID(int=7))]
+    stamp = "a" * 16 + ":" + "b" * 16
+    result = {"groups": [{"before": [], "after": [{"id": str(uuid.UUID(int=7)), "stamp": stamp}]}]}
+    StatelessGraphObjectManager._hand_back_fragments(None, [FragmentGroup(model, keys)], result)  # pyright: ignore[reportArgumentType]
+    assert keys[0].stamp == stamp
+
+
+class StampedDays(GraphView):
+    target: Annotated[StampedKey, Root()]
+    days: Annotated[list[StampedDay], Relationship("ON_DAY")] = []
+
+
+def test_a_save_hands_each_stamped_related_node_its_stamp_by_its_date_ids_text_as_the_store_reads_it_back():
+    # Oracle's save reads each stamped related node's id back from its tag, as the tag's text, as a batch does.
+    model = ModelRegistry().fragment(StampedDay)
+    view = StampedDays(target=StampedKey(id=uuid.UUID(int=7)), days=[StampedDay(on=date(2024, 1, 3))])
+    stamp = "a" * 16 + ":" + "b" * 16
+    statement = SaveStatement("", {}, stamped_models=[model])
+    result = {"related": [{"before": [], "after": [{"id": "2024-01-03", "stamp": stamp}]}]}
+    StatelessGraphObjectManager._hand_back(None, view, statement, result)  # pyright: ignore[reportArgumentType]
+    assert view.days[0].stamp == stamp
+
+
+def test_an_id_is_read_back_as_the_store_reads_it_a_decimal_with_a_fraction_as_the_float_it_is_held_as():
+    assert read_back_key(Decimal("0.1")) == 0.1
+    assert read_back_key(Decimal("3")) == 3
+    assert read_back_key(time(4, 5, tzinfo=timezone(timedelta(hours=2)))) == "04:05:00+02:00"
+    assert read_back_key(True) is True

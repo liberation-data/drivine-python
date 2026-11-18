@@ -1049,11 +1049,12 @@ class StatelessGraphObjectManager:
         """
         for index, model in enumerate(statement.stamped_models):
             stamped = result["related"][index]
-            found = {it["id"]: it["stamp"] for it in stamped["before"]}
-            now = {it["id"]: it["stamp"] for it in stamped["after"]}
+            # Each id as the save reads it back (see _hand_back_fragments).
+            found = {read_back_key(it["id"]): it["stamp"] for it in stamped["before"]}
+            now = {read_back_key(it["id"]): it["stamp"] for it in stamped["after"]}
             assert model.node_id_field is not None and model.stamp_field is not None
             for node in _nodes_of(obj, model):
-                node_id = getattr(node, model.node_id_field)
+                node_id = read_back_key(getattr(node, model.node_id_field))
                 if node_id in now:
                     carried = getattr(node, model.stamp_field)
                     setattr(node, model.stamp_field, stamps.handed_back(carried, found.get(node_id, ""), now[node_id]))

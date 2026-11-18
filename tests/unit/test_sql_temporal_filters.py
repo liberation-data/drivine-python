@@ -157,7 +157,7 @@ def test_the_fragments_render_an_order_by_and_a_seek_after_a_temporal_value(stor
 
 
 def test_a_graph_engine_renders_a_comparison_with_a_temporal_value_and_an_order_by_one():
-    # The refusal is the SQL stores' own: the graph engines compare and order a temporal value as it is.
+    # As the SQL stores do, the graph engines compare and order a temporal value as it is.
     neo4j = CypherBackend(NEO4J_GRAMMAR)
     for where in TEMPORAL.values():
         written, _ = neo4j.render_where(where(), model, labels)

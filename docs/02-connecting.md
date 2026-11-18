@@ -38,22 +38,23 @@ makes it: one over the property whatever the label, and one over the label's nod
 through. A uniqueness constraint comes with a range index over its properties, which stays when the constraint is
 dropped. The object manager writes SQL for it, and the query DSL, grouped reads, search and schema management work as on
 the graph engines. A raw `where` is SQL over the node's row, `n`: its `labels`, `props` (a JSON object keyed by stored
-name) and `stamp`, say `JSON_VALUE(n.props, '$.name') = $name`, read over the row a statement calls it by, `n_` (the
-row the shared module's fragments read). A property of the node may be written as Cypher writes it, `n.name = $name`
-(or ``n.`a name` ``), and is read as that property, one whose stored name begins with `$`, ``n.`$score` ``, by the name
-the store holds it by; a property compared with `true` or `false` is compared with the text a JSON boolean is read as.
-Your own statements are SQL too, unless written as
-Cypher (see [Cypher on Postgres, Oracle and SQLite](04-statements.md#cypher-on-postgres-oracle-and-sqlite)), and a
-`$name` in quoted text or a comment, such as the JSON path `'$."$t"'`, is no parameter. The query DSL's conditions,
-orders, seeks and grouped reads are the shared module's SQL for the Cypher the DSL writes for Neo4j
-([drivine-cypher-spec#235](https://github.com/liberation-data/drivine-cypher-spec/issues/235)), as in compiled Cypher:
-a date is compared by its moment, text is compared and ordered by its code points (`B, a, b`), and an equality of a
+name) and `stamp`, say `JSON_VALUE(n.props, '$.name') = $name`, read over the row a statement calls it by, `n_` (the row
+the shared module's fragments read). A property of the node may be written as Cypher writes it, `n.name = $name` (or
+``n.`a name` ``), and is read as that property, one whose stored name begins with `$`, ``n.`$score` ``, by the name the
+store holds it by; a property compared with `true` or `false` is compared with the text a JSON boolean is read as. Your
+own statements are SQL too, unless written as Cypher (see [Cypher on Postgres, Oracle and
+SQLite](04-statements.md#cypher-on-postgres-oracle-and-sqlite)), and a `$name` in quoted text or a comment, such as the
+JSON path `'$."$t"'`, is no parameter. The query DSL's conditions, orders, seeks and grouped reads are the shared
+module's SQL for the Cypher the DSL writes for Neo4j
+([drivine-cypher-spec#235](https://github.com/liberation-data/drivine-cypher-spec/issues/235)), as in compiled Cypher: a
+date is compared by its moment, text is compared and ordered by its code points (`B, a, b`), and an equality of a
 property with a range index or a uniqueness constraint is read through layout 2's index of the label. Each statement
 carries the optimizer hints that SQL asks for. `matches` takes a regular expression as compiled Cypher's `=~` does,
 matched against the whole value, in Oracle's POSIX dialect. A leading `(?i)` ignores case. A backreference is read as
-Java reads it only where it is `\1` to `\8`, to a simple group; the shared module refuses any other, with why. A vector index is a table of embeddings beside the nodes, holding those of the index's size: a node written with
-another size is left out, not refused. `load_nearest` is approximate through it. With no index made, or one of another
-size than the vector's, it measures every node of the label whose embedding is of the vector's size, and is exact.
+Java reads it only where it is `\1` to `\8`, to a simple group; the shared module refuses any other, with why. A vector
+index is a table of embeddings beside the nodes, holding those of the index's size: a node written with another size is
+left out, not refused. `load_nearest` is approximate through it. With no index made, or one of another size than the
+vector's, it measures every node of the label whose embedding is of the vector's size, and is exact.
 
 Each session of Drivine's Oracle pool makes no adaptive plan (`ALTER SESSION SET OPTIMIZER_ADAPTIVE_PLANS = FALSE`, run
 as the pool opens it; a session it fails in is dropped from the pool, not given out). Once a graph's tables had grown

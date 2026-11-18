@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
 from drivine.backend.oracle.oracle_graph import holding, json_key, labelled_value
 from drivine.backend.oracle.oracle_views import OracleViews
@@ -37,7 +37,11 @@ class OracleQueryRenderer(SqlQueryRenderer):
     index or a uniqueness constraint would find a few (drivine4j#65). So a comparison with text that every root meets,
     of a property such an index of one of the root's labels begins with, is also written as the index's expression,
     which Oracle reads through the index: see `_through_index`.
+
+    A date, datetime or time is refused (see SqlQueryRenderer.reads_temporals).
     """
+
+    store: ClassVar[str] = "Oracle"
 
     def __init__(
         self,

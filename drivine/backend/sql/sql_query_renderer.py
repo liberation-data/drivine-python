@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Sequence
-from datetime import time
-from typing import Any, Literal
+from collections.abc import Callable, Mapping, Sequence
+from datetime import date, time
+from types import UnionType
+from typing import Annotated, Any, ClassVar, Literal, Union, cast, get_args, get_origin
 
 from drivine.backend.sql.compared import Compared
 from drivine.backend.sql.rows import Rows
@@ -48,6 +49,20 @@ class SqlQueryRenderer(ABC):
     TypeScript's Drivine writes it. A condition across a relationship is an EXISTS over the relationship table. Values
     are bound (`$_q0`, …), never written in. What is each store's own is how it compares a property, tests labels and
     reads a property for an order or an expression.
+
+    A comparison with a date, datetime or time, or an order by a field declared one or by an expression that reads one,
+    is refused by name, unless the store `reads_temporals`.
+    """
+
+    store: ClassVar[str] = "this store"
+    """The store, as a refusal names it."""
+
+    reads_temporals: ClassVar[bool] = False
+    """
+    Whether the store's renderer compares and orders a saved date, datetime or time as the value it is. Store layout 2
+    holds one as its tag (`{"$t": "date", "v": …, "s": …}`): SQLite's reads the tag (see sqlite_graph.temporal_text),
+    and Postgres's and Oracle's compare it by its text until the query DSL takes the shared module's fragments
+    (drivine-cypher-spec#235), so they refuse one rather than give wrong rows, or none, and say nothing.
     """
 
     def __init__(self, views: SqlViews, labels_of_class: Callable[[type], list[str]]) -> None:
@@ -145,6 +160,8 @@ class SqlQueryRenderer(ABC):
         if next_.kind == "PROPERTY":
             if not last:
                 raise DrivineError(f"{described(path[: i + 1])} is a property; it has no fields.")
+            if isinstance(test, CompareTest) and not next_.json_packed and _temporal(test.value):
+                self._refuse_temporal(f"{described(path)} is compared with {test.value!r}")
             on_relationship = next_.on == "RELATIONSHIP"
             row = rows.rel if on_relationship and rows.rel is not None else rows.node
             return self._property(
@@ -202,6 +219,9 @@ class SqlQueryRenderer(ABC):
         the lexicographic branches.
         """
         check_keyset(keys, seek, query)
+        for it in seek:
+            if _temporal(it.value):
+                self._refuse_temporal(f"{described(it.path)} is sought after {it.value!r}")
         values = [self._bind(self._storable(it.value)) for it in seek]
 
         def tested(i: int, operator: str) -> str:
@@ -224,6 +244,8 @@ class SqlQueryRenderer(ABC):
     def _order(self, key: RootKey, scope: Scope, alias: str) -> str:
         """An order term: a property, or an expression; nulls as placed."""
         direction: Literal["ASC", "DESC"] = "DESC" if key.term.direction == "DESC" else "ASC"
+        if key.term.expression is None and key.property and _declares_temporal(scope, key.property):
+            self._refuse_temporal(f"an order is by {described(key.term.path)}, a date, datetime or time")
         if key.term.expression is None:
             return self._ordered_property(alias, key.property or "", direction, key.term.nulls)
         nulls = f" NULLS {key.term.nulls}" if key.term.nulls else ""
@@ -237,8 +259,13 @@ class SqlQueryRenderer(ABC):
             return self._expression(it, scope, alias, "NUMBER")
 
         if node.kind == "PROPERTY":
-            return self._read(alias, root_property(node.path, scope, "An expression"), as_)
+            property = root_property(node.path, scope, "An expression")
+            if _declares_temporal(scope, property):
+                self._refuse_temporal(f"an order's expression reads {described(node.path)}, a date, datetime or time")
+            return self._read(alias, property, as_)
         if node.kind == "VALUE":
+            if _temporal(node.value):
+                self._refuse_temporal(f"an order's expression holds {node.value!r}")
             return self._bind(self._storable(node.value))
         if node.kind == "ARITHMETIC":
             left, right = node.args
@@ -274,6 +301,18 @@ class SqlQueryRenderer(ABC):
         joined = f" {node.kind} ".join(self._case_condition(it, scope, alias) for it in node.conditions)
         return f"({joined})"
 
+    def _refuse_temporal(self, what: str) -> None:
+        """
+        Refuses a comparison with a date, datetime or time, or an order by one, unless the store `reads_temporals`.
+        `what` says which.
+        """
+        if self.reads_temporals:
+            return
+        raise DrivineError(
+            f"Temporal filters via the query DSL aren't supported on {self.store} yet ({what}): use Cypher "
+            "(drivine-cypher-spec#235)."
+        )
+
     # ----- The dialect -----
 
     @abstractmethod
@@ -303,6 +342,55 @@ class SqlQueryRenderer(ABC):
     @abstractmethod
     def _present(self, alias: str, property: str) -> str:
         """Whether the root has the property."""
+
+
+def declared_types(scope: Scope, property: str) -> list[Any]:
+    """
+    The types the root's field stored under `property` is declared, each of a union's: none where no field of the
+    root's model is stored under it.
+    """
+    root = _root_of(scope)
+    field = root.fields_by_property.get(property) if root is not None else None
+    info = getattr(root.type, "model_fields", {}).get(field) if root is not None and field else None
+    return [] if info is None else _types_of(info.annotation)
+
+
+def _declares_temporal(scope: Scope, property: str) -> bool:
+    """
+    Whether the root's field stored under `property` is declared a date, datetime or time: not where it is JsonPacked,
+    which holds the JSON text a save packs, ordered as that text.
+    """
+    root = _root_of(scope)
+    field = root.fields_by_property.get(property) if root is not None else None
+    if root is None or field is None or field in root.json_packed:
+        return False
+    return any(isinstance(it, type) and issubclass(it, (date, time)) for it in declared_types(scope, property))
+
+
+def _root_of(scope: Scope) -> FragmentModel | None:
+    """The fragment of the root, where it has a class."""
+    root = scope.model.root if isinstance(scope.model, GraphViewModel) else scope.model
+    return root if isinstance(root, FragmentModel) and root.type is not None else None
+
+
+def _types_of(annotation: Any) -> list[Any]:
+    """The types an annotation names: itself, or each of a union's, each without its Annotated metadata."""
+    if get_origin(annotation) is Annotated:
+        return _types_of(get_args(annotation)[0])
+    if get_origin(annotation) in (Union, UnionType):
+        return [it for arg in get_args(annotation) for it in _types_of(arg)]
+    return [annotation]
+
+
+def _temporal(value: Any) -> bool:
+    """Whether the value is a date, datetime or time, or a list, tuple, set or map that holds one at any depth."""
+    if isinstance(value, (date, time)):
+        return True
+    if isinstance(value, Mapping):
+        return any(_temporal(it) for it in cast(Mapping[Any, Any], value).values())
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return any(_temporal(it) for it in cast(Any, value))
+    return False
 
 
 def _numeric(value: Any) -> bool:

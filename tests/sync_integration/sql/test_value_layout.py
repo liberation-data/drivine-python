@@ -238,38 +238,62 @@ class Dated(NodeFragment, labels=["DatedHeld"]):
     clocks: list[time] | None = None
 
 
-DSL_TEMPORALS = (
-    "the query DSL compares a saved date or moment by its text, where store layout 2 holds it as its tag, until its "
-    "comparisons come from the shared module's fragments (a later PR of drivine-python#471)"
-)
-"""The hold on Postgres and Oracle: SQLite's DSL reads a tag's text or key (see temporal_text, time_key)."""
+def refused(pm: PersistenceManager) -> str:
+    """
+    The refusal of a comparison with a date, datetime or time, or an order by one, by the query DSL on Postgres or
+    Oracle, which compare one by its text until the DSL takes the shared module's fragments (drivine-cypher-spec#235).
+    """
+    store = "Oracle" if pm.type is DatabaseType.ORACLE else "Postgres"
+    return rf"aren't supported on {store} yet .*drivine-cypher-spec#235"
 
 
-def test_a_saved_date_or_moment_is_compared_and_ordered_by_the_query_dsl_as_it_is(
+def on_sqlite_or_refused(pm: PersistenceManager, check: Callable[[], None]) -> None:
+    """
+    Runs the check: on SQLite its rows must be as it asserts; on Postgres and Oracle its first comparison or order by a
+    date, datetime or time must be refused by name (see refused).
+    """
+    if pm.type is DatabaseType.SQLITE:
+        check()
+        return
+    with pytest.raises(DrivineError, match=refused(pm)):
+        check()
+
+
+def test_a_saved_date_or_moment_is_compared_and_ordered_by_the_query_dsl_as_it_is_or_refused_by_name(
     gom: StatelessGraphObjectManager, pm: PersistenceManager
 ):
-    def check() -> None:
-        base = datetime(2024, 5, 6, 7, 8, 9, 123000, tzinfo=UTC)
-        gom.save_all(
-            [
-                Dated(id="t1", on=date(2024, 1, 1), at=base),
-                Dated(id="t2", on=date(2024, 1, 2), at=base.replace(second=10)),
-            ]
+    """
+    SQLite's DSL reads the tag store layout 2 holds a date or moment as (see sqlite_graph.temporal_text). Postgres's and
+    Oracle's would compare it by its text until the DSL takes the shared module's fragments (drivine-cypher-spec#235),
+    so they refuse it by name, and Cypher compares it there.
+    """
+    base = datetime(2024, 5, 6, 7, 8, 9, 123000, tzinfo=UTC)
+    gom.save_all(
+        [
+            Dated(id="t1", on=date(2024, 1, 1), at=base),
+            Dated(id="t2", on=date(2024, 1, 2), at=base.replace(second=10)),
+        ]
+    )
+    found = pm.query(
+        QuerySpecification[Any](cypher_statement("MATCH (n:DatedHeld) WHERE n.at > $at RETURN n.id AS id")).bind(
+            {"at": base}
         )
-        q = refs(Dated)
+    )
+    assert [it["id"] if isinstance(it, dict) else it for it in found] == ["t2"]
+    q = refs(Dated)
+    if pm.type is DatabaseType.SQLITE:
         assert [it.id for it in gom.load_all(Dated, q.on.eq(date(2024, 1, 2)))] == ["t2"]
         assert [it.id for it in gom.load_all(Dated, q.at.gt(base))] == ["t2"]
         # Its own nodes alone: the tests beside it save other Dated nodes in the same graph.
         assert [it.id for it in gom.load_all(Dated, q.id.in_(["t1", "t2"]), order_by=q.on.desc())] == ["t2", "t1"]
-
-    if pm.type is DatabaseType.SQLITE:
-        check()
         return
-    try:
-        check()
-    except AssertionError:
-        pytest.xfail(DSL_TEMPORALS)
-    pytest.fail(f"Held, and passing: take the hold off. {DSL_TEMPORALS}")
+    with pytest.raises(DrivineError, match=refused(pm)) as raised:
+        gom.load_all(Dated, q.on.eq(date(2024, 1, 2)))
+    assert "on is compared with" in str(raised.value)
+    with pytest.raises(DrivineError, match=refused(pm)):
+        gom.load_all(Dated, q.at.gt(base))
+    with pytest.raises(DrivineError, match=refused(pm)):
+        gom.load_all(Dated, q.id.in_(["t1", "t2"]), order_by=q.on.desc())
 
 
 class Listed(NodeFragment, labels=["ListedHeld"]):
@@ -305,14 +329,7 @@ def test_the_query_dsl_finds_a_saved_date_moment_or_time_in_a_list_by_has_item(
         assert found(q.clocks.has_item(time(12))) == []
         assert found(q.words.has_item("b")) == ["l2"]
 
-    if pm.type is DatabaseType.SQLITE:
-        check()
-        return
-    try:
-        check()
-    except AssertionError:
-        pytest.xfail(DSL_TEMPORALS)
-    pytest.fail(f"Held, and passing: take the hold off. {DSL_TEMPORALS}")
+    on_sqlite_or_refused(pm, check)
 
 
 def test_has_item_finds_a_moment_a_list_holds_as_text_and_passes_over_a_text_that_names_none(
@@ -328,14 +345,7 @@ def test_has_item_finds_a_moment_a_list_holds_as_text_and_passes_over_a_text_tha
         moment = datetime(2024, 5, 6, 7, 8, 9, 123456, tzinfo=UTC)
         assert [it.id for it in gom.load_all(Listed, refs(Listed).moments.has_item(moment))] == ["l3"]
 
-    if pm.type is DatabaseType.SQLITE:
-        check()
-        return
-    try:
-        check()
-    except AssertionError:
-        pytest.xfail(DSL_TEMPORALS)
-    pytest.fail(f"Held, and passing: take the hold off. {DSL_TEMPORALS}")
+    on_sqlite_or_refused(pm, check)
 
 
 class Clocked(NodeFragment, labels=["ClockedHeld"]):
@@ -368,18 +378,6 @@ def offset(hours: int) -> timezone:
     return timezone(timedelta(hours=hours))
 
 
-def held_or_failing(pm: PersistenceManager, check: Callable[[], None]) -> None:
-    """Runs the check: on SQLite it must pass; on Postgres and Oracle it is held (DSL_TEMPORALS) until it passes."""
-    if pm.type is DatabaseType.SQLITE:
-        check()
-        return
-    try:
-        check()
-    except AssertionError:
-        pytest.xfail(DSL_TEMPORALS)
-    pytest.fail(f"Held, and passing: take the hold off. {DSL_TEMPORALS}")
-
-
 def test_the_query_dsl_compares_and_orders_times_at_different_offsets_as_cypher_does(
     gom: StatelessGraphObjectManager, pm: PersistenceManager
 ):
@@ -409,7 +407,7 @@ def test_the_query_dsl_compares_and_orders_times_at_different_offsets_as_cypher_
         assert found(q.clock.eq(time(8, 0, 0, 500000, tzinfo=UTC))) == []
         assert found(q.clock.in_([time(8, 30, tzinfo=UTC), time(4, 30, tzinfo=offset(-5))])) == ["b", "c"]
 
-    held_or_failing(pm, check)
+    on_sqlite_or_refused(pm, check)
 
 
 def test_a_time_with_an_offset_is_compared_by_its_utc_time_unwrapped_at_midnight(
@@ -424,7 +422,7 @@ def test_a_time_with_an_offset_is_compared_by_its_utc_time_unwrapped_at_midnight
         assert [it.id for it in gom.load_all(Midnight, q.clock.lt(time(0, 30, tzinfo=UTC)))] == ["early"]
         assert [it.id for it in gom.load_all(Midnight, order_by=q.clock.asc())] == ["early", "late"]
 
-    held_or_failing(pm, check)
+    on_sqlite_or_refused(pm, check)
 
 
 def test_a_local_time_and_a_time_with_an_offset_are_unequal_and_neither_before_the_other(
@@ -451,7 +449,7 @@ def test_a_local_time_and_a_time_with_an_offset_are_unequal_and_neither_before_t
         after = q.clock.after(time(8, tzinfo=UTC))
         assert [it.id for it in gom.load_all(TwoKinds, order_by=q.clock.asc(), seek=after)] == ["local"]
 
-    held_or_failing(pm, check)
+    on_sqlite_or_refused(pm, check)
 
 
 def test_two_local_times_are_compared_and_ordered_as_the_times_they_are(
@@ -466,7 +464,7 @@ def test_two_local_times_are_compared_and_ordered_as_the_times_they_are(
         assert [it.id for it in gom.load_all(Local, q.clock.eq(time(10, 0, 0, 250000)))] == ["m"]
         assert [it.id for it in gom.load_all(Local, order_by=q.clock.desc())] == ["m", "l"]
 
-    held_or_failing(pm, check)
+    on_sqlite_or_refused(pm, check)
 
 
 def test_has_item_finds_a_time_in_a_list_as_cypher_finds_one_at_its_offset(
@@ -485,7 +483,7 @@ def test_has_item_finds_a_time_in_a_list_as_cypher_finds_one_at_its_offset(
         assert found(q.clocks.has_item(time(13, 30, tzinfo=offset(5)))) == []
         assert found(q.clocks.has_item(time(8, 30))) == []
 
-    held_or_failing(pm, check)
+    on_sqlite_or_refused(pm, check)
 
 
 def test_a_date_is_never_a_moment_nor_a_local_moment_a_moment(gom: StatelessGraphObjectManager, pm: PersistenceManager):
@@ -521,7 +519,7 @@ def test_a_date_is_never_a_moment_nor_a_local_moment_a_moment(gom: StatelessGrap
         assert lists(listed.days.has_item(datetime(2024, 5, 6, tzinfo=UTC))) == []
         assert lists(listed.moments.has_item(moment.replace(tzinfo=None))) == []
 
-    held_or_failing(pm, check)
+    on_sqlite_or_refused(pm, check)
 
 
 class Wall(NodeFragment, labels=["WallHeld"]):
@@ -554,7 +552,7 @@ def test_a_saved_local_moment_is_compared_with_a_local_moment_as_the_moment_it_i
         assert found(q.at.neq(local.replace(tzinfo=UTC))) == ["w"]
         assert found(q.moments.has_item(local.replace(tzinfo=UTC))) == []
 
-    held_or_failing(pm, check)
+    on_sqlite_or_refused(pm, check)
 
 
 class Ranked(NodeFragment, labels=["RankedHeld"]):
@@ -605,7 +603,7 @@ def test_an_order_by_an_expression_compares_a_date_moment_or_time_as_a_condition
         assert ranked(not_equal_to(q.on, datetime(2025, 1, 1, tzinfo=UTC))) == ["r1", "r2", "r3", "r4"]
         assert ranked(not_equal_to(q.clock, time(8))) == ["r2", "r3", "r1", "r4"]
 
-    held_or_failing(pm, check)
+    on_sqlite_or_refused(pm, check)
 
 
 class Zoned(NodeFragment, labels=["ZonedHeld"]):
@@ -627,14 +625,17 @@ def test_a_time_of_a_named_zone_is_compared_as_the_local_time_a_save_writes_of_i
         assert [it.id for it in gom.load_all(Zoned, q.clock.eq(time(8)))] == ["z"]
         assert [it.id for it in gom.load_all(Zoned, q.clock.eq(time(8, tzinfo=UTC)))] == []
 
-    held_or_failing(pm, check)
+    on_sqlite_or_refused(pm, check)
 
 
 @pytest.mark.parametrize("test", ["eq", "in", "has_item"])
 def test_the_query_dsl_refuses_a_time_at_an_offset_with_seconds_by_name_as_a_parameter_is(
-    gom: StatelessGraphObjectManager, test: str
+    gom: StatelessGraphObjectManager, pm: PersistenceManager, test: str
 ):
-    # The store holds an offset to the minute (#517); the DSL wrote this one as a text no value of it matches (#523).
+    """
+    The store holds an offset to the minute (#517); the DSL wrote this one as a text no value of it matches (#523).
+    Postgres and Oracle refuse any comparison with a time first, by the name of drivine-cypher-spec#235.
+    """
     at = time(10, tzinfo=timezone(timedelta(hours=1, seconds=1)))
     dated = refs(Dated)
     tested = {
@@ -642,7 +643,9 @@ def test_the_query_dsl_refuses_a_time_at_an_offset_with_seconds_by_name_as_a_par
         "in": lambda: dated.clock.in_([time(9), at]),
         "has_item": lambda: dated.clocks.has_item(at),
     }[test]()
-    with pytest.raises(DrivineError, match="at an offset with seconds"):
+    with pytest.raises(
+        DrivineError, match="at an offset with seconds" if pm.type is DatabaseType.SQLITE else refused(pm)
+    ):
         gom.load_all(Dated, tested)
 
 
@@ -657,4 +660,4 @@ def test_the_query_dsl_finds_a_time_at_an_offset_of_whole_minutes_as_it_was_befo
         assert [it.id for it in gom.load_all(Dated, dated.clock.eq(at))] == ["c1"]
         assert [it.id for it in gom.load_all(Dated, dated.clock.in_([at]))] == ["c1"]
 
-    held_or_failing(pm, check)
+    on_sqlite_or_refused(pm, check)

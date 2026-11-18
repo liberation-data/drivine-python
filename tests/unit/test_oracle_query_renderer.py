@@ -8,6 +8,7 @@ import pytest
 from drivine import DrivineError, ModelRegistry, NodeFragment, NodeId, refs
 from drivine.backend.oracle.oracle_backend import OracleBackend
 from drivine.backend.oracle.oracle_graph import OracleGraph
+from drivine.backend.oracle.oracle_query_renderer import OracleQueryRenderer
 from tests.models import Person
 
 
@@ -61,9 +62,13 @@ class Clocked(NodeFragment, labels=["Clocked"]):
 
 @pytest.mark.parametrize("test", ["eq", "in", "has_item"])
 def test_a_time_at_an_offset_with_seconds_is_refused_by_name_as_the_query_dsl_refuses_it_on_the_other_sql_stores(
-    test: str,
+    test: str, monkeypatch: pytest.MonkeyPatch
 ):
-    # Oracle's renderer writes its value through _storable too (#523), so it can't bind one no stored value matches.
+    """
+    Oracle's renderer writes its value through _storable too (#523), so it can't bind one no stored value matches. It
+    refuses any comparison with a time first, by the name of drivine-cypher-spec#235: with that refusal lifted, as it
+    will be when the DSL takes the shared module's fragments, the offset is refused.
+    """
     at = time(10, tzinfo=timezone(timedelta(hours=1, seconds=1)))
     clocked = refs(Clocked)
     tested = {
@@ -72,7 +77,14 @@ def test_a_time_at_an_offset_with_seconds_is_refused_by_name_as_the_query_dsl_re
         "has_item": lambda: clocked.clocks.has_item(at),
     }[test]()
     registry = ModelRegistry()
-    with pytest.raises(DrivineError, match="at an offset with seconds"):
+
+    def render() -> None:
         OracleBackend(OracleGraph()).render_where(
             tested, registry.fragment(Clocked), lambda type_: registry.fragment(type_).labels
         )
+
+    with pytest.raises(DrivineError, match=r"aren't supported on Oracle yet .*drivine-cypher-spec#235"):
+        render()
+    monkeypatch.setattr(OracleQueryRenderer, "reads_temporals", True)
+    with pytest.raises(DrivineError, match="at an offset with seconds"):
+        render()

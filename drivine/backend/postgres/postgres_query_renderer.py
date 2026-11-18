@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
 from drivine.backend.postgres.postgres_graph import json_value, number_of, text_of
 from drivine.backend.postgres.postgres_views import PostgresViews
@@ -28,7 +28,10 @@ class PostgresQueryRenderer(SqlQueryRenderer):
     kind of the value it is compared with: a number only where one is stored, so `'7'` is not `7`, as on the graph
     engines; a boolean as the text JSON writes it; anything else as text. A missing property is null, and meets no
     comparison, as in Cypher. Nothing is written with Postgres's `?` operators, which a driver may take for a parameter.
+    A date, datetime or time is refused (see SqlQueryRenderer.reads_temporals).
     """
+
+    store: ClassVar[str] = "Postgres"
 
     @staticmethod
     def render(

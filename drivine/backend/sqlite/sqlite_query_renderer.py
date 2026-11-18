@@ -3,13 +3,12 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Sequence
 from datetime import UTC, date, datetime, time
-from types import UnionType
-from typing import Annotated, Any, Literal, Union, get_args, get_origin
+from typing import Any, ClassVar, Literal
 
 from drivine.backend.save_statement_builder import packed
 from drivine.backend.sql.compared import Compared
 from drivine.backend.sql.sql_json import storable, to_json
-from drivine.backend.sql.sql_query_renderer import SqlQueryRenderer
+from drivine.backend.sql.sql_query_renderer import SqlQueryRenderer, declared_types
 from drivine.backend.sql.value_layout import Held, write
 from drivine.backend.sqlite.sqlite_graph import (
     LOWER,
@@ -37,8 +36,6 @@ from drivine.dsl.rendered_query import RenderedQuery
 from drivine.dsl.root_key import RootKey
 from drivine.dsl.scope import Scope
 from drivine.model import stamps
-from drivine.model.fragment_model import FragmentModel
-from drivine.model.graph_view_model import GraphViewModel
 from drivine.model.target_model import TargetModel
 
 _SQL_OPERATORS = {"EQ": "=", "NEQ": "<>", "GT": ">", "GTE": ">=", "LT": "<", "LTE": "<="}
@@ -60,6 +57,8 @@ class SqliteQueryRenderer(SqlQueryRenderer):
     comparison, as in Cypher.
     Where an order puts its nulls is always said, as SQLite puts them first when ascending and Cypher last.
     """
+
+    reads_temporals: ClassVar[bool] = True
 
     def __init__(self, views: SqliteViews, labels_of_class: Callable[[type], list[str]]) -> None:
         super().__init__(views, labels_of_class)
@@ -366,14 +365,7 @@ def _declared_kind(scope: Scope, property: str) -> Kind | None:
     INSTANT, DATE or TIME where the root's field stored under `property` is declared a moment, a date or a time; None
     otherwise.
     """
-    root = scope.model.root if isinstance(scope.model, GraphViewModel) else scope.model
-    if not isinstance(root, FragmentModel) or root.type is None:
-        return None
-    field = root.fields_by_property.get(property)
-    info = getattr(root.type, "model_fields", {}).get(field) if field else None
-    if info is None:
-        return None
-    for it in _types_of(info.annotation):
+    for it in declared_types(scope, property):
         if it is datetime:
             return "INSTANT"
         if it is date:
@@ -381,15 +373,6 @@ def _declared_kind(scope: Scope, property: str) -> Kind | None:
         if it is time:
             return "TIME"
     return None
-
-
-def _types_of(annotation: Any) -> list[Any]:
-    """The types an annotation names: itself, or each of a union's, each without its Annotated metadata."""
-    if get_origin(annotation) is Annotated:
-        return _types_of(get_args(annotation)[0])
-    if get_origin(annotation) in (Union, UnionType):
-        return [it for arg in get_args(annotation) for it in _types_of(arg)]
-    return [annotation]
 
 
 def _kind_of(value: Any, json_packed: bool) -> Kind:

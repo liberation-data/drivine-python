@@ -4,7 +4,8 @@
 A query DSL filter, order and grouped read of a property whose name begins with `$`, which store layout 2 holds as
 `$$score` (drivine-cypher-spec#161). The DSL's own SQL named it as it is, `$score`, so it found no node, ordered by
 nothing and grouped every node under no value, silently. The shared module's fragments read it as the layout holds it:
-on SQLite since drivine-cypher-spec#235 step 2, and on Postgres since step 3. A port of Drivine for TypeScript's
+on SQLite since drivine-cypher-spec#235 step 2, and on Postgres since step 3. A raw where reads it by the key it is held
+under on each SQL store (drivine-python#543, liberation-data/drivine#793). A port of Drivine for TypeScript's
 StatelessGraphObjectManager.dollarNames.spec.
 """
 
@@ -82,3 +83,34 @@ def test_groups_and_adds_by_it(gom: StatelessGraphObjectManager, held: None):
         {"score": 2, "nodes": 1, "total": 2},
         {"score": 1, "nodes": 1, "total": 1},
     ]
+
+
+def test_reads_it_in_a_raw_where_by_the_key_it_is_held_under(gom: StatelessGraphObjectManager):
+    # A raw where names it as Cypher writes it, in backticks, and reads the key layout 2 holds it under, $$score.
+    assert sorted(it.id for it in gom.load_all(Ranked, "n.`$score` IS NOT NULL")) == ["r1", "r2", "r3"]
+    assert gom.load_all(Ranked, "n.`$score` IS NULL") == []
+    # A patch's raw where, which Postgres and SQLite run with its values written in (PostgresWrites' _meeting).
+    assert (gom.patch(Ranked, "r2", set={"score": 20}, where="n.`$score` IS NOT NULL")).applied
+    loaded = gom.load(Ranked, "r2")
+    assert loaded is not None and loaded.score == 20
+    # A grouped read's raw where and raw aggregate filter.
+    groups = gom.groups.load(
+        Ranked,
+        where="n.`$score` IS NOT NULL",
+        keys={"id": key("id")},
+        aggregates={"scored": count("n.`$score` IS NOT NULL")},
+        order_by=[("id", "asc")],
+    )
+    assert groups == [{"id": "r1", "scored": 1}, {"id": "r2", "scored": 1}, {"id": "r3", "scored": 1}]
+
+
+def test_compares_it_with_a_number_in_a_raw_where(
+    pm: PersistenceManager, gom: StatelessGraphObjectManager, request: pytest.FixtureRequest
+):
+    if pm.type is DatabaseType.SQLITE:
+        # Held, and not for the held key, which the raw where reads: SQLite's raw where reads a number property as its
+        # JSON text, which SQLite orders after every number, so `n.score > 1` holds for a score of 1, or of 0, too.
+        request.applymarker(
+            pytest.mark.xfail(strict=True, reason="SQLite's raw where compares a number property as its JSON text")
+        )
+    assert sorted(it.id for it in gom.load_all(Ranked, "n.`$score` > 1")) == ["r2", "r3"]

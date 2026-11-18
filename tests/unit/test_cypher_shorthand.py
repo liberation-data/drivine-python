@@ -9,6 +9,7 @@ from drivine.backend.oracle.oracle_backend import OracleBackend
 from drivine.backend.oracle.oracle_graph import text_of as oracle
 from drivine.backend.postgres.postgres_backend import PostgresBackend
 from drivine.backend.sql.cypher_shorthand import CypherShorthand
+from drivine.backend.sqlite.sqlite_backend import SqliteBackend
 
 shorthand = CypherShorthand("n", "n_", oracle)
 
@@ -23,6 +24,20 @@ def test_a_property_of_the_root_is_read_from_its_document():
 
 def test_a_name_in_backticks_is_one_key_quoted_in_the_path():
     assert rewrite("n.`a.b` = 1") == "JSON_VALUE(n_.props, '$.\"a.b\"') = 1"
+
+
+def test_a_property_whose_name_begins_with_dollar_is_read_by_the_key_the_layout_holds_it_under():
+    # drivine-python#543, a port of liberation-data/drivine#793: the `$` doubled, as drivine4j reads it.
+    assert rewrite("n.`$score` > 1") == "JSON_VALUE(n_.props, '$.\"$$score\"') > 1"
+    assert rewrite("n.`$open` = true") == "JSON_VALUE(n_.props, '$.\"$$open\"') = 'true'"
+    assert rewrite("n.`a$b` = 'x'") == "JSON_VALUE(n_.props, '$.\"a$b\"') = 'x'"
+    # Each SQL store's raw where reads it so.
+    assert OracleBackend().written("n.`$score` > 1") == "JSON_VALUE(n.props, '$.\"$$score\"') > 1"
+    assert PostgresBackend().written("n.`$score` > 1") == "(n_.props ->> '$$score') > 1"
+    assert SqliteBackend().written("n.`$score` > 1") == (
+        "(CASE json_type(n_.props, '$.\"$$score\"') WHEN 'text' THEN n_.props ->> '$.\"$$score\"' "
+        "WHEN 'null' THEN NULL ELSE n_.props -> '$.\"$$score\"' END) > 1"
+    )
 
 
 def test_the_rows_own_columns_are_the_columns():

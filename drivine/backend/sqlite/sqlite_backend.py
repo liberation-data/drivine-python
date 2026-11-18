@@ -22,7 +22,7 @@ from drivine.backend.sql.node_ids import has_id
 from drivine.backend.sql.sql_cascade import beyond_count, kept_targets
 from drivine.backend.sql.sql_graph import sql_text
 from drivine.backend.sql.sql_json import to_json
-from drivine.backend.sql.value_layout import held_key, write
+from drivine.backend.sql.value_layout import write
 from drivine.backend.sqlite.sqlite_contention import contended
 from drivine.backend.sqlite.sqlite_graph import (
     DELETE,
@@ -101,7 +101,7 @@ class SqliteBackend:
         property of the root written as Cypher writes it, `n.name`, read as that property, by the name the layout holds
         it by, so `` n.`$score` `` is the property held as `$$score` (see CypherShorthand).
         """
-        return CypherShorthand(NODE_ROW, ROW_ALIAS, lambda row, key: text_of(row, held_key(key))).rewrite(predicate)
+        return CypherShorthand(NODE_ROW, ROW_ALIAS, text_of).rewrite(predicate)
 
     def render_where(
         self, where: Any, target: TargetModel, labels_of_class: Callable[[type], list[str]]

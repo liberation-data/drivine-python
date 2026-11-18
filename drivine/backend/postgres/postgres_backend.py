@@ -94,7 +94,8 @@ class PostgresBackend:
     def written(self, predicate: str) -> str:
         """
         A predicate the caller wrote over `n`, as the store reads it over the row a read calls its root, `n_`: each
-        property of the root written as Cypher writes it, `n.name`, read as that property (see CypherShorthand).
+        property of the root written as Cypher writes it, `n.name`, read as that property, by the name the layout holds
+        it by, so `` n.`$score` `` is the property held as `$$score` (see CypherShorthand).
         """
         return CypherShorthand(NODE_ROW, ROW_ALIAS, text_of).rewrite(predicate)
 

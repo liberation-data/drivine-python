@@ -4,6 +4,8 @@ import re
 from collections.abc import Callable
 from typing import NamedTuple
 
+from drivine.backend.sql.value_layout import held_key
+
 _SHORTHAND = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\.(?:`([^`]+)`|([A-Za-z_][A-Za-z0-9_]*))")
 """`alias.name` or ``alias.`a name` ``."""
 
@@ -36,13 +38,15 @@ class CypherShorthand:
     text on a SQL store; anything more is SQL, over the root's columns `issue.props`, `issue.labels` and
     `issue.stamp`. Text inside a string literal is left as it is. A property compared with `true` or `false`
     (`issue.locked = true`) is compared with the text a store reads a JSON boolean as, since SQL compares no text with
-    a boolean. drivine4j's `CypherShorthand`, rule for rule.
+    a boolean. A property whose name begins with `$` is read under the key store layout 2 holds it by, the `$`
+    doubled (`` n.`$score` `` is `$$score`, see held_key). drivine4j's `CypherShorthand`, rule for rule.
     """
 
     def __init__(self, alias: str, row: str, property: Callable[[str, str], str]) -> None:
         """
         `alias` is what the predicate calls the root, `row` what the statement calls the root's row, and `property` how
-        the store reads the property of a row, given the row and the property's name.
+        the store reads the property of a row, given the row and the key the property is held under (see held_key), so
+        it escapes none itself.
         """
         self._alias = alias
         self._row = row
@@ -81,13 +85,13 @@ class CypherShorthand:
         # One of the row's own columns is the column; any other name is a property.
         if key in _COLUMNS:
             return _Read(f"{self._row}.{key}", match.end())
+        # A property whose name begins with `$` is held under its key with the `$` doubled, as drivine4j reads it.
+        property = self._property(self._row, held_key(key))
         # A property compared with a boolean is compared with the boolean's text, which is what a property is read as.
         compared = _BOOLEAN_COMPARED.match(predicate, match.end())
         if compared is None:
-            return _Read(self._property(self._row, key), match.end())
-        return _Read(
-            f"{self._property(self._row, key)}{compared.group(1)}'{compared.group(2).lower()}'", compared.end()
-        )
+            return _Read(property, match.end())
+        return _Read(f"{property}{compared.group(1)}'{compared.group(2).lower()}'", compared.end())
 
     @staticmethod
     def _end_of_literal(predicate: str, start: int) -> int:

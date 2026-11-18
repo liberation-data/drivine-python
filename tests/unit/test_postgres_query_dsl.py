@@ -146,6 +146,10 @@ def test_counts_and_deletes_over_n_and_reads_a_raw_where_over_n_as_n_():
     assert "FROM drivine_node n\nWHERE " in backend.found_stamp(scored).text
 
 
+def test_reads_a_raw_wheres_property_whose_name_begins_with_dollar_by_the_name_the_layout_holds_it_by():
+    assert backend.written("n.`$score` > 1") == "(n_.props ->> '$$score') > 1"
+
+
 def test_writes_a_patchs_condition_over_n_a_value_in_the_text_of_a_quoted_name_left_as_it_is():
     where, bindings = backend.render_where(q.score.eq(2), scored, labels)
     patch = backend.patch_one(scored, where)

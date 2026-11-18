@@ -300,3 +300,12 @@ def test_an_order_of_several_terms_is_no_condition_or_value():
     order = SqlFragment(("a", "b"), {})
     with pytest.raises(DrivineError, match="A fragment of 2 terms is no condition or value"):
         _ = order.term
+
+
+def test_a_fragment_may_call_the_root_by_another_alias():
+    # The DSL's where, a cursor's keyset, an order and a value may each name the root as the query does, not `n`.
+    fragments = Fragments("SQLITE", "g", "people_", ["Person"])
+    assert "people_.props" in (fragments.where("m.name = $_q0", {"_q0": "Ada"}, alias="m") or "")
+    assert "people_.props" in fragments.after("m.age > $_q1", {"_q1": 1}, alias="m")
+    assert "people_.props" in fragments.order("m.age", alias="m")[0]
+    assert "people_.props" in fragments.value("m.age", alias="m")

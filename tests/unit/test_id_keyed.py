@@ -639,3 +639,18 @@ def test_typed_id_keeps_text_as_it_is_given_for_an_id_of_more_than_one_type():
     assert typed_id(either, "6") == "6"
     assert typed_id(either, "abc") == "abc"
     assert typed_id(either, None) is NO_NODE
+
+
+class StampedDay(NodeFragment, labels=["StampedDay"]):
+    on: Annotated[date, NodeId()]
+    stamp: Annotated[str | None, NodeStamp()] = None
+
+
+def test_a_batch_hands_each_stamped_node_its_stamp_by_its_date_ids_text_as_the_store_reads_it_back():
+    # Oracle's fragment batch reads each node's id back from its tag, as the tag's text, where the object holds a date.
+    model = ModelRegistry().fragment(StampedDay)
+    days = [StampedDay(on=date(2024, 1, 3)), StampedDay(on=date(2024, 1, 3))]
+    stamp = "a" * 16 + ":" + "b" * 16
+    result = {"groups": [{"before": [], "after": [{"id": "2024-01-03", "stamp": stamp}]}]}
+    StatelessGraphObjectManager._hand_back_fragments(None, [FragmentGroup(model, days)], result)  # pyright: ignore[reportArgumentType]
+    assert [it.stamp for it in days] == [stamp, stamp]

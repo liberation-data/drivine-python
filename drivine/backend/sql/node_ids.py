@@ -211,3 +211,17 @@ def temporal_text(layout: str) -> str | None:
     tag: Any = json.loads(layout)
     text: Any = cast(dict[str, Any], tag).get("v") if isinstance(tag, dict) else None
     return text if isinstance(text, str) else None
+
+
+def read_back_key(id: Any) -> Any:
+    """
+    `id` as a batch reads a node's id back from the store, where it hands each object its stamp: a temporal id as its
+    tag's text `v`, which is what a tag is read as (see value_layout.read), and any other id as it is. A date id the
+    object holds as a `date` is read back as its text, so the two are matched by that text.
+    """
+    if not isinstance(id, (date, time)):
+        return id
+    from drivine.backend.sql.sql_json import to_json
+    from drivine.backend.sql.value_layout import write
+
+    return temporal_text(to_json(write(id, "sqlite"))) or id

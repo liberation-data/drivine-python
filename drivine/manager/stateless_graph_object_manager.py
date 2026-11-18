@@ -17,7 +17,7 @@ from drivine.backend.nearest_search import NearestSearch
 from drivine.backend.page import Page
 from drivine.backend.save_statement import SaveStatement
 from drivine.backend.save_statement_builder import id_of, items, packed, props_of, root_of, stored, target
-from drivine.backend.sql.node_ids import NO_NODE, lookup_id
+from drivine.backend.sql.node_ids import NO_NODE, lookup_id, read_back_key
 from drivine.backend.vector_writes import split_vectors
 from drivine.connection.database_type import DatabaseType
 from drivine.connection.transaction_mode import TransactionMode
@@ -880,10 +880,11 @@ class StatelessGraphObjectManager:
             model = group.model
             if not model.stamp_field or not model.node_id_field:
                 continue
-            found = {it["id"]: it["stamp"] for it in result["groups"][i]["before"]}
-            now = {it["id"]: it["stamp"] for it in result["groups"][i]["after"]}
+            # Each id as the batch reads it back, a temporal one as its tag's text, so a date id matches its node's.
+            found = {read_back_key(it["id"]): it["stamp"] for it in result["groups"][i]["before"]}
+            now = {read_back_key(it["id"]): it["stamp"] for it in result["groups"][i]["after"]}
             for obj in group.objects:
-                node_id = getattr(obj, model.node_id_field)
+                node_id = read_back_key(getattr(obj, model.node_id_field))
                 carried = getattr(obj, model.stamp_field)
                 setattr(obj, model.stamp_field, stamps.handed_back(carried, found.get(node_id, ""), now[node_id]))
 

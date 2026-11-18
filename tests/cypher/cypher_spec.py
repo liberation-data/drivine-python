@@ -195,8 +195,9 @@ class Hold:
     """The repository of liberation-data's that `issue` is in: the shared module's fixes are drivine-cypher-spec's."""
     skip: bool = False
     """
-    Whether the steps are skipped on those stores, not run and expected to fail: for a store that fails them only now
-    and then, which a hold that checks they fail can't hold. As drivine4j's `CypherSpec.HELD` `skip`.
+    Whether the steps are skipped on those stores, not run, rather than run and expected to fail: for a store
+    that fails them only now and then, which a hold that checks they fail can't hold. As drivine4j's
+    `CypherSpec.HELD` `skip`.
     """
 
 
@@ -219,12 +220,15 @@ HELD: dict[str, dict[str, list[Hold]]] = {
 """
 The steps of a spec tag past what drivine-python runs that a port here has yet to make pass, by file and case. Each is
 run, and must fail; one that passes fails, so that its hold is taken out when its port lands. As Drivine for
-TypeScript's.
+TypeScript's. A skip (`Hold.skip`) isn't run.
 """
 
 
 def skipped_for(file: str, case: Case, index: int, store: str) -> str | None:
-    """The issue the step at `index` of the case of `file` is skipped for on `store`, if it is (`Hold.skip`)."""
+    """
+    The issue the step at `index` (from 0) of the case of `file` is skipped for on `store`, if it is, as `repository#n`:
+    see `Hold.skip`.
+    """
     for hold in HELD.get(file, {}).get(case.name, []):
         named = any(it == store or store in GROUPS.get(it, set()) for it in hold.on)
         if hold.skip and named and (hold.steps is None or index + 1 in hold.steps):

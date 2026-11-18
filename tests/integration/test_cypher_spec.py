@@ -74,7 +74,7 @@ async def clear(pm: PersistenceManager) -> None:
 async def run(pm: PersistenceManager, file: str, case: Case) -> None:
     """
     Each step of the case of the spec file that runs on the store, in turn: its rows checked, or its failure. A step
-    held on the store (`HELD`) must fail, until its port lands.
+    held on the store (`HELD`) must fail, until its port lands; one skipped on it skips the rest of the case.
     """
     store = NAMES[pm.type]
     for index, step in enumerate(case.steps):

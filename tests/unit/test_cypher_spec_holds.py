@@ -30,3 +30,11 @@ def test_a_skip_on_some_steps_skips_those_steps_alone(monkeypatch: pytest.Monkey
     ]
     assert [skipped_for("queries.yaml", case, index, "neo4j") for index in range(4)] == [None] * 4
     assert [held_for("queries.yaml", case, index, "oracle") for index in range(4)] == [None] * 4
+
+
+def test_a_hold_that_isnt_a_skip_skips_no_step():
+    case = next(it for it in QUERIES.cases if it.name == "A regular expression with a backreference")
+    assert held_for("queries.yaml", case, 0, "sqlite") == "drivine-cypher-spec#240"
+    assert [skipped_for("queries.yaml", case, index, "sqlite") for index in range(len(case.steps))] == [None] * len(
+        case.steps
+    )

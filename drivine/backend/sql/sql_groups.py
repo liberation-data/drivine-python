@@ -6,7 +6,7 @@ from typing import Any, Literal, Protocol
 
 from drivine.annotation.direction import Direction
 from drivine.backend.graph_statement import GraphStatement
-from drivine.backend.group_statement import COMPARISONS, GroupStatement, whole_number
+from drivine.backend.group_statement import COMPARISONS, GroupStatement, path_key_id, whole_number
 from drivine.backend.sql.sql_graph import SqlGraph
 from drivine.backend.sql.sql_views import SqlViews
 from drivine.drivine_error import DrivineError
@@ -90,12 +90,6 @@ class SqlGroups(ABC):
         aggregates = list(query.aggregates.items())
         if not keys:
             raise DrivineError("A grouped read needs at least one key.")
-        for name, group_key in keys:
-            if isinstance(group_key, PathKey) and not path_targets[name].node_id_property:
-                raise DrivineError(
-                    f"{path_targets[name].type.__name__} has no NodeId field, so a grouped read can't key by it: "
-                    f"the path key {name} is ordered by the id of the node it reaches."
-                )
         bindings: dict[str, Any] = dict(query.bindings)
         n = self.row
         froms = [f"FROM {self.graph.nodes} {n}"]
@@ -203,10 +197,7 @@ class SqlGroups(ABC):
             if not isinstance(group_key, PathKey):
                 return self._key_value(f"g.k{i}")
             target = path_targets[name]
-            return (
-                f"(SELECT {self._id_value(target.node_id_property or '')} FROM {self.graph.nodes} p "
-                f"WHERE p.nid = g.k{i})"
-            )
+            return f"(SELECT {self._id_value(path_key_id(target))} FROM {self.graph.nodes} p WHERE p.nid = g.k{i})"
 
         def column_order(column: str, ascending: bool) -> str:
             i = int(column[1:])

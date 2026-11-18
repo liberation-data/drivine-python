@@ -24,7 +24,8 @@ from drivine import (
     refs,
     sum_,
 )
-from drivine.backend.cypher_grammar import NEO4J_GRAMMAR
+from drivine.backend.cypher_backend import CypherBackend
+from drivine.backend.cypher_grammar import FALKORDB_GRAMMAR, MEMGRAPH_GRAMMAR, NEO4J_GRAMMAR
 from drivine.backend.graph_backend import GraphBackend
 from drivine.backend.graph_statement import GraphStatement
 from drivine.backend.oracle.oracle_backend import OracleBackend
@@ -196,9 +197,28 @@ def test_reads_a_property_written_as_cypher_writes_it_as_the_store_reads_it_over
 
 
 @pytest.mark.parametrize(
-    "on", [SqliteBackend(SqliteGraph()), PostgresBackend(), OracleBackend(OracleGraph())], ids=repr
+    "on",
+    [
+        SqliteBackend(SqliteGraph()),
+        PostgresBackend(),
+        OracleBackend(OracleGraph()),
+        CypherBackend(NEO4J_GRAMMAR),
+        CypherBackend(MEMGRAPH_GRAMMAR),
+        CypherBackend(FALKORDB_GRAMMAR),
+    ],
+    ids=repr,
 )
 async def test_a_grouped_read_keyed_by_a_path_to_a_class_with_no_node_id_is_refused_by_name(on: GraphBackend):
-    # drivine-python#539: it was ordered by a property named '', in no set order, without a word.
-    with pytest.raises(DrivineError, match=r"^Unkeyed has no NodeId field, so a grouped read can't key by it"):
-        await grouped(on, keys={"to": path_key(Unkeyed, [Hop("TO")])}, aggregates={"all": count()})
+    # drivine-python#539 and #550: it was ordered by a property named '', in no set order, without a word. It is
+    # refused before any store writes the read, with drivine4j's words.
+    statements: list[GraphStatement] = []
+
+    async def query(statement: GraphStatement) -> list[Any]:
+        statements.append(statement)
+        return []
+
+    with pytest.raises(DrivineError, match=r"^Unkeyed has no @NodeId field, which a path key is ordered by\.$"):
+        await GroupOperations(registry, query, None, on).load(  # type: ignore[arg-type]
+            Scored, keys={"to": path_key(Unkeyed, [Hop("TO")])}, aggregates={"all": count()}
+        )
+    assert statements == []

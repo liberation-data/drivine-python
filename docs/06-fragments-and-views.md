@@ -240,7 +240,8 @@ await gom.groups.count_by(Review, "page")                       # {"/pricing": 1
 ```
 
 Aggregates are `count`, `sum_`, `avg`, `min_` and `max_`, each with an optional filter. Ties in an order are broken by
-the keys, so a page of groups is the same every time. On the SQL stores a key is ordered as Cypher orders it (a text,
+the keys, so a page of groups is the same every time. A path key's groups are ordered by its node's id, so a path key to
+a class with no `NodeId` field is refused, before anything is run, on every store. On the SQL stores a key is ordered as Cypher orders it (a text,
 then a boolean, then a number, no value last; on Postgres a key of mixed kinds still sorts a number before a boolean,
 until [drivine-cypher-spec#371](https://github.com/liberation-data/drivine-cypher-spec/issues/371)), a date by its
 moment, and `min_` and `max_` take a value of any kind, a text or a date as well as a number, read back as the type its

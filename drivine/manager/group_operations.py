@@ -8,6 +8,7 @@ from pydantic import TypeAdapter
 
 from drivine.backend.graph_backend import GraphBackend
 from drivine.backend.graph_statement import GraphStatement
+from drivine.backend.group_statement import path_key_id
 from drivine.drivine_error import DrivineError
 from drivine.dsl.model_scope import scope_of
 from drivine.dsl.query_renderer import root_property
@@ -90,11 +91,15 @@ class GroupOperations:
             skip,
         )
         targets: dict[str, FragmentModel] = {}
+        # Checked before anything is written, so every store refuses the same keys: a path key's groups are ordered by
+        # its node's id, so its fragment must have a NodeId (path_key_id; drivine4j's GroupQuery.check).
         for name, group_key in keys.items():
             if isinstance(group_key, PathKey):
                 if not group_key.hops:
                     raise DrivineError(f"The path key {name} needs at least one hop.")
-                targets[name] = self._registry.fragment(group_key.target)
+                target = self._registry.fragment(group_key.target)
+                path_key_id(target)
+                targets[name] = target
         rows = await self._query(self._backend.groups(model, query, targets, self._labels))
         key_names = list(keys)
         aggregate_names = list(aggregates or {})

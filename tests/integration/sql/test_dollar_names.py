@@ -13,7 +13,6 @@ from typing import Annotated
 import pytest
 
 from drivine import (
-    DatabaseType,
     GraphProperty,
     NodeFragment,
     NodeId,

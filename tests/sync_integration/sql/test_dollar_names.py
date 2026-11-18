@@ -15,7 +15,6 @@ from typing import Annotated
 import pytest
 
 from drivine.sync import (
-    DatabaseType,
     GraphProperty,
     NodeFragment,
     NodeId,

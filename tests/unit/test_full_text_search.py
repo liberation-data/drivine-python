@@ -66,7 +66,9 @@ def test_a_sql_store_joins_the_modules_candidates_back_to_its_node_table_and_bin
 ):
     planned = full_text_search(store, GRAPHS[store].name, ["Shelf", "Stocked"], ["title"], "graph -relational", index)
     statement = backend.matching(SHELF, search("graph -relational", index))
-    assert f"FROM ({planned.statement}) s JOIN {GRAPHS[store].nodes} n ON n.nid = s.nid" in statement.text
+    # SQLite's hit is the row a read of the query DSL calls its root, which a filter of the DSL reads.
+    row = "n_" if store == "SQLITE" else "n"
+    assert f"FROM ({planned.statement}) s JOIN {GRAPHS[store].nodes} {row} ON {row}.nid = s.nid" in statement.text
     assert statement.bindings == planned.parameters
     assert all(re.fullmatch(r"_cy_ft[0-9]+", it) for it in statement.bindings)
 

@@ -16,6 +16,8 @@ from drivine.backend.postgres.postgres_statement import PostgresStatement
 from drivine.backend.postgres.postgres_writes import PostgresWrites
 from drivine.backend.save_statement import SaveStatement
 from drivine.backend.sql.cypher_shorthand import CypherShorthand
+from drivine.backend.sql.fragment_query_renderer import FragmentQueryRenderer, root_labels
+from drivine.backend.sql.fragments import FRAGMENT_ROOT_ROW, Fragments
 from drivine.backend.sql.node_ids import has_id
 from drivine.backend.sql.sql_cascade import beyond_count, kept_targets
 from drivine.backend.sql.sql_graph import sql_text
@@ -32,7 +34,6 @@ from drivine.backend.sqlite.sqlite_graph import (
     text_of,
 )
 from drivine.backend.sqlite.sqlite_groups import SqliteGroups
-from drivine.backend.sqlite.sqlite_query_renderer import SqliteQueryRenderer
 from drivine.backend.sqlite.sqlite_search import SqliteSearch
 from drivine.backend.sqlite.sqlite_views import SqliteViews
 from drivine.backend.store_statements import StampAndMarker
@@ -50,8 +51,14 @@ from drivine.model.model_registry import ModelRegistry
 from drivine.model.target_model import TargetModel
 from drivine.schema.schema_item import SchemaItem
 
-ROW_ALIAS = "n"
-"""What a statement over a fragment calls its node's row. A raw `where` is SQL over it."""
+ROW_ALIAS = FRAGMENT_ROOT_ROW
+"""
+What a load, a count, a delete, a patch's where, a grouped read and a search call their root's row: `n_`, the row the
+query DSL's fragments read (see FragmentQueryRenderer). A raw `where` is SQL over `n`, which `written` reads as it.
+"""
+
+NODE_ROW = "n"
+"""What the statements that read a node by its id alone call its row: `held_properties` and `found_stamp`."""
 
 
 class SqliteBackend:
@@ -59,7 +66,9 @@ class SqliteBackend:
     Statements for SQLite, over the tables of a SqliteGraph: drivine4j's store, so a graph file written from the JVM,
     from Node and from Python is one. A load returns the rows the graph engines do, `{props, labels}` for a fragment,
     as JSON text that a statement opening with JSON_ROWS has read back. A raw `where` is an SQL predicate over the
-    node's row, `n` (its `labels`, `props` and `stamp`).
+    node's row, `n` (its `labels`, `props` and `stamp`), in which a property of the node may be written as Cypher writes
+    it, `n.name` (see `written`). A filter, a seek and an order of the query DSL are the shared module's SQL
+    (FragmentQueryRenderer), over the row `n_`.
 
     A save, a patch and a relationship are the plan of steps Postgres carries out (see PostgresSaveBuilder and
     PostgresWrites), carried out by the function Drivine registers on each connection (see sqlite_functions). A delete
@@ -80,25 +89,28 @@ class SqliteBackend:
         indexed: Sequence[SchemaItem] = (),
     ) -> RenderedQuery:
         """
-        A query over a class's references, written for the store. A partial index over the nodes of a label is the
-        planner's to choose, so `indexed` changes nothing here.
+        A query over a class's references, written for the store by the shared module's fragments (see
+        FragmentQueryRenderer). A partial index over the nodes of a label is the planner's to choose, so `indexed`
+        changes nothing here.
         """
-        return SqliteQueryRenderer.render(
-            query, target, lambda depth: SqliteViews(self.graph, depth), ROW_ALIAS, labels_of_class
-        )
+        return FragmentQueryRenderer.render(query, target, self._fragments(target), labels_of_class)
 
     def written(self, predicate: str) -> str:
         """
-        A predicate the caller wrote, as the store reads it: each property of the root written as Cypher writes it,
-        `n.name`, read as that property (see CypherShorthand).
+        A predicate the caller wrote over `n`, as the store reads it over the row a read calls its root, `n_`: each
+        property of the root written as Cypher writes it, `n.name`, read as that property (see CypherShorthand).
         """
-        return CypherShorthand(ROW_ALIAS, ROW_ALIAS, text_of).rewrite(predicate)
+        return CypherShorthand(NODE_ROW, ROW_ALIAS, text_of).rewrite(predicate)
 
     def render_where(
         self, where: Any, target: TargetModel, labels_of_class: Callable[[type], list[str]]
     ) -> tuple[str, dict[str, Any]]:
-        """A condition over a class's references, written for the store, with its values."""
-        return SqliteQueryRenderer.render_where(where, target, SqliteViews(self.graph), ROW_ALIAS, labels_of_class)
+        """A condition over a class's references, written for the store by the shared module's fragments."""
+        return FragmentQueryRenderer.render_where(where, target, self._fragments(target), labels_of_class)
+
+    def _fragments(self, target: TargetModel) -> Fragments:
+        """The fragments of one statement over the target's root, its row `n_`."""
+        return Fragments("SQLITE", self.graph.name, ROW_ALIAS, root_labels(target))
 
     def load_all_fragments(
         self, model: FragmentModel, where: str | None = None, page: Page | None = None, tested: Sequence[str] = ()
@@ -251,7 +263,11 @@ class SqliteBackend:
         return self._by_id(
             PostgresStatement(
                 "\n".join(
-                    [JSON_ROWS, f'SELECT {ROW_ALIAS}.props AS "props"', self._from(model, self._id_predicate(model))]
+                    [
+                        JSON_ROWS,
+                        f'SELECT {NODE_ROW}.props AS "props"',
+                        self._from(model, self._id_predicate(model, NODE_ROW), NODE_ROW),
+                    ]
                 )
             )
         )
@@ -261,8 +277,8 @@ class SqliteBackend:
             PostgresStatement(
                 "\n".join(
                     [
-                        f"SELECT COALESCE({ROW_ALIAS}.stamp, '{stamps.NEVER_STAMPED}') AS \"found\"",
-                        self._from(model, self._id_predicate(model)),
+                        f"SELECT COALESCE({NODE_ROW}.stamp, '{stamps.NEVER_STAMPED}') AS \"found\"",
+                        self._from(model, self._id_predicate(model, NODE_ROW), NODE_ROW),
                     ]
                 )
             )
@@ -359,10 +375,10 @@ class SqliteBackend:
         parts = [*([f"({where})"] if where else []), *SqliteViews(self.graph, depth).requirements(model, ROW_ALIAS)]
         return " AND ".join(parts) if parts else None
 
-    def _from(self, model: FragmentModel, where: str | None = None) -> str:
-        """The nodes of the fragment's labels that meet `where`, as the row `n`."""
-        tests = [has_labels(ROW_ALIAS, model.labels), *([f"({where})"] if where else [])]
-        return f"FROM {self.graph.nodes} {ROW_ALIAS}\nWHERE {' AND '.join(tests)}"
+    def _from(self, model: FragmentModel, where: str | None = None, row: str = ROW_ALIAS) -> str:
+        """The nodes of the fragment's labels that meet `where`, as the row `row`."""
+        tests = [has_labels(row, model.labels), *([f"({where})"] if where else [])]
+        return f"FROM {self.graph.nodes} {row}\nWHERE {' AND '.join(tests)}"
 
     def _deleting(self, model: FragmentModel, where: str | None) -> GraphStatement:
         """
@@ -380,7 +396,7 @@ class SqliteBackend:
         return PostgresStatement.of(statement).keying_id(id_json)
 
     @staticmethod
-    def _id_predicate(model: FragmentModel) -> str:
+    def _id_predicate(model: FragmentModel, row: str = ROW_ALIAS) -> str:
         """
         The node whose id is `$id`, the JSON text the node holds it as, as `_by_id` binds it: the property's class and
         key compared with the id's, as the shared module writes the comparison, which the index over the id answers
@@ -388,7 +404,7 @@ class SqliteBackend:
         """
         if not model.node_id_property:
             raise DrivineError(f"{model.type.__name__} has no NodeId field, so it can't be found by id.")
-        return has_id("sqlite", ROW_ALIAS, model.node_id_property, "$id")
+        return has_id("sqlite", row, model.node_id_property, "$id")
 
     @staticmethod
     def _page(page: Page | None) -> list[str]:

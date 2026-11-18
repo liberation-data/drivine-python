@@ -6,6 +6,7 @@ from typing import Any
 from drivine.backend.graph_statement import GraphStatement
 from drivine.backend.matching_search import MatchingSearch, searched_labels
 from drivine.backend.nearest_search import NearestSearch
+from drivine.backend.sql.fragments import FRAGMENT_ROOT_ROW as ROW
 from drivine.backend.sql.sql_graph import sql_text
 from drivine.backend.sqlite.sqlite_graph import (
     JSON_ROWS,
@@ -36,6 +37,8 @@ class SqliteSearch:
     full-text search's candidates are the shared module's (`full_text_search`): the core of Lucene's syntax, each term
     counted as a whole word by `drivine_regexp_count` (see sqlite_patterns), as on Postgres and Oracle, its text lowered
     by `drivine_lower`, and scored by BM25 as Neo4j's index scores it, by `drivine_math`, then scaled by the best hit.
+
+    A hit's row is the root's of a read of the query DSL, `n_`, which its `where` reads.
     """
 
     def __init__(self, graph: SqliteGraph) -> None:
@@ -71,20 +74,20 @@ class SqliteSearch:
         root = target.root if isinstance(target, GraphViewModel) else target
         views = SqliteViews(self.graph, depth)
         filters = [
-            has_labels("n", root.labels),
+            has_labels(ROW, root.labels),
             *(["s.score >= $_threshold"] if threshold else []),
             *([f"({where})"] if where else []),
-            *(views.requirements(target, "n") if isinstance(target, GraphViewModel) else []),
+            *(views.requirements(target, ROW) if isinstance(target, GraphViewModel) else []),
         ]
-        value = views.document(target, "n") if isinstance(target, GraphViewModel) else node_document("n")
+        value = views.document(target, ROW) if isinstance(target, GraphViewModel) else node_document(ROW)
         return GraphStatement(
             "\n".join(
                 [
                     JSON_ROWS,
                     f"SELECT json_object('value', json({value}), 'score', s.score) AS \"result\"",
-                    f"FROM ({candidates}) s JOIN {self.graph.nodes} n ON n.nid = s.nid",
+                    f"FROM ({candidates}) s JOIN {self.graph.nodes} {ROW} ON {ROW}.nid = s.nid",
                     f"WHERE {' AND '.join(filters)}",
-                    "ORDER BY s.score DESC, n.nid",
+                    f"ORDER BY s.score DESC, {ROW}.nid",
                     *([f"LIMIT {limit}"] if limit is not None else []),
                 ]
             ),

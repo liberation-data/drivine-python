@@ -105,9 +105,9 @@ async def test_a_property_no_save_writes_keeps_the_text_it_was_stored_with(gom, 
     assert row["props"] == f'{{"id":"r1","value":1.5,"extra":1e3,"nested":{{"x":2.0}},"at":{moment}}}'
 
 
-async def test_moments_a_microsecond_apart_order_compare_and_seek_as_the_moments_they_are(gom, pm):
+async def test_a_moment_held_as_text_is_a_text_to_the_query_dsl_as_cypher_has_it(gom, pm):
     base = datetime(2024, 5, 6, 7, 8, 9, 123456, tzinfo=UTC)
-    # As drivine4j writes a moment: to the microsecond, at one offset or another.
+    # A moment held as its text, as no save writes one since store layout 2, which holds a moment as its tag.
     for id, text in (
         ("a", "2024-05-06T07:08:09.123456Z"),
         ("b", "2024-05-06T09:08:09.123457+02:00"),
@@ -119,11 +119,12 @@ async def test_moments_a_microsecond_apart_order_compare_and_seek_as_the_moments
             props=json.dumps({"id": id, "at": text}),
         )
     q = refs(Reading)
-    assert [it.id for it in await gom.load_all(Reading, q.at.gt(base))] == ["b", "c"]
-    assert [it.id for it in await gom.load_all(Reading, q.at.eq(base + timedelta(microseconds=1)))] == ["b"]
-    assert [it.id for it in await gom.load_all(Reading, order_by=q.at.desc())] == ["c", "b", "a"]
-    later = base.astimezone(timezone(timedelta(hours=-5)))
-    assert [it.id for it in await gom.load_all(Reading, q.at.gte(later))] == ["a", "b", "c"]
+    # A text is no moment, so it meets no comparison with one, as in Cypher (the shared module's fragments).
+    assert [it.id for it in await gom.load_all(Reading, q.at.gt(base))] == []
+    assert [it.id for it in await gom.load_all(Reading, q.at.eq(base + timedelta(microseconds=1)))] == []
+    assert [it.id for it in await gom.load_all(Reading, q.at.gte(base.astimezone(timezone(timedelta(hours=-5)))))] == []
+    # And it is ordered as the text it is.
+    assert [it.id for it in await gom.load_all(Reading, order_by=q.at.desc())] == ["b", "c", "a"]
 
 
 class Dated(NodeFragment, labels=["Dated"]):
@@ -144,7 +145,13 @@ async def test_saved_moments_and_dates_held_as_their_tags_compare_order_and_are_
     )
     q = refs(Reading)
     assert [it.id for it in await gom.load_all(Reading, q.at.gt(base))] == ["b", "c"]
-    assert [it.id for it in await gom.load_all(Reading, q.at.eq(base + timedelta(microseconds=1)))] == ["b"]
+    # Equal only at its own offset: the same instant at another is another value, as Neo4j has it (the spec's "Zoned
+    # values at one instant", drivine-cypher-spec#161).
+    later = base + timedelta(microseconds=1)
+    assert [it.id for it in await gom.load_all(Reading, q.at.eq(later.astimezone(timezone(timedelta(hours=2)))))] == [
+        "b"
+    ]
+    assert [it.id for it in await gom.load_all(Reading, q.at.eq(later))] == []
     assert [it.id for it in await gom.load_all(Reading, order_by=q.at.desc())] == ["c", "b", "a"]
     among = [base, base + timedelta(microseconds=2)]
     assert sorted(it.id for it in await gom.load_all(Reading, q.at.in_(among))) == ["a", "c"]
@@ -341,8 +348,8 @@ class Tagged(NodeFragment, labels=["Tagged"]):
     size: int | None = None
 
 
-async def test_a_grouped_read_orders_a_text_before_a_number_before_a_boolean_and_nulls_last_ascending(gom, pm):
-    # As Postgres's jsonb, the graph engines and drivine4j's SQLite (SqliteSelect.groupOrder) order a group.
+async def test_a_grouped_read_orders_a_text_before_a_boolean_before_a_number_and_nulls_last_ascending(gom, pm):
+    # As Cypher orders a key, as drivine4j's SQLite does (SqliteSelect.groups): through a node of the group.
     for id, props in (
         ("t1", {"code": 2, "size": 5}),
         ("t2", {"code": "b"}),
@@ -362,9 +369,9 @@ async def test_a_grouped_read_orders_a_text_before_a_number_before_a_boolean_and
         return [it["code"] for it in found]
 
     keyed = {"code": key("code")}
-    assert codes(await gom.groups.load(Tagged, keys=keyed, aggregates={"n": count()})) == ["a", "b", 2, 10, True, None]
+    assert codes(await gom.groups.load(Tagged, keys=keyed, aggregates={"n": count()})) == ["a", "b", True, 2, 10, None]
     descending = await gom.groups.load(Tagged, keys=keyed, aggregates={"n": count()}, order_by=[("code", "desc")])
-    assert codes(descending) == [None, True, 10, 2, "b", "a"]
+    assert codes(descending) == [None, 10, 2, True, "b", "a"]
     biggest = {"n": count(), "biggest": max_("size")}
     by_size = await gom.groups.load(Tagged, keys=keyed, aggregates=biggest, order_by=[("biggest", "asc")])
     assert [it["biggest"] for it in by_size] == [1, 2, 3, 5, None, None]

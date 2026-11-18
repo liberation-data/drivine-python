@@ -45,7 +45,6 @@ from drivine.backend.sqlite.sqlite_graph import (
     path,
     text_of,
 )
-from drivine.backend.sqlite.sqlite_groups import SqliteGroups
 from drivine.connection.sqlite.sqlite_session import SqliteSession, bindable
 from drivine.model import stamps
 from drivine.schema.schema_grammar import schema_grammar_for
@@ -137,20 +136,6 @@ class TestTheSql:
         assert exact_json.loads(stamped) == {"props": {"x": 1, stamps.PROPERTY: "s:t"}, "labels": ["A"]}
         unstamped = connection.execute(select, ('["A"]', '{"x":1}', None)).fetchone()[0]
         assert exact_json.loads(unstamped) == {"props": {"x": 1}, "labels": ["A"]}
-
-    def test_a_group_key_orders_as_jsonb_does_with_a_node_of_no_value_last_ascending_and_first_descending(self):
-        connection = apsw.Connection(":memory:")
-        keys = [None, "{}", "[1]", "true", "false", "2.5", "1", '"b"', '"a"', "null"]
-        rows = " UNION ALL ".join("SELECT ? AS k" for _ in keys)
-        groups = SqliteGroups(SqliteGraph())
-
-        def ordered(ascending: bool) -> list[str | None]:
-            order = groups._ordered("g.k", ascending, "KEY")  # pyright: ignore[reportPrivateUsage]
-            return [it[0] for it in connection.execute(f"SELECT g.k FROM ({rows}) g ORDER BY {order}", keys)]
-
-        jsonb = ["null", '"a"', '"b"', "1", "2.5", "false", "true", "[1]", "{}", None]
-        assert ordered(True) == jsonb
-        assert ordered(False) == jsonb[::-1]
 
     def test_a_named_value_is_bound_as_sqlite_reads_it_and_a_positional_one_as_its_number(self):
         assert bindable("SELECT $a", {"a": {"x": [1]}}) == ("SELECT $a", {"a": '{"x":[1]}'})

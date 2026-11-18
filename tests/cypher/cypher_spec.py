@@ -199,6 +199,13 @@ class Hold:
     that fails them only now and then, which a hold that checks they fail can't hold. The runner skips the rest of
     the case from the first of them. As drivine4j's `CypherSpec.HELD` `skip`.
     """
+    may_pass: str | None = None
+    """
+    Why the steps may pass on those stores as well as fail as the issue has it, where they are held: for a store whose
+    answer differs from run to run or from host to host, as Neo4j's does for a dropped variable (#764). A step held so
+    is run, its failure is the run's answer when it fails, and its passing doesn't fail. As Drivine for TypeScript's
+    `mayPass`.
+    """
 
 
 def _steps(first: int, last: int) -> tuple[int, ...]:
@@ -215,12 +222,24 @@ HELD: dict[str, dict[str, list[Hold]]] = {
         # Oracle's server sometimes ends the session mid-statement here (ORA-03113, DPY-4011), and passes it in most
         # runs, so it is skipped on Oracle, as drivine4j skips it (liberation-data/drivine4j#838, #839).
         "collect skips nulls": [Hold(838, ("oracle",), repository="drivine4j", skip=True)],
+        # CI's Neo4j gives four rows where the box's, the same 2026.10.2, gives none, for a dropped p read in a WITH's
+        # WHERE, alone (step 11) or one list deeper (step 110): Neo4j's own answer, not another case's nodes, as each
+        # case empties the graph first and the graph holds one Keanu (liberation-data/drivine#764, #778).
+        "Nesting of a dropped variable: a WITH that drops p and groups, in its WHERE": [
+            Hold(
+                764,
+                ("neo4j",),
+                steps=(11, 110),
+                repository="drivine",
+                may_pass="it passes on the test box, and fails on CI",
+            ),
+        ],
     },
 }
 """
 The steps of a spec tag past what drivine-python runs that a port here has yet to make pass, by file and case. Each is
 run, and must fail; one that passes fails, so that its hold is taken out when its port lands. As Drivine for
-TypeScript's. A skip (`Hold.skip`) isn't run.
+TypeScript's. A skip (`Hold.skip`) isn't run, and a step that may pass (`Hold.may_pass`) doesn't fail when it passes.
 """
 
 
@@ -234,6 +253,15 @@ def skipped_for(file: str, case: Case, index: int, store: str) -> str | None:
         if hold.skip and named and (hold.steps is None or index + 1 in hold.steps):
             return f"{hold.repository}#{hold.issue}"
     return None
+
+
+def may_pass(file: str, case: Case, index: int, store: str) -> bool:
+    """Whether the step at `index` (from 0) of the case of `file`, held on `store`, may pass there (`Hold.may_pass`)."""
+    for hold in HELD.get(file, {}).get(case.name, []):
+        named = any(it == store or store in GROUPS.get(it, set()) for it in hold.on)
+        if hold.may_pass is not None and named and (hold.steps is None or index + 1 in hold.steps):
+            return True
+    return False
 
 
 def held_for(file: str, case: Case, index: int, store: str) -> str | None:

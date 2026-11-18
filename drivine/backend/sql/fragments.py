@@ -35,7 +35,14 @@ NODE = "n"
 """What the Cypher of a fragment the library writes itself calls the node it is over."""
 
 RESERVED = "_cy_"
-"""The start of every name the module binds a fragment's parameters under: no caller binds one."""
+"""
+The compiler's reserved prefix, which the module binds a fragment's parameters under: no caller binds a name that
+begins with it. On Oracle a key compared by its index is bound as `_cyk_<name>`, outside it, so a caller's name that
+is one of those is refused as bound twice instead (see `bound_beside`).
+"""
+
+_QUOTED = r"`(?:[^`]|``)*`|'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\""
+"""A quoted name or a text of Cypher, a backtick doubled or a quote escaped in it: no parameter is named within one."""
 
 
 class Names:
@@ -60,11 +67,15 @@ class Names:
         return {self.given_name(name): value for name, value in parameters.items()}
 
     def named(self, cypher: str, parameters: Iterable[str]) -> str:
-        """`cypher` with each of `parameters`, `$p`, written as the fragment names it, the longest name first."""
-        for name in sorted(parameters, key=len, reverse=True):
-            given = self(name)
-            cypher = re.sub(rf"\${re.escape(name)}(?![A-Za-z0-9_])", lambda _, given=given: given, cypher)
-        return cypher
+        """
+        `cypher` with each of `parameters`, `$p`, written as the fragment names it: not where it is part of a longer
+        name (`$pq`), nor within a quoted name or a text, as a property may be named `$p` and a text may hold it.
+        """
+        names = sorted(parameters, key=len, reverse=True)
+        if not names:
+            return cypher
+        pattern = re.compile(rf"({_QUOTED})|\$({'|'.join(map(re.escape, names))})(?!\w)")
+        return pattern.sub(lambda it: it.group(1) if it.group(1) is not None else self(it.group(2)), cypher)
 
 
 Nulls = Literal["FIRST", "LAST"]
@@ -221,10 +232,11 @@ class Fragments:
 
     def take(self, fragment: SqlFragment) -> None:
         """`fragment`'s parameters bound in the statement, each once, and its hints and NaN kept for it."""
-        for name, value in fragment.parameters.items():
+        # Each name checked before any is bound, so a fragment refused binds none of its own.
+        for name in fragment.parameters:
             if name in self.parameters:
                 raise DrivineError(f"The parameter {name} is bound already.")
-            self.parameters[name] = value
+        self.parameters.update(fragment.parameters)
         for hint in fragment.hints:
             if hint not in self.hints:
                 self.hints.append(hint)

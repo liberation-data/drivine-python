@@ -235,3 +235,53 @@ def test_the_root_row_ends_with_an_underscore_and_oracle_joins_a_node_back_by_bo
     with pytest.raises(DrivineError, match="A property name is empty"):
         property_of("")
     assert property_of("a`b") == "n.`a``b`"
+
+
+def test_a_parameters_name_is_not_renamed_in_a_quoted_name_or_text():
+    # A property may be named `$p` (a key that begins with `$` is read as it is held), and a text may hold `$p`.
+    names = Names(1)
+    assert names.named("n.`$p` = $p AND n.b = '$p' AND n.c = \"$p\"", ["p"]) == (
+        "n.`$p` = $f1_p AND n.b = '$p' AND n.c = \"$p\""
+    )
+    assert names.named("n.`a``$p` = 'it''s $p\\' $p' + $p", ["p"]) == "n.`a``$p` = 'it''s $p\\' $p' + $f1_p"
+    assert names.named("n.a = $p", []) == "n.a = $p"
+
+
+def test_a_fragment_over_a_relationship_gives_its_row_and_no_labels():
+    knows = FragmentVariable("knows_", relationship=True)
+    assert knows.written() == {"relationship": "knows_"}
+    term = compile_fragment("SQLITE", "g", "condition", "r.since > $s", {"r": knows}, {"s": 1}).term
+    assert "knows_.props" in term
+
+
+def test_only_an_order_asks_to_be_descending():
+    # The module refuses a descending condition or value: a caller's descending is written for an order alone.
+    for part in ("condition", "value"):
+        compile_fragment("SQLITE", "g", part, "n.age > 1", PEOPLE, descending=True)
+    ascending = compile_fragment("SQLITE", "g", "order", "n.age", PEOPLE).terms
+    assert compile_fragment("SQLITE", "g", "order", "n.age", PEOPLE, descending=True).terms != ascending
+
+
+def test_a_condition_on_another_row_is_not_given_the_roots_labels():
+    fragments = Fragments("ORACLE", "g", "people_", ["Person"], INDEXED)
+    assert "JSON_EXISTS(people_.labels" in fragments.condition("n.name = $p", {"p": "Ada"})
+    other = fragments.condition("n.name = $p", {"p": "Ada"}, row="others_")
+    assert "others_.props" in other
+    assert "labels" not in other
+
+
+def test_a_fragment_that_binds_a_name_bound_already_binds_none_of_its_own():
+    fragments = Fragments("SQLITE", "g", "people_")
+    fragments.where("n.name = $_q0", {"_q0": "Ada"})
+    with pytest.raises(DrivineError, match="bound already"):
+        fragments.where("n.age > $_q1 AND n.name = $_q0", {"_q0": "Ada", "_q1": 1})
+    assert set(fragments.parameters) == {"_cy__q0"}
+
+
+def test_a_callers_name_the_module_binds_on_oracle_is_refused_as_bound_already():
+    # On Oracle the module binds a key compared by its index as `_cyk_<name>`, which isn't under `_cy_`.
+    fragments = Fragments("ORACLE", "g", "people_", ["Person"], INDEXED)
+    fragments.condition("n.name = $p", {"p": "Ada"})
+    assert "_cyk_f1_p" in fragments.parameters
+    with pytest.raises(DrivineError, match="The parameter _cyk_f1_p is bound already."):
+        fragments.bound_beside({"_cyk_f1_p": "Ada"})

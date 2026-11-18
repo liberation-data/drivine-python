@@ -16,8 +16,10 @@ import pytest
 from drivine.cypher.shared_compiler import compile_cypher
 from drivine.query.statement import cypher_statement
 from drivine.sync import (
+    CascadeType,
     DatabaseRegistry,
     DatabaseType,
+    DrivineError,
     FullTextIndex,
     NodeFragment,
     NodeId,
@@ -36,6 +38,7 @@ from drivine.sync import (
     vector_index,
 )
 from tests.models import Organization, Person, PersonCareer, WorkHistory
+from tests.sync_integration.test_recursive_cascade import DeletableSessionTree, chain, seed
 
 
 class Reading(NodeFragment, labels=["Reading"]):
@@ -422,3 +425,25 @@ def test_the_query_dsl_compares_seeks_orders_and_patches_a_boolean_and_a_moment_
     assert patched(q.open.in_([True]))
     assert patched(q.days.has_item(first))
     assert not patched(q.open.eq(False))
+
+
+def test_a_cascade_and_its_depth_check_read_the_dsls_where_over_the_roots_row_n_(gom, pm):
+    # The roots are the row n_, which the DSL's fragments read; what the cascade reaches from them is SQL over n.
+    seed(pm, chain(4))
+    q = refs(DeletableSessionTree)
+    for cascade in (CascadeType.DELETE_ALL, CascadeType.DELETE_ORPHAN):
+        with pytest.raises(DrivineError, match="reaches 3 levels deep"):
+            gom.delete(DeletableSessionTree, "rc-s0", where=q.session.id.eq("rc-s0"), cascade=cascade)
+        assert gom.delete(DeletableSessionTree, "rc-s0", where=q.session.id.eq("other"), cascade=cascade) == 0
+    assert (
+        gom.delete(DeletableSessionTree, "rc-s1", where=q.session.id.eq("rc-s1"), cascade=CascadeType.DELETE_ALL) == 8
+    )
+
+
+def test_a_raw_wheres_binding_named_as_the_dsls_own_keeps_its_value_beside_a_seek(gom):
+    # The DSL's values are bound under the shared module's names (`_cy__q0`), so a caller's `_q0` is the caller's.
+    # Were the seek's value bound as `_q0` too, the where would keep every node but "a", and find "b" and "c".
+    gom.save_all([Reading(id=it) for it in ("a", "b", "c")])
+    q = refs(Reading)
+    found = gom.load_all(Reading, "n.id <> $_q0", bindings={"_q0": "b"}, order_by=q.id.asc(), seek=q.id.after("a"))
+    assert [it.id for it in found] == ["c"]

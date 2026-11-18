@@ -217,7 +217,8 @@ TEXT, words TEXT)`, `<graph>_edge (eid INTEGER PRIMARY KEY AUTOINCREMENT, src, d
 CASCADE, type, props TEXT)` and `<graph>_schema`, the indexes and constraints Drivine made, with the shared module's
 tables of counts and its lock (`<graph>_count2`, `<graph>_count2_delta`, `<graph>_lock2`). Labels and properties are
 JSON text, not SQLite's binary `jsonb`, and labels are written sorted, with nothing escaped that JSON does not require:
-a label is found by its text. The stamp is a column. Moments compare and order to the nanosecond, whatever their offset.
+a label is found by its text. The stamp is a column. In the query DSL a moment compares and orders as Cypher's does:
+by its instant, and equal only to one at the same offset.
 
 The id of a node or relationship that is deleted is never given to another, within a statement, a transaction or after
 it, as on Oracle and Postgres: an element id an application holds names the element it was read from or nothing.

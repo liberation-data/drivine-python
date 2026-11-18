@@ -121,6 +121,9 @@ def test_a_property_compared_with_a_parameter_bound_to_a_boolean_is_compared_wit
     assert rewrite("n.open = $open AND n.shut <> $shut", bound) == (
         "JSON_VALUE(n_.props, '$.open') = 'true' AND JSON_VALUE(n_.props, '$.shut') <> 'false'"
     )
+    assert rewrite("n.open\n!=\t$open OR 'n.open = $open' = $open", bound) == (
+        "JSON_VALUE(n_.props, '$.open')\n!=\t'true' OR 'n.open = $open' = $open"
+    )
     # A parameter bound to anything else, one bound to none, and a longer name are read as they are.
     assert rewrite("n.count = $count AND n.name = $name AND n.open = $missing", bound) == (
         "JSON_VALUE(n_.props, '$.count') = $count AND JSON_VALUE(n_.props, '$.name') = $name AND "

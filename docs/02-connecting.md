@@ -158,8 +158,8 @@ is applied whole or not at all.
   and is read as that property, as text, and one whose stored name begins with `$`, ``n.`$score` ``, by the name the
   store holds it by; a property compared with `true` or `false`, or with a parameter bound to `True` or `False`, is
   compared with the text a JSON boolean is read as. To compare one with a number, read it as a number in SQL:
-  ``CAST(n.`$score` AS NUMERIC) > $least``. A date in a raw `where` is compared with the property's JSON text, the tag a save holds it as, so
-  `(n.props ->> 'at') = $when` finds nothing: compare dates in the query DSL.
+  ``CAST(n.`$score` AS NUMERIC) > $least``. A date in a raw `where` is compared with the property's JSON text, the tag
+  a save holds it as, so `(n.props ->> 'at') = $when` finds nothing: compare dates in the query DSL.
 - A number is compared as a number only where one is stored: `'7'` is not `7`, as on the graph engines.
 - **Behaviour change:** text is compared and ordered by its code points, as Neo4j orders it, in the query DSL's
   conditions (`gt`, `lt` and the rest on text), orders, seeks and grouped reads, as in compiled Cypher

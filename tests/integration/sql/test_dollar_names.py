@@ -109,6 +109,6 @@ async def test_compares_it_with_a_number_in_a_raw_where(
         # Held, and not for the held key, which the raw where reads: SQLite's raw where reads a number property as its
         # JSON text, which SQLite orders after every number, so `n.score > 1` holds for a score of 1, or of 0, too.
         request.applymarker(
-            pytest.mark.xfail(strict=True, reason="SQLite's raw where compares a number property as its JSON text")
+            pytest.mark.xfail(strict=True, reason="drivine-python#542: a raw where compares a number property as text")
         )
     assert sorted(it.id for it in await gom.load_all(Ranked, "n.`$score` > 1")) == ["r2", "r3"]

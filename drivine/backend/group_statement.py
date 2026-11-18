@@ -116,7 +116,7 @@ class GroupStatement:
             index = int(column[1:])
             if column.startswith("k") and isinstance(keys[index][1], PathKey):
                 target = path_targets[keys[index][0]]
-                return f"{column}.{quote_name(target.node_id_property or '')}"
+                return f"{column}.{quote_name(path_key_id(target))}"
             return column
 
         ordered: list[tuple[str, str]] = []
@@ -169,3 +169,13 @@ def whole_number(value: int, what: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:  # pyright: ignore[reportUnnecessaryIsInstance]
         raise DrivineError(f"{what} must be a whole number of at least 0.")
     return value
+
+
+def path_key_id(target: FragmentModel) -> str:
+    """
+    The id property a path key's groups are ordered by, its node's: GroupOperations refuses a path key to a fragment
+    with none before any store writes the read.
+    """
+    if not target.node_id_property:
+        raise DrivineError(f"{target.type.__name__} has no @NodeId field, which a path key is ordered by.")
+    return target.node_id_property

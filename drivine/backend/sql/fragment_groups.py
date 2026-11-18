@@ -5,7 +5,7 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from drivine.backend.graph_statement import GraphStatement
-from drivine.backend.group_statement import COMPARISONS
+from drivine.backend.group_statement import COMPARISONS, path_key_id
 from drivine.backend.sql.fragment_query_renderer import FragmentQueryRenderer
 from drivine.backend.sql.fragments import FRAGMENT_ROOT_ROW, Fragments, Names, property_of
 from drivine.backend.sql.sql_graph import SqlGraph
@@ -104,7 +104,7 @@ class FragmentGroups(SqlGroups):
         joined back, as drivine4j reads it.
         """
         return lambda holder, descending: self._fragments.ordered(
-            property_of(target.node_id_property or ""), descending, row=holder
+            property_of(path_key_id(target)), descending, row=holder
         )
 
     @abstractmethod

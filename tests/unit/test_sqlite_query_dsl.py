@@ -24,7 +24,8 @@ from drivine import (
     refs,
     sum_,
 )
-from drivine.backend.cypher_grammar import NEO4J_GRAMMAR
+from drivine.backend.cypher_backend import CypherBackend
+from drivine.backend.cypher_grammar import FALKORDB_GRAMMAR, MEMGRAPH_GRAMMAR, NEO4J_GRAMMAR
 from drivine.backend.graph_backend import GraphBackend
 from drivine.backend.graph_statement import GraphStatement
 from drivine.backend.oracle.oracle_backend import OracleBackend
@@ -36,6 +37,7 @@ from drivine.backend.sqlite.sqlite_graph import SqliteGraph, text_of
 from drivine.dsl.query import Query
 from drivine.dsl.query_renderer import QueryRenderer
 from drivine.manager.group_operations import GroupOperations
+from drivine.manager.group_query import GroupQuery
 
 
 class Scored(NodeFragment, labels=["Scored"]):
@@ -195,10 +197,50 @@ def test_reads_a_property_written_as_cypher_writes_it_as_the_store_reads_it_over
     assert backend.written("n.`$score` > 1") == f"{text_of('n_', '$$score')} > 1"
 
 
+EVERY_STORE = [
+    SqliteBackend(SqliteGraph()),
+    PostgresBackend(),
+    OracleBackend(OracleGraph()),
+    CypherBackend(NEO4J_GRAMMAR),
+    CypherBackend(MEMGRAPH_GRAMMAR),
+    CypherBackend(FALKORDB_GRAMMAR),
+]
+UNKEYED_REFUSED = r"^Unkeyed has no @NodeId field, which a path key is ordered by\.$"
+
+
+@pytest.mark.parametrize("on", EVERY_STORE, ids=repr)
 @pytest.mark.parametrize(
-    "on", [SqliteBackend(SqliteGraph()), PostgresBackend(), OracleBackend(OracleGraph())], ids=repr
+    "keys",
+    [{"to": path_key(Unkeyed, [Hop("TO")])}, {"name": key(q.name), "to": path_key(Unkeyed, [Hop("TO")])}],
+    ids=["alone", "among others"],
 )
-async def test_a_grouped_read_keyed_by_a_path_to_a_class_with_no_node_id_is_refused_by_name(on: GraphBackend):
-    # drivine-python#539: it was ordered by a property named '', in no set order, without a word.
-    with pytest.raises(DrivineError, match=r"^Unkeyed has no NodeId field, so a grouped read can't key by it"):
-        await grouped(on, keys={"to": path_key(Unkeyed, [Hop("TO")])}, aggregates={"all": count()})
+async def test_a_grouped_read_keyed_by_a_path_to_a_class_with_no_node_id_is_refused_by_name(
+    on: GraphBackend, keys: dict[str, Any]
+):
+    # drivine-python#539 and #550: it was ordered by a property named '', in no set order, without a word. It is
+    # refused before any lookup is run or any store writes the read, with drivine4j's words.
+    statements: list[GraphStatement] = []
+    looked_up: list[Any] = []
+
+    async def query(statement: GraphStatement) -> list[Any]:
+        statements.append(statement)
+        return []
+
+    async def lookups(_: Any, where: Any) -> Any:
+        looked_up.append(where)
+        return where
+
+    with pytest.raises(DrivineError, match=UNKEYED_REFUSED):
+        await GroupOperations(registry, query, None, on, lookups).load(  # type: ignore[arg-type]
+            Scored, keys=keys, aggregates={"all": count()}, where=q.score.gt(1), order_by=[("all", "desc")]
+        )
+    assert statements == []
+    assert looked_up == []
+
+
+@pytest.mark.parametrize("on", EVERY_STORE, ids=repr)
+def test_a_stores_grouped_read_keyed_by_a_path_to_a_class_with_no_node_id_is_refused_by_name(on: GraphBackend):
+    # The backends read a path key's id through path_key_id, so one called without GroupOperations refuses it too.
+    query = GroupQuery({"to": path_key(Unkeyed, [Hop("TO")])}, {"all": count()})
+    with pytest.raises(DrivineError, match=UNKEYED_REFUSED):
+        on.groups(scored, query, {"to": registry.fragment(Unkeyed)}, labels)

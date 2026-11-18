@@ -153,6 +153,17 @@ def has_labels(alias: str, labels: Sequence[str]) -> str:
     )
 
 
+def carries_labels(alias: str, labels: Sequence[str]) -> str:
+    """
+    A predicate that holds when the node row `alias` carries every one of the labels, each told by the labels' text
+    (`holds_label`), so the index over labels answers none of them: the form for a node that is found some other way,
+    by its id. Given the choice, Oracle reads every node of a label and tests each for the id, where the index over the
+    id gives the one node. drivine4j's `OracleSql.hasLabels(scanned = false)` writes the same, its `carriesLabel` for
+    each.
+    """
+    return " AND ".join(holds_label(f"{alias}.labels", it) for it in labels)
+
+
 def holds_label(labels: str, label: str) -> str:
     """
     A predicate that holds when the JSON array of labels `labels` holds `label`, told by its text. `JSON_SERIALIZE`

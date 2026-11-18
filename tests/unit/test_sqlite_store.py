@@ -208,7 +208,10 @@ class TestTheStatementsOnAStore:
         statement = SqliteBackend(SqliteGraph()).delete(ModelRegistry().model_of(PersonCareer), None, cascade)
 
         counted = {CascadeType.NONE: 2, CascadeType.DELETE_ALL: 4, CascadeType.DELETE_ORPHAN: 3}
-        assert connection.execute(statement.text, {"id": "p1"}).fetchall() == [(counted[cascade],)]
+        # The id bound as the JSON the node holds it as, as the backend binds it.
+        assert connection.execute(statement.text, statement.spec({"id": "p1"}).parameters).fetchall() == [
+            (counted[cascade],)
+        ]
         assert len(calls) == 1
         left = {CascadeType.NONE: [3, 4, 5], CascadeType.DELETE_ALL: [5], CascadeType.DELETE_ORPHAN: [4, 5]}
         assert [it[0] for it in connection.execute("SELECT nid FROM drivine_node ORDER BY nid")] == left[cascade]

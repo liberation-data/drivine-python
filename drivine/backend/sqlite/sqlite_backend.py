@@ -11,13 +11,16 @@ from drivine.backend.matched_node import MatchedNode
 from drivine.backend.matching_search import MatchingSearch
 from drivine.backend.nearest_search import NearestSearch
 from drivine.backend.page import Page
-from drivine.backend.postgres.postgres_save_builder import PostgresSaveBuilder, stored_key
+from drivine.backend.postgres.postgres_save_builder import PostgresSaveBuilder
 from drivine.backend.postgres.postgres_statement import PostgresStatement
 from drivine.backend.postgres.postgres_writes import PostgresWrites
 from drivine.backend.save_statement import SaveStatement
 from drivine.backend.sql.cypher_shorthand import CypherShorthand
+from drivine.backend.sql.node_ids import has_id
 from drivine.backend.sql.sql_cascade import beyond_count, kept_targets
 from drivine.backend.sql.sql_graph import sql_text
+from drivine.backend.sql.sql_json import to_json
+from drivine.backend.sql.value_layout import write
 from drivine.backend.sqlite.sqlite_contention import contended
 from drivine.backend.sqlite.sqlite_graph import (
     DELETE,
@@ -302,10 +305,10 @@ class SqliteBackend:
         return PostgresStatement(
             f'{JSON_ROWS}\nSELECT {node_document("n")} AS "result" FROM {self.graph.nodes} n WHERE n.nid IN ('
             f"SELECT x.nid FROM {self.graph.nodes} a JOIN {self.graph.edges} e ON e.type = {text('$x_type')} "
-            f"JOIN {self.graph.nodes} x ON {join} WHERE {has_labels('a', labels)} AND "
-            f"{text_of('a', origin.model.node_id_property)} = {text('$x_from')} AND "
-            f"{has_labels('x', target.labels)})",
-            {"x_type": type, "x_from": stored_key(origin.id, "sqlite")},
+            f"JOIN {self.graph.nodes} x ON {join} WHERE "
+            f"{has_id('sqlite', 'a', origin.model.node_id_property, '$x_from')} AND "
+            f"{has_labels('a', labels)} AND {has_labels('x', target.labels)})",
+            {"x_type": type, "x_from": id_json(origin.id)},
         )
 
     def relate(
@@ -373,18 +376,19 @@ class SqliteBackend:
 
     @staticmethod
     def _by_id(statement: GraphStatement) -> GraphStatement:
-        """`statement`, which finds a node by `$id`, binding the id as the text the store holds it as (stored_key)."""
-        return PostgresStatement.of(statement).keying_id(lambda id: stored_key(id, "sqlite"))
+        """`statement`, which finds a node by `$id`, binding the id as the JSON text the node holds it as (id_json)."""
+        return PostgresStatement.of(statement).keying_id(id_json)
 
     @staticmethod
     def _id_predicate(model: FragmentModel) -> str:
         """
-        The node whose id is `$id`, read as text, as a uniqueness constraint over the id holds it and as drivine4j finds
-        a node: a number is the text the store holds it as, as `_by_id` binds it.
+        The node whose id is `$id`, the JSON text the node holds it as, as `_by_id` binds it: the property's class and
+        key compared with the id's, as the shared module writes the comparison, which the index over the id answers
+        (see node_ids). It reads `$id` more than once, which is bound by name.
         """
         if not model.node_id_property:
             raise DrivineError(f"{model.type.__name__} has no NodeId field, so it can't be found by id.")
-        return f"{text_of(ROW_ALIAS, model.node_id_property)} = {text('$id')}"
+        return has_id("sqlite", ROW_ALIAS, model.node_id_property, "$id")
 
     @staticmethod
     def _page(page: Page | None) -> list[str]:
@@ -401,3 +405,8 @@ class SqliteBackend:
                 else []
             ),
         ]
+
+
+def id_json(id: Any) -> str:
+    """An id as the JSON text a node on SQLite holds it as, as a save writes it (see value_layout.write)."""
+    return to_json(write(id, "sqlite"))

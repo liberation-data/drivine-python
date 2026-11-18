@@ -8,6 +8,7 @@ from drivine.backend.graph_backend import GraphBackend
 from drivine.backend.graph_statement import GraphStatement
 from drivine.backend.matched_node import MatchedNode
 from drivine.backend.save_statement_builder import stored
+from drivine.backend.sql.node_ids import NO_NODE, lookup_id
 from drivine.manager.node_ref import NodeRef
 from drivine.manager.relate_mode import RelateMode
 from drivine.mapper.graph_object_mapper import GraphObjectMapper
@@ -46,7 +47,10 @@ class EdgeOperations:
         class, or the subclass of it whose labels each carries.
         """
         model = self._registry.fragment(target)
-        rows = await self._query(self._backend.related(self._node(origin), type, direction, model))
+        node = self._node(origin)
+        if node is None:
+            return []
+        rows = await self._query(self._backend.related(node, type, direction, model))
         return [self._mapper.fragment(model, row) for row in rows]
 
     async def relate(
@@ -65,16 +69,31 @@ class EdgeOperations:
         found and joined.
         """
         values = {key: stored(value) for key, value in (properties or {}).items()}
-        statement = self._backend.relate(self._node(origin), self._node(to), type, values, mode)
+        start, end = self._node(origin), self._node(to)
+        if start is None or end is None:
+            return False
+        statement = self._backend.relate(start, end, type, values, mode)
         return await self._run(statement) > 0
 
     async def unrelate(self, origin: NodeRef, to: NodeRef, type: str) -> int:
         """Removes every relationship of the type from `origin` to `to`, and returns how many there were."""
-        return await self._run(self._backend.unrelate(self._node(origin), self._node(to), type))
+        start, end = self._node(origin), self._node(to)
+        if start is None or end is None:
+            return 0
+        return await self._run(self._backend.unrelate(start, end, type))
 
     async def unrelate_all(self, origin: NodeRef, type: str, direction: Direction = Direction.OUTGOING) -> int:
         """Removes every relationship of the type `origin` has in the direction, and returns how many."""
-        return await self._run(self._backend.unrelate_all(self._node(origin), type, direction))
+        start = self._node(origin)
+        if start is None:
+            return 0
+        return await self._run(self._backend.unrelate_all(start, type, direction))
 
-    def _node(self, ref: NodeRef) -> MatchedNode:
-        return MatchedNode(self._registry.fragment(ref.type), ref.id, tuple(ref.labels))
+    def _node(self, ref: NodeRef) -> MatchedNode | None:
+        """
+        The node `ref` names, its id read as the NodeId field's type on a SQL store; None where no node can have the
+        id, for which no statement is run (see node_ids).
+        """
+        model = self._registry.fragment(ref.type)
+        id_ = lookup_id(self._backend, model, ref.id)
+        return None if id_ is NO_NODE else MatchedNode(model, id_, tuple(ref.labels))

@@ -9,9 +9,10 @@ from drivine.backend.fragment_group import FragmentGroup
 from drivine.backend.graph_statement import GraphStatement
 from drivine.backend.matched_node import MatchedNode
 from drivine.backend.oracle.id_keyed_statement import held_id
-from drivine.backend.oracle.oracle_graph import OracleGraph, has_labels, json_key, node_document
+from drivine.backend.oracle.oracle_graph import OracleGraph, carries_labels, has_labels, json_key, node_document
 from drivine.backend.oracle.oracle_save_builder import prelude
 from drivine.backend.save_statement_builder import id_of, object_props
+from drivine.backend.sql.node_ids import has_id
 from drivine.backend.sql.sql_json import to_json
 from drivine.backend.sql.value_layout import held_key, write, write_props
 from drivine.drivine_error import DrivineError
@@ -125,7 +126,7 @@ class OracleWrites:
 
         def reads(when: str) -> None:
             for i, group in enumerate(groups):
-                k = json_key(_id_property(group.model))
+                k = json_key(held_key(_id_property(group.model)))
                 variable = f"v_{when}{i}"
                 if when == "before":
                     declarations.extend([f"{variable} CLOB;", f"v_after{i} CLOB;"])
@@ -260,13 +261,15 @@ class OracleWrites:
         else:
             join = "e.src = a.nid AND x.nid = e.dst"
         labels = list(dict.fromkeys([*from_.model.labels, *from_.labels]))
+        # The node it is from found by its id, as the index over the id is made, its labels told by their text so
+        # Oracle reads that index for it (see OracleBackend._found_by_id); the id is read more than once, so bound by
+        # name.
         return GraphStatement(
             f'SELECT {node_document("n")} AS "result" FROM {self.graph.nodes} n WHERE n.nid IN ('
             f"SELECT x.nid FROM {self.graph.nodes} a JOIN {self.graph.edges} e ON e.type = $x_type "
-            f"JOIN {self.graph.nodes} x ON {join} WHERE {has_labels('a', labels)} AND "
-            f"JSON_EXISTS(a.props, '$?(@{json_key(_id_property(from_.model))} == $v)' "
-            'PASSING JSON($x_from EXTENDED) AS "v") '
-            f"AND {has_labels('x', target.labels)})",
+            f"JOIN {self.graph.nodes} x ON {join} WHERE "
+            f"{has_id('oracle', 'a', _id_property(from_.model), 'JSON($x_from EXTENDED)')} AND "
+            f"{carries_labels('a', labels)} AND {has_labels('x', target.labels)})",
             {"x_type": type, "x_from": held_id(from_.id)},
         )
 
@@ -279,7 +282,7 @@ class OracleWrites:
 
     def _match_of(self, node: MatchedNode, name: str = "x_frommatch") -> str:
         labels = list(dict.fromkeys([*node.model.labels, *node.labels]))
-        k = json_key(_id_property(node.model))
+        k = json_key(held_key(_id_property(node.model)))
         self._pending[name] = (
             f"{has_labels('n', labels)} AND JSON_EXISTS(n.props, '$?(@{k} == $v)' PASSING JSON(:1 EXTENDED) AS \"v\")"
         )
@@ -292,7 +295,7 @@ class OracleWrites:
 
     @staticmethod
     def _match_text(model: FragmentModel) -> str:
-        k = json_key(_id_property(model))
+        k = json_key(held_key(_id_property(model)))
         return (
             f"{has_labels('n', model.labels)} AND JSON_EXISTS(n.props, '$?(@{k} == $v)' "
             'PASSING JSON(:1 EXTENDED) AS "v")'

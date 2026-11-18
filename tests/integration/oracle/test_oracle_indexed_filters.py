@@ -145,8 +145,9 @@ async def test_reads_the_index_and_not_the_label_for_a_comparison_every_root_mee
     await gom.indexes.ensure(BY_CODE)
     try:
         labelled = OracleGraph().object_name("lx2", ["OraIssue", "code"]).upper()
-        # Beside another condition, so its statement isn't the uniqueness constraint's test's: a session keeps the plan
-        # it explained prepared, and explaining it again once the indexes changed is refused (ORA-00900).
+        # Beside another condition, so its statement isn't the uniqueness constraint's test's: the driver's statement
+        # cache keeps the EXPLAIN PLAN it ran prepared, and running it again once the indexes changed is refused
+        # (ORA-00900).
         closed: Where = [q.code.eq("c42"), q.state.eq("closed")]
         indexed = await plan_of(gom, pm, closed)
         assert labelled in indexed

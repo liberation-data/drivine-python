@@ -9,7 +9,7 @@ from typing import Annotated, Any
 
 import pytest
 
-from drivine import NodeFragment, NodeId, QuerySpecification, times
+from drivine import CursorSpecification, NodeFragment, NodeId, QuerySpecification, times
 from drivine.backend.graph_statement import StoredFunctionCalls
 from drivine.backend.oracle.oracle_backend import OracleBackend
 from drivine.backend.oracle.oracle_graph import OracleGraph
@@ -70,6 +70,17 @@ async def test_one_is_refused_saying_why_where_the_session_may_not_call_them_and
     assert f"calls {g}_nulls_equal, a function the Oracle graph '{g}' keeps, which this session may not call" in str(
         refused.value
     )
+    assert session.statements == []
+
+
+async def test_one_opened_as_a_cursor_is_refused_too_where_the_session_may_not_call_them_and_not_run():
+    g = a_graph()
+    session = Session(era=(904,))
+    spec = CursorSpecification[Any]("SELECT 1 FROM dual")
+    spec.stored_functions = StoredFunctionCalls(g, era=True)
+    with pytest.raises(DrivineError, match=f"calls {g}_era, {g}_era_date and {g}_temporal_key, functions"):
+        await connection(session, g).open_cursor(spec)
+    assert len(session.checks) == 1
     assert session.statements == []
 
 

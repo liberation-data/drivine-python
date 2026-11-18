@@ -191,6 +191,20 @@ def test_an_equality_is_read_through_the_labelled_index_the_module_writes_and_th
     assert rendered(Query(where=q.name.gte("A")), indexed=INDEXED).labels_tested == ()
 
 
+def test_a_views_root_equality_implies_its_label_and_a_related_nodes_of_the_same_label_does_not():
+    h = refs(LocationHierarchy)
+    indexed = [SchemaItem("Location", ("name",))]
+    root = rendered(Query(where=h.location.name.eq("Ada")), hierarchy, indexed)
+    assert root.labels_tested == ("Location",)
+    tested = "JSON_EXISTS(n_.labels, '$?(@ == \"Location\")')"
+    assert tested not in backend.load_all_views(hierarchy, root.where, None, None, root.labels_tested).text
+    assert tested not in backend.count_views(hierarchy, root.where, None, root.labels_tested).text
+    # A sub-location's equality is the related node's, read over its own row: the root's label is still tested.
+    related = rendered(Query(where=h.sub_locations.any(lambda it: it.location.name.eq("Ada"))), hierarchy, indexed)
+    assert related.labels_tested == ()
+    assert tested in backend.load_all_views(hierarchy, related.where, None, None, related.labels_tested).text
+
+
 def lowered(where: Any, indexed: list[SchemaItem]) -> Any:
     return rendered(Query(where=lowered_where(where, account, {"email"})), account, indexed)
 

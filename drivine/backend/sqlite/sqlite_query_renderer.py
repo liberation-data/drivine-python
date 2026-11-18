@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Sequence
 from datetime import UTC, date, datetime, time
 from types import UnionType
@@ -9,8 +10,10 @@ from drivine.backend.save_statement_builder import packed
 from drivine.backend.sql.compared import Compared
 from drivine.backend.sql.sql_json import storable, to_json
 from drivine.backend.sql.sql_query_renderer import SqlQueryRenderer
+from drivine.backend.sql.value_layout import Held, write
 from drivine.backend.sqlite.sqlite_graph import (
     LOWER,
+    TIME_KINDS,
     Kind,
     json_type,
     number_of,
@@ -18,14 +21,18 @@ from drivine.backend.sqlite.sqlite_graph import (
     temporal_text,
     text,
     text_of,
+    time_key,
+    time_key_of,
     typed,
 )
 from drivine.backend.sqlite.sqlite_views import SqliteViews
 from drivine.drivine_error import DrivineError
 from drivine.dsl.compare_test import CompareTest
+from drivine.dsl.condition_node import ConditionNode
+from drivine.dsl.expression_node import ExpressionNode
 from drivine.dsl.model_scope import scope_of
 from drivine.dsl.query import Query
-from drivine.dsl.query_renderer import described
+from drivine.dsl.query_renderer import described, root_property
 from drivine.dsl.rendered_query import RenderedQuery
 from drivine.dsl.root_key import RootKey
 from drivine.dsl.scope import Scope
@@ -37,23 +44,27 @@ from drivine.model.target_model import TargetModel
 _SQL_OPERATORS = {"EQ": "=", "NEQ": "<>", "GT": ">", "GTE": ">=", "LT": "<", "LTE": "<="}
 """The comparisons SQL writes as an operator."""
 
+_TEMPORAL: set[Kind] = {"INSTANT", "DATE", "TIME"}
+"""The kinds a saved temporal value is read as, each compared only with a value of its own tag (see _tag_of)."""
+
 
 class SqliteQueryRenderer(SqlQueryRenderer):
     """
     Writes a query on SQLite (see SqlQueryRenderer), as drivine4j writes one. A property is read as the kind of the
     value it is compared with: a number only where one is stored, so `'7'` is not `7`, as on the graph engines; a
     moment as nanoseconds since the epoch and a date as a date, the value bound read alike, so two moments compare as
-    the moments they are; a boolean as the text JSON writes it; anything else as text, as Postgres's `->>` reads it. A
-    missing property is null, and meets no comparison, as in Cypher. Where an order puts its nulls is always said, as
-    SQLite puts them first when ascending and Cypher last.
+    the moments they are; a time as its key (see time_key), so two at different offsets compare as Cypher compares
+    them; a boolean as the text JSON writes it; anything else as text, as Postgres's `->>` reads it. A saved temporal
+    value is compared only with a value of its own kind, as in Cypher, where a date is unequal to a moment and neither
+    before nor after it, and so is a local time to a time with an offset. A missing property is null, and meets no
+    comparison, as in Cypher.
+    Where an order puts its nulls is always said, as SQLite puts them first when ascending and Cypher last.
     """
 
     def __init__(self, views: SqliteViews, labels_of_class: Callable[[type], list[str]]) -> None:
         super().__init__(views, labels_of_class)
         self._seek_kinds: dict[str, Kind] = {}
         """The kind of each value a cursor binds, by its parameter."""
-        self._seek_times: set[str] = set()
-        """The parameters a cursor binds a time to: a seek reads a saved time's tag by its text (see _text_read)."""
 
     @staticmethod
     def render(
@@ -88,7 +99,10 @@ class SqliteQueryRenderer(SqlQueryRenderer):
         if operator is not None:
             kind = _kind_of(test.value, json_packed)
             bound = typed(kind, self._bind(self._scalar(test.value, json_packed)))
-            read = self._text_read(compared, [test.value]) if kind == "TEXT" else self._typed(row, name, kind)
+            read = text_of(row, name) if kind == "TEXT" else self._typed(row, name, kind, _tag_of(test.value))
+            if operator == "<>" and kind in _TEMPORAL:
+                # A value of another kind reads as null, and is unequal: Cypher has a date unequal to a moment.
+                return f"COALESCE({read} <> {bound}, {present})"
             return f"{read} {operator} {bound}"
         if test.operator == "IN":
             return self._listed(compared, self._list(test.value, path_)) or "1 = 0"
@@ -96,6 +110,8 @@ class SqliteQueryRenderer(SqlQueryRenderer):
             any_ = self._listed(compared, self._list(test.value, path_))
             return f"{present} AND NOT COALESCE({any_}, FALSE)" if any_ else present
         if test.operator == "HAS_ITEM":
+            if not json_packed and isinstance(test.value, (date, time)):
+                return self._holds_temporal(row, name, test.value)
             item = packed(test.value) if json_packed else super()._storable(test.value)
             return self._holds(row, name, item)
         if test.operator == "IS_NULL":
@@ -111,18 +127,24 @@ class SqliteQueryRenderer(SqlQueryRenderer):
         )
 
     def _seek_test(self, alias: str, property: str, operator: str, value: str) -> str:
-        """The property read as the kind of the cursor's value, as a comparison reads it."""
+        """
+        The property read as the kind of the cursor's value, as a comparison reads it, a saved temporal value of any
+        kind among its kind's as an order reads it, so a page goes on where the one before it ended.
+        """
         kind = self._seek_kinds.get(value[1:], "TEXT")
-        read = temporal_text(alias, property) if value[1:] in self._seek_times else self._typed(alias, property, kind)
+        read = self._typed(alias, property, kind)
         return f"{read} {'=' if operator == '==' else operator} {typed(kind, value)}"
 
     def _storable(self, value: Any) -> Any:
         """
         A boolean as the text JSON writes it, which is what a property read as text gives; a date as ISO text; a moment
-        as ISO text to the microsecond, as it is compared to the nanosecond, a naive one taken as UTC.
+        as ISO text to the microsecond, as it is compared to the nanosecond, a naive one taken as UTC; a time as its key
+        (see time_key).
         """
         if isinstance(value, bool):
             return "true" if value else "false"
+        if isinstance(value, time):
+            return _time_key(value)
         if isinstance(value, datetime):
             utc = value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
             return utc.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
@@ -136,17 +158,19 @@ class SqliteQueryRenderer(SqlQueryRenderer):
         # The cursor's values are the next bound, in turn.
         start = len(self.bindings)
         self._seek_kinds = {f"_q{start + i}": _kind_of(it.value, False) for i, it in enumerate(seek)}
-        self._seek_times = {f"_q{start + i}" for i, it in enumerate(seek) if isinstance(it.value, time)}
         return super()._keyset(keys, seek, query, alias)
 
     def _order(self, key: RootKey, scope: Scope, alias: str) -> str:
-        """A property its field declares a moment or a date is ordered as one: offsets order as the time they are."""
+        """
+        A property its field declares a moment, a date or a time is ordered as one: offsets order as the time they are,
+        and a time with an offset before a local one (see time_key), whichever its field holds.
+        """
         kind = _declared_kind(scope, key.property) if key.term.expression is None and key.property else None
         if kind is None:
             return super()._order(key, scope, alias)
         direction = "DESC" if key.term.direction == "DESC" else "ASC"
         nulls = key.term.nulls or ("LAST" if direction == "ASC" else "FIRST")
-        return f"{typed(kind, temporal_text(alias, key.property or ''))} {direction} NULLS {nulls}"
+        return f"{self._typed(alias, key.property or '', kind)} {direction} NULLS {nulls}"
 
     def _ordered_property(
         self, alias: str, property: str, direction: Literal["ASC", "DESC"], nulls: str | None = None
@@ -169,6 +193,33 @@ class SqliteQueryRenderer(SqlQueryRenderer):
         default = " NULLS LAST" if direction == "ASC" else " NULLS FIRST"
         return f"{first}{number_of(alias, property)} {direction}{default}, {text_} {direction}{default}"
 
+    def _case_condition(self, node: ConditionNode, scope: Scope, alias: str) -> str:
+        """
+        A comparison with a date, a moment or a time compares a property as a comparison of the property with it does
+        (see _typed): a saved one of its own kind as the value it is, and one of another kind as null, except that it is
+        unequal (`not_equal_to`), as in Cypher. Anything else as any SQL store compares it.
+        """
+        given = [it.value for it in node.args if it.kind == "VALUE"] if node.kind == "COMPARE" else []
+        temporal = [it for it in given if _kind_of(it, False) in _TEMPORAL]
+        if not temporal:
+            return super()._case_condition(node, scope, alias)
+        kind, tag = _kind_of(temporal[0], False), _tag_of(temporal[0])
+
+        def side(it: ExpressionNode) -> str:
+            if it.kind == "PROPERTY":
+                return self._typed(alias, root_property(it.path, scope, "An expression"), kind, tag)
+            if it.kind == "VALUE":
+                return typed(kind, self._bind(self._storable(it.value))) if _tag_of(it.value) == tag else "NULL"
+            return self._expression(it, scope, alias, "TEXT")
+
+        left, right = node.args
+        compared = f"{side(left)} {node.operator} {side(right)}"
+        held = [it for it in node.args if it.kind == "PROPERTY"]
+        if node.operator == "<>" and len(held) == 1:
+            # A value of another kind reads as null, and is unequal, as a condition has it (see _property).
+            return f"COALESCE({compared}, {self._has(alias, root_property(held[0].path, scope, 'An expression'))})"
+        return compared
+
     def _read(self, alias: str, property: str, as_: Literal["NUMBER", "TEXT"]) -> str:
         if as_ == "NUMBER" and property != stamps.PROPERTY:
             return number_of(alias, property)
@@ -177,19 +228,17 @@ class SqliteQueryRenderer(SqlQueryRenderer):
     def _present(self, alias: str, property: str) -> str:
         return self._has(alias, property)
 
-    def _typed(self, row: str, name: str, kind: Kind) -> str:
-        """The property read as `kind`: a number as one, a moment or a date as one, anything else as text."""
+    def _typed(self, row: str, name: str, kind: Kind, tag: str | None = None) -> str:
+        """
+        The property read as `kind`: a number as one, a moment or a date as one, a time as its key, anything else as
+        text. Given the tag of the value it is compared with (see _tag_of), a saved temporal value of another kind is
+        null; without one, as an order and a seek read it, any of its kind's.
+        """
         if kind == "NUMBER":
             return number_of(row, name)
-        return typed(kind, temporal_text(row, name) if kind in ("INSTANT", "DATE") else text_of(row, name))
-
-    def _text_read(self, compared: Compared, values: list[Any]) -> str:
-        """
-        The property read as text, compared with the values: a saved time's tag by its text where every value is a
-        time, as store layout 2 holds one (see temporal_text), and anything else as text_of reads it.
-        """
-        times = not compared.json_packed and all(isinstance(it, time) for it in values)
-        return (temporal_text if times else text_of)(compared.row, compared.name)
+        if kind == "TIME":
+            return time_key(row, name, tag)
+        return typed(kind, temporal_text(row, name, tag) if kind in ("INSTANT", "DATE") else text_of(row, name))
 
     def _scalar(self, value: Any, json_packed: bool) -> Any:
         """
@@ -199,19 +248,26 @@ class SqliteQueryRenderer(SqlQueryRenderer):
 
     def _listed(self, compared: Compared, values: list[Any]) -> str | None:
         """
-        Whether the property is among the values, read as numbers where every value is one, and as moments or dates
-        where every value is one of those: None for no values, which nothing is among. Each value is read as a property
-        of its kind is read, so a text is a string's text or another value's JSON.
+        Whether the property is among the values, read as numbers where every value is one, and as moments, dates or
+        times where every value is one of those: None for no values, which nothing is among. Each value is read as a
+        property of its kind is read, so a text is a string's text or another value's JSON.
         """
         if not values:
             return None
         kinds = {_kind_of(it, compared.json_packed) for it in values if it is not None}
-        if len(kinds) == 1 and (kind := next(iter(kinds))) in ("INSTANT", "DATE"):
-            # Moments or dates, each read as one, as a comparison reads it: a saved one's tag by its text. A null among
-            # them is null read as one, which SQL's IN reads as Cypher's does.
-            bound = self._bind(to_json([self._scalar(it, False) for it in values]))
-            among = f"SELECT {typed(kind, 'v.value')} FROM json_each({bound}) v"
-            return f"{self._typed(compared.row, compared.name, kind)} IN ({among})"
+        if kinds and kinds <= _TEMPORAL:
+            # Moments, dates or times, each read as one, as a comparison reads it: against the values of each tag in
+            # turn, so a saved one is among only values of its own kind, a moment among the moments of a list that
+            # holds dates too. A null among them is null read as one, which SQL's IN reads as Cypher's does.
+            tags = sorted({_tag_of(it) for it in values if it is not None}, key=str)
+            among: list[str] = []
+            for tag in tags:
+                own = [it for it in values if it is None or _tag_of(it) == tag]
+                kind = _kind_of(next(it for it in own if it is not None), False)
+                bound = self._bind(to_json([self._scalar(it, False) for it in own]))
+                read = self._typed(compared.row, compared.name, kind, tag)
+                among.append(f"{read} IN (SELECT {typed(kind, 'v.value')} FROM json_each({bound}) v)")
+            return among[0] if len(among) == 1 else f"({' OR '.join(among)})"
         numbers = not compared.json_packed and all(_kind_of(it, False) == "NUMBER" for it in values)
         read = (
             "(CASE WHEN v.type IN ('integer', 'real') THEN v.value END)"
@@ -221,7 +277,7 @@ class SqliteQueryRenderer(SqlQueryRenderer):
             "ELSE v.value END)"
         )
         bound = self._bind(to_json([self._scalar(it, compared.json_packed) for it in values]))
-        column = number_of(compared.row, compared.name) if numbers else self._text_read(compared, values)
+        column = (number_of if numbers else text_of)(compared.row, compared.name)
         return f"{column} IN (SELECT {read} FROM json_each({bound}) v)"
 
     def _holds(self, row: str, name: str, item: Any) -> str:
@@ -235,6 +291,28 @@ class SqliteQueryRenderer(SqlQueryRenderer):
         return (
             f"({json_type(row, name)} = 'array' AND EXISTS (SELECT 1 FROM {elements} WHERE {same_type} "
             "AND h.value IS b.value))"
+        )
+
+    def _holds_temporal(self, row: str, name: str, item: date | time) -> str:
+        """
+        Whether the list property holds the moment, date or time `item`, each held item read as a comparison reads a
+        single temporal property (see temporal_text): store layout 2 holds a saved one as its tag, an object `_holds`
+        never finds equal to the item's text (#525), so a tag of the item's kind is read by its text `v`, and a text as
+        itself; a tag of another kind is no match. A moment compares as the moment it is, whatever its offset; a date as
+        a date; a time as its key (see time_key), and a text never as a time.
+        """
+        kind, tag = _kind_of(item, False), _tag_of(item)
+        if kind == "TIME":
+            held = f"(CASE WHEN h.type = 'object' THEN {time_key_of('h.value', '$', tag)} END)"
+        else:
+            own = f"h.value ->> '$.\"$t\"' = '{tag}'"
+            held = (
+                f"(CASE WHEN h.type = 'object' AND {own} THEN h.value ->> '$.v' WHEN h.type = 'text' THEN h.value END)"
+            )
+        bound = typed(kind, self._bind(self._scalar(item, False)))
+        return (
+            f"({json_type(row, name)} = 'array' AND EXISTS (SELECT 1 FROM json_each({row}.props, {path(name)}) h "
+            f"WHERE {typed(kind, held)} = {bound}))"
         )
 
     def _text_test(self, operator: str, value: Any, text_: str) -> str:
@@ -284,7 +362,10 @@ class SqliteQueryRenderer(SqlQueryRenderer):
 
 
 def _declared_kind(scope: Scope, property: str) -> Kind | None:
-    """INSTANT or DATE where the root's field stored under `property` is declared a moment or a date; None otherwise."""
+    """
+    INSTANT, DATE or TIME where the root's field stored under `property` is declared a moment, a date or a time; None
+    otherwise.
+    """
     root = scope.model.root if isinstance(scope.model, GraphViewModel) else scope.model
     if not isinstance(root, FragmentModel) or root.type is None:
         return None
@@ -297,6 +378,8 @@ def _declared_kind(scope: Scope, property: str) -> Kind | None:
             return "INSTANT"
         if it is date:
             return "DATE"
+        if it is time:
+            return "TIME"
     return None
 
 
@@ -317,10 +400,34 @@ def _kind_of(value: Any, json_packed: bool) -> Kind:
         return "INSTANT"
     if isinstance(value, date):
         return "DATE"
+    if isinstance(value, time):
+        return "TIME"
     stored = storable(value)
     if isinstance(stored, (int, float)) and not isinstance(stored, bool):
         return "NUMBER"
     return "TEXT"
+
+
+def _tag_of(value: Any) -> str | None:
+    """
+    The kind store layout 2 tags a saved temporal value of the value's kind with (its `$t`, see value_layout), which a
+    saved one must have to be compared with it; None for a value of no temporal kind. A value has an offset where its
+    utcoffset() is one, as a save writes it (see shared_compiler.written): a time of a ZoneInfo has none.
+    """
+    if isinstance(value, datetime):
+        return "localdatetime" if value.utcoffset() is None else "datetime"
+    if isinstance(value, date):
+        return "date"
+    if isinstance(value, time):
+        return "localtime" if value.utcoffset() is None else "time"
+    return None
+
+
+def _time_key(value: time) -> str:
+    """The time's key, as time_key reads a saved one's: the digit of its kind, then the sort key the module writes."""
+    held = write(value, "sqlite")
+    tag: dict[str, str] = json.loads(held.text) if isinstance(held, Held) else {}
+    return TIME_KINDS[tag["$t"]] + tag["s"]
 
 
 def _string(value: Any) -> str:

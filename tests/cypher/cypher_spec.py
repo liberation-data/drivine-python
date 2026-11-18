@@ -202,9 +202,9 @@ class Hold:
     may_pass: str | None = None
     """
     Why the steps may pass on those stores as well as fail as the issue has it, where they are held: for a store whose
-    answer differs from run to run or from host to host, as Neo4j's does for a dropped variable (#764). A step held so
-    is run, its failure is the run's answer when it fails, and its passing doesn't fail. As Drivine for TypeScript's
-    `mayPass`.
+    answer differs from run to run or from host to host, as Neo4j's does for a dropped variable
+    (liberation-data/drivine#764). A step held so is run, its failure is the run's answer when it fails, and its
+    passing doesn't fail. As Drivine for TypeScript's `mayPass`.
     """
 
 

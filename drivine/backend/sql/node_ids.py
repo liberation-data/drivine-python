@@ -21,7 +21,7 @@ import types
 import typing
 import uuid
 from collections.abc import Callable
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any, cast
 
@@ -215,16 +215,16 @@ def temporal_text(layout: str) -> str | None:
 
 def read_back_key(id: Any) -> Any:
     """
-    `id` as a batch reads a node's id back from the store, where it hands each object its stamp: a temporal id as its
-    tag's text `v`, which is what a tag is read as (see value_layout.read), a UUID as its text and a Decimal with a
-    fraction as the float it is held as, as each is read back, and any other id as it is. A date id the object holds
-    as a `date` is read back as its text, so the two are matched by that text.
+    `id` as a batch reads a node's id back from the store, where it hands each object its stamp: a temporal id (a date,
+    a time or a duration) as its tag's text `v`, which is what a tag is read as (see value_layout.read), a UUID as its
+    text and a Decimal with a fraction as the float it is held as, as each is read back, and any other id as it is. A
+    date id the object holds as a `date` is read back as its text, so the two are matched by that text.
     """
     if isinstance(id, uuid.UUID):
         return str(id)
     if isinstance(id, Decimal) and id.is_finite() and id != id.to_integral_value():
         return float(id)
-    if not isinstance(id, (date, time)):
+    if not isinstance(id, (date, time, timedelta)):
         return id
     from drivine.backend.sql.sql_json import to_json
     from drivine.backend.sql.value_layout import write

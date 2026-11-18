@@ -689,6 +689,21 @@ def test_a_save_hands_each_stamped_related_node_its_stamp_by_its_date_ids_text_a
     assert view.days[0].stamp == stamp
 
 
+class StampedSpan(NodeFragment, labels=["StampedSpan"]):
+    span: Annotated[timedelta, NodeId()]
+    stamp: Annotated[str | None, NodeStamp()] = None
+
+
+def test_a_batch_hands_each_stamped_node_its_stamp_by_its_duration_ids_text_as_the_store_reads_it_back():
+    # A duration is held as its tag too, which Oracle's fragment batch reads back as the tag's text, as it does a date.
+    model = ModelRegistry().fragment(StampedSpan)
+    spans = [StampedSpan(span=timedelta(days=1, seconds=5))]
+    stamp = "a" * 16 + ":" + "b" * 16
+    result = {"groups": [{"before": [], "after": [{"id": "P1DT5S", "stamp": stamp}]}]}
+    StatelessGraphObjectManager._hand_back_fragments(None, [FragmentGroup(model, spans)], result)  # pyright: ignore[reportArgumentType]
+    assert spans[0].stamp == stamp
+
+
 def test_an_id_is_read_back_as_the_store_reads_it_a_decimal_with_a_fraction_as_the_float_it_is_held_as():
     assert read_back_key(Decimal("0.1")) == 0.1
     assert read_back_key(Decimal("3")) == 3

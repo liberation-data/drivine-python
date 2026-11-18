@@ -54,6 +54,7 @@ from drivine.backend.sql.sql_json import to_json
 from drivine.backend.sql.value_layout import write
 from drivine.backend.sqlite.sqlite_backend import SqliteBackend
 from drivine.backend.sqlite.sqlite_graph import SqliteGraph, text_of
+from drivine.connection.falkordb.falkordb_parameter_coercer import FalkorDbParameterCoercer
 from drivine.cursor.cursor import Cursor
 from drivine.cursor.cursor_specification import CursorSpecification
 from drivine.cypher.shared_compiler import id_sql
@@ -693,3 +694,45 @@ def test_an_id_is_read_back_as_the_store_reads_it_a_decimal_with_a_fraction_as_t
     assert read_back_key(Decimal("3")) == 3
     assert read_back_key(time(4, 5, tzinfo=timezone(timedelta(hours=2)))) == "04:05:00+02:00"
     assert read_back_key(True) is True
+
+
+class StampedAmount(NodeFragment, labels=["StampedAmount"]):
+    id: Annotated[Decimal, NodeId()]
+    stamp: Annotated[str | None, NodeStamp()] = None
+
+
+def test_a_batch_hands_two_ids_that_read_back_as_one_float_each_its_own_stamp_where_the_store_gives_them_as_given():
+    # Postgres and SQLite give each id back as the object gave it, and hold these two as two nodes.
+    model = ModelRegistry().fragment(StampedAmount)
+    amounts = [StampedAmount(id=Decimal("0.1")), StampedAmount(id=Decimal("0.10000000000000000001"))]
+    first, second = "a" * 16 + ":" + "b" * 16, "c" * 16 + ":" + "d" * 16
+    after = [{"id": amounts[0].id, "stamp": first}, {"id": amounts[1].id, "stamp": second}]
+    result = {"groups": [{"before": [], "after": after}]}
+    StatelessGraphObjectManager._hand_back_fragments(None, [FragmentGroup(model, amounts)], result)  # pyright: ignore[reportArgumentType]
+    assert [it.stamp for it in amounts] == [first, second]
+
+
+class PatchedDay(NodeFragment, labels=["PatchedDay"]):
+    on: Annotated[date, NodeId()]
+    value: int | None = None
+
+
+class Echoing(PersistenceManager):
+    """Gives each row's id back as FalkorDB does, as the parameter it was sent as: a date as its text."""
+
+    def __init__(self) -> None:
+        self.database = "echoing"
+        self.type = DatabaseType.FALKORDB
+
+    async def query(self, spec: QuerySpecification[T]) -> list[T]:
+        rows: list[Any] = FalkorDbParameterCoercer().coerce(dict(spec.parameters))["rows"]  # type: ignore[arg-type]
+        return [{"id": row["id"], "found": True, "changed": True} for row in rows]  # type: ignore[return-value]
+
+    async def open_cursor(self, spec: CursorSpecification[T]) -> Cursor[T]:
+        raise NotImplementedError
+
+
+async def test_patch_all_hands_each_object_its_result_where_falkordb_gives_a_date_id_back_as_its_text():
+    gom = StatelessGraphObjectManager(Echoing())
+    results = await gom.patch_all([PatchedDay(on=date(2024, 1, 3), value=1)], only=["value"])
+    assert results == [PatchResult(True, True, True)]

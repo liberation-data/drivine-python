@@ -733,7 +733,7 @@ class StatelessGraphObjectManager:
         for rows in await self._run_batch(chunks):
             for it in rows:
                 results[it["id"]] = PatchResult(it["found"], it["found"], it["changed"])
-        return [results[it] for it in ids]
+        return [results[_keyed(results, it)] for it in ids]
 
     def _condition(
         self, target_: TargetModel, where: str | Where | None, bindings: Mapping[str, Any] | None
@@ -880,11 +880,10 @@ class StatelessGraphObjectManager:
             model = group.model
             if not model.stamp_field or not model.node_id_field:
                 continue
-            # Each id as the batch reads it back, a temporal one as its tag's text, so a date id matches its node's.
-            found = {read_back_key(it["id"]): it["stamp"] for it in result["groups"][i]["before"]}
-            now = {read_back_key(it["id"]): it["stamp"] for it in result["groups"][i]["after"]}
+            found = {it["id"]: it["stamp"] for it in result["groups"][i]["before"]}
+            now = {it["id"]: it["stamp"] for it in result["groups"][i]["after"]}
             for obj in group.objects:
-                node_id = read_back_key(getattr(obj, model.node_id_field))
+                node_id = _keyed(now, getattr(obj, model.node_id_field))
                 carried = getattr(obj, model.stamp_field)
                 setattr(obj, model.stamp_field, stamps.handed_back(carried, found.get(node_id, ""), now[node_id]))
 
@@ -1055,12 +1054,11 @@ class StatelessGraphObjectManager:
         """
         for index, model in enumerate(statement.stamped_models):
             stamped = result["related"][index]
-            # Each id as the save reads it back (see _hand_back_fragments).
-            found = {read_back_key(it["id"]): it["stamp"] for it in stamped["before"]}
-            now = {read_back_key(it["id"]): it["stamp"] for it in stamped["after"]}
+            found = {it["id"]: it["stamp"] for it in stamped["before"]}
+            now = {it["id"]: it["stamp"] for it in stamped["after"]}
             assert model.node_id_field is not None and model.stamp_field is not None
             for node in _nodes_of(obj, model):
-                node_id = read_back_key(getattr(node, model.node_id_field))
+                node_id = _keyed(now, getattr(node, model.node_id_field))
                 if node_id in now:
                     carried = getattr(node, model.stamp_field)
                     setattr(node, model.stamp_field, stamps.handed_back(carried, found.get(node_id, ""), now[node_id]))
@@ -1111,6 +1109,16 @@ def _checked(depth: Mapping[str, int] | None) -> Mapping[str, int] | None:
         if isinstance(it, bool) or not isinstance(it, int) or it < 1:  # pyright: ignore[reportUnnecessaryIsInstance]
             raise DrivineError(f"The depth of {field} must be a whole number of at least 1.")
     return depth
+
+
+def _keyed(by_id: Mapping[Any, Any], id: Any) -> Any:
+    """
+    The key `by_id`, results keyed by the id of each node, has for the node whose id an object holds as `id`: `id`
+    itself where the store's results give the id as it was given (Postgres, SQLite, Neo4j, Memgraph), so two ids that
+    read back alike (a Decimal and the float nearest it, a date and its text) stay apart, and otherwise `id` as the
+    store reads it back (see read_back_key): Oracle reads it from the node, FalkorDB gives a date as its text.
+    """
+    return id if id in by_id else read_back_key(id)
 
 
 def _copy(obj: Any) -> Any:

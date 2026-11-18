@@ -7,8 +7,12 @@ library writes a fragment named apart. A port of Drivine for TypeScript's Sqlite
 import re
 from typing import Annotated, Any
 
+import pytest
+
 from drivine import (
+    DrivineError,
     GraphProperty,
+    Hop,
     ModelRegistry,
     NodeFragment,
     NodeId,
@@ -16,12 +20,15 @@ from drivine import (
     key,
     max_,
     min_,
+    path_key,
     refs,
     sum_,
 )
 from drivine.backend.cypher_grammar import NEO4J_GRAMMAR
 from drivine.backend.graph_backend import GraphBackend
 from drivine.backend.graph_statement import GraphStatement
+from drivine.backend.oracle.oracle_backend import OracleBackend
+from drivine.backend.oracle.oracle_graph import OracleGraph
 from drivine.backend.page import Page
 from drivine.backend.postgres.postgres_backend import PostgresBackend
 from drivine.backend.sqlite.sqlite_backend import SqliteBackend
@@ -35,6 +42,12 @@ class Scored(NodeFragment, labels=["Scored"]):
     id: Annotated[str, NodeId()]
     name: str | None = None
     score: Annotated[float | None, GraphProperty("$score")] = None
+
+
+class Unkeyed(NodeFragment, labels=["Unkeyed"]):
+    """A node class with no NodeId, which a path key can't order by."""
+
+    name: str | None = None
 
 
 registry = ModelRegistry()
@@ -184,3 +197,12 @@ def test_reads_a_property_written_as_cypher_writes_it_as_the_store_reads_it_over
     assert backend.written("n.title = 'x'") == f"{text_of('n_', 'title')} = 'x'"
     # A column of the row is the row's, which a read of the query DSL calls n_ (see SqliteBackend's ROW_ALIAS).
     assert backend.written("n.props ->> '$.title' = 'x'") == "n_.props ->> '$.title' = 'x'"
+
+
+@pytest.mark.parametrize(
+    "on", [SqliteBackend(SqliteGraph()), PostgresBackend(), OracleBackend(OracleGraph())], ids=repr
+)
+async def test_a_grouped_read_keyed_by_a_path_to_a_class_with_no_node_id_is_refused_by_name(on: GraphBackend):
+    # drivine-python#539: it was ordered by a property named '', in no set order, without a word.
+    with pytest.raises(DrivineError, match=r"^Unkeyed has no NodeId field, so a grouped read can't key by it"):
+        await grouped(on, keys={"to": path_key(Unkeyed, [Hop("TO")])}, aggregates={"all": count()})

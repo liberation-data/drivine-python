@@ -72,6 +72,12 @@ class SqlGroups(ABC):
         aggregates = list(query.aggregates.items())
         if not keys:
             raise DrivineError("A grouped read needs at least one key.")
+        for name, group_key in keys:
+            if isinstance(group_key, PathKey) and not path_targets[name].node_id_property:
+                raise DrivineError(
+                    f"{path_targets[name].type.__name__} has no NodeId field, so a grouped read can't key by it: "
+                    f"the path key {name} is ordered by the id of the node it reaches."
+                )
         bindings: dict[str, Any] = dict(query.bindings)
         n = self.row
         froms = [f"FROM {self.graph.nodes} {n}"]

@@ -4,8 +4,8 @@
 A `time` with an offset saved and loaded back as that time, in a field and in a list, and bound as a parameter, on each
 store (#565, as liberation-data/drivine4j#862). The Neo4j driver couldn't pack one whose zone is the standard
 library's `timezone`, so on Neo4j and Memgraph a save or a bind of it failed. Neo4j now holds it as a Time of its
-offset; Memgraph, which has no Time, and FalkorDB hold its ISO text, which a field declared `time` reads back as the
-time. A naive time binds, saves and loads as before.
+offset; Memgraph, which has no Time, holds it as text of one width, as drivine4j writes it, and FalkorDB its ISO text,
+either of which a field declared `time` reads back as the time. A naive time binds, saves and loads as before.
 """
 
 from datetime import time, timedelta, timezone
@@ -66,15 +66,21 @@ def test_a_time_with_an_offset_saved_again_from_its_loaded_copy_loads_back_as_th
     assert_same_time(again.times[0], STARTS)
 
 
-STORED_AS_TEXT = (DatabaseType.MEMGRAPH, DatabaseType.FALKORDB)
-"""The engines with no Time: a time with an offset is held as its ISO text."""
+STORED_AS_TEXT = {
+    DatabaseType.MEMGRAPH: ("10:11:12.000000000+02:00", "18:30:00.250000000-05:30"),
+    DatabaseType.FALKORDB: ("10:11:12+02:00", "18:30:00.250000-05:30"),
+}
+"""
+The engines with no Time, and the text each holds STARTS and ENDS as: Memgraph's of one width, as drivine4j writes it,
+FalkorDB's the ISO text its parameter coercer writes.
+"""
 
 
 @pytest.mark.graph_engine_only("a statement of the graph engines' own, sent as it is")
 def test_a_time_with_an_offset_binds_as_a_parameter(pm: PersistenceManager):
     rows = pm.query(QuerySpecification[Any]("RETURN $t AS t").bind({"t": STARTS}))
     if pm.type in STORED_AS_TEXT:
-        assert rows == ["10:11:12.000000000+02:00"]
+        assert rows == [STORED_AS_TEXT[pm.type][0]]
     else:
         assert_same_time(rows[0], STARTS)
 
@@ -83,7 +89,7 @@ def test_a_time_with_an_offset_binds_as_a_parameter(pm: PersistenceManager):
 def test_a_time_with_an_offset_binds_in_a_list_as_a_parameter(pm: PersistenceManager):
     rows = pm.query(QuerySpecification[Any]("RETURN $ts AS ts").bind({"ts": [STARTS, ENDS]}))
     if pm.type in STORED_AS_TEXT:
-        assert rows == [["10:11:12.000000000+02:00", "18:30:00.250000000-05:30"]]
+        assert rows == [list(STORED_AS_TEXT[pm.type])]
     else:
         assert_same_time(rows[0][0], STARTS)
         assert_same_time(rows[0][1], ENDS)

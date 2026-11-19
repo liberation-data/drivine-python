@@ -1,7 +1,7 @@
 """
 A time with an offset is sent to the Bolt engines as each takes it (#565): on Neo4j with a fixed offset the driver can
-pack, as a Time of that offset; on Memgraph, which has no Time, as its ISO text. A naive time is left as it is. The
-integration tests' OffsetTimes saves and binds one on each engine.
+pack, as a Time of that offset; on Memgraph, which has no Time, as text of one width, as drivine4j writes it. A naive
+time is left as it is. The integration tests' OffsetTimes saves and binds one on each engine.
 """
 
 import pickle
@@ -13,7 +13,13 @@ from neo4j._codec.hydration.bolt.v1.temporal import dehydrate_time, hydrate_time
 from drivine import QuerySpecification
 from drivine.connection.database_type import DatabaseType
 from drivine.connection.neo4j.bolt_values import FixedOffset, bolt_parameters
+from drivine.connection.neo4j.neo4j_connection import Neo4jConnection
+from drivine.connection.neo4j.neo4j_connection_provider import Neo4jConnectionProvider
 from drivine.connection.neo4j.neo4j_spec_compiler import Neo4jSpecCompiler
+from drivine.sync.connection.neo4j.neo4j_connection import Neo4jConnection as SyncNeo4jConnection
+from drivine.sync.connection.neo4j.neo4j_connection_provider import (
+    Neo4jConnectionProvider as SyncNeo4jConnectionProvider,
+)
 
 PLUS_TWO = timezone(timedelta(hours=2))
 STARTS = time(10, 11, 12, 500000, tzinfo=PLUS_TWO)
@@ -98,3 +104,17 @@ def test_the_spec_compiler_makes_named_and_positional_parameters_so_for_its_engi
     assert Neo4jSpecCompiler(named, DatabaseType.MEMGRAPH).compile().parameters == {"t": "10:11:12.500000000+02:00"}
     positional = QuerySpecification("RETURN $1").bind([STARTS]).finalized_copy("CYPHER")
     assert isinstance(Neo4jSpecCompiler(positional).compile().parameters["1"].tzinfo, FixedOffset)
+
+
+async def test_a_connection_is_given_its_providers_engine_so_memgraph_is_sent_the_text():
+    provider = Neo4jConnectionProvider("mg", DatabaseType.MEMGRAPH, "bolt://localhost:7687", None)
+    sync_provider = SyncNeo4jConnectionProvider("mg", DatabaseType.MEMGRAPH, "bolt://localhost:7687", None)
+    try:
+        connection = await provider.connect()
+        sync_connection = sync_provider.connect()
+        assert isinstance(connection, Neo4jConnection)
+        assert isinstance(sync_connection, SyncNeo4jConnection)
+        assert connection.engine is sync_connection.engine is DatabaseType.MEMGRAPH
+    finally:
+        await provider.end()
+        sync_provider.end()

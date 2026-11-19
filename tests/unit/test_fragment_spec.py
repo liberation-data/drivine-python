@@ -74,7 +74,8 @@ def test_each_order_of_the_table_both_ways_gives_the_terms_its_digest_pins(
 
 def test_the_spec_has_the_cases_and_table_the_runner_counts():
     with_rows = [it for it in SPEC["cases"] if "rows" in it]
-    assert len(with_rows) + len(CONDITIONS) + len(ORDERS) == 271
+    # 272 since spec 0.51.0's case of a lowered copy past 4,000 bytes (liberation-data/drivine-cypher-spec#373, #386).
+    assert len(with_rows) + len(CONDITIONS) + len(ORDERS) == 272
 
 
 @pytest.mark.parametrize("store", STORES)
@@ -114,6 +115,8 @@ def test_indexed_properties_are_written_on_oracle_alone():
     assert shared_compiler._graph("ORACLE", "g", True, True, INDEXED)["indexedProperties"] == [  # pyright: ignore[reportPrivateUsage]
         ["Person", "name"],
         ["Person", "id"],
+        ["Person", "bio"],
+        ["Robot", "bio"],
     ]
 
 

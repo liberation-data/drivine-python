@@ -135,11 +135,13 @@ pool, never one of an application's transaction. Layout 1 can't tell which texts
 numbers are floats and which texts are bytes, so it is told by declarations, a label's property and its kind each:
 `declarations_of(Person)` derives them from a node fragment's fields of type `date`, `datetime` (naive or aware) or
 `AwareDatetime`, `timedelta` or `float`, or a list, a tuple or a set of one (under each of its labels, inherited ones
-too), by the name each is stored under, and `declarations_of(Knows, "KNOWS")` from a relationship fragment's;
-`with_declared(derived, by_hand)` replaces or adds declarations by hand. A field 0.8.0 saved in another form than its
-kind's is not declared, as the migration would read it as no value of its kind and refuse the graph, and is kept as it
-is: a `NaiveDatetime`, saved as a UTC moment with a `Z`, no local datetime; a `time`, saved with its offset where it had
-one, which its type can't tell; `bytes`, saved as their UTF-8 text; and a `JsonPacked` field, saved as a JSON text.
+too), by the name each is stored under (pass `registry=` the `ModelRegistry` the application's managers are given,
+where it names properties otherwise than in camel case), and `declarations_of(Knows, "KNOWS")` from a relationship
+fragment's; `with_declared(derived, by_hand)` replaces or adds declarations by hand. A field 0.8.0 saved in another
+form than its kind's is not declared, as the migration would read it as no value of its kind and refuse the graph, and
+is kept as it is: a `NaiveDatetime`, saved as a UTC moment with a `Z`, no local datetime; a `time`, saved with its
+offset where it had one, which its type can't tell; `bytes`, saved as their UTF-8 text; and a `JsonPacked` field, saved
+as a JSON text.
 `migrate(declarations, dry_run=True, unproven=True)` writes nothing, and reports what would change, the values that are
 no value of their declared kind, the properties whose values all read as one kind (candidates to declare), and the
 uniqueness constraints' keys that may collide. A migration gives back its report, whose `status` says how it ended:

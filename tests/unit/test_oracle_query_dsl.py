@@ -250,7 +250,10 @@ def test_a_text_past_4000_bytes_is_compared_as_a_clob_not_through_the_index_and_
 
 def columns(ran: list[str], kind: str) -> list[str]:
     """The expressions the index of the kind (lx2, uq2) is made over, over the DSL's row, split at the top level."""
-    made = re.search(rf"INDEX IF NOT EXISTS drivine_{kind}_Scoredname_\w+ ON drivine_node n \((.*)\)';", "\n".join(ran))
+    # A range index's labelled index is built ONLINE, the unique one isn't (liberation-data/drivine-cypher-spec#381).
+    made = re.search(
+        rf"INDEX IF NOT EXISTS drivine_{kind}_Scoredname_\w+ ON drivine_node n \((.*)\)(?: ONLINE)?';", "\n".join(ran)
+    )
     assert made is not None, ran
     ddl = re.sub(r"\bn\.", "n_.", made.group(1).replace("''", "'"))
     split: list[str] = []

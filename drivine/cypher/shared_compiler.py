@@ -26,7 +26,7 @@ import sys
 import threading
 from collections import OrderedDict
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from enum import Enum
@@ -195,13 +195,16 @@ class SqlFragment:
     own and no other. `hints` are the optimizer hints the statement that holds the terms carries in its outermost
     `SELECT` (on Oracle; none on Postgres and SQLite); `non_finite` says a value it gives may be NaN or an infinity,
     read back as a statement's rows are. The `calls_stored_*` flags say, on Oracle, which of the graph's functions it
-    calls, as a compiled statement's do.
+    calls, as a compiled statement's do. `implied_labels` are, by each node variable, the labels of the library's that
+    every row a condition keeps carries, as a test of their labelled index the row must pass holds only of a node with
+    them (on Oracle; none on Postgres and SQLite): a statement needn't test those labels again.
     """
 
     terms: tuple[str, ...]
     parameters: Mapping[str, Any]
     non_finite: bool = False
     hints: tuple[str, ...] = ()
+    implied_labels: Mapping[str, tuple[str, ...]] = field(default_factory=dict[str, tuple[str, ...]])
     calls_stored_nulls_equal: bool = False
     calls_stored_era: bool = False
     calls_stored_temporal_arithmetic: bool = False
@@ -284,10 +287,17 @@ def compile_fragment(
         parameters=decoded(answer.get("parameters") or {}),
         non_finite=bool(answer.get("nonFinite", False)),
         hints=tuple(answer.get("hints") or ()),
+        implied_labels=_implied_labels(answer.get("impliedLabels")),
         calls_stored_nulls_equal=bool(stored.get("nullsEqual", False)),
         calls_stored_era=bool(stored.get("era", False)),
         calls_stored_temporal_arithmetic=bool(stored.get("temporalArithmetic", False)),
     )
+
+
+def _implied_labels(answered: Any) -> dict[str, tuple[str, ...]]:
+    """A fragment's `impliedLabels`, by each node variable, as the module answers them: none where it gives none."""
+    implied: Mapping[str, Any] = answered or {}
+    return {str(name): tuple(str(it) for it in labels) for name, labels in implied.items()}
 
 
 _GRAPH_ENGINES = {"NEO4J": "Neo4j", "MEMGRAPH": "Memgraph", "FALKORDB": "FalkorDB"}

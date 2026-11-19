@@ -97,8 +97,8 @@ def test_runs_a_comparison_that_calls_the_graphs_nulls_equal_and_gives_what_cyph
 def test_finds_by_eq_ignore_case_through_the_index_over_the_copy_past_4000_bytes_its_own_label_alone(
     gom: StatelessGraphObjectManager,
 ):
-    # drivine-cypher-spec#373: past 4,000 bytes the module's term over the copy holds for any node, so the statement
-    # tests the label itself, and a node of another label with the same copy is not found.
+    # drivine-cypher-spec#373: past 4,000 bytes the module's term over the copy keeps its label's test, so the
+    # statement needn't test the label itself, and a node of another label with the same copy is not found.
     index = range_index("OraDslCiA", "email", ignore_case=True)
     gom.indexes.ensure(index)
     try:

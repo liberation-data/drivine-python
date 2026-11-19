@@ -222,18 +222,6 @@ HELD: dict[str, dict[str, list[Hold]]] = {
         # Oracle's server sometimes ends the session mid-statement here (ORA-03113, DPY-4011), and passes it in most
         # runs, so it is skipped on Oracle, as drivine4j skips it (liberation-data/drivine4j#838, #839).
         "collect skips nulls": [Hold(838, ("oracle",), repository="drivine4j", skip=True)],
-        # CI's Neo4j gives four rows where the box's, the same 2026.10.2, gives none, for a dropped p read in a WITH's
-        # WHERE, alone (step 11) or one list deeper (step 110): Neo4j's own answer, not another case's nodes, as each
-        # case empties the graph first and the graph holds one Keanu (liberation-data/drivine#764, #778).
-        "Nesting of a dropped variable: a WITH that drops p and groups, in its WHERE": [
-            Hold(
-                764,
-                ("neo4j",),
-                steps=(11, 110),
-                repository="drivine",
-                may_pass="it passes on the test box, and fails on CI",
-            ),
-        ],
     },
 }
 """

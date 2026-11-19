@@ -309,3 +309,44 @@ def test_the_migration_reads_each_kind_declared_from_the_form_0_8_0_saved_it_in_
         provider.end()
     invalid = [it for p in report["properties"] if p["property"] == "probe" for it in p["invalid"]]
     assert (report["status"], len(invalid)) == (("dryRun", 0) if read else ("invalid", 1)), report["message"]
+
+
+class Upload(NodeFragment, labels=["Person"]):
+    name: Annotated[str, NodeId()]
+    photo: bytes | None = None
+
+
+def test_bytes_0_8_0_saved_as_their_utf8_text_are_kept_a_text_by_the_migration_and_load_back_as_the_bytes(
+    path: str,
+):
+    # 0.8.0 saved bytes as their UTF-8 text, which the migration reads as no bytes: declarations_of declares none, so
+    # the migration keeps the text as it was, which this version still loads as the bytes, and saves again as bytes.
+    sql(
+        path,
+        "UPDATE drivine_node SET props = json_set(props, '$.photo', 'abcd') "
+        "WHERE json_extract(props, '$.name') = 'Ada'",
+    )
+    assert [it for it in declarations_of(Upload) if it.property == "photo"] == []
+    provider = SqliteConnectionProvider("migration", path)
+    try:
+        stopped = StoreLayoutMigration(provider).migrate(DECLARATIONS, unproven=True)
+        assert stopped["status"] == "collisions", stopped["message"]
+        # The fixture's two spellings of one moment, corrected with plain SQL, as the first test does.
+        [(event,)] = sql(path, "SELECT max(nid) FROM drivine_node WHERE labels LIKE '%\"Event\"%'")
+        sql(path, f"DELETE FROM drivine_node WHERE nid = {event}")
+        migrated = StoreLayoutMigration(provider).migrate(DECLARATIONS, unproven=True)
+    finally:
+        provider.end()
+    assert migrated["status"] == "migrated", migrated["message"]
+    assert sql(
+        path, "SELECT json_extract(props, '$.photo') FROM drivine_node WHERE json_extract(props, '$.name') = 'Ada'"
+    ) == [("abcd",)]
+    registry = DatabaseRegistry()
+    registry.builder().database_type(DatabaseType.SQLITE).database_name(path).register("after")
+    try:
+        gom = StatelessGraphObjectManager(PersistenceManagerFactory(registry).get("after"))
+        assert (gom.load(Upload, "Ada")) == Upload(name="Ada", photo=b"abcd")
+        gom.save(Upload(name="Ada", photo=b"\x00\xff"))
+        assert (gom.load(Upload, "Ada")) == Upload(name="Ada", photo=b"\x00\xff")
+    finally:
+        registry.close()

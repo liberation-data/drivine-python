@@ -1,6 +1,6 @@
 """
 The declarations a store layout migration is told, from a fragment's fields' annotations (drivine-python#514), with no
-store: drivine4j's StoreLayoutMigrationDeclarationsTest and Drivine for TypeScript's declarationsOf.spec.ts, ported.
+store: drivine4j's StoreLayoutDeclarationsTest and Drivine for TypeScript's declarationsOf.spec.ts, ported.
 """
 
 from __future__ import annotations
@@ -8,7 +8,7 @@ from __future__ import annotations
 from datetime import date, datetime, time, timedelta
 from typing import Annotated, Any
 
-from pydantic import AwareDatetime, NaiveDatetime
+from pydantic import AwareDatetime, NaiveDatetime, PlainSerializer, WrapSerializer, field_serializer
 
 from drivine import (
     GraphProperty,
@@ -21,7 +21,7 @@ from drivine import (
     TargetNode,
     Transient,
 )
-from drivine.migration.store_layout_migration import MigrationDeclaration, declarations_of, with_declared
+from drivine.migration.store_layout_migration import Declaration, declarations_of, with_declared
 from drivine.model.model_registry import ModelRegistry
 
 
@@ -71,20 +71,19 @@ class Knows(RelationshipFragment):
     target: Annotated[Person, TargetNode()]
 
 
-def by_label(declared: list[MigrationDeclaration]) -> list[tuple[str, str, str]]:
+def by_label(declared: list[Declaration]) -> list[tuple[str, str, str]]:
     return sorted((it.label, it.property, it.kind) for it in declared)
 
 
-def test_a_node_fragments_temporal_float_and_bytes_fields_are_declared_under_each_of_its_labels():
+def test_a_node_fragments_temporal_and_float_fields_are_declared_under_each_of_its_labels():
+    # Not wakes (a time), seen (a NaiveDatetime) or photo (bytes): 0.8.0 saved each in a form other than its kind's, so
+    # a declaration would refuse the graph (see _KINDS, and the store's test of those forms).
     expected = [
         ("born", "date"),
-        ("wakes", "localtime"),
-        ("seen", "localdatetime"),
         ("at", "datetime"),
         ("logged", "datetime"),
         ("tenure", "duration"),
         ("height", "float"),
-        ("photo", "bytes"),
         ("days", "date"),
         ("moments", "datetime"),
         ("ratios", "float"),
@@ -97,6 +96,22 @@ def test_a_node_fragments_temporal_float_and_bytes_fields_are_declared_under_eac
     assert by_label(declarations_of(Person)) == sorted(
         (label, prop, kind) for label in ("Person", "Author") for prop, kind in expected
     )
+
+
+class Serialized(NodeFragment, labels=["Serialized"]):
+    id: Annotated[str, NodeId()]
+    plain: Annotated[date, PlainSerializer(lambda it: it.strftime("%d/%m/%Y"))]
+    wrapped: Annotated[float, WrapSerializer(lambda it, handler: str(handler(it)))]
+    by_method: date
+    kept: date
+
+    @field_serializer("by_method")
+    def _by_method(self, value: date) -> str:
+        return value.strftime("%Y%m%d")
+
+
+def test_a_field_written_as_a_serializer_of_its_own_says_is_not_declared_as_its_saved_form_cant_be_told():
+    assert by_label(declarations_of(Serialized)) == [("Serialized", "kept", "date")]
 
 
 def test_a_field_neither_loaded_nor_held_as_its_kind_is_not_declared():
@@ -123,9 +138,9 @@ def test_a_registry_names_the_properties_as_it_names_them_for_its_managers():
 def test_a_hand_declaration_replaces_the_derived_one_of_its_label_and_property_and_the_rest_are_added():
     declared = with_declared(
         [*declarations_of(Animal), *declarations_of(Animal)],
-        [MigrationDeclaration("Animal", "born", "localdatetime"), MigrationDeclaration("Animal", "nick", "date")],
+        [Declaration("Animal", "born", "localdatetime"), Declaration("Animal", "nick", "date")],
     )
     assert declared == [
-        MigrationDeclaration("Animal", "born", "localdatetime"),
-        MigrationDeclaration("Animal", "nick", "date"),
+        Declaration("Animal", "born", "localdatetime"),
+        Declaration("Animal", "nick", "date"),
     ]

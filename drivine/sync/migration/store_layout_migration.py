@@ -24,10 +24,10 @@ import json
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta
-from typing import Any, Literal, Protocol, cast
+from datetime import date, datetime, timedelta
+from typing import Any, Literal, Protocol, TypedDict, cast
 
-from pydantic import AwareDatetime, BaseModel, NaiveDatetime
+from pydantic import AwareDatetime, BaseModel, PlainSerializer, WrapSerializer
 
 from drivine.drivine_error import DrivineError
 from drivine.model.field_mapping import FieldMapping
@@ -36,48 +36,92 @@ from drivine.model.model_registry import ModelRegistry
 from drivine.query.query_specification import QuerySpecification
 from drivine.sync.connection.connection import Connection
 
-DeclaredKind = Literal["date", "localtime", "time", "localdatetime", "datetime", "duration", "float", "bytes"]
-"""What a property is declared to hold, which store layout 1 can't tell (the module's `LayoutMigration.Kind`)."""
+Kind = Literal["date", "localtime", "time", "localdatetime", "datetime", "duration", "float", "bytes"]
+"""
+What a property is declared to hold, which store layout 1 can't tell: which texts are dates or moments, which whole
+numbers are floats, and which lists of numbers are bytes (the shared module's kinds, by their words, as drivine4j's
+`Kind` and Drivine for TypeScript's give them).
+"""
 
 
 @dataclass(frozen=True)
-class MigrationDeclaration:
+class Declaration:
     """That the property `property` of the nodes labelled `label`, or the relationships of that type, holds `kind`."""
 
     label: str
     property: str
-    kind: DeclaredKind
+    kind: Kind
 
 
-_KINDS: dict[Any, DeclaredKind] = {
+MigrationStatus = Literal[
+    "current", "empty", "refused", "inProgress", "invalid", "dryRun", "collisions", "migrated", "failed"
+]
+"""
+How a migration ended, as drivine4j's `MigrationReport.Status` and Drivine for TypeScript's name it: `migrated`, the
+graph is in layout 2; `current` or `empty`, nothing to do; `dryRun`, a dry run's, nothing written; `inProgress`, a dry
+run of a graph part way through a migration, which only resuming it goes on with; `invalid`, values that are no value of
+their declared kind (declare them otherwise, or pass `keep_invalid`); `collisions`, a uniqueness constraint's keys that
+collide in layout 2 (correct them with plain SQL, and run it again); `refused`, a graph of another layout, or one
+changed since its migration began, or a migration resumed, before every row is written, with other declarations or
+another `keep_invalid`; `failed`, a statement failed, the message the store's (run it again to resume).
+"""
+
+
+class MigrationReport(TypedDict):
+    """
+    The report a migration, or its dry run, ends with: the shared module's, as its JSON entry writes it. `tables`, for
+    `nodes` and `edges`, the rows read and changed; `properties`, each label's property a rewrite changes or finds a
+    value of not of its declared kind; `observed`, the classes of the values of the properties no declaration names;
+    `candidates`, those whose values all read as one kind, to declare; `kept`, the values kept as they were;
+    `collisions`, the uniqueness constraints' keys that collide; `notes`, what a migration leaves to others: the
+    indexes, which the application's schema plan makes at its next start, and the count store, left unseeded.
+    """
+
+    status: MigrationStatus
+    message: str
+    tables: dict[str, dict[str, int]]
+    properties: list[dict[str, Any]]
+    observed: list[dict[str, Any]]
+    candidates: list[dict[str, Any]]
+    kept: list[dict[str, Any]]
+    collisions: list[dict[str, Any]]
+    notes: list[str]
+
+
+_KINDS: dict[Any, Kind] = {
     date: "date",
     datetime: "datetime",
     AwareDatetime: "datetime",
-    NaiveDatetime: "localdatetime",
-    time: "localtime",
     timedelta: "duration",
     float: "float",
-    bytes: "bytes",
-    bytearray: "bytes",
 }
 """
-The kind a field of each type is declared. A `datetime` may hold a naive value, which layout 2 holds as a localdatetime,
-and a `time` an aware one, a time: a field that holds them is declared by hand (see `with_declared`).
+The kind a field of each type is declared: those whose values drivine-python 0.8.0, the last release of layout 1, saved
+in the form the migration reads that kind from. A `date` as its ISO text; a `datetime`, naive or aware, as the UTC
+moment's ISO text with a `Z`; a `timedelta` as its ISO duration; a float as a number.
+
+A field layout 1 saved in a form other than its kind's is given no declaration, as the migration would read its values
+as no value of the kind and refuse the graph: it is kept as it is. So a `NaiveDatetime` is not declared a
+localdatetime, as 0.8.0 saved it with a `Z`, as a moment; a `time` not a localtime, as 0.8.0 saved an aware one with its
+offset, which its type can't tell; and bytes not at all, as 0.8.0 saved them as their UTF-8 text, not the list of
+numbers or base64 text the migration reads bytes from. Each such property is a candidate in a dry run's report where
+its values all read as one kind, to declare by hand (see `with_declared`).
 """
 
 
 def declarations_of(
     fragment: type, relationship_type: str | None = None, registry: ModelRegistry | None = None
-) -> list[MigrationDeclaration]:
+) -> list[Declaration]:
     """
     What the node fragment `fragment` says of its properties that layout 1 can't tell: a declaration under each of its
     labels, its own and those it inherits, for each of its fields of a temporal type, a float or bytes, or a list, a
     tuple or a set of one, by the name the property is stored under (a `GraphProperty`'s, or the registry's naming of
     the field), as the user names it: a name that begins with `$` is declared as it is. For the relationship fragment
     `fragment`, the same of each of its fields but the node it leads to, under `relationship_type`. A field that is
-    transient, JSON packed, a map, a list of lists, the node's stamp, its labels or a property bag is not declared, nor
-    is any other type. drivine4j's `declarationsOf`. `registry` is the one the application's managers build models with,
-    for its naming of fields: a new one, which names them in camel case, by default.
+    transient, JSON packed, given a serializer of its own, a map, a list of lists, the node's stamp, its labels or a
+    property bag is not declared, nor is any other type (see `_KINDS`). drivine4j's `declarationsOf`. `registry` is the
+    one the application's managers build models with, for its naming of fields: a new one, which names them in camel
+    case, by default.
     """
     models = registry or ModelRegistry()
     mapping: FieldMapping
@@ -88,24 +132,23 @@ def declarations_of(
         mapping, labels = model, model.labels
     pydantic_model: type[BaseModel] = fragment  # pyright: ignore[reportAssignmentType]
     fields = pydantic_model.model_fields
-    declared: list[MigrationDeclaration] = []
+    declared: list[Declaration] = []
     for label in labels:
         for field, stored in mapping.graph_properties.items():
-            kind = None if field in mapping.json_packed else _kind_of(fields[field].annotation)
+            shaped = field in mapping.json_packed or _serialized(pydantic_model, field)
+            kind = None if shaped else _kind_of(fields[field].annotation)
             if kind is not None:
-                declared.append(MigrationDeclaration(label, stored, kind))
+                declared.append(Declaration(label, stored, kind))
     return declared
 
 
-def with_declared(
-    derived: Iterable[MigrationDeclaration], by_hand: Iterable[MigrationDeclaration]
-) -> list[MigrationDeclaration]:
+def with_declared(derived: Iterable[Declaration], by_hand: Iterable[Declaration]) -> list[Declaration]:
     """
     The `derived` declarations (see `declarations_of`), each of a label's property that one of `by_hand` declares
     replaced by it, then the rest of `by_hand`: each label's property declared once.
     """
     hand = {(it.label, it.property): it for it in by_hand}
-    found: dict[tuple[str, str], MigrationDeclaration] = {}
+    found: dict[tuple[str, str], Declaration] = {}
     for it in derived:
         found.setdefault((it.label, it.property), hand.get((it.label, it.property), it))
     for key, it in hand.items():
@@ -113,7 +156,20 @@ def with_declared(
     return list(found.values())
 
 
-def _kind_of(annotation: Any) -> DeclaredKind | None:
+def _serialized(model: type[BaseModel], field: str) -> bool:
+    """
+    Whether `field` of `model` is written as a serializer of its own says (a `field_serializer`, or a `PlainSerializer`
+    or `WrapSerializer` in its annotation), whose saved form its type can't tell.
+    """
+    decorators: Any = getattr(model, "__pydantic_decorators__", None)
+    if decorators is not None and any(
+        field in it.info.fields or "*" in it.info.fields for it in decorators.field_serializers.values()
+    ):
+        return True
+    return any(isinstance(it, PlainSerializer | WrapSerializer) for it in model.model_fields[field].metadata)
+
+
+def _kind_of(annotation: Any) -> Kind | None:
     """The kind a field of `annotation` is declared: its own, or a list's, a tuple's or a set's items'; else None."""
     shape = FieldShape.of(annotation)
     if shape.collection == "dict":
@@ -172,13 +228,13 @@ class StoreLayoutMigration:
 
     def migrate(
         self,
-        declarations: Sequence[MigrationDeclaration],
+        declarations: Sequence[Declaration],
         *,
         batch_size: int = 1000,
         dry_run: bool = False,
         keep_invalid: bool = False,
         unproven: bool = False,
-    ) -> dict[str, Any]:
+    ) -> MigrationReport:
         """
         Migrates the graph by `declarations`, or with `dry_run` reports what a migration would do and writes nothing,
         reading and writing `batch_size` rows at a time. Where `keep_invalid`, a value that is no value of its declared
@@ -208,7 +264,7 @@ class StoreLayoutMigration:
             while "run" in answer:
                 outcomes = self._round(work, held, answer["run"])
                 answer = self._ask({"resume": answer["state"], "outcomes": outcomes})
-            return dict(answer["done"])
+            return cast(MigrationReport, dict(answer["done"]))
         finally:
             # Cleanup after the migration's own outcome, which a failure here must not hide.
             lock = held.get("lock")

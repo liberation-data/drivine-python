@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 
 from drivine.drivine_error import DrivineError
-from drivine.migration.store_layout_migration import MigrationDeclaration, StoreLayoutMigration
+from drivine.migration.store_layout_migration import Declaration, StoreLayoutMigration
 
 
 class FakeConnection:
@@ -76,7 +76,7 @@ class Planner:
         return json.dumps({"done": {"status": "migrated", "message": "done"}})
 
 
-DECLARED = [MigrationDeclaration("Person", "born", "date")]
+DECLARED = [Declaration("Person", "born", "date")]
 
 
 async def test_a_migration_unless_told_it_is_unproven_is_refused() -> None:

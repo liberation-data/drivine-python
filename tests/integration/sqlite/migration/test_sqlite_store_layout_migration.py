@@ -42,7 +42,7 @@ from drivine import (
 )
 from drivine.connection.sqlite.sqlite_connection_provider import SqliteConnectionProvider
 from drivine.migration.store_layout_migration import (
-    MigrationDeclaration,
+    Declaration,
     StoreLayoutMigration,
     declarations_of,
     with_declared,
@@ -105,8 +105,10 @@ DECLARATIONS = with_declared(
         *declarations_of(File),
         *declarations_of(Knows, "KNOWS"),
     ],
-    # The Events were written in Cypher, and have no model to say what they hold.
-    [MigrationDeclaration("Event", "at", "datetime")],
+    # The Events were written in Cypher, and have no model to say what they hold; nor are bytes ever derived, as 0.8.0's
+    # object manager saved them as their UTF-8 text (see _KINDS): File's were written in Cypher as base64, so are
+    # declared by hand.
+    [Declaration("Event", "at", "datetime"), Declaration("File", "data", "bytes")],
 )
 
 
@@ -271,3 +273,39 @@ def _compile() -> Callable[[str], str]:
     found = _migrator()
     assert found is not None
     return found
+
+
+@pytest.mark.parametrize(
+    "value, kind, read",
+    [
+        # As 0.8.0 saved a datetime, naive or aware: the UTC moment's ISO text, with a Z. A moment, so no localdatetime,
+        # which is why a NaiveDatetime field is not declared.
+        ("2024-03-15T10:30:00.000Z", "datetime", True),
+        ("2024-03-15T10:30:00.000Z", "localdatetime", False),
+        # A time as 0.8.0 saved one: naive, a localtime; aware, with its offset, no localtime, which a time field's type
+        # can't tell apart, so a time field is not declared.
+        ("10:11:12", "localtime", True),
+        ("10:11:12+02:00", "localtime", False),
+        # A timedelta as its ISO duration, and a whole float as a number.
+        ("PT1H1.5S", "duration", True),
+        (2.0, "float", True),
+    ],
+)
+async def test_the_migration_reads_each_kind_declared_from_the_form_0_8_0_saved_it_in_or_refuses_the_graph(
+    path: str, value: Any, kind: str, read: bool
+):
+    # What declarations_of declares a field each kind of: those 0.8.0 saved in the form the migration reads (_KINDS).
+    sql(
+        path,
+        f"UPDATE drivine_node SET props = json_set(props, '$.probe', json('{json.dumps(value)}')) "
+        "WHERE json_extract(props, '$.name') = 'Ada'",
+    )
+    provider = SqliteConnectionProvider("forms", path)
+    try:
+        report = await StoreLayoutMigration(provider).migrate(
+            [Declaration("Person", "probe", kind)], dry_run=True, unproven=True
+        )
+    finally:
+        await provider.end()
+    invalid = [it for p in report["properties"] if p["property"] == "probe" for it in p["invalid"]]
+    assert (report["status"], len(invalid)) == (("dryRun", 0) if read else ("invalid", 1)), report["message"]

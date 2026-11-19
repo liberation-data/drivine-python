@@ -14,11 +14,12 @@ from uuid import UUID
 import pytest
 
 from drivine.backend.sql.sql_json import to_json
-from drivine.backend.sql.value_layout import Held, held_key, read, read_after, write, write_props
+from drivine.backend.sql.value_layout import Held, TagText, held_key, read, read_after, read_value, write, write_props
 from drivine.backend.sqlite.sqlite_cypher_values import with_nan
 from drivine.drivine_error import DrivineError
 
 DATE_TAG = '{"$t":"date","v":"2024-01-01","s":"10000020240101"}'
+TAG_TEXT = TagText("2024-01-01", "date")
 
 
 class Colour(Enum):
@@ -84,6 +85,32 @@ def test_a_held_value_is_spliced_into_the_json_as_it_is_and_a_text_like_its_stan
 def test_a_column_is_read_with_its_tags_their_text_and_its_keys_unescaped():
     assert read(f'{{"d":{DATE_TAG},"$$k":1,"t":"$5"}}') == {"d": "2024-01-01", "$k": 1, "t": "$5"}
     assert read('{"plain":1.5}') == {"plain": 1.5}
+
+
+def test_a_tag_is_read_as_text_that_knows_its_kind_at_any_depth_and_a_users_tag_like_map_as_the_map():
+    # The load reads the kind to refuse a NodeId held as a temporal value by a model that declares it text (#560).
+    column = read(f'{{"d":{DATE_TAG},"l":[{{"$t":"duration","v":"PT1S"}}],"m":{{"$$t":"date","v":"x"}},"t":"text"}}')
+    assert column == {"d": "2024-01-01", "l": ["PT1S"], "m": {"$t": "date", "v": "x"}, "t": "text"}
+    assert isinstance(column["d"], TagText) and column["d"].kind == "date"
+    assert isinstance(column["l"][0], TagText) and column["l"][0].kind == "duration"
+    assert not isinstance(column["m"]["v"], TagText) and not isinstance(column["t"], TagText)
+    parsed = read_value({"d": json.loads(DATE_TAG)})
+    assert isinstance(parsed["d"], TagText) and parsed["d"].kind == "date"
+    # A user's map that is itself `{"$t": "map", "v": …}` stays that map, the tags inside it still read.
+    wrapped = read(f'{{"w":{{"$$t":"map","v":{{"a":{DATE_TAG}}}}}}}')
+    assert wrapped == {"w": {"$t": "map", "v": {"a": "2024-01-01"}}}
+    assert isinstance(wrapped["w"]["v"]["a"], TagText)
+    after = read_after(f'{{"n":{{"$numberDouble":"NaN"}},"d":{DATE_TAG}}}', with_nan)
+    assert isinstance(after["d"], TagText) and after["d"].kind == "date"
+
+
+def test_a_tag_text_is_copied_and_pickled_with_its_kind():
+    # A load hands it to a field declared Any, which a deep model_copy or a cache copies.
+    import copy
+    import pickle
+
+    for made in (copy.copy(TAG_TEXT), copy.deepcopy(TAG_TEXT), pickle.loads(pickle.dumps(TAG_TEXT))):
+        assert isinstance(made, TagText) and made == "2024-01-01" and made.kind == "date"
 
 
 def test_a_column_the_store_wrote_its_own_way_is_read_so_first_its_floats_kept_across_the_module():

@@ -10,7 +10,8 @@ alike. host.yaml's write and read steps pin it.
   stays a binary double, and on SQLite an infinity as `9e999`; NaN and an infinity the store holds as no number are
   refused by name. It is the store's JSON text, spliced into the statement's own as it is
   (see `Held`, and sql_json.to_json), so a float's text is never read back and written again otherwise.
-- A column a row gives (`read`): each tag read as its text and each escaped key unescaped, at any depth.
+- A column a row gives (`read`): each tag read as its text, a TagText that knows the tag's kind, and each escaped key
+  unescaped, at any depth.
 
 The module is asked only of a value or a column it has something to decide of: a save's value that holds nothing but
 whole numbers, texts, booleans and nulls under keys that don't begin with `$` is written as it is, and a column whose
@@ -192,10 +193,49 @@ def _unmarked(value: Any) -> Any:
     return value
 
 
+class TagText(str):
+    """
+    A temporal value's text as a row gives it, which knows the kind of the tag it was read from (`kind`: `date`,
+    `datetime`, `localdatetime`, `time`, `localtime` or `duration`, as the module names it). It is the text in every
+    other way, and a model that validates the field holds a plain `str` of it. The load reads `kind` to refuse a node
+    whose NodeId is held as a temporal value by a model that declares the id a `str` or a number, which a lookup by
+    the text would never find (liberation-data/drivine#813, drivine-python#560): see GraphObjectMapper.
+    """
+
+    kind: str
+
+    def __new__(cls, text: str, kind: str) -> TagText:
+        made = super().__new__(cls, text)
+        made.kind = kind
+        return made
+
+    def __getnewargs__(self) -> tuple[str, str]:  # pyright: ignore[reportIncompatibleMethodOverride]
+        # A copy or a pickle makes it again with its kind: str's own gives only the text, which __new__ refuses.
+        return str(self), self.kind
+
+
 def _read_by_module(text: str) -> Any:
     from drivine.cypher.shared_compiler import module_text
 
-    given = json.loads(module_text({"read": text, "typed": False}, "sqlite"))
+    given = json.loads(module_text({"read": text, "typed": True}, "sqlite"))
     if "error" in given:
         raise DrivineError(f"A row's value can't be read in the store layout: {given['error']}")
-    return given["value"]
+    return _untagged(given["value"])
+
+
+def _untagged(value: Any) -> Any:
+    """
+    A value the module read typed, each tag `{"$t": kind, "v": text}` read as its text (TagText), and each map of the
+    user's that has a `$t` key of its own, which the module answers as `{"$t": "map", "v": map}`, as that map.
+    """
+    if isinstance(value, dict):
+        entries = cast(dict[str, Any], value)
+        kind = entries.get("$t")
+        if kind == "map":
+            return {key: _untagged(it) for key, it in cast(dict[str, Any], entries["v"]).items()}
+        if isinstance(kind, str) and len(entries) == 2 and "v" in entries:
+            return TagText(entries["v"], kind)
+        return {key: _untagged(it) for key, it in entries.items()}
+    if isinstance(value, list):
+        return [_untagged(it) for it in cast(list[Any], value)]
+    return value

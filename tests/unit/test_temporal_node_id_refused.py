@@ -178,6 +178,16 @@ def test_a_union_that_reads_the_tag_as_its_temporal_member_loads_it_as_that():
             TagText("10:00:00.1234567", "localtime"),
             "as a localtime below the microsecond, which a time can't save back: declare id as Any to load it.",
         ),
+        (
+            DurationId,
+            TagText("P1M", "duration"),
+            "as a duration, which a timedelta can't save back: declare id as Any to load it.",
+        ),
+        (
+            DurationId,
+            TagText("PT24H", "duration"),
+            "as a duration, which a timedelta can't save back: declare id as Any to load it.",
+        ),
     ],
 )
 def test_a_temporal_id_that_would_save_back_as_another_value_is_refused_by_name(
@@ -195,6 +205,7 @@ def test_a_temporal_id_that_would_save_back_as_another_value_is_refused_by_name(
         (DateTimeId, TagText("2026-01-05T10:00:00+02:00", "datetime")),
         (DateTimeId, TagText("2026-01-05T10:00:00.123456", "localdatetime")),
         (TimeId, TagText("10:00:00+02:00", "time")),
+        (DurationId, TagText("P1DT2H30M0.5S", "duration")),
     ],
 )
 def test_a_temporal_id_that_saves_back_as_it_is_held_loads(type_: type[NodeFragment], held: TagText):

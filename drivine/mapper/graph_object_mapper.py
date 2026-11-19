@@ -183,8 +183,9 @@ _BELOW_THE_MICROSECOND = re.compile(r"\.\d{7,}")
 def _refuse_temporal_id_changed(model: FragmentModel, props: Mapping[str, Any], instance: Any) -> None:
     """
     Refuses, by name, a node whose NodeId a SQL store holds as a temporal value's tag that the id `model` declares
-    loads as another value: a `date` id over a `localdatetime` or a `datetime`, a `datetime` id over a `date`, or a
-    time below the microsecond, which Python holds to the microsecond. A save of the node would write the id it loaded
+    loads as another value: a `date` id over a `localdatetime` or a `datetime`, a `datetime` id over a `date`, a
+    time below the microsecond, which Python holds to the microsecond, or a `timedelta` id over a duration it doesn't
+    write back as the same text (`P1M`, `PT24H`). A save of the node would write the id it loaded
     as, which a lookup by the id never finds, so it would make a second node (drivine-python#561, as
     liberation-data/drivine#815). An id that holds the tag as it was read, as `Any` does (TagText), is saved back as
     that tag, and isn't refused; one a union with `Any` validated as text (`str | Any`) is refused as text is.
@@ -203,15 +204,18 @@ def _refuse_temporal_id_changed(model: FragmentModel, props: Mapping[str, Any], 
         # A union with Any that validated the text as its `str`, `str | Any`: the id loaded as text.
         raise _held_as_text(model, held)
     kind = cast(str, request["$temporal"]).lower().replace("_", "")
-    if kind == held.kind and not _BELOW_THE_MICROSECOND.search(held):
+    below = _BELOW_THE_MICROSECOND.search(held) is not None
+    # A duration of months, or one written another way (`PT24H`, `PT-0.5S`), loads as a timedelta of days and seconds,
+    # which saves back as another duration: a duration is found by its text, which has no other form.
+    if kind == held.kind and not below and (kind != "duration" or request["text"] == held):
         return
     declared = _declared_name(model.node_id_type)
     fits = _PYTHON_TYPE_OF_TAG[held.kind]
     advice = f"declare {field} as Any" if fits == declared or kind == held.kind else f"declare {field} as a {fits}"
     raise DrivineError(
         f"{model.type.__name__}'s NodeId {field} is declared a {declared}, but the node whose id is '{held}' holds it"
-        f" as a {held.kind}{' below the microsecond' if kind == held.kind else ''}, which a {declared} can't save back:"
-        f" {advice} to load it."
+        f" as a {held.kind}{' below the microsecond' if kind == held.kind and below else ''}, which a {declared} can't"
+        f" save back: {advice} to load it."
     )
 
 

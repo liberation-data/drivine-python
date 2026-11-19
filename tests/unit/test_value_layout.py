@@ -124,6 +124,15 @@ def test_a_tag_text_is_written_back_as_the_tag_it_was_read_from_on_each_store(te
         assert write(text, store) == text
 
 
+def test_a_tag_text_in_a_list_or_a_map_is_written_back_as_the_tag_it_was_read_from():
+    # A property declared Any of a list or a map keeps each value as the store held it (#561).
+    value = {"days": [TagText("2024-01-01", "date"), "2024-01-01"], "span": {"d": TagText("P1M", "duration")}}
+    held = read(to_json(write(value, "postgres")))
+    assert held == value
+    assert held["days"][0].kind == "date" and not isinstance(held["days"][1], TagText)
+    assert held["span"]["d"].kind == "duration"
+
+
 def test_a_tag_text_is_copied_and_pickled_with_its_kind():
     # A load hands it to a field declared Any, which a deep model_copy or a cache copies.
     import copy

@@ -204,7 +204,9 @@ class TagText(str):
     `datetime`, `localdatetime`, `time`, `localtime` or `duration`, as the module names it). It is the text in every
     other way, and a model that validates the field holds a plain `str` of it. The load reads `kind` to refuse a node
     whose NodeId is held as a temporal value by a model that declares the id a `str` or a number, which a lookup by
-    the text would never find (liberation-data/drivine#813, drivine-python#560): see GraphObjectMapper.
+    the text would never find (liberation-data/drivine#813, drivine-python#560): see GraphObjectMapper. A save, and a
+    statement it is bound to, write it as the tag it was read from, so a field declared `Any` saved back keeps its value
+    as the store held it, and a lookup by it finds the node (drivine-python#561); text made from it is a plain `str`.
     """
 
     kind: str

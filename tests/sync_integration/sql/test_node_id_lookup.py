@@ -40,6 +40,7 @@ from drivine.sync import (
     RemovedTargets,
     Root,
     StatelessGraphObjectManager,
+    cypher_statement,
     node_ref,
     range_index,
     refs,
@@ -665,6 +666,19 @@ def test_an_id_declared_any_given_a_new_text_is_a_node_of_that_text(gom: Statele
     [loaded] = gom.load_all(LookupDayAsAny)
     gom.save(loaded.model_copy(update={"id": "2026-01-05", "name": "text"}))
     assert sorted(it.name or "" for it in gom.load_all(LookupDayAsAny)) == ["day", "text"]
+
+
+def test_a_temporal_value_a_query_gave_bound_back_finds_the_node_it_was_read_from(pm: PersistenceManager):
+    # A row's temporal value reads as its text, and binds back as the value it was read from, not as text (#561).
+    pm.execute(QuerySpecification[Any](cypher_statement("CREATE (:SqlLookup:LookupDay {id: date('2026-01-05')})")))
+    [held] = pm.query(QuerySpecification[Any](cypher_statement("MATCH (n:LookupDay) RETURN n.id")))
+    assert held == "2026-01-05"
+    found = pm.query(
+        QuerySpecification[Any](cypher_statement("MATCH (n:LookupDay) WHERE n.id = $id RETURN count(n)")).bind(
+            {"id": held}
+        )
+    )
+    assert found == [1]
 
 
 class LookupDayWhen(NodeFragment, labels=["SqlLookup", "LookupDay"]):

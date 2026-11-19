@@ -31,8 +31,9 @@ On FalkorDB, `DATABASE_NAME` names the graph, `graph` by default.
 
 A `time` with an offset is saved and bound on each graph engine
 ([#565](https://github.com/liberation-data/drivine-python/issues/565)). Neo4j holds it as a Time of its offset, and
-gives it back as a `time` of that offset. Memgraph, which has no Time, and FalkorDB hold its ISO text, `10:11:12+02:00`,
-which a field declared `time` loads back as the time, and a statement that returns it gives as text. A `time` without
+gives it back as a `time` of that offset. Memgraph, which has no Time, holds it as text of one width, as drivine4j
+writes it, `10:11:12.000000000+02:00`, so the text sorts as the times do, and FalkorDB holds its ISO text,
+`10:11:12+02:00`. A field declared `time` loads either back as the time, and a statement that returns it gives the text. A `time` without
 an offset, or of a `ZoneInfo`, which gives none for a time alone, is a local time on each.
 
 On Oracle, `DATABASE_NAME` is the service (`FREEPDB1`, say), and `DATABASE_DEFAULT_GRAPH_PATH` names the graph,

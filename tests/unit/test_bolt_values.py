@@ -47,10 +47,13 @@ def test_the_time_the_driver_packed_reads_back_as_the_time_with_its_offset():
     assert read.utcoffset() == timedelta(hours=2)
 
 
-def test_on_memgraph_a_time_with_an_offset_is_sent_as_its_iso_text():
-    assert bolt_parameters({"t": STARTS}, DatabaseType.MEMGRAPH) == {"t": "10:11:12.500000+02:00"}
+def test_on_memgraph_a_time_with_an_offset_is_sent_as_drivine4js_fixed_width_text():
+    # Seconds always, nine digits of the second, `Z` for no offset: text that sorts as time, as drivine4j writes it.
+    assert bolt_parameters({"t": STARTS}, DatabaseType.MEMGRAPH) == {"t": "10:11:12.500000000+02:00"}
     utc = time(10, 11, 12, tzinfo=UTC)
-    assert bolt_parameters({"t": utc}, DatabaseType.MEMGRAPH) == {"t": "10:11:12+00:00"}
+    assert bolt_parameters({"t": utc}, DatabaseType.MEMGRAPH) == {"t": "10:11:12.000000000Z"}
+    minute = time(10, 11, tzinfo=timezone(-timedelta(hours=5, minutes=30)))
+    assert bolt_parameters({"t": minute}, DatabaseType.MEMGRAPH) == {"t": "10:11:00.000000000-05:30"}
 
 
 def test_a_naive_time_is_left_as_it_is_on_each_engine():
@@ -69,8 +72,8 @@ def test_a_time_whose_zone_gives_no_offset_is_naive_as_python_counts_it():
 def test_a_time_in_a_list_or_a_map_is_made_so_too():
     given = {"props": {"starts": STARTS, "times": [STARTS, NAIVE], "name": "s"}, "ts": (STARTS,)}
     assert bolt_parameters(given, DatabaseType.MEMGRAPH) == {
-        "props": {"starts": "10:11:12.500000+02:00", "times": ["10:11:12.500000+02:00", NAIVE], "name": "s"},
-        "ts": ["10:11:12.500000+02:00"],
+        "props": {"starts": "10:11:12.500000000+02:00", "times": ["10:11:12.500000000+02:00", NAIVE], "name": "s"},
+        "ts": ["10:11:12.500000000+02:00"],
     }
     on_neo4j = bolt_parameters(given, DatabaseType.NEO4J)
     assert isinstance(on_neo4j["props"]["times"][0].tzinfo, FixedOffset)
@@ -92,6 +95,6 @@ def test_the_fixed_offset_compares_hashes_and_pickles_by_its_offset():
 
 def test_the_spec_compiler_makes_named_and_positional_parameters_so_for_its_engine():
     named = QuerySpecification("RETURN $t").bind({"t": STARTS}).finalized_copy("CYPHER")
-    assert Neo4jSpecCompiler(named, DatabaseType.MEMGRAPH).compile().parameters == {"t": "10:11:12.500000+02:00"}
+    assert Neo4jSpecCompiler(named, DatabaseType.MEMGRAPH).compile().parameters == {"t": "10:11:12.500000000+02:00"}
     positional = QuerySpecification("RETURN $1").bind([STARTS]).finalized_copy("CYPHER")
     assert isinstance(Neo4jSpecCompiler(positional).compile().parameters["1"].tzinfo, FixedOffset)

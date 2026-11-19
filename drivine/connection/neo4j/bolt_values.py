@@ -76,6 +76,21 @@ def _value(value: Any, as_text: bool) -> Any:
     return value
 
 
+def fixed_width_time(value: time, offset: timedelta) -> str:
+    """
+    A time with an offset as drivine4j writes one as text (its `TemporalCoercer`): its seconds always, all nine digits
+    of the second, and its offset, `Z` where it is none (`10:11:12.000000000+02:00`). The engine compares the text as
+    text, which sorts as time only when every value is the same width: the offset follows the fraction, and `Z` sorts
+    after `.`.
+    """
+    total = int(offset.total_seconds())
+    sign = "-" if total < 0 else "+"
+    hours, rest = divmod(abs(total), 3600)
+    minutes, seconds = divmod(rest, 60)
+    zone = "Z" if total == 0 else f"{sign}{hours:02d}:{minutes:02d}" + (f":{seconds:02d}" if seconds else "")
+    return f"{value.hour:02d}:{value.minute:02d}:{value.second:02d}.{value.microsecond:06d}000{zone}"
+
+
 def _time(value: time, as_text: bool) -> Any:
     """
     A time as the engine takes it. One whose zone gives no offset, as a named zone gives none for a time alone, is
@@ -87,5 +102,5 @@ def _time(value: time, as_text: bool) -> Any:
     if offset is None:
         return value.replace(tzinfo=None)
     if as_text:
-        return value.isoformat()
+        return fixed_width_time(value, offset)
     return value if isinstance(value.tzinfo, FixedOffset) else value.replace(tzinfo=FixedOffset(offset))

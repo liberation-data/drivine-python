@@ -72,7 +72,7 @@ STORED_AS_TEXT = (DatabaseType.MEMGRAPH, DatabaseType.FALKORDB)
 async def test_a_time_with_an_offset_binds_as_a_parameter(pm: PersistenceManager):
     rows = await pm.query(QuerySpecification[Any]("RETURN $t AS t").bind({"t": STARTS}))
     if pm.type in STORED_AS_TEXT:
-        assert rows == ["10:11:12+02:00"]
+        assert rows == ["10:11:12.000000000+02:00"]
     else:
         assert_same_time(rows[0], STARTS)
 
@@ -81,7 +81,7 @@ async def test_a_time_with_an_offset_binds_as_a_parameter(pm: PersistenceManager
 async def test_a_time_with_an_offset_binds_in_a_list_as_a_parameter(pm: PersistenceManager):
     rows = await pm.query(QuerySpecification[Any]("RETURN $ts AS ts").bind({"ts": [STARTS, ENDS]}))
     if pm.type in STORED_AS_TEXT:
-        assert rows == [["10:11:12+02:00", "18:30:00.250000-05:30"]]
+        assert rows == [["10:11:12.000000000+02:00", "18:30:00.250000000-05:30"]]
     else:
         assert_same_time(rows[0][0], STARTS)
         assert_same_time(rows[0][1], ENDS)

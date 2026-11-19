@@ -30,6 +30,12 @@ class NumberId(NodeFragment, labels=["Day"]):
     id: Annotated[int, NodeId()]
 
 
+class OptionalNumberId(NodeFragment, labels=["Day"]):
+    """A union with no temporal member: it loads a tag's text, or fails to, as no temporal value."""
+
+    id: Annotated[int | None, NodeId()] = None
+
+
 class RenamedTextId(NodeFragment, labels=["Day"]):
     key: Annotated[str, NodeId(), GraphProperty("dayKey")]
 
@@ -94,6 +100,7 @@ def loaded(type_: type[NodeFragment], props: dict[str, Any]) -> Any:
         (TextId, "str"),
         (OptionalTextId, "str | None"),
         (NumberId, "int"),
+        (OptionalNumberId, "int | None"),
         (Unvalidated, "str"),
         (TextOrDateId, "str | date"),
     ],

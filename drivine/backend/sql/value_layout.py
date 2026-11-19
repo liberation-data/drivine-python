@@ -14,9 +14,9 @@ alike. host.yaml's write and read steps pin it.
   unescaped, at any depth.
 
 The module is asked only of a value or a column it has something to decide of: a save's value that holds nothing but
-whole numbers, texts, booleans and nulls under keys that don't begin with `$` is written as it is, and a column whose
-text holds neither `"$` nor `\\u0024` is read as it is. The module's ValueLayoutTest pins that every tag and escaped key
-it writes holds `"$`.
+whole numbers, texts, booleans and nulls under keys that don't begin with `$` is written as it is (a TagText, a text a
+row gave, is written as the tag it was read from), and a column whose text holds neither `"$` nor `\\u0024` is read as
+it is. The module's ValueLayoutTest pins that every tag and escaped key it writes holds `"$`.
 """
 
 from __future__ import annotations

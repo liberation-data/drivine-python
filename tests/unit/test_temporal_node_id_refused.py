@@ -38,6 +38,11 @@ class Unvalidated(NodeFragment, labels=["Day"], validate_on_load=False):
     id: Annotated[str, NodeId()]
 
 
+class TextAt(NodeFragment, labels=["Day"]):
+    id: Annotated[str, NodeId()]
+    at: str
+
+
 class AnyId(NodeFragment, labels=["Day"]):
     id: Annotated[Any, NodeId()]
 
@@ -104,3 +109,7 @@ def test_a_tagged_id_loads_for_a_temporal_type_or_any(type_: type[NodeFragment],
 def test_a_text_id_loads_as_a_plain_str_and_an_untagged_one_is_not_refused():
     assert type(loaded(TextId, {"id": "2026-01-05"}).id) is str
     assert loaded(TextId, {"id": "a"}).id == "a"
+
+
+def test_a_tagged_property_that_is_no_id_loads_as_a_plain_str_for_a_str_field():
+    assert type(loaded(TextAt, {"id": "a", "at": TagText("2026-01-05", "date")}).at) is str

@@ -209,6 +209,10 @@ class TagText(str):
         made.kind = kind
         return made
 
+    def __getnewargs__(self) -> tuple[str, str]:  # pyright: ignore[reportIncompatibleMethodOverride]
+        # A copy or a pickle makes it again with its kind: str's own gives only the text, which __new__ refuses.
+        return str(self), self.kind
+
 
 def _read_by_module(text: str) -> Any:
     from drivine.cypher.shared_compiler import module_text

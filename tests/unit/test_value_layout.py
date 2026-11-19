@@ -19,6 +19,7 @@ from drivine.backend.sqlite.sqlite_cypher_values import with_nan
 from drivine.drivine_error import DrivineError
 
 DATE_TAG = '{"$t":"date","v":"2024-01-01","s":"10000020240101"}'
+TAG_TEXT = TagText("2024-01-01", "date")
 
 
 class Colour(Enum):
@@ -95,6 +96,21 @@ def test_a_tag_is_read_as_text_that_knows_its_kind_at_any_depth_and_a_users_tag_
     assert not isinstance(column["m"]["v"], TagText) and not isinstance(column["t"], TagText)
     parsed = read_value({"d": json.loads(DATE_TAG)})
     assert isinstance(parsed["d"], TagText) and parsed["d"].kind == "date"
+    # A user's map that is itself `{"$t": "map", "v": …}` stays that map, the tags inside it still read.
+    wrapped = read(f'{{"w":{{"$$t":"map","v":{{"a":{DATE_TAG}}}}}}}')
+    assert wrapped == {"w": {"$t": "map", "v": {"a": "2024-01-01"}}}
+    assert isinstance(wrapped["w"]["v"]["a"], TagText)
+    after = read_after(f'{{"n":{{"$numberDouble":"NaN"}},"d":{DATE_TAG}}}', with_nan)
+    assert isinstance(after["d"], TagText) and after["d"].kind == "date"
+
+
+def test_a_tag_text_is_copied_and_pickled_with_its_kind():
+    # A load hands it to a field declared Any, which a deep model_copy or a cache copies.
+    import copy
+    import pickle
+
+    for made in (copy.copy(TAG_TEXT), copy.deepcopy(TAG_TEXT), pickle.loads(pickle.dumps(TAG_TEXT))):
+        assert isinstance(made, TagText) and made == "2024-01-01" and made.kind == "date"
 
 
 def test_a_column_the_store_wrote_its_own_way_is_read_so_first_its_floats_kept_across_the_module():

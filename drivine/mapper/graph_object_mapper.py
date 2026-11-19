@@ -224,7 +224,8 @@ def _refuses_tags(kind: Any) -> bool:
     Whether a NodeId declared `kind` refuses a temporal value's tag: a type no tag loads as (`str`), or a union that
     loads the tag's text as text: one with no temporal member (`int | None`), or one with a `str` (`str | date`, as
     pydantic keeps text that is a `str` as it is). `int | date` loads the text as the date, and isn't refused. One
-    declared `Any`, or a union with it, takes the text as it is given, and a union's `None` takes no tag.
+    declared `Any`, or a union with it, takes the text as it is given, and a union's `None` takes no tag; one such union
+    that validated the text as its `str` (`str | Any`) is refused after the load (_refuse_temporal_id_changed).
     """
     if typing.get_origin(kind) in (typing.Union, types.UnionType):
         members = [it for it in typing.get_args(kind) if it is not type(None)]

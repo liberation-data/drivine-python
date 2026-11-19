@@ -705,3 +705,27 @@ def test_a_date_id_over_a_moment_is_refused_by_name_as_one_a_save_couldnt_find(
         r" a date can't save back: declare id as a datetime to load it\.",
     ):
         gom.load_all(LookupDay)
+
+
+class LookupDaySpan(NodeFragment, labels=["SqlLookup", "LookupDay"]):
+    id: Annotated[timedelta, NodeId()]
+    name: str | None = None
+
+
+@pytest.mark.parametrize(
+    ("made", "type_"),
+    [
+        ("datetime('2026-01-05T10:00:00.5+02:00')", LookupDayAt),
+        ("datetime('2026-01-05T10:00:00Z')", LookupDayAt),
+        ("localdatetime('2026-01-05T10:00:00.123456')", LookupDayAt),
+        ("duration('P1DT2H30M0.5S')", LookupDaySpan),
+    ],
+)
+def test_a_temporal_id_at_an_offset_or_a_fraction_saved_back_is_one_node(
+    pm: PersistenceManager, gom: StatelessGraphObjectManager, made: str, type_: type[Any]
+):
+    # Another writer's value loads as the Python value, which a save writes back as the value the store holds (#561).
+    pm.execute(QuerySpecification[Any](cypher_statement(f"CREATE (:SqlLookup:LookupDay {{id: {made}, name: 'a'}})")))
+    [loaded] = gom.load_all(type_)
+    gom.save(loaded.model_copy(update={"name": "again"}))
+    assert names(gom, type_) == ["again"]

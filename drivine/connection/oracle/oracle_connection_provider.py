@@ -6,6 +6,7 @@ import re
 from typing import Any
 
 from drivine.backend.oracle.oracle_graph import DEFAULT_GRAPH, OracleGraph
+from drivine.backend.sql.store_layout import stamping
 from drivine.backend.store_statements import store_statements
 from drivine.connection.connection import Connection
 from drivine.connection.connection_provider import ConnectionProvider
@@ -102,13 +103,49 @@ class OracleConnectionProvider(ConnectionProvider):
         connection = await pool.acquire()
         try:
             await self._tables.ensure(lambda statement: self._ensure(connection, statement))
-            cursor = connection.cursor()
-            await cursor.execute("SELECT SYS_CONTEXT('USERENV', 'SID') FROM dual")
-            row = await cursor.fetchone()
-            cursor.close()
+            return await self._connection(pool, connection)
         except BaseException:
             await pool.release(connection)
             raise
+
+    async def connect_unjudged(self) -> Connection:
+        """
+        A connection that neither makes the graph's tables nor judges its store layout, as `connect` does first: what a
+        store layout migration runs on, as the graph it migrates is one `connect` refuses (see StoreLayoutMigration).
+        """
+        pool = self._pool_of()
+        connection = await pool.acquire()
+        try:
+            self._check_version(connection)
+            return await self._connection(pool, connection)
+        except BaseException:
+            await pool.release(connection)
+            raise
+
+    async def prepare_unjudged(self, connection: Connection) -> None:
+        """
+        Makes the graph's tables on `connection`, one of `connect_unjudged`'s, as a first connection makes them,
+        without the layout's verdict: a store layout migration's `prepare`.
+        """
+        assert isinstance(connection, OracleConnection)
+        statement = self.graph.ensuring
+        await when_not_contended(lambda: self._run(connection.connection, statement), ddl_deadlocked)
+        self.graph.ensured()
+
+    def stamp_statement(self) -> tuple[str, dict[str, Any]]:
+        """
+        The stamp's `assign_if_absent` of this layout, and what it binds: a new id and this moment, as a first
+        connection stamps a graph (see store_layout.stamping). A store layout migration's `assignStamp`.
+        """
+        stamp = stamping("oracle", self.graph.name)
+        return stamp.statement, dict(stamp.parameters)
+
+    async def _connection(self, pool: Any, connection: Any) -> OracleConnection:
+        """The pool's `connection` as Drivine's, named by its session's id."""
+        cursor = connection.cursor()
+        await cursor.execute("SELECT SYS_CONTEXT('USERENV', 'SID') FROM dual")
+        row = await cursor.fetchone()
+        cursor.close()
         return OracleConnection(
             connection,
             pool.release,

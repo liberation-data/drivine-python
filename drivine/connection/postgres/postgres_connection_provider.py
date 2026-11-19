@@ -4,6 +4,7 @@ from typing import Any
 
 from drivine.backend.postgres.postgres_graph import PostgresGraph
 from drivine.backend.sql.sql_graph import DEFAULT_GRAPH
+from drivine.backend.sql.store_layout import stamping
 from drivine.connection.connection import Connection
 from drivine.connection.connection_provider import ConnectionProvider
 from drivine.connection.database_type import DatabaseType
@@ -71,6 +72,33 @@ class PostgresConnectionProvider(ConnectionProvider):
             await pool.putconn(connection)
             raise
         return PostgresConnection(connection, pool.putconn, f"postgres.{connection.info.backend_pid}", self.graph.name)
+
+    async def connect_unjudged(self) -> Connection:
+        """
+        A connection that neither makes the graph's tables nor judges its store layout, as `connect` does first: what a
+        store layout migration runs on, as the graph it migrates is one `connect` refuses (see StoreLayoutMigration).
+        """
+        pool = self._pool_of()
+        await pool.open()
+        connection = await pool.getconn()
+        return PostgresConnection(connection, pool.putconn, f"postgres.{connection.info.backend_pid}", self.graph.name)
+
+    async def prepare_unjudged(self, connection: Connection) -> None:
+        """
+        Makes the graph's tables on `connection`, one of `connect_unjudged`'s, as a first connection makes them,
+        without the layout's verdict: a store layout migration's `prepare`.
+        """
+        assert isinstance(connection, PostgresConnection)
+        statement = self.graph.ensuring
+        await when_not_contended(lambda: connection.connection.execute(statement), ddl_deadlocked)
+
+    def stamp_statement(self) -> tuple[str, dict[str, Any]]:
+        """
+        The stamp's `assign_if_absent` of this layout, and what it binds: a new id and this moment, as a first
+        connection stamps a graph (see store_layout.stamping). A store layout migration's `assignStamp`.
+        """
+        stamp = stamping("postgres", self.graph.name)
+        return stamp.statement, dict(stamp.parameters)
 
     async def _ensure(self, connection: Any, pool: Any, statement: str) -> None:
         """

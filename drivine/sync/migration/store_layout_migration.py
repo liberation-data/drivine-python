@@ -24,7 +24,7 @@ import json
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, cast
 
 from drivine.drivine_error import DrivineError
 from drivine.query.query_specification import QuerySpecification
@@ -153,7 +153,7 @@ class StoreLayoutMigration:
                         lock = self._provider.connect_unjudged()
                         held["lock"] = lock
                         lock.start_transaction()
-                        lock.query(QuerySpecification(action["statement"]))
+                        lock.query(QuerySpecification[Any](action["statement"]))
                     outcome: dict[str, Any] = {"type": "ran"}
                 else:
                     outcome = self._run(work, action)
@@ -192,7 +192,7 @@ class StoreLayoutMigration:
         raise DrivineError(f"No migration action {kind}.")
 
     def _rows(self, work: Connection, statement: str, parameters: Mapping[str, Any]) -> list[Any]:
-        rows = work.query(QuerySpecification(statement).bind(dict(parameters)))
+        rows = work.query(QuerySpecification[Any](statement).bind(dict(parameters)))
         return [_document(row) for row in rows]
 
     def _ask(self, request: Mapping[str, Any]) -> dict[str, Any]:
@@ -218,12 +218,12 @@ def _document(row: Any) -> Any:
     A row of one JSON column as the value it holds, whether the store gives it as text or as an object; any other row
     as it is.
     """
-    if isinstance(row, Mapping) and len(row) == 1:
-        value = next(iter(row.values()))
+    if isinstance(row, Mapping) and len(cast(Mapping[str, Any], row)) == 1:
+        value: Any = next(iter(cast(Mapping[str, Any], row).values()))
         if isinstance(value, str) and value.lstrip()[:1] in ("{", "["):
             try:
                 return json.loads(value)
             except ValueError:
                 return value
         return value
-    return row
+    return cast(Any, row)

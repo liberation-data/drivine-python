@@ -61,15 +61,6 @@ class ActorDirectors(GraphView):
     ] = None
 
 
-MIXED_ON_POSTGRES = pytest.mark.xfail(
-    reason=(
-        "The pinned compiler (0.50.0) orders kinds on Postgres in jsonb's order, a number before a boolean and a "
-        "temporal after a text (liberation-data/drivine-cypher-spec#371, fixed by #374 after 0.50.0: unfail at the "
-        "bump)"
-    ),
-    strict=True,
-)
-
 DATED_ON_MEMGRAPH = pytest.mark.skip(
     reason=(
         "Memgraph's datetime() reads neither a fraction of a second before Z nor an offset (.5Z, +02:00), so the dates "
@@ -149,7 +140,7 @@ def test_orders_a_date_hop_property_by_its_moment_an_offsets_included_not_by_its
     }
 
 
-@pytest.mark.parametrize("pm", stores(postgres=[MIXED_ON_POSTGRES]), indirect=True)
+@pytest.mark.parametrize("pm", stores(), indirect=True)
 def test_orders_a_hop_property_of_mixed_kinds_as_cypher_does_a_text_a_boolean_a_number_no_value_last(pm, gom):
     create(pm, ["'b'", "true", "10", "9", "null", "false", "'a'"])
     assert loaded(gom) == {
@@ -160,7 +151,7 @@ def test_orders_a_hop_property_of_mixed_kinds_as_cypher_does_a_text_a_boolean_a_
     }
 
 
-@pytest.mark.parametrize("pm", stores(postgres=[MIXED_ON_POSTGRES], memgraph=[DATED_ON_MEMGRAPH]), indirect=True)
+@pytest.mark.parametrize("pm", stores(memgraph=[DATED_ON_MEMGRAPH]), indirect=True)
 def test_keeps_for_a_node_reached_by_a_date_and_a_number_the_date_lowest_first_the_number_highest(pm, gom):
     create(pm, ["datetime('2024-01-01T00:00:00.5Z')", "'x'", "datetime('2024-01-01T00:00:00Z')"])
     pm.execute(

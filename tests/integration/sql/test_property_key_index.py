@@ -54,8 +54,8 @@ async def seeded(factory: PersistenceManagerFactory, store: str) -> AsyncIterato
     )
     await query(
         pm,
-        "CREATE (:Person {id: ['a', 'b'], k: -5}), (:Person {id: [], k: -6}), (:Person {id: [1], k: -7}), "
-        "(:Person {id: [[1, 2]], k: -8})",
+        # No list of lists: a property can't be one, as in Neo4j (liberation-data/drivine-cypher-spec#367).
+        "CREATE (:Person {id: ['a', 'b'], k: -5}), (:Person {id: [], k: -6}), (:Person {id: [1], k: -7})",
     )
     await query(
         pm,
@@ -120,14 +120,15 @@ ORACLE_NAMES_NO_INDEX = (
 async def test_a_rows_value_of_each_kind_finds_the_nodes_it_is_equal_to_as_json_compares_them(
     pm: PersistenceManager, seeded: None
 ):
-    # 7.0 is 7, and 8 is 8.0, as in Cypher; a list, empty, of one item or of lists, is equal to the same list only, not
-    # to its item or to its items in another order; null and a missing key are equal to nothing.
+    # 7.0 is 7, and 8 is 8.0, as in Cypher; a list, empty or of one item, is equal to the same list only, not to its
+    # item or to its items in another order; null, a missing key and a list of lists, which no node holds, are equal to
+    # nothing.
     rows = [
         *({"s": it} for it in ["p5", 7, 7.0, 8, True, [1, 2], None]),
         {},
         *({"s": it} for it in ["nobody", "7", ["a", "b"], [], [1], [[1, 2]], [2, 1], 1]),
     ]
-    expected = [-8, -7, -6, -5, -4, -3, -2, -1, -1, 5]
+    expected = [-7, -6, -5, -4, -3, -2, -1, -1, 5]
     by_pattern = "UNWIND $rows AS row MATCH (a:Person {id: row.s}) RETURN a.k ORDER BY a.k"
     assert await query(pm, by_pattern, {"rows": rows}) == expected
     # The same, compared in a WHERE.
@@ -261,7 +262,7 @@ async def test_a_merge_of_each_row_finds_the_node_it_is_equal_to_and_makes_none(
     rows = [{"s": it} for it in ["p3", 7.0, 8, [1, 2], True, 0.1, ""]]
     statement = "UNWIND $rows AS row MERGE (a:Person {id: row.s}) RETURN a.k ORDER BY a.k"
     assert await query(pm, statement, {"rows": rows}) == [-13, -9, -4, -3, -2, -1, 3]
-    assert await query(pm, "MATCH (a:Person) RETURN count(a)") == [NODES + 15]
+    assert await query(pm, "MATCH (a:Person) RETURN count(a)") == [NODES + 14]
 
 
 async def test_a_node_at_a_relationships_end_is_found_by_a_rows_or_a_parameters_value(
@@ -314,11 +315,6 @@ async def test_a_rows_number_finds_a_node_whose_number_the_store_keeps_with_more
         bound = {"rows": [{"s": it} for it in given]}
         statement = "UNWIND $rows AS row MATCH (a:Scaled {id: row.s}) RETURN a.k ORDER BY a.k"
         where = "UNWIND $rows AS row MATCH (a:Scaled) WHERE a.id = row.s RETURN a.k ORDER BY a.k"
-        if pm.type is DatabaseType.SQLITE and isinstance(given[0], list):
-            # SQLite's compiled equality compares a list's JSON text first (liberation-data/drivine-cypher-spec#354).
-            if await query(pm, statement, bound) == expected or await query(pm, where, bound) == expected:
-                pytest.fail("A list of whole numbers finds its stored floats on SQLite now: take out the hold (#354)")
-            continue
         assert await query(pm, statement, bound) == expected, given
         assert await query(pm, where, bound) == expected, f"{given} in a WHERE"
 

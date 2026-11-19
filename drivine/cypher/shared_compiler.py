@@ -26,7 +26,7 @@ import sys
 import threading
 from collections import OrderedDict
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from enum import Enum
@@ -48,15 +48,6 @@ logger = logging.getLogger(__name__)
 _lock = threading.Lock()
 _compile: Callable[[str], str] | None = None
 
-_compiling = threading.Lock()
-"""
-Held while the native compiler runs, so one call runs at a time in the process. The wheel's `compile` releases the GIL,
-and the native compiler's parse caches are shared by every call and not yet safe for two at once: two threads compiling
-together could corrupt them (liberation-data/drivine-cypher-spec#385, drivine-python#558). Answers kept here, such as a
-fragment's, are read without it, and the compiler's SQLite functions (see sqlite_extension) run without it, on the
-threads running statements, as they never parse Cypher. Comes out once the pinned compiler is safe for concurrent calls.
-"""
-
 
 def shared_compiler_loaded() -> bool:
     """Whether the shared compiler has been loaded in this process: a graph engine's application never loads it."""
@@ -64,10 +55,7 @@ def shared_compiler_loaded() -> bool:
 
 
 def _compiler(missing: Callable[[], str]) -> Callable[[str], str]:
-    """
-    The shared compiler's entry, loaded on the first call, which runs one call at a time (see `_compiling`); where it
-    isn't installed, a DrivineError of `missing`.
-    """
+    """The shared compiler's entry, loaded on the first call; where it isn't installed, a DrivineError of `missing`."""
     global _compile
     if _compile is None:
         with _lock:
@@ -78,13 +66,7 @@ def _compiler(missing: Callable[[], str]) -> Callable[[str], str]:
                     if error.name != PACKAGE:
                         raise
                     raise DrivineError(missing()) from error
-                native = drivine_cypher_compiler.compile
-
-                def compile_one_at_a_time(request: str) -> str:
-                    with _compiling:
-                        return native(request)
-
-                _compile = compile_one_at_a_time
+                _compile = drivine_cypher_compiler.compile
     return _compile
 
 
@@ -213,13 +195,16 @@ class SqlFragment:
     own and no other. `hints` are the optimizer hints the statement that holds the terms carries in its outermost
     `SELECT` (on Oracle; none on Postgres and SQLite); `non_finite` says a value it gives may be NaN or an infinity,
     read back as a statement's rows are. The `calls_stored_*` flags say, on Oracle, which of the graph's functions it
-    calls, as a compiled statement's do.
+    calls, as a compiled statement's do. `implied_labels` are, by each node variable, the labels of the library's that
+    every row a condition keeps carries, as a test of their labelled index the row must pass holds only of a node with
+    them (on Oracle; none on Postgres and SQLite): a statement needn't test those labels again.
     """
 
     terms: tuple[str, ...]
     parameters: Mapping[str, Any]
     non_finite: bool = False
     hints: tuple[str, ...] = ()
+    implied_labels: Mapping[str, tuple[str, ...]] = field(default_factory=dict[str, tuple[str, ...]])
     calls_stored_nulls_equal: bool = False
     calls_stored_era: bool = False
     calls_stored_temporal_arithmetic: bool = False
@@ -302,10 +287,17 @@ def compile_fragment(
         parameters=decoded(answer.get("parameters") or {}),
         non_finite=bool(answer.get("nonFinite", False)),
         hints=tuple(answer.get("hints") or ()),
+        implied_labels=_implied_labels(answer.get("impliedLabels")),
         calls_stored_nulls_equal=bool(stored.get("nullsEqual", False)),
         calls_stored_era=bool(stored.get("era", False)),
         calls_stored_temporal_arithmetic=bool(stored.get("temporalArithmetic", False)),
     )
+
+
+def _implied_labels(answered: Any) -> dict[str, tuple[str, ...]]:
+    """A fragment's `impliedLabels`, by each node variable, as the module answers them: none where it gives none."""
+    implied: Mapping[str, Any] = answered or {}
+    return {str(name): tuple(str(it) for it in labels) for name, labels in implied.items()}
 
 
 _GRAPH_ENGINES = {"NEO4J": "Neo4j", "MEMGRAPH": "Memgraph", "FALKORDB": "FalkorDB"}

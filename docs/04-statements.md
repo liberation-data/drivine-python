@@ -96,7 +96,8 @@ people = await pm.query(spec.bind({"city": "Sydney"}))
   `RETURN 123 AND true` fails with `AND takes a truth value, not an integer, as in Neo4j.`, and so do
   `WITH 123 AS x RETURN x.num` and `RETURN 1 IN 'foo'`. A step of 0 in `range()`, written or given, a parameter given
   as the index of a list or a map written that isn't indexed by its kind, and a map, or a list of maps or of lists,
-  written in `SET`, are refused too, though Neo4j fails on them only when a row reaches them. A value whose kind is
+  written as a property in `SET` or in a `CREATE` or `MERGE` pattern, are refused too, though Neo4j fails on them
+  only when a row reaches them. A value whose kind is
   known only when the row is read, such as a property or a parameter, is compiled: where it is of the wrong kind, the
   statement may give null where Neo4j fails. A variable used as two kinds is refused, as Neo4j refuses it:
   `MATCH (a)-[a]->()` fails with `a is a node, and is used as a relationship: a variable is of one kind, as in Neo4j.`

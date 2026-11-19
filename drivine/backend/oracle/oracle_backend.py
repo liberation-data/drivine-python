@@ -18,7 +18,6 @@ from drivine.backend.oracle.oracle_graph import (
     OracleGraph,
     carries_labels,
     has_labels,
-    module_label_test,
     node_document,
     text_of,
 )
@@ -39,11 +38,7 @@ from drivine.backend.sql.sql_catalog import catalog_properties
 from drivine.backend.store_statements import StampAndMarker
 from drivine.cypher.shared_compiler import SearchIndex, full_text_index_lookup
 from drivine.drivine_error import DrivineError
-from drivine.dsl.composite_condition import CompositeCondition
-from drivine.dsl.condition import Condition, all_of_one
-from drivine.dsl.model_scope import scope_of
 from drivine.dsl.query import Query
-from drivine.dsl.query_renderer import pinned_properties
 from drivine.dsl.rendered_query import RenderedQuery
 from drivine.manager.cascade_type import CascadeType
 from drivine.manager.group_query import GroupQuery
@@ -98,8 +93,8 @@ class OracleBackend:
         The query, as the shared module's fragments write it (FragmentQueryRenderer), what they ask of its statement
         noted on its filter and its order (see oracle_fragments). An equality of a property the first property of a
         range index or a uniqueness constraint of one of the root's labels is (`indexed`) is read through the index's
-        expression, as the module writes it for the labels the root is given (drivine4j#65): a label that such an
-        equality at the top of the filter tests is then not tested again by the statement (`labels_tested`, see
+        expression, as the module writes it for the labels the root is given (drivine4j#65): a label the module says
+        the filter implies (Fragments.labels_implied) is then not tested again by the statement (`labels_tested`, see
         `_from`).
         """
         fragments = self._fragments(target, indexed)
@@ -108,13 +103,7 @@ class OracleBackend:
             rendered,
             where=noted(rendered.where, fragments),
             order_by=noted(rendered.order_by, fragments),
-            labels_tested=tuple(
-                labels_implied(
-                    rendered.where,
-                    root_labels(target),
-                    self._indexed_equalities(query, target, labels_of_class, indexed),
-                )
-            ),
+            labels_tested=fragments.labels_implied,
         )
 
     def written(self, predicate: str, bindings: Mapping[str, Any] | None = None) -> str:
@@ -143,34 +132,6 @@ class OracleBackend:
             root_labels(target),
             [(it.label, it.properties[0]) for it in indexed if it.properties],
         )
-
-    def _indexed_equalities(
-        self,
-        query: Query,
-        target: TargetModel,
-        labels_of_class: Callable[[type], list[str]],
-        indexed: Sequence[SchemaItem],
-    ) -> str | None:
-        """
-        The plain equalities at the top of the query's filter of a property `indexed` for a label of the root, as the
-        shared module's fragments write them alone: None where there are none. The module reads some values through
-        the index (a label test in their term) and others not (a list, a map, `""`), as it alone knows.
-        """
-        labels = root_labels(target)
-        properties = {it.properties[0] for it in indexed if it.label in labels and it.properties}
-        if query.where is None or not properties:
-            return None
-        scope = scope_of(target)
-
-        def equalities(condition: Condition) -> list[Condition]:
-            if isinstance(condition, CompositeCondition) and condition.kind == "AND":
-                return [it for part in condition.conditions for it in equalities(part)]
-            return [condition] if any(it in properties for it in pinned_properties(condition, scope)) else []
-
-        pinned = equalities(all_of_one(query.where))
-        if not pinned:
-            return None
-        return FragmentQueryRenderer.render_where(pinned, target, self._fragments(target, indexed), labels_of_class)[0]
 
     def load_all_fragments(
         self, model: FragmentModel, where: str | None = None, page: Page | None = None, tested: Sequence[str] = ()
@@ -552,24 +513,3 @@ END;""")
             *([f"OFFSET {page.skip} ROWS"] if page.skip is not None else []),
             *([f"FETCH NEXT {page.limit} ROWS ONLY"] if page.limit is not None else []),
         ]
-
-
-def labels_implied(where: str | None, labels: Sequence[str], equalities: str | None) -> list[str]:
-    """
-    The labels of `labels` the condition `where`, as the shared module's fragments write it, tests at its top: those of
-    whose properties an equality is read through a labelled index there (see module_label_test), as drivine4j's
-    `OraclePredicates.predicate` finds them. None for no condition.
-
-    Only a plain equality at the top of the DSL's filter of an indexed property of the label, read through the index
-    (`equalities`, see OracleBackend._indexed_equalities), implies it. An ignore-case equality of a lowercased copy
-    (`EQ_LOWERED`, see lower_copy_lookups) is read through the same index, but past 4,000 bytes the module's term holds
-    for every node, the label's test inside it then not deciding it: the statement tests the label itself. Retires once
-    the module keeps the label's test inside that guard (liberation-data/drivine-cypher-spec#373).
-    """
-    if not where or not equalities:
-        return []
-    return [
-        it
-        for it in labels
-        if module_label_test(ROW_ALIAS, it) in where and module_label_test(ROW_ALIAS, it) in equalities
-    ]

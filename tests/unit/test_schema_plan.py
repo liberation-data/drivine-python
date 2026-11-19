@@ -223,7 +223,10 @@ async def test_recreate_raises_where_a_table_stands_under_the_indexs_name_droppi
         "Could not recreate RANGE_INDEX on Person[name]: drivine_ix2_personname_44ce5436, an object Drivine didn't "
         "make, stands under its name. Drop or rename it"
     )
-    assert not [it for it in host.ran if "DROP" in it.upper() or "CREATE" in it.upper()]
+    # The listing names pg_stat_progress_create_index, to tell a build under way from one left invalid
+    # (liberation-data/drivine-cypher-spec#381): a SELECT makes and drops nothing.
+    made = [it for it in host.ran if not it.lstrip().upper().startswith("SELECT")]
+    assert not [it for it in made if "DROP" in it.upper() or "CREATE" in it.upper()]
 
 
 async def test_reads_the_data_once_the_store_refuses_a_constraint_a_sample_size_of_0_giving_a_violation_with_none(

@@ -89,11 +89,6 @@ async def test_orders_a_key_of_moments_as_cypher_orders_them_by_the_moment_an_of
     assert await firsts(gom, "desc") == ["i0", "i1", "i2"]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="The module's order term on Postgres ranks kinds in jsonb's order, so a number sorts before a boolean "
-    "(liberation-data/drivine-cypher-spec#371). SQLite's ranks them as Cypher does.",
-)
 async def test_orders_a_key_of_mixed_kinds_as_cypher_orders_them_a_text_a_boolean_a_number_and_no_value_last(gom, seed):
     await create(seed, ["b", True, 10, 9, None, False, "a"])
     assert await firsts(gom, "asc") == ["i6", "i0", "i5", "i1", "i3", "i2", "i4"]

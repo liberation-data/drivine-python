@@ -118,4 +118,4 @@ def test_each_fragment_keeps_or_orders_the_nodes_neo4j_does(spec_pm: Persistence
         order = entry["value"]
         check(f"ORDER BY {order}{' DESC' if descending else ''}", entry["rows"][at], None, order, descending, {})
     assert not wrong, f"{len(wrong)} of {checked} differ from Neo4j:\n" + "\n".join(wrong)
-    assert checked == 271, "fragments.yaml's cases with rows and its table"
+    assert checked == 272, "fragments.yaml's cases with rows and its table"

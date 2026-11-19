@@ -91,8 +91,10 @@ class Fragments:
     `parameters` are what the fragments written so far bind, under the names the module gives them (`_cy_<name>`), for
     the statement to bind beside its own (see `bound_beside`); `hints`, in the order they were first asked for and each
     once, are the optimizer hints the statement's outermost `SELECT` or `DELETE` carries (see oracle_fragments.hinted);
-    `non_finite` whether a value one gives may be NaN or an infinity; and on Oracle the `calls_stored_*` flags whether
-    one calls the graph's stored function of that name, which the session must be able to call (see OracleConnection).
+    `non_finite` whether a value one gives may be NaN or an infinity; on Oracle the `calls_stored_*` flags whether
+    one calls the graph's stored function of that name, which the session must be able to call (see OracleConnection);
+    and `labels_implied`, in the order of `labels`, those of the root's labels that the DSL's filter or its keyset, as
+    the module answers them (SqlFragment.implied_labels), keeps only rows of, which the statement needn't test again.
     """
 
     def __init__(
@@ -115,6 +117,7 @@ class Fragments:
         self.parameters: dict[str, Any] = {}
         self.hints: list[str] = []
         self.non_finite = False
+        self.labels_implied: tuple[str, ...] = ()
         self.calls_stored_nulls_equal = False
         self.calls_stored_era = False
         self.calls_stored_temporal_arithmetic = False
@@ -134,14 +137,25 @@ class Fragments:
         """
         if cypher is None:
             return None
-        return self.compiled("condition", cypher, parameters, alias, self.labels).term
+        return self._implying(cypher, parameters, alias)
 
     def after(self, cypher: str, parameters: Mapping[str, Any], alias: str = NODE) -> str:
         """
         The condition that keeps the rows after a keyset cursor: QueryRenderer's keyset on the Neo4j grammar, as the
         graph engines run it, compiled as one fragment, its parameters the DSL's.
         """
-        return self.compiled("condition", cypher, parameters, alias, self.labels).term
+        return self._implying(cypher, parameters, alias)
+
+    def _implying(self, cypher: str, parameters: Mapping[str, Any], alias: str) -> str:
+        """
+        The condition over the root, `alias` in it, compiled as one fragment: the root's labels it implies
+        (SqlFragment.implied_labels) kept in `labels_implied`. Only a query's filter and keyset, which its WHERE joins
+        with AND, are read so (OracleBackend.render_query); a grouped read's filters are kept too, but never read.
+        """
+        fragment = self.compiled("condition", cypher, parameters, alias, self.labels)
+        implied = set(self.labels_implied) | set(fragment.implied_labels.get(alias, ()))
+        self.labels_implied = tuple(it for it in self.labels if it in implied)
+        return fragment.term
 
     def condition(
         self, cypher: str | Callable[[Names], str], parameters: Mapping[str, Any] | None = None, row: str | None = None

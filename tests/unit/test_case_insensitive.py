@@ -392,7 +392,7 @@ class TestLookups:
         assert written in rendered.where
         assert bound in rendered.bindings.values()
 
-    def test_on_oracle_read_the_copy_through_its_index_and_still_test_the_label(self):
+    def test_on_oracle_read_the_copy_through_its_index_which_implies_the_label(self):
         # Oracle's is the module's fragment over the row `n_`: the copy compared with the value lowered.
         account = self.registry.fragment(Account)
         where = lowered_where(refs(Account).email.eq_ignore_case("A"), account, {"email"})
@@ -406,11 +406,12 @@ class TestLookups:
         assert 'n_.props, \'$."__drivine.lower.email"' in plain.where
         assert "'$[*]?(@ == \"Account\")'" not in plain.where
         assert plain.labels_tested == ()
-        # Through the labelled index over the copy, which the module's equality reads; past 4,000 bytes its term holds
-        # for any node, so the statement still tests the label (drivine-cypher-spec#373).
+        # Through the labelled index over the copy, which the module's equality reads, its label's test kept within the
+        # term past 4,000 bytes too (drivine-cypher-spec#373): the module says it implies the label, so the statement
+        # doesn't test it again.
         indexed = rendered([SchemaItem("Account", ("__drivine.lower.email",))])
         assert "CASE WHEN JSON_EXISTS(n_.labels, '$[*]?(@ == \"Account\")') THEN" in indexed.where
-        assert indexed.labels_tested == ()
+        assert indexed.labels_tested == ("Account",)
 
 
 class _Store:

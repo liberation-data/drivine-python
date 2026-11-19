@@ -255,8 +255,7 @@ await gom.groups.count_by(Review, "page")                       # {"/pricing": 1
 Aggregates are `count`, `sum_`, `avg`, `min_` and `max_`, each with an optional filter. Ties in an order are broken by
 the keys, so a page of groups is the same every time. A path key's groups are ordered by its node's id, so a path key to
 a class with no `NodeId` field is refused, before anything is run, on every store. On the SQL stores a key is ordered as Cypher orders it (a text,
-then a boolean, then a number, no value last; on Postgres a key of mixed kinds still sorts a number before a boolean,
-until [drivine-cypher-spec#371](https://github.com/liberation-data/drivine-cypher-spec/issues/371)), a date by its
+then a boolean, then a number, no value last), a date by its
 moment, and `min_` and `max_` take a value of any kind, a text or a date as well as a number, read back as the type its
 field declares. A text stored as `""` is kept by `min_` and `max_`, as Cypher keeps it, on Oracle too.
 
@@ -280,11 +279,9 @@ field declares. A text stored as `""` is kept by `min_` and `max_`, as Cypher ke
   without the property comes last, whichever way the path is read. Targets whose first nodes hold equal values come in
   no set order. A text of digits such as `'0100'` is ordered as text, and an empty text as a text, the lowest one. On
   Neo4j and the SQL stores a date is ordered by its moment, an offset's included, not by its text. Where the property
-  holds values of several kinds, Neo4j, Memgraph, SQLite and Oracle order them by kind as Cypher's ORDER BY does: lowest
+  holds values of several kinds, Neo4j, Memgraph and the SQL stores order them by kind as Cypher's ORDER BY does: lowest
   first a map, a list, a temporal value, a text, a boolean, then a number, and the other way highest first. On Neo4j and
-  Memgraph the path is sorted by the engine's own ORDER BY. Postgres will once Drivine takes the compiler's fix of
-  liberation-data/drivine-cypher-spec#371; until then it orders them as jsonb does, a text before a number before a
-  boolean, and a temporal value after them. FalkorDB orders them as its own ORDER BY does. A group key's path names no
+  Memgraph the path is sorted by the engine's own ORDER BY. FalkorDB orders them as its own ORDER BY does. A group key's path names no
   order: `path_key` refuses one.
 - **A set field** is stored as a list of its items, sorted where they order (as the set iterates where they don't), and
   a `JsonPacked` one packed so: a set is written alike in every process, whatever order it iterates in. `patch` writes

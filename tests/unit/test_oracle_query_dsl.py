@@ -33,6 +33,7 @@ from drivine import (
     key,
     max_,
     min_,
+    not_,
     refs,
     sum_,
     times,
@@ -189,6 +190,14 @@ def test_an_equality_is_read_through_the_labelled_index_the_module_writes_and_th
     assert rendered(Query(where=any_of(q.name.eq("Ada"), q.name.eq("Bo"))), indexed=INDEXED).labels_tested == ()
     # A range comparison is not read through the index: the module reads an equality alone through it.
     assert rendered(Query(where=q.name.gte("A")), indexed=INDEXED).labels_tested == ()
+    # Nor inside a not.
+    assert rendered(Query(where=not_(q.name.eq("Ada"))), indexed=INDEXED).labels_tested == ()
+    # The filter and the seek are each compiled as one of the statement's conjuncts: the filter's label kept beside a
+    # seek that implies none, and a seek over the indexed property implying none itself.
+    seek = rendered(Query(where=q.name.eq("Ada"), order_by=[q.id.asc()], seek=q.id.after("B")), indexed=INDEXED)
+    assert seek.labels_tested == ("Scored",)
+    by_name = Query(where=q.score.gt(1), order_by=[q.name.asc()], seek=q.name.after("B"))
+    assert rendered(by_name, indexed=INDEXED).labels_tested == ()
 
 
 def test_a_views_root_equality_implies_its_label_and_a_related_nodes_of_the_same_label_does_not():
@@ -205,32 +214,53 @@ def test_a_views_root_equality_implies_its_label_and_a_related_nodes_of_the_same
     assert tested in backend.load_all_views(hierarchy, related.where, None, None, related.labels_tested).text
 
 
+class Tagged(NodeFragment, labels=["Tagged", "Extra"]):
+    id: Annotated[str, NodeId()]
+    name: str | None = None
+
+
+def test_of_a_roots_labels_only_those_whose_index_an_equality_is_read_through_are_implied_in_the_roots_order():
+    tagged, t = registry.fragment(Tagged), refs(Tagged)
+    query = Query(where=[t.id.eq("a"), t.name.eq("Ada")])
+    extra = rendered(query, tagged, [SchemaItem("Extra", ("name",))])
+    assert extra.labels_tested == ("Extra",)
+    statement = backend.load_all_fragments(tagged, extra.where, None, extra.labels_tested).text
+    assert "WHERE CASE WHEN JSON_EXISTS(n_.labels, '$?(@ == \"Tagged\")') THEN 1 END = 1 AND (" in statement
+    assert "JSON_EXISTS(n_.labels, '$?(@ == \"Extra\")')" not in statement
+    both = rendered(query, tagged, [SchemaItem("Extra", ("name",)), SchemaItem("Tagged", ("id",))])
+    assert both.labels_tested == ("Tagged", "Extra")
+
+
 def lowered(where: Any, indexed: list[SchemaItem]) -> Any:
     return rendered(Query(where=lowered_where(where, account, {"email"})), account, indexed)
 
 
-def test_the_label_of_an_ignore_case_equality_read_through_the_index_over_a_lowercased_copy_is_tested():
-    # drivine-cypher-spec#373: the module reads the copy through the labelled index, but past 4,000 bytes its term
-    # holds for any node, so the statement tests the label itself.
+def test_the_label_of_an_ignore_case_equality_read_through_the_index_over_a_lowercased_copy_is_implied():
+    # drivine-cypher-spec#373: the module reads the copy through the labelled index and keeps the label's test within
+    # its term past 4,000 bytes too, so it says the condition implies the label, and the statement doesn't test it.
     a = refs(Account)
     copy = [SchemaItem("Account", ("__drivine.lower.email",))]
     by_name = [*copy, SchemaItem("Account", ("name",))]
     query = lowered(a.email.eq_ignore_case("Ada@X.com"), copy)
     assert "CASE WHEN JSON_EXISTS(n_.labels, '$[*]?(@ == \"Account\")') THEN" in query.where
-    assert query.labels_tested == ()
+    assert query.labels_tested == ("Account",)
     statement = backend.load_all_fragments(account, query.where, None, query.labels_tested)
-    assert "WHERE JSON_EXISTS(n_.labels, '$?(@ == \"Account\")') AND (" in statement.text
+    assert "JSON_EXISTS(n_.labels, '$?(@ == \"Account\")') AND (" not in statement.text
     # An equality of the copy's own value, not lowered, still tests the label through the index.
     plain = rendered(Query(where=a.property("__drivine.lower.email").eq("ada@x.com")), account, copy)
     assert plain.labels_tested == ("Account",)
     # As does a plain indexed equality beside the lowered one.
     assert lowered([a.email.eq_ignore_case("Ada@X.com"), a.name.eq("Ada")], by_name).labels_tested == ("Account",)
-    # But not an equality of an indexed property the module reads through no index, a list's or "": its term holds no
-    # label test, and the lowered one's doesn't decide it.
+    # And beside an equality of an indexed property the module reads through no index, a list's or "", whose term holds
+    # no label test, the lowered one's still implies it.
     for value in (["Ada"], ""):
         unread = lowered([a.email.eq_ignore_case("Ada@X.com"), a.name.eq(value)], by_name)
         assert "CASE WHEN JSON_EXISTS(n_.labels, '$[*]?(@ == \"Account\")') THEN" in unread.where
-        assert unread.labels_tested == ()
+        assert unread.labels_tested == ("Account",)
+    # Without the lowered equality, such an equality implies nothing.
+    for value in (["Ada"], ""):
+        alone = rendered(Query(where=a.name.eq(value)), account, by_name)
+        assert alone.labels_tested == ()
 
 
 def test_a_text_past_4000_bytes_is_compared_as_a_clob_not_through_the_index_and_the_label_tested():
@@ -250,7 +280,10 @@ def test_a_text_past_4000_bytes_is_compared_as_a_clob_not_through_the_index_and_
 
 def columns(ran: list[str], kind: str) -> list[str]:
     """The expressions the index of the kind (lx2, uq2) is made over, over the DSL's row, split at the top level."""
-    made = re.search(rf"INDEX IF NOT EXISTS drivine_{kind}_Scoredname_\w+ ON drivine_node n \((.*)\)';", "\n".join(ran))
+    # A range index's labelled index is built ONLINE, the unique one isn't (liberation-data/drivine-cypher-spec#381).
+    made = re.search(
+        rf"INDEX IF NOT EXISTS drivine_{kind}_Scoredname_\w+ ON drivine_node n \((.*)\)(?: ONLINE)?';", "\n".join(ran)
+    )
     assert made is not None, ran
     ddl = re.sub(r"\bn\.", "n_.", made.group(1).replace("''", "'"))
     split: list[str] = []

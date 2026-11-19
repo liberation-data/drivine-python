@@ -656,16 +656,24 @@ def test_a_text_past_32_kb_set_from_an_unwound_parameter_on_two_nodes_leaves_the
 
 
 @pytest.mark.skipif(not ORACLE, reason="Oracle isn't configured: set ORACLE_TESTS=true.")
-def test_a_map_an_unwound_item_holds_with_a_key_as_extended_jsons_is_written_as_the_map_it_is_on_oracle(
+def test_a_map_an_unwound_item_holds_with_a_key_as_extended_jsons_is_refused_as_a_property_not_read_as_a_number(
     factory: PersistenceManagerFactory,
 ):
-    # Only a text a write takes from its row is read through the row's text (#176, drivine4j#309): a map is read as
-    # JSON, as before, and not from extended JSON, which would read {"$numberLong": "5"} as the number 5.
+    # A map is no property, as in Neo4j (liberation-data/drivine-cypher-spec#367): the write is refused whole, not taken
+    # from extended JSON, which would read {"$numberLong": "5"} as the number 5 (#176, drivine4j#309), and nothing is
+    # written.
     pm = factory.get("oracle")
     clear(pm)
     items = [{"id": 1, "m": {"$numberLong": "5"}}, {"id": 2, "m": {"$numberDouble": "2.0"}}]
-    pm.query(spec("UNWIND $items AS t CREATE (:CyWrite {id: t.id, m: t.m})", {"items": items}))
-    assert pm.query(spec("MATCH (n:CyWrite) RETURN properties(n) ORDER BY n.id")) == items
+    with pytest.raises(Exception) as refused:
+        pm.query(spec("UNWIND $items AS t CREATE (:CyWrite {id: t.id, m: t.m})", {"items": items}))
+    causes: list[BaseException] = []
+    error: BaseException | None = refused.value
+    while error is not None and error not in causes:
+        causes.append(error)
+        error = error.__cause__ or error.__context__
+    assert any("not a map, as in Neo4j" in str(it) for it in causes), repr(refused.value)
+    assert pm.query(spec("MATCH (n:CyWrite) RETURN n.id")) == []
 
 
 @pytest.mark.nightly
@@ -4555,9 +4563,9 @@ def test_a_text_in_a_list_sorts_by_its_code_points_up_to_and_across_its_500th_ch
 
 # Values of several kinds sorted as Cypher orders their kinds, a map, a list, a text, a truth value, a number, then
 # null: drivine4j's tests of liberation-data/drivine4j#299, and Drivine for TypeScript's port of them
-# (liberation-data/drivine#371), ported for #175, beside the spec's cases since v0.6.16 (#299). Postgres takes
-# `jsonb`'s order for every kind but a text: a number before a truth value, a map and a list last
-# (liberation-data/drivine4j#307).
+# (liberation-data/drivine#371), ported for #175, beside the spec's cases since v0.6.16 (#299). Postgres ranks the
+# kinds so too since compiler 0.51.0 (liberation-data/drivine-cypher-spec#374, drivine4j#307), which the spec's cases
+# hold it to; lists nested among other kinds, which no case of the spec has yet, are still left out there.
 
 KIND_ORDER_ON_POSTGRES = "Postgres takes jsonb's order of kinds (liberation-data/drivine4j#307)."
 
@@ -4581,8 +4589,6 @@ def test_values_of_several_kinds_sort_as_cypher_orders_their_kinds_a_map_a_list_
     cypher_pm: PersistenceManager,
 ):
     # Beside the spec's case since v0.6.16 (#299): Oracle sorts first by where a value's kind comes, then by the value.
-    if cypher_pm.type is DatabaseType.POSTGRES:
-        pytest.skip(KIND_ORDER_ON_POSTGRES)
 
     def rows(cypher: str) -> Any:
         return typed(cypher_pm.query(spec(cypher)))
@@ -4631,8 +4637,6 @@ def test_values_of_several_kinds_sort_as_cypher_orders_their_kinds_a_map_a_list_
 def test_a_property_stored_as_several_kinds_sorts_as_cypher_orders_their_kinds(cypher_pm: PersistenceManager):
     # Beside the spec's case since v0.6.16 (#299): a property read from the store may be of any kind, so its kind is
     # ranked first.
-    if cypher_pm.type is DatabaseType.POSTGRES:
-        pytest.skip(KIND_ORDER_ON_POSTGRES)
 
     def rows(cypher: str) -> Any:
         return typed(cypher_pm.query(spec(cypher)))

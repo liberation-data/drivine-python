@@ -7,6 +7,7 @@ from typing import Any, TypeVar
 from neo4j import AsyncManagedTransaction, AsyncResult, AsyncSession, AsyncTransaction
 
 from drivine.connection.connection import Connection
+from drivine.connection.database_type import DatabaseType
 from drivine.connection.neo4j.neo4j_cursor import Neo4jCursor
 from drivine.connection.neo4j.neo4j_result_mapper import Neo4jResultMapper
 from drivine.connection.neo4j.neo4j_spec_compiler import Neo4jSpecCompiler
@@ -26,15 +27,22 @@ class Neo4jConnection(Connection):
     A session on a Bolt engine: Neo4j, Memgraph or Neptune.
     """
 
-    def __init__(self, session: AsyncSession, session_id: str, result_mapper: GraphResultMapper | None = None):
+    def __init__(
+        self,
+        session: AsyncSession,
+        session_id: str,
+        result_mapper: GraphResultMapper | None = None,
+        engine: DatabaseType = DatabaseType.NEO4J,
+    ):
         self.session = session
+        self.engine = engine
         self.session_id = session_id
         self.result_mapper = result_mapper or Neo4jResultMapper()
         self.transaction: AsyncTransaction | None = None
 
     async def query(self, spec: QuerySpecification[T]) -> list[T]:
         finalized = spec.finalized_copy("CYPHER")
-        compiled = Neo4jSpecCompiler(finalized).compile()
+        compiled = Neo4jSpecCompiler(finalized, self.engine).compile()
         start = time.perf_counter()
         result = await self._run(compiled.statement, compiled.parameters)
         records = [record async for record in result]
@@ -43,7 +51,7 @@ class Neo4jConnection(Connection):
 
     async def open_cursor(self, spec: CursorSpecification[T]) -> Neo4jCursor[T]:
         finalized = spec.finalized_copy("CYPHER")
-        compiled = Neo4jSpecCompiler(finalized).compile()
+        compiled = Neo4jSpecCompiler(finalized, self.engine).compile()
         start = time.perf_counter()
         result = await self._run(compiled.statement, compiled.parameters)
         log_statement(self.session_id, finalized, start)

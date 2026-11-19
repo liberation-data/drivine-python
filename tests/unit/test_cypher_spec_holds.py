@@ -43,21 +43,25 @@ def test_a_hold_that_isnt_a_skip_skips_no_step():
     )
 
 
-def test_the_dropped_p_where_case_is_held_on_neo4j_at_steps_11_and_110_and_may_pass_there():
-    # CI's Neo4j gives four rows where the box's gives none (drivine#764): held so either answer passes.
+def test_a_hold_that_may_pass_lets_its_steps_pass_on_its_stores_alone(monkeypatch: pytest.MonkeyPatch):
+    case = next(it for it in QUERIES.cases if it.name == "collect skips nulls")
+    hold = Hold(1, ("neo4j",), steps=(2,), may_pass="it passes on one host and fails on another")
+    monkeypatch.setattr(cypher_spec, "HELD", {"queries.yaml": {case.name: [hold]}})
+    assert [held_for("queries.yaml", case, index, "neo4j") for index in range(3)] == [None, "drivine-python#1", None]
+    assert [may_pass("queries.yaml", case, index, "neo4j") for index in range(3)] == [False, True, False]
+    assert [skipped_for("queries.yaml", case, index, "neo4j") for index in range(3)] == [None] * 3
+    for store in ("postgres", "sqlite", "oracle"):
+        assert [may_pass("queries.yaml", case, index, store) for index in range(3)] == [False] * 3
+
+
+def test_the_dropped_p_where_case_holds_no_step_as_the_spec_pins_no_neo4j_answer_for_it():
+    # The spec no longer pins Neo4j's answer for a dropped p read in the WITH's WHERE through a list comprehension,
+    # which it gave differently by host (liberation-data/drivine-cypher-spec#366, #368; drivine#764), so the two
+    # steps that were held for it are no steps of the case.
     name = "Nesting of a dropped variable: a WITH that drops p and groups, in its WHERE"
     case = next(it for it in QUERIES.cases if it.name == name)
-    held = [index for index in range(len(case.steps)) if held_for("queries.yaml", case, index, "neo4j")]
-    assert held == [10, 109]
-    assert all(held_for("queries.yaml", case, index, "neo4j") == "drivine#764" for index in held)
-    assert all(may_pass("queries.yaml", case, index, "neo4j") for index in held)
-    for store in ("memgraph", "falkordb", "postgres", "sqlite", "oracle"):
-        assert [held_for("queries.yaml", case, index, store) for index in range(len(case.steps))] == [None] * len(
-            case.steps
-        )
-    assert [skipped_for("queries.yaml", case, index, "neo4j") for index in range(len(case.steps))] == [None] * len(
-        case.steps
-    )
+    assert not any(" WHERE p.name IS NOT NULL]" in it.cypher for it in case.steps)
+    assert name not in cypher_spec.HELD["queries.yaml"]
 
 
 def test_a_hold_that_may_not_pass_must_fail():

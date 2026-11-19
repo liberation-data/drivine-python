@@ -189,15 +189,6 @@ def serialized_label(text: str) -> str:
     return f'"{escaped}"'
 
 
-def module_label_test(alias: str, label: str) -> str:
-    """
-    The test the shared module writes of whether the node row `alias` carries `label`, where it reads an equality of
-    the node's property through the labelled index of the label (`CASE WHEN <test> THEN …`): a condition that holds it
-    at its top implies the label, so a statement needn't test the label again (see oracle_backend.labels_implied).
-    """
-    return f"CASE WHEN JSON_EXISTS({alias}.labels, '$[*]?(@ == \"{_escaped(label)}\")') THEN"
-
-
 def labelled_value(alias: str, label: str, property: str) -> str:
     """
     A property of the node row `alias` as Drivine 5.0's range index or uniqueness constraint over the label held it

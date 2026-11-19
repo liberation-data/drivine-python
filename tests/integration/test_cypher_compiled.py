@@ -4577,9 +4577,9 @@ async def test_a_text_in_a_list_sorts_by_its_code_points_up_to_and_across_its_50
 
 # Values of several kinds sorted as Cypher orders their kinds, a map, a list, a text, a truth value, a number, then
 # null: drivine4j's tests of liberation-data/drivine4j#299, and Drivine for TypeScript's port of them
-# (liberation-data/drivine#371), ported for #175, beside the spec's cases since v0.6.16 (#299). Postgres takes
-# `jsonb`'s order for every kind but a text: a number before a truth value, a map and a list last
-# (liberation-data/drivine4j#307).
+# (liberation-data/drivine#371), ported for #175, beside the spec's cases since v0.6.16 (#299). Postgres ranks the
+# kinds so too since compiler 0.51.0 (liberation-data/drivine-cypher-spec#374, drivine4j#307), which the spec's cases
+# hold it to; lists nested among other kinds, which no case of the spec has yet, are still left out there.
 
 KIND_ORDER_ON_POSTGRES = "Postgres takes jsonb's order of kinds (liberation-data/drivine4j#307)."
 
@@ -4603,8 +4603,6 @@ async def test_values_of_several_kinds_sort_as_cypher_orders_their_kinds_a_map_a
     cypher_pm: PersistenceManager,
 ):
     # Beside the spec's case since v0.6.16 (#299): Oracle sorts first by where a value's kind comes, then by the value.
-    if cypher_pm.type is DatabaseType.POSTGRES:
-        pytest.skip(KIND_ORDER_ON_POSTGRES)
 
     async def rows(cypher: str) -> Any:
         return typed(await cypher_pm.query(spec(cypher)))
@@ -4655,8 +4653,6 @@ async def test_values_of_several_kinds_sort_as_cypher_orders_their_kinds_a_map_a
 async def test_a_property_stored_as_several_kinds_sorts_as_cypher_orders_their_kinds(cypher_pm: PersistenceManager):
     # Beside the spec's case since v0.6.16 (#299): a property read from the store may be of any kind, so its kind is
     # ranked first.
-    if cypher_pm.type is DatabaseType.POSTGRES:
-        pytest.skip(KIND_ORDER_ON_POSTGRES)
 
     async def rows(cypher: str) -> Any:
         return typed(await cypher_pm.query(spec(cypher)))

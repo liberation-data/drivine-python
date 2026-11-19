@@ -19,13 +19,14 @@ Not yet proven on every store (drivine-python#514): `migrate` refuses to run unl
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Any, Literal, Protocol, TypedDict, cast
 
-from pydantic import AwareDatetime, BaseModel, PlainSerializer, WrapSerializer
+from pydantic import AwareDatetime, BaseModel
 
 from drivine.connection.connection import Connection
 from drivine.drivine_error import DrivineError
@@ -33,6 +34,8 @@ from drivine.model.field_mapping import FieldMapping
 from drivine.model.field_shape import FieldShape
 from drivine.model.model_registry import ModelRegistry
 from drivine.query.query_specification import QuerySpecification
+
+logger = logging.getLogger("drivine.store")
 
 Kind = Literal["date", "localtime", "time", "localdatetime", "datetime", "duration", "float", "bytes"]
 """
@@ -104,6 +107,9 @@ localdatetime, as 0.8.0 saved it with a `Z`, as a moment; a `time` not a localti
 offset, which its type can't tell; and bytes not at all, as 0.8.0 saved them as their UTF-8 text, not the list of
 numbers or base64 text the migration reads bytes from. Each such property is a candidate in a dry run's report where
 its values all read as one kind, to declare by hand (see `with_declared`).
+
+A field's own pydantic serializer, alias or `json_encoders` changes nothing here: 0.8.0 saved the field's value, not its
+serialized form, under the name the registry gives the field, as this version does.
 """
 
 
@@ -116,10 +122,9 @@ def declarations_of(
     tuple or a set of one, by the name the property is stored under (a `GraphProperty`'s, or the registry's naming of
     the field), as the user names it: a name that begins with `$` is declared as it is. For the relationship fragment
     `fragment`, the same of each of its fields but the node it leads to, under `relationship_type`. A field that is
-    transient, JSON packed, given a serializer of its own, a map, a list of lists, the node's stamp, its labels or a
-    property bag is not declared, nor is any other type (see `_KINDS`). drivine4j's `declarationsOf`. `registry` is the
-    one the application's managers build models with, for its naming of fields: a new one, which names them in camel
-    case, by default.
+    transient, JSON packed, a map, a list of lists, the node's stamp, its labels or a property bag is not declared, nor
+    is any other type (see `_KINDS`). drivine4j's `declarationsOf`. `registry` is the one the application's managers
+    build models with, for its naming of fields: a new one, which names them in camel case, by default.
     """
     models = registry or ModelRegistry()
     mapping: FieldMapping
@@ -133,8 +138,7 @@ def declarations_of(
     declared: list[Declaration] = []
     for label in labels:
         for field, stored in mapping.graph_properties.items():
-            shaped = field in mapping.json_packed or _serialized(pydantic_model, field)
-            kind = None if shaped else _kind_of(fields[field].annotation)
+            kind = None if field in mapping.json_packed else _kind_of(fields[field].annotation)
             if kind is not None:
                 declared.append(Declaration(label, stored, kind))
     return declared
@@ -152,19 +156,6 @@ def with_declared(derived: Iterable[Declaration], by_hand: Iterable[Declaration]
     for key, it in hand.items():
         found.setdefault(key, it)
     return list(found.values())
-
-
-def _serialized(model: type[BaseModel], field: str) -> bool:
-    """
-    Whether `field` of `model` is written as a serializer of its own says (a `field_serializer`, or a `PlainSerializer`
-    or `WrapSerializer` in its annotation), whose saved form its type can't tell.
-    """
-    decorators: Any = getattr(model, "__pydantic_decorators__", None)
-    if decorators is not None and any(
-        field in it.info.fields or "*" in it.info.fields for it in decorators.field_serializers.values()
-    ):
-        return True
-    return any(isinstance(it, PlainSerializer | WrapSerializer) for it in model.model_fields[field].metadata)
 
 
 def _kind_of(annotation: Any) -> Kind | None:
@@ -244,25 +235,29 @@ class StoreLayoutMigration:
                 "The store layout migration is not yet proven on every store (drivine-python#514): back the graph up "
                 "first, and pass unproven=True to run it."
             )
+        # Asked first, so declarations or a batch size the module refuses are refused before the store is reached.
+        answer = self._ask(
+            {
+                "start": {
+                    "declarations": [{"label": d.label, "property": d.property, "kind": d.kind} for d in declarations],
+                    "batchSize": batch_size,
+                    "dryRun": dry_run,
+                    "keepInvalid": keep_invalid,
+                }
+            }
+        )
         work = await self._provider.connect_unjudged()
         held: dict[str, Connection] = {}
         try:
-            answer = self._ask(
-                {
-                    "start": {
-                        "declarations": [
-                            {"label": d.label, "property": d.property, "kind": d.kind} for d in declarations
-                        ],
-                        "batchSize": batch_size,
-                        "dryRun": dry_run,
-                        "keepInvalid": keep_invalid,
-                    }
-                }
-            )
             while "run" in answer:
                 outcomes = await self._round(work, held, answer["run"])
                 answer = self._ask({"resume": answer["state"], "outcomes": outcomes})
-            return cast(MigrationReport, dict(answer["done"]))
+            report = cast(MigrationReport, dict(answer["done"]))
+            graph = self._provider.graph_name
+            logger.info("Store layout migration of '%s': %s: %s", graph, report["status"], report["message"])
+            for note in report.get("notes", []):
+                logger.warning("Store layout migration of '%s': %s", graph, note)
+            return report
         finally:
             # Cleanup after the migration's own outcome, which a failure here must not hide.
             lock = held.get("lock")

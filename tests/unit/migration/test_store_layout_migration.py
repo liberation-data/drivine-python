@@ -8,6 +8,7 @@ layout 2.
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 import pytest
@@ -73,7 +74,7 @@ class Planner:
         self.asked.append(request)
         if self.rounds:
             return json.dumps({"run": self.rounds.pop(0), "state": {"n": len(self.asked)}})
-        return json.dumps({"done": {"status": "migrated", "message": "done"}})
+        return json.dumps({"done": {"status": "migrated", "message": "done", "notes": ["No index is made."]}})
 
 
 DECLARED = [Declaration("Person", "born", "date")]
@@ -84,7 +85,9 @@ async def test_a_migration_unless_told_it_is_unproven_is_refused() -> None:
         await StoreLayoutMigration(FakeProvider(), Planner([])).migrate(DECLARED)
 
 
-async def test_each_action_runs_where_it_belongs_and_the_lock_is_held_on_a_connection_of_its_own() -> None:
+async def test_each_action_runs_where_it_belongs_and_the_lock_is_held_on_a_connection_of_its_own(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     provider = FakeProvider()
     planner = Planner(
         [
@@ -104,8 +107,16 @@ async def test_each_action_runs_where_it_belongs_and_the_lock_is_held_on_a_conne
             ],
         ]
     )
-    report = await StoreLayoutMigration(provider, planner).migrate(DECLARED, batch_size=2, dry_run=False, unproven=True)
+    with caplog.at_level(logging.INFO, logger="drivine.store"):
+        report = await StoreLayoutMigration(provider, planner).migrate(
+            DECLARED, batch_size=2, dry_run=False, unproven=True
+        )
     assert report["status"] == "migrated"
+    # Its status logged, and each note, what it leaves to others, warned of, as drivine4j and TypeScript's do.
+    assert [(it.levelname, it.getMessage()) for it in caplog.records] == [
+        ("INFO", "Store layout migration of 'drivine': migrated: done"),
+        ("WARNING", "Store layout migration of 'drivine': No index is made."),
+    ]
     assert planner.asked[0]["start"] == {
         "declarations": [{"label": "Person", "property": "born", "kind": "date"}],
         "batchSize": 2,
@@ -147,11 +158,28 @@ async def test_a_failed_action_ends_its_round_and_a_failed_transaction_is_rolled
     assert "c1: rollback" in provider.log and not any("NEVER" in line for line in provider.log)
 
 
-async def test_the_modules_refusal_is_thrown() -> None:
+async def test_the_modules_refusal_is_thrown_before_the_store_is_reached() -> None:
+    provider = FakeProvider()
     with pytest.raises(DrivineError, match="refused the migration"):
-        await StoreLayoutMigration(FakeProvider(), lambda _: json.dumps({"error": "No kind x"})).migrate(
+        await StoreLayoutMigration(provider, lambda _: json.dumps({"error": "No kind x"})).migrate(
             DECLARED, unproven=True
         )
+    assert provider.connections == 0
+
+
+async def test_a_lock_whose_statement_fails_is_given_back_and_ends_its_round() -> None:
+    provider = FakeProvider(fail_on="LOCK")
+    planner = Planner(
+        [
+            [
+                {"type": "lock", "statement": "LOCK"},
+                {"type": "execute", "statement": "NEVER", "parameters": {}, "purpose": "x"},
+            ]
+        ]
+    )
+    await StoreLayoutMigration(provider, planner).migrate(DECLARED, unproven=True)
+    assert planner.asked[1]["outcomes"] == [{"type": "failed", "message": "refused LOCK"}]
+    assert provider.log == ["c2: begin", "c2: LOCK []", "c2: rollback", "c2: release", "c1: release"]
 
 
 def test_a_graph_engine_is_refused() -> None:

@@ -110,8 +110,14 @@ class Serialized(NodeFragment, labels=["Serialized"]):
         return value.strftime("%Y%m%d")
 
 
-def test_a_field_written_as_a_serializer_of_its_own_says_is_not_declared_as_its_saved_form_cant_be_told():
-    assert by_label(declarations_of(Serialized)) == [("Serialized", "kept", "date")]
+def test_a_field_with_a_serializer_of_its_own_is_declared_as_its_type_says_as_0_8_0_saved_its_value_not_its_dump():
+    # 0.8.0's save wrote each field's value as it is (save_statement_builder.props_of), never its pydantic dump.
+    assert by_label(declarations_of(Serialized)) == [
+        ("Serialized", "byMethod", "date"),
+        ("Serialized", "kept", "date"),
+        ("Serialized", "plain", "date"),
+        ("Serialized", "wrapped", "float"),
+    ]
 
 
 def test_a_field_neither_loaded_nor_held_as_its_kind_is_not_declared():

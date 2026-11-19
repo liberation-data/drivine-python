@@ -29,6 +29,12 @@ async with DatabaseRegistry() as registry:          # closes the drivers and poo
 
 On FalkorDB, `DATABASE_NAME` names the graph, `graph` by default.
 
+A `time` with an offset is saved and bound on each graph engine
+([#565](https://github.com/liberation-data/drivine-python/issues/565)). Neo4j holds it as a Time of its offset, and
+gives it back as a `time` of that offset. Memgraph, which has no Time, and FalkorDB hold its ISO text, `10:11:12+02:00`,
+which a field declared `time` loads back as the time, and a statement that returns it gives as text. A `time` without
+an offset, or of a `ZoneInfo`, which gives none for a time alone, is a local time on each.
+
 On Oracle, `DATABASE_NAME` is the service (`FREEPDB1`, say), and `DATABASE_DEFAULT_GRAPH_PATH` names the graph,
 `drivine` by default. A graph is drivine4j's tables, `<graph>_node`, `<graph>_edge` and `<graph>_schema`, and a SQL
 property graph over them, made on the first connection when they aren't there, so one store serves the JVM, Node and

@@ -44,7 +44,8 @@ class Neo4jConnectionProvider(ConnectionProvider):
         return self._driver
 
     def connect(self) -> Connection:
-        return Neo4jConnection(self.driver.session(database=self.database), short_id())  # pyright: ignore[reportUnknownMemberType]
+        session = self.driver.session(database=self.database)  # pyright: ignore[reportUnknownMemberType]
+        return Neo4jConnection(session, short_id(), engine=self.type)
 
     def end(self) -> None:
         if self._driver is not None:

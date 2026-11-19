@@ -49,11 +49,11 @@ is the number 6. Text that is no value of the type, such as `"abc"` for an `int`
 number's text, finds no node: nothing is run, and a DEBUG line on the `drivine.node_ids` logger says why. A `None` id
 finds none either, and runs nothing. Neo4j, Memgraph and FalkorDB compare the id as it is given.
 
-A node whose id the store holds as a temporal value, such as a date another library or a Cypher `date(...)` wrote, is
-refused by name when it is loaded by a class that declares the id a `str`, a number or any other type that isn't
-temporal. Its id would load as its text, which no lookup by the id finds, so saving it back would make a second node.
-The message says what to declare instead: `Event's NodeId id is declared a str, but the node whose id is '2026-01-05'
-holds it as a date: declare id as a date to load it.` An id declared `Any` loads the text as it is.
+A node whose id Oracle, Postgres or SQLite holds as a temporal value, such as a date another library or a Cypher
+`date(...)` wrote, is refused by name when it is loaded by a class that declares the id a `str`, a number or any other
+type that isn't temporal. Its id would load as its text, which no lookup by the id finds, so saving it back would make a
+second node. The message says what to declare instead: `Event's NodeId id is declared a str, but the node whose id is
+'2026-01-05' holds it as a date: declare id as a date to load it.` An id declared `Any` loads the text as it is.
 
 ### Queries
 

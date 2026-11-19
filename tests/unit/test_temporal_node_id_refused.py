@@ -47,6 +47,21 @@ class AnyId(NodeFragment, labels=["Day"]):
     id: Annotated[Any, NodeId()]
 
 
+class TextOrAnyId(NodeFragment, labels=["Day"]):
+    id: Annotated[str | Any, NodeId()]
+
+
+class NumberOrDateId(NodeFragment, labels=["Day"]):
+    """A union that reads a date's text as the date: an int can't hold it."""
+
+    id: Annotated[int | date, NodeId()]
+
+
+class TextOrDateId(NodeFragment, labels=["Day"]):
+    # pydantic validates a tag's text as the str: the id would load as text all the same.
+    id: Annotated[str | date, NodeId()]
+
+
 class DateId(NodeFragment, labels=["Day"]):
     id: Annotated[date, NodeId()]
 
@@ -74,7 +89,14 @@ def loaded(type_: type[NodeFragment], props: dict[str, Any]) -> Any:
 
 
 @pytest.mark.parametrize(
-    ("type_", "declared"), [(TextId, "str"), (OptionalTextId, "str | None"), (NumberId, "int"), (Unvalidated, "str")]
+    ("type_", "declared"),
+    [
+        (TextId, "str"),
+        (OptionalTextId, "str | None"),
+        (NumberId, "int"),
+        (Unvalidated, "str"),
+        (TextOrDateId, "str | date"),
+    ],
 )
 def test_a_tagged_id_is_refused_by_name_for_a_type_no_tag_loads_as(type_: type[NodeFragment], declared: str):
     message = (
@@ -100,6 +122,8 @@ def test_a_renamed_id_is_read_by_its_stored_name_and_refused_by_its_field():
         (TimeId, TagText("10:00:00", "localtime")),
         (DurationId, TagText("PT1S", "duration")),
         (AnyId, TagText("2026-01-05", "date")),
+        (TextOrAnyId, TagText("2026-01-05", "date")),
+        (NumberOrDateId, TagText("2026-01-05", "date")),
     ],
 )
 def test_a_tagged_id_loads_for_a_temporal_type_or_any(type_: type[NodeFragment], held: TagText):
@@ -113,3 +137,7 @@ def test_a_text_id_loads_as_a_plain_str_and_an_untagged_one_is_not_refused():
 
 def test_a_tagged_property_that_is_no_id_loads_as_a_plain_str_for_a_str_field():
     assert type(loaded(TextAt, {"id": "a", "at": TagText("2026-01-05", "date")}).at) is str
+
+
+def test_a_union_that_reads_the_tag_as_its_temporal_member_loads_it_as_that():
+    assert loaded(NumberOrDateId, {"id": TagText("2026-01-05", "date")}).id == date(2026, 1, 5)

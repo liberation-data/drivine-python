@@ -161,16 +161,24 @@ def _refuse_temporal_id(model: FragmentModel, props: Mapping[str, Any]) -> None:
 
 def _refuses_tags(kind: Any) -> bool:
     """
-    Whether a NodeId declared `kind` refuses a temporal value's tag: a type, or a union of types, none of which a tag
-    loads as (`str`, `int | None`). One declared `Any`, or a union with it, takes the text as it is given.
+    Whether a NodeId declared `kind` refuses a temporal value's tag: a type no tag loads as (`str`), or a union that
+    loads the tag's text as text: one with no temporal member (`int | None`), or one with a `str` (`str | date`, as
+    pydantic keeps text that is a `str` as it is). `int | date` loads the text as the date, and isn't refused. One
+    declared `Any`, or a union with it, takes the text as it is given, and a union's `None` takes no tag.
     """
     if typing.get_origin(kind) in (typing.Union, types.UnionType):
-        return all(_refuses_tags(it) for it in typing.get_args(kind))
+        members = [it for it in typing.get_args(kind) if it is not type(None)]
+        if Any in members:
+            return False
+        texts = any(isinstance(it, type) and issubclass(it, str) for it in members)
+        return texts or all(_refuses_tags(it) for it in members)
     return kind is not Any and isinstance(kind, type) and not issubclass(kind, _TEMPORAL_IDS)
 
 
 def _declared_name(kind: Any) -> str:
-    """The NodeId's declared type as Python writes it: `str`, `int`, `str | None`."""
+    """The NodeId's declared type as Python writes it: `str`, `int`, `str | None`, `str | date`."""
+    if typing.get_origin(kind) in (typing.Union, types.UnionType):
+        return " | ".join("None" if it is type(None) else _declared_name(it) for it in typing.get_args(kind))
     return kind.__name__ if isinstance(kind, type) else str(kind)
 
 

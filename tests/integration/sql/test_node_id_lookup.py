@@ -642,3 +642,52 @@ async def test_a_related_node_whose_date_id_is_declared_text_is_refused_by_name(
     assert await gom.edges.relate(TARGET, node_ref(LookupDay, date(2026, 1, 5)), "ON_TEXT_DAY")
     with pytest.raises(DrivineError, match=REFUSED):
         await gom.load_all(LookupTargetTextDays)
+
+
+class LookupDayAsAny(NodeFragment, labels=["SqlLookup", "LookupDay"]):
+    """A day's labels with its id and a property declared Any: each loads as the text of the tag it was read from."""
+
+    id: Annotated[Any, NodeId()]
+    name: str | None = None
+    when: Any = None
+
+
+async def test_a_date_id_declared_any_saved_back_is_one_node_that_keeps_its_date(gom: StatelessGraphObjectManager):
+    # Its id loads as its text, which the save looks up and writes as the date it was read from (#561).
+    await gom.save(LookupDay(id=date(2026, 1, 5), name="day"))
+    [loaded] = await gom.load_all(LookupDayAsAny)
+    await gom.save(loaded.model_copy(update={"name": "again"}))
+    assert [(it.id, it.name) for it in await gom.load_all(LookupDay)] == [(date(2026, 1, 5), "again")]
+
+
+async def test_an_id_declared_any_given_a_new_text_is_a_node_of_that_text(gom: StatelessGraphObjectManager):
+    await gom.save(LookupDay(id=date(2026, 1, 5), name="day"))
+    [loaded] = await gom.load_all(LookupDayAsAny)
+    await gom.save(loaded.model_copy(update={"id": "2026-01-05", "name": "text"}))
+    assert sorted(it.name or "" for it in await gom.load_all(LookupDayAsAny)) == ["day", "text"]
+
+
+class LookupDayWhen(NodeFragment, labels=["SqlLookup", "LookupDay"]):
+    id: Annotated[date, NodeId()]
+    name: str | None = None
+    when: date | None = None
+
+
+async def test_a_property_declared_any_saved_back_keeps_the_date_a_where_finds_it_by(gom: StatelessGraphObjectManager):
+    await gom.save(LookupDayWhen(id=date(2026, 1, 5), name="day", when=date(2026, 2, 1)))
+    [loaded] = await gom.load_all(LookupDayAsAny)
+    await gom.save(loaded.model_copy(update={"name": "again"}))
+    found = await gom.load_all(LookupDayWhen, where=refs(LookupDayWhen).when.eq(date(2026, 2, 1)))
+    assert [(it.name, it.when) for it in found] == [("again", date(2026, 2, 1))]
+
+
+async def test_a_date_id_over_a_moment_is_refused_by_name_as_one_a_save_couldnt_find(
+    gom: StatelessGraphObjectManager,
+):
+    await gom.save(LookupDayAt(id=datetime(2026, 1, 5, tzinfo=UTC), name="midnight"))
+    with pytest.raises(
+        DrivineError,
+        match=r"LookupDay's NodeId id is declared a date, .* holds it as a datetime, which"
+        r" a date can't save back: declare id as a datetime to load it\.",
+    ):
+        await gom.load_all(LookupDay)

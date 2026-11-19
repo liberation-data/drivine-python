@@ -99,7 +99,12 @@ def prepared(value: Any) -> Any:
 
 
 def _plain(value: Any) -> bool:
-    """Whether the layout holds `value` as plain JSON writes it: only whole numbers, texts, booleans and nulls."""
+    """
+    Whether the layout holds `value` as plain JSON writes it: only whole numbers, texts, booleans and nulls. A temporal
+    value's text a row gave (TagText) is held as the tag it was read from.
+    """
+    if isinstance(value, TagText):
+        return False
     if value is None or isinstance(value, (bool, int, str)):
         return True
     if isinstance(value, Decimal):

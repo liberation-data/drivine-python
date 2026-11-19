@@ -32,6 +32,7 @@ from decimal import Decimal
 from enum import Enum
 from typing import Any, Literal, cast
 
+from drivine.backend.sql.value_layout import TagText
 from drivine.cypher.sql.compiled_cypher import CompiledCypher
 from drivine.drivine_error import DrivineError
 
@@ -550,8 +551,13 @@ def written(value: Any) -> Any:
     - a list, tuple, set, frozenset or iterator is the list of its items; a map is its entries, wrapped as
       `{"$map": {...}}` where a key starts with `$`, so no map a caller binds is read as a tag.
 
+    A temporal value's text a row gave (value_layout.TagText) is that value again, of the kind its tag was: a node
+    loaded and saved back keeps it as the store held it, and a lookup by it finds the node (drivine-python#561).
+
     Any other value is refused, naming its type.
     """
+    if isinstance(value, TagText):
+        return {"$temporal": _TAG_KINDS[value.kind], "text": str(value)}
     if value is None or isinstance(value, (bool, str)):
         return value
     if isinstance(value, Enum):
@@ -584,6 +590,17 @@ def written(value: Any) -> Any:
     if isinstance(value, (list, tuple, set, frozenset, Iterator)):
         return [written(it) for it in value]  # pyright: ignore[reportUnknownVariableType]
     raise DrivineError(f"A parameter of type {type(value).__name__} can't be bound to a Cypher statement.")
+
+
+_TAG_KINDS = {
+    "date": "DATE",
+    "datetime": "DATE_TIME",
+    "localdatetime": "LOCAL_DATE_TIME",
+    "time": "TIME",
+    "localtime": "LOCAL_TIME",
+    "duration": "DURATION",
+}
+"""Each kind of tag the module writes, as a parameter names the temporal value of it."""
 
 
 def _to_the_minute(text: str, offset: timedelta | None) -> str:

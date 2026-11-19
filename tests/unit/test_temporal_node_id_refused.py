@@ -103,6 +103,7 @@ def loaded(type_: type[NodeFragment], props: dict[str, Any]) -> Any:
         (OptionalNumberId, "int | None"),
         (Unvalidated, "str"),
         (TextOrDateId, "str | date"),
+        (TextOrAnyId, "str | Any"),
     ],
 )
 def test_a_tagged_id_is_refused_by_name_for_a_type_no_tag_loads_as(type_: type[NodeFragment], declared: str):
@@ -129,7 +130,6 @@ def test_a_renamed_id_is_read_by_its_stored_name_and_refused_by_its_field():
         (TimeId, TagText("10:00:00", "localtime")),
         (DurationId, TagText("PT1S", "duration")),
         (AnyId, TagText("2026-01-05", "date")),
-        (TextOrAnyId, TagText("2026-01-05", "date")),
         (NumberOrDateId, TagText("2026-01-05", "date")),
     ],
 )
@@ -148,3 +148,62 @@ def test_a_tagged_property_that_is_no_id_loads_as_a_plain_str_for_a_str_field():
 
 def test_a_union_that_reads_the_tag_as_its_temporal_member_loads_it_as_that():
     assert loaded(NumberOrDateId, {"id": TagText("2026-01-05", "date")}).id == date(2026, 1, 5)
+
+
+@pytest.mark.parametrize(
+    ("type_", "held", "refused"),
+    [
+        (
+            DateId,
+            TagText("2026-01-05T00:00:00", "localdatetime"),
+            "as a localdatetime, which a date can't save back: declare id as a datetime to load it.",
+        ),
+        (
+            DateId,
+            TagText("2026-01-05T00:00:00Z", "datetime"),
+            "as a datetime, which a date can't save back: declare id as a datetime to load it.",
+        ),
+        (
+            DateTimeId,
+            TagText("2026-01-05", "date"),
+            "as a date, which a datetime can't save back: declare id as a date to load it.",
+        ),
+        (
+            DateTimeId,
+            TagText("2026-01-05T10:00:00.123456789Z", "datetime"),
+            "as a datetime below the microsecond, which a datetime can't save back: declare id as Any to load it.",
+        ),
+        (
+            TimeId,
+            TagText("10:00:00.1234567", "localtime"),
+            "as a localtime below the microsecond, which a time can't save back: declare id as Any to load it.",
+        ),
+    ],
+)
+def test_a_temporal_id_that_would_save_back_as_another_value_is_refused_by_name(
+    type_: type[NodeFragment], held: TagText, refused: str
+):
+    # A save writes the id it loaded as, which a lookup never finds: it would make a second node (#561).
+    message = f"{type_.__name__}'s NodeId id is declared a {type_.model_fields['id'].annotation.__name__}, but the node"
+    with pytest.raises(DrivineError, match=re.escape(message) + ".*" + re.escape(refused)):
+        loaded(type_, {"id": held})
+
+
+@pytest.mark.parametrize(
+    ("type_", "held"),
+    [
+        (DateTimeId, TagText("2026-01-05T10:00:00+02:00", "datetime")),
+        (DateTimeId, TagText("2026-01-05T10:00:00.123456", "localdatetime")),
+        (TimeId, TagText("10:00:00+02:00", "time")),
+    ],
+)
+def test_a_temporal_id_that_saves_back_as_it_is_held_loads(type_: type[NodeFragment], held: TagText):
+    assert loaded(type_, {"id": held}).id is not None
+
+
+def test_an_unvalidated_temporal_id_keeps_the_tag_it_was_read_from():
+    class UnvalidatedDate(NodeFragment, labels=["Day"], validate_on_load=False):
+        id: Annotated[date, NodeId()]
+
+    held = loaded(UnvalidatedDate, {"id": TagText("2026-01-05T00:00:00", "localdatetime")}).id
+    assert isinstance(held, TagText) and held.kind == "localdatetime"

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import types
 import typing
 from collections.abc import Iterable, Mapping
@@ -48,7 +49,9 @@ class GraphObjectMapper:
                 it for it in labels if (it in field.members if field.members is not None else it not in model.labels)
             ]
             values[field.field] = set(held) if field.is_set else held
-        return _instance(model.type, values, model.validate_on_load)
+        instance = _instance(model.type, values, model.validate_on_load)
+        _refuse_temporal_id_changed(model, props, instance)
+        return instance
 
     def view(self, model: GraphViewModel, row: Mapping[str, Any]) -> Any:
         rels: Mapping[str, Any] = row.get("rels") or {}
@@ -151,11 +154,64 @@ def _refuse_temporal_id(model: FragmentModel, props: Mapping[str, Any]) -> None:
     held = props.get(model.node_id_property or model.node_id_field)
     if not isinstance(held, TagText) or not _refuses_tags(model.node_id_type):
         return
-    declared = _declared_name(model.node_id_type)
+    raise _held_as_text(model, held)
+
+
+def _held_as_text(model: FragmentModel, held: TagText) -> DrivineError:
+    """The refusal of a node whose temporal id `model` would load as text: the words the three libraries share."""
     field = model.node_id_field
+    return DrivineError(
+        f"{model.type.__name__}'s NodeId {field} is declared a {_declared_name(model.node_id_type)}, but the node whose"
+        f" id is '{held}' holds it as a {held.kind}: declare {field} as a {held.kind} to load it."
+    )
+
+
+_PYTHON_TYPE_OF_TAG = {
+    "date": "date",
+    "datetime": "datetime",
+    "localdatetime": "datetime",
+    "time": "time",
+    "localtime": "time",
+    "duration": "timedelta",
+}
+"""The Python type each kind of tag loads as, and is saved back as that kind from."""
+
+_BELOW_THE_MICROSECOND = re.compile(r"\.\d{7,}")
+"""A fraction of a second past the microsecond, which no Python temporal value holds."""
+
+
+def _refuse_temporal_id_changed(model: FragmentModel, props: Mapping[str, Any], instance: Any) -> None:
+    """
+    Refuses, by name, a node whose NodeId a SQL store holds as a temporal value's tag that the id `model` declares
+    loads as another value: a `date` id over a `localdatetime` or a `datetime`, a `datetime` id over a `date`, or a
+    time below the microsecond, which Python holds to the microsecond. A save of the node would write the id it loaded
+    as, which a lookup by the id never finds, so it would make a second node (drivine-python#561, as
+    liberation-data/drivine#815). An id that holds the tag as it was read, as `Any` does (TagText), is saved back as
+    that tag, and isn't refused; one a union with `Any` validated as text (`str | Any`) is refused as text is.
+    """
+    field = model.node_id_field
+    if field is None:
+        return
+    held = props.get(model.node_id_property or field)
+    loaded = getattr(instance, field, None)
+    if not isinstance(held, TagText) or isinstance(loaded, TagText) or loaded is None:
+        return
+    from drivine.cypher.shared_compiler import written
+
+    request = written(loaded)
+    if not isinstance(request, dict) or "$temporal" not in request:
+        # A union with Any that validated the text as its `str`, `str | Any`: the id loaded as text.
+        raise _held_as_text(model, held)
+    kind = cast(str, request["$temporal"]).lower().replace("_", "")
+    if kind == held.kind and not _BELOW_THE_MICROSECOND.search(held):
+        return
+    declared = _declared_name(model.node_id_type)
+    fits = _PYTHON_TYPE_OF_TAG[held.kind]
+    advice = f"declare {field} as Any" if fits == declared or kind == held.kind else f"declare {field} as a {fits}"
     raise DrivineError(
         f"{model.type.__name__}'s NodeId {field} is declared a {declared}, but the node whose id is '{held}' holds it"
-        f" as a {held.kind}: declare {field} as a {held.kind} to load it."
+        f" as a {held.kind}{' below the microsecond' if kind == held.kind else ''}, which a {declared} can't save back:"
+        f" {advice} to load it."
     )
 
 

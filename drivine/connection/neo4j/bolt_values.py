@@ -3,10 +3,12 @@ Parameters as the Bolt engines take them: a `time` with an offset made one the N
 
 The driver packs a `time` with a zone by asking its `tzinfo` for the offset of the time itself
 (`value.tzinfo.utcoffset(value)`), and the standard library's `timezone` answers only for a `datetime`, or None: the
-driver raises before anything reaches the store. On Neo4j such a time is given a fixed offset of Drivine's own that
-answers for a time too, so it is sent and stored as a Neo4j Time of that offset, and read back as a `time` of it.
+driver raises before anything reaches the store (neo4j/neo4j-python-driver#1380). On Neo4j such a time is given a
+fixed offset of Drivine's own that answers for a time too, so it is sent and stored as a Neo4j Time of that offset,
+and read back as a `time` of it.
 Memgraph has no Time (its Bolt decoder has no Time structure, as liberation-data/drivine4j#862 found), so it is sent
-the time's ISO text, `10:11:12+02:00`, as FalkorDB is: a field declared `time` reads it back as the time. A time
+the time as text of one width, as drivine4j writes it (`10:11:12.000000000+02:00`, see `fixed_width_time`), where
+FalkorDB is sent its ISO text: a field declared `time` reads either back as the time. A time
 without an offset, which the driver sends as a LocalTime, is left as it is.
 """
 

@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 import uuid
 from collections.abc import AsyncIterator
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Annotated, Any
 
 import pytest
@@ -578,3 +578,67 @@ async def test_each_lookup_by_id_reads_the_index_by_the_row_its_statements_from_
         assert reads("n").search(await plan(backend.found_stamp(model).text))
     finally:
         await gom.indexes.drop(index)
+
+
+class LookupDay(NodeFragment, labels=["SqlLookup", "LookupDay"]):
+    id: Annotated[date, NodeId()]
+    name: str | None = None
+
+
+class LookupDayAt(NodeFragment, labels=["SqlLookup", "LookupDay"]):
+    id: Annotated[datetime, NodeId()]
+    name: str | None = None
+
+
+class LookupDayAsText(NodeFragment, labels=["SqlLookup", "LookupDay"]):
+    """A day's labels with its id declared text: what a model of a graph another writer made may declare."""
+
+    id: Annotated[str, NodeId()]
+    name: str | None = None
+
+
+class LookupDayAsStampedText(NodeFragment, labels=["SqlLookup", "LookupDay"]):
+    id: Annotated[str, NodeId()]
+    name: str | None = None
+    stamp: Annotated[str | None, NodeStamp()] = None
+
+
+class LookupTargetTextDays(GraphView):
+    """The target joined to days whose id it declares text."""
+
+    target: Annotated[LookupTarget, Root()]
+    days: Annotated[list[LookupDayAsText], Relationship("ON_TEXT_DAY")] = []
+
+
+REFUSED = re.escape(
+    "LookupDayAsText's NodeId id is declared a str, but the node whose id is '2026-01-05' holds it as a date:"
+    " declare id as a date to load it."
+)
+
+
+async def test_a_load_of_a_date_id_declared_text_is_refused_by_name(gom: StatelessGraphObjectManager):
+    # The id would load as its text, which a lookup never finds: a save of it would make a second node (#560).
+    await gom.save(LookupDay(id=date(2026, 1, 5), name="day"))
+    with pytest.raises(DrivineError, match=REFUSED):
+        await gom.load_all(LookupDayAsText)
+    assert [it.id for it in await gom.load_all(LookupDay)] == [date(2026, 1, 5)]
+
+
+async def test_a_load_of_a_date_id_declared_text_with_a_stamp_is_refused_by_name(gom: StatelessGraphObjectManager):
+    # Before, its save was refused as stale, as though the node had been deleted.
+    await gom.save(LookupDay(id=date(2026, 1, 5), name="day"))
+    with pytest.raises(DrivineError, match=r"LookupDayAsStampedText's NodeId id is declared a str, .* as a date"):
+        await gom.load_all(LookupDayAsStampedText)
+
+
+async def test_a_datetime_id_declared_text_is_refused_with_its_kind(gom: StatelessGraphObjectManager):
+    await gom.save(LookupDayAt(id=datetime(2026, 1, 5, 10, tzinfo=UTC), name="at ten"))
+    with pytest.raises(DrivineError, match=r"holds it as a datetime: declare id as a datetime to load it\."):
+        await gom.load_all(LookupDayAsText)
+
+
+async def test_a_related_node_whose_date_id_is_declared_text_is_refused_by_name(gom: StatelessGraphObjectManager):
+    await gom.save(LookupDay(id=date(2026, 1, 5), name="day"))
+    assert await gom.edges.relate(TARGET, node_ref(LookupDay, date(2026, 1, 5)), "ON_TEXT_DAY")
+    with pytest.raises(DrivineError, match=REFUSED):
+        await gom.load_all(LookupTargetTextDays)

@@ -14,7 +14,7 @@ from uuid import UUID
 import pytest
 
 from drivine.backend.sql.sql_json import to_json
-from drivine.backend.sql.value_layout import Held, held_key, read, read_after, write, write_props
+from drivine.backend.sql.value_layout import Held, TagText, held_key, read, read_after, read_value, write, write_props
 from drivine.backend.sqlite.sqlite_cypher_values import with_nan
 from drivine.drivine_error import DrivineError
 
@@ -84,6 +84,17 @@ def test_a_held_value_is_spliced_into_the_json_as_it_is_and_a_text_like_its_stan
 def test_a_column_is_read_with_its_tags_their_text_and_its_keys_unescaped():
     assert read(f'{{"d":{DATE_TAG},"$$k":1,"t":"$5"}}') == {"d": "2024-01-01", "$k": 1, "t": "$5"}
     assert read('{"plain":1.5}') == {"plain": 1.5}
+
+
+def test_a_tag_is_read_as_text_that_knows_its_kind_at_any_depth_and_a_users_tag_like_map_as_the_map():
+    # The load reads the kind to refuse a NodeId held as a temporal value by a model that declares it text (#560).
+    column = read(f'{{"d":{DATE_TAG},"l":[{{"$t":"duration","v":"PT1S"}}],"m":{{"$$t":"date","v":"x"}},"t":"text"}}')
+    assert column == {"d": "2024-01-01", "l": ["PT1S"], "m": {"$t": "date", "v": "x"}, "t": "text"}
+    assert isinstance(column["d"], TagText) and column["d"].kind == "date"
+    assert isinstance(column["l"][0], TagText) and column["l"][0].kind == "duration"
+    assert not isinstance(column["m"]["v"], TagText) and not isinstance(column["t"], TagText)
+    parsed = read_value({"d": json.loads(DATE_TAG)})
+    assert isinstance(parsed["d"], TagText) and parsed["d"].kind == "date"
 
 
 def test_a_column_the_store_wrote_its_own_way_is_read_so_first_its_floats_kept_across_the_module():

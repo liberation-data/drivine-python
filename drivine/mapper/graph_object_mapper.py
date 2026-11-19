@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import json
+import types
+import typing
 from collections.abc import Iterable, Mapping
+from datetime import date, time, timedelta
 from typing import Any, cast
 
 from pydantic import BaseModel
 
 from drivine.annotation.sorted_by import SortedBy
+from drivine.backend.sql.value_layout import TagText
+from drivine.drivine_error import DrivineError
 from drivine.model.field_mapping import FieldMapping
 from drivine.model.field_shape import CollectionKind
 from drivine.model.fragment_model import FragmentModel
@@ -33,6 +38,7 @@ class GraphObjectMapper:
         labels: list[str] = row.get("labels") or []
         props: Mapping[str, Any] = row.get("props") or {}
         model = self.registry.fragment_for(expected, labels) if labels else expected
+        _refuse_temporal_id(model, props)
         values = self._properties(model, props, model)
         if model.stamp_field:
             values[model.stamp_field] = props.get(STAMP_PROPERTY)
@@ -126,6 +132,46 @@ class GraphObjectMapper:
             if values.get(field) is None:
                 values[field] = empty_collection(kind)
         return values
+
+
+_TEMPORAL_IDS = (date, time, timedelta)
+"""The NodeId types a temporal value's tag loads as (a datetime is a date): any other is refused one."""
+
+
+def _refuse_temporal_id(model: FragmentModel, props: Mapping[str, Any]) -> None:
+    """
+    Refuses, by name, a node whose NodeId a SQL store holds as a temporal value's tag (a date another writer stored)
+    where `model` declares the id a `str`, a number or any other type no tag loads as (see _refuses_tags). The id would
+    load as its text, which a lookup by the id never finds, as it compares the id's kind too: a save of the node would
+    make a second one, or, with a NodeStamp, be refused as stale (liberation-data/drivine#813, drivine-python#560).
+    Drivine for TypeScript and drivine4j refuse it in the same words.
+    """
+    if model.node_id_field is None:
+        return
+    held = props.get(model.node_id_property or model.node_id_field)
+    if not isinstance(held, TagText) or not _refuses_tags(model.node_id_type):
+        return
+    declared = _declared_name(model.node_id_type)
+    field = model.node_id_field
+    raise DrivineError(
+        f"{model.type.__name__}'s NodeId {field} is declared a {declared}, but the node whose id is '{held}' holds it"
+        f" as a {held.kind}: declare {field} as a {held.kind} to load it."
+    )
+
+
+def _refuses_tags(kind: Any) -> bool:
+    """
+    Whether a NodeId declared `kind` refuses a temporal value's tag: a type, or a union of types, none of which a tag
+    loads as (`str`, `int | None`). One declared `Any`, or a union with it, takes the text as it is given.
+    """
+    if typing.get_origin(kind) in (typing.Union, types.UnionType):
+        return all(_refuses_tags(it) for it in typing.get_args(kind))
+    return kind is not Any and isinstance(kind, type) and not issubclass(kind, _TEMPORAL_IDS)
+
+
+def _declared_name(kind: Any) -> str:
+    """The NodeId's declared type as Python writes it: `str`, `int`, `str | None`."""
+    return kind.__name__ if isinstance(kind, type) else str(kind)
 
 
 def empty_collection(kind: CollectionKind) -> Any:

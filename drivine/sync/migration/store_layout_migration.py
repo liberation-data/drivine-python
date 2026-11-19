@@ -30,6 +30,7 @@ from typing import Any, Literal, Protocol, TypedDict, cast
 
 from pydantic import AwareDatetime, BaseModel
 
+from drivine.cypher.shared_compiler import module_text
 from drivine.drivine_error import DrivineError
 from drivine.model.field_mapping import FieldMapping
 from drivine.model.field_shape import FieldShape
@@ -120,13 +121,14 @@ def declarations_of(
 ) -> list[Declaration]:
     """
     What the node fragment `fragment` says of its properties that layout 1 can't tell: a declaration under each of its
-    labels, its own and those it inherits, for each of its fields of a temporal type, a float or bytes, or a list, a
-    tuple or a set of one, by the name the property is stored under (a `GraphProperty`'s, or the registry's naming of
-    the field), as the user names it: a name that begins with `$` is declared as it is. For the relationship fragment
-    `fragment`, the same of each of its fields but the node it leads to, under `relationship_type`. A field that is
-    transient, JSON packed, a map, a list of lists, the node's stamp, its labels or a property bag is not declared, nor
-    is any other type (see `_KINDS`). drivine4j's `declarationsOf`. `registry` is the one the application's managers
-    build models with, for its naming of fields: a new one, which names them in camel case, by default.
+    labels, its own and those it inherits, for each of its fields of a type `_KINDS` declares (a `date`, a `datetime`,
+    an `AwareDatetime`, a `timedelta` or a float), or a list, a tuple or a set of one, by the name the property is
+    stored under (a `GraphProperty`'s, or the registry's naming of the field), as the user names it: a name that
+    begins with `$` is declared as it is. For the relationship fragment `fragment`, the same of each of its fields but
+    the node it leads to, under `relationship_type`. A field that is transient, JSON packed, a map, a list of lists, the
+    node's stamp, its labels or a property bag is not declared, nor is any other type (see `_KINDS`). drivine4j's
+    `declarationsOf`. `registry` is the one the application's managers build models with, for its naming of fields: a
+    new one, which names them in camel case, by default.
     """
     models = registry or ModelRegistry()
     mapping: FieldMapping
@@ -291,6 +293,9 @@ class StoreLayoutMigration:
                 else:
                     outcome = self._run(work, action)
             except Exception as error:  # noqa: BLE001 - every store error is the module's to read
+                logger.warning(
+                    "Store layout migration of '%s': %s failed: %s", self._provider.graph_name, action["type"], error
+                )
                 outcome = {"type": "failed", "message": str(error)}
             outcomes.append(outcome)
             if outcome["type"] == "failed":
@@ -329,21 +334,14 @@ class StoreLayoutMigration:
         return [_document(row) for row in rows]
 
     def _ask(self, request: Mapping[str, Any]) -> dict[str, Any]:
-        compile_json = self._compile or _shared_compile()
-        answer = json.loads(
-            compile_json(json.dumps({"migrate": {"store": self._store, "graph": self._provider.graph_name, **request}}))
-        )
+        asked = {"migrate": {"store": self._store, "graph": self._provider.graph_name, **request}}
+        # Where the compiler isn't installed, module_text says how to install it for this store.
+        answer = json.loads(self._compile(json.dumps(asked)) if self._compile else module_text(asked, self._store))
         if "error" in answer:
             raise DrivineError(
                 f"The shared module refused the migration of '{self._provider.graph_name}': {answer['error']}"
             )
         return dict(answer)
-
-
-def _shared_compile() -> Compile:
-    from drivine.cypher.shared_compiler import _compiler, not_installed
-
-    return _compiler(lambda: not_installed("SQLITE"))
 
 
 def _document(row: Any) -> Any:

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
 from typing import Any
 
 import pytest
@@ -143,7 +144,9 @@ async def test_each_action_runs_where_it_belongs_and_the_lock_is_held_on_a_conne
     ]
 
 
-async def test_a_failed_action_ends_its_round_and_a_failed_transaction_is_rolled_back() -> None:
+async def test_a_failed_action_ends_its_round_and_a_failed_transaction_is_rolled_back(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     provider = FakeProvider(fail_on="UPDATE")
     planner = Planner(
         [
@@ -153,9 +156,27 @@ async def test_a_failed_action_ends_its_round_and_a_failed_transaction_is_rolled
             ]
         ]
     )
-    await StoreLayoutMigration(provider, planner).migrate(DECLARED, unproven=True)
+    with caplog.at_level(logging.WARNING, logger="drivine.store"):
+        await StoreLayoutMigration(provider, planner).migrate(DECLARED, unproven=True)
     assert planner.asked[1]["outcomes"] == [{"type": "failed", "message": "refused UPDATE"}]
     assert "c1: rollback" in provider.log and not any("NEVER" in line for line in provider.log)
+    # Logged as drivine4j logs it, as the module's report may not say which statement the store refused.
+    assert "Store layout migration of 'drivine': transaction failed: refused UPDATE" in caplog.messages
+
+
+async def test_a_store_without_the_compiler_is_told_how_to_install_it_for_that_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from drivine.cypher import shared_compiler
+
+    monkeypatch.setattr(shared_compiler, "_compile", None)
+    monkeypatch.setattr(shared_compiler, "has_wheel", lambda: True)
+    monkeypatch.setitem(sys.modules, "drivine_cypher_compiler", None)
+    provider = FakeProvider()
+    provider.type = "POSTGRES"  # type: ignore[misc]
+    with pytest.raises(DrivineError, match=r"drivine\[postgres\]"):
+        await StoreLayoutMigration(provider).migrate(DECLARED, unproven=True)
+    assert provider.connections == 0
 
 
 async def test_the_modules_refusal_is_thrown_before_the_store_is_reached() -> None:

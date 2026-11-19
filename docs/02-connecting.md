@@ -125,6 +125,44 @@ in an earlier layout that holds nodes, or one a later Drivine wrote, is refused 
 it with a `StoreLayoutError`, from `drivine` and `drivine.sync`, whose message says what to do (reload it with this
 version, or upgrade) and whose `graph` names the graph.
 
+**Migrating a graph from layout 1 to layout 2.** `StoreLayoutMigration`, in `drivine.migration.store_layout_migration`
+(and `drivine.sync.migration.store_layout_migration`), moves a graph on Oracle, Postgres or SQLite from layout 1, which
+0.8.0 and earlier wrote, to layout 2 in place, by the shared compiler's migrator, which drivine4j and Drivine for
+TypeScript run alike. It is not yet proven on every store (#514): it is not exported from `drivine`, its `Declaration`,
+`Kind` and `MigrationReport` may change in any release, and `migrate` refuses to run unless passed `unproven=True`. Run
+it while nothing else uses the graph, with a backup taken first; it runs on connections of its own from the provider's
+pool, never one of an application's transaction. Layout 1 can't tell which texts are dates or moments, which whole
+numbers are floats and which texts are bytes, so it is told by declarations, a label's property and its kind each:
+`declarations_of(Person)` derives them from a node fragment's fields of type `date`, `datetime` (naive or aware) or
+`AwareDatetime`, `timedelta` or `float`, or a list, a tuple or a set of one (under each of its labels, inherited ones
+too), by the name each is stored under (pass `registry=` the `ModelRegistry` the application's managers are given,
+where it names properties otherwise than in camel case), and `declarations_of(Knows, "KNOWS")` from a relationship
+fragment's; `with_declared(derived, by_hand)` replaces or adds declarations by hand. A field 0.8.0 saved in another
+form than its kind's is not declared, as the migration would read it as no value of its kind and refuse the graph, and
+is kept as it is: a `NaiveDatetime`, saved as a UTC moment with a `Z`, no local datetime; a `time`, saved with its
+offset where it had one, which its type can't tell; `bytes`, saved as their UTF-8 text; and a `JsonPacked` field, saved
+as a JSON text.
+`migrate(declarations, dry_run=True, unproven=True)` writes nothing, and reports what would change, the values that are
+no value of their declared kind, the properties whose values all read as one kind (candidates to declare), and the
+uniqueness constraints' keys that may collide. A migration gives back its report, whose `status` says how it ended:
+`migrated`, `current` or `empty` (nothing to do), `dryRun` (a dry run's), `inProgress` (a dry run of a graph part way
+through a migration, which only resuming it goes on with), `invalid` (a value not of its kind: declare it otherwise, or
+pass `keep_invalid=True`), `collisions` (keys a uniqueness constraint holds once that layout 2 reads as one: correct them
+with plain SQL and run it again), `refused` (a graph of another layout, or one changed since its migration began, or
+resumed, before every row is written, with other declarations or `keep_invalid`), or `failed` (the store's error). One
+stopped at any moment, or by `collisions`, is resumed by running it again with the same declarations. It makes no index
+or constraint, which the application's schema plan makes at its next start, and leaves the count store unseeded.
+
+```python
+from drivine.migration.store_layout_migration import StoreLayoutMigration, declarations_of
+
+declarations = [*declarations_of(Person), *declarations_of(Knows, "KNOWS")]
+migration = StoreLayoutMigration(registry.connection_provider("graph"))
+report = await migration.migrate(declarations, dry_run=True, unproven=True)
+if report["status"] == "dryRun":
+    report = await migration.migrate(declarations, unproven=True)
+```
+
 Or in code:
 
 ```python

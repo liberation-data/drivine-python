@@ -87,13 +87,22 @@ def judging(store: ModuleStore, graph: str, tables_made: str) -> Generator[Ask, 
         if verdict["assign"]:
             # A graph of this layout whose stamp a clear deleted: stamped again as a stamp is first made. Another
             # process may stamp it first; the insert is made only where there is none, and both read the one back.
-            assigned_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
-            yield Ask(
-                stamp.assign_if_absent,
-                stamp_parameters(store, graph, str(uuid.uuid4()), assigned_at, statements.engine),
-            )
+            yield stamping(store, graph)
         elif stamp.restamp_layout:
             yield Ask(stamp.restamp_layout, {**restamp_parameters(store, graph), **verdict["parameters"]})
+
+
+def stamping(store: ModuleStore, graph: str) -> Ask:
+    """
+    The stamp's `assign_if_absent`, of this layout, with what it binds: a new id and this moment, as a stamp is first
+    made. A store layout migration's `assignStamp` runs it too (see StoreLayoutMigration).
+    """
+    statements = store_statements(store, graph)
+    assigned_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    return Ask(
+        statements.stamp.assign_if_absent,
+        stamp_parameters(store, graph, str(uuid.uuid4()), assigned_at, statements.engine),
+    )
 
 
 def judge(store: ModuleStore, graph: str, tables_made: str, rows: Callable[[str, Mapping[str, Any]], Rows]) -> None:

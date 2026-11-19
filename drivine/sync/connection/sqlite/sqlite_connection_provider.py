@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import itertools
+from typing import Any
 
 from drivine.backend.sql.sql_graph import DEFAULT_GRAPH
+from drivine.backend.sql.store_layout import stamping
 from drivine.backend.sqlite.sqlite_graph import SqliteGraph
 from drivine.connection.database_type import DatabaseType
 from drivine.connection.sqlite.sqlite_session import DEFAULT_BUSY_TIMEOUT, SqliteSession
@@ -61,6 +63,34 @@ class SqliteConnectionProvider(ConnectionProvider):
         except BaseException:
             self._give_back(session)
             raise
+        return self._connection(session)
+
+    def connect_unjudged(self) -> Connection:
+        """
+        A connection that neither makes the graph's tables nor judges its store layout, as `connect` does first: what a
+        store layout migration runs on, as the graph it migrates is one `connect` refuses (see StoreLayoutMigration).
+        """
+        return self._connection(self._session())
+
+    def prepare_unjudged(self, connection: Connection) -> None:
+        """
+        Makes the graph's tables on `connection`, one of `connect_unjudged`'s, as a first connection makes them,
+        without the layout's verdict: a store layout migration's `prepare`.
+        """
+        assert isinstance(connection, SqliteConnection)
+        session = connection.session
+        for statement in self.graph.ddl:
+            concurrency.blocking(session.query, statement, {}, on=session.thread)
+
+    def stamp_statement(self) -> tuple[str, dict[str, Any]]:
+        """
+        The stamp's `assign_if_absent` of this layout, and what it binds: a new id and this moment, as a first
+        connection stamps a graph (see store_layout.stamping). A store layout migration's `assignStamp`.
+        """
+        stamp = stamping("sqlite", self.graph.name)
+        return stamp.statement, dict(stamp.parameters)
+
+    def _connection(self, session: SqliteSession) -> SqliteConnection:
         return SqliteConnection(session, self._give_back, f"sqlite.{next(_SESSIONS)}", self.graph.name or DEFAULT_GRAPH)
 
     def end(self) -> None:

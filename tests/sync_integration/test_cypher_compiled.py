@@ -656,16 +656,24 @@ def test_a_text_past_32_kb_set_from_an_unwound_parameter_on_two_nodes_leaves_the
 
 
 @pytest.mark.skipif(not ORACLE, reason="Oracle isn't configured: set ORACLE_TESTS=true.")
-def test_a_map_an_unwound_item_holds_with_a_key_as_extended_jsons_is_written_as_the_map_it_is_on_oracle(
+def test_a_map_an_unwound_item_holds_with_a_key_as_extended_jsons_is_refused_as_a_property_not_read_as_a_number(
     factory: PersistenceManagerFactory,
 ):
-    # Only a text a write takes from its row is read through the row's text (#176, drivine4j#309): a map is read as
-    # JSON, as before, and not from extended JSON, which would read {"$numberLong": "5"} as the number 5.
+    # A map is no property, as in Neo4j (liberation-data/drivine-cypher-spec#367): the write is refused whole, not taken
+    # from extended JSON, which would read {"$numberLong": "5"} as the number 5 (#176, drivine4j#309), and nothing is
+    # written.
     pm = factory.get("oracle")
     clear(pm)
     items = [{"id": 1, "m": {"$numberLong": "5"}}, {"id": 2, "m": {"$numberDouble": "2.0"}}]
-    pm.query(spec("UNWIND $items AS t CREATE (:CyWrite {id: t.id, m: t.m})", {"items": items}))
-    assert pm.query(spec("MATCH (n:CyWrite) RETURN properties(n) ORDER BY n.id")) == items
+    with pytest.raises(Exception) as refused:
+        pm.query(spec("UNWIND $items AS t CREATE (:CyWrite {id: t.id, m: t.m})", {"items": items}))
+    causes: list[BaseException] = []
+    error: BaseException | None = refused.value
+    while error is not None and error not in causes:
+        causes.append(error)
+        error = error.__cause__ or error.__context__
+    assert any("not a map, as in Neo4j" in str(it) for it in causes), repr(refused.value)
+    assert pm.query(spec("MATCH (n:CyWrite) RETURN n.id")) == []
 
 
 @pytest.mark.nightly

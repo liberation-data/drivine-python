@@ -19,13 +19,19 @@ Not yet proven on every store (drivine-python#514): `migrate` refuses to run unl
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
+from datetime import date, datetime, time, timedelta
 from typing import Any, Literal, Protocol, cast
+
+from pydantic import AwareDatetime, BaseModel, NaiveDatetime
 
 from drivine.connection.connection import Connection
 from drivine.drivine_error import DrivineError
+from drivine.model.field_mapping import FieldMapping
+from drivine.model.field_shape import FieldShape
+from drivine.model.model_registry import ModelRegistry
 from drivine.query.query_specification import QuerySpecification
 
 DeclaredKind = Literal["date", "localtime", "time", "localdatetime", "datetime", "duration", "float", "bytes"]
@@ -39,6 +45,82 @@ class MigrationDeclaration:
     label: str
     property: str
     kind: DeclaredKind
+
+
+_KINDS: dict[Any, DeclaredKind] = {
+    date: "date",
+    datetime: "datetime",
+    AwareDatetime: "datetime",
+    NaiveDatetime: "localdatetime",
+    time: "localtime",
+    timedelta: "duration",
+    float: "float",
+    bytes: "bytes",
+    bytearray: "bytes",
+}
+"""
+The kind a field of each type is declared. A `datetime` may hold a naive value, which layout 2 holds as a localdatetime,
+and a `time` an aware one, a time: a field that holds them is declared by hand (see `with_declared`).
+"""
+
+
+def declarations_of(
+    fragment: type, relationship_type: str | None = None, registry: ModelRegistry | None = None
+) -> list[MigrationDeclaration]:
+    """
+    What the node fragment `fragment` says of its properties that layout 1 can't tell: a declaration under each of its
+    labels, its own and those it inherits, for each of its fields of a temporal type, a float or bytes, or a list, a
+    tuple or a set of one, by the name the property is stored under (a `GraphProperty`'s, or the registry's naming of
+    the field), as the user names it: a name that begins with `$` is declared as it is. For the relationship fragment
+    `fragment`, the same of each of its fields but the node it leads to, under `relationship_type`. A field that is
+    transient, JSON packed, a map, a list of lists, the node's stamp, its labels or a property bag is not declared, nor
+    is any other type. drivine4j's `declarationsOf`. `registry` is the one the application's managers build models with,
+    for its naming of fields: a new one, which names them in camel case, by default.
+    """
+    models = registry or ModelRegistry()
+    mapping: FieldMapping
+    if relationship_type is not None:
+        mapping, labels = models.relationship_fragment(fragment), [relationship_type]
+    else:
+        model = models.fragment(fragment)
+        mapping, labels = model, model.labels
+    pydantic_model: type[BaseModel] = fragment  # pyright: ignore[reportAssignmentType]
+    fields = pydantic_model.model_fields
+    declared: list[MigrationDeclaration] = []
+    for label in labels:
+        for field, stored in mapping.graph_properties.items():
+            kind = None if field in mapping.json_packed else _kind_of(fields[field].annotation)
+            if kind is not None:
+                declared.append(MigrationDeclaration(label, stored, kind))
+    return declared
+
+
+def with_declared(
+    derived: Iterable[MigrationDeclaration], by_hand: Iterable[MigrationDeclaration]
+) -> list[MigrationDeclaration]:
+    """
+    The `derived` declarations (see `declarations_of`), each of a label's property that one of `by_hand` declares
+    replaced by it, then the rest of `by_hand`: each label's property declared once.
+    """
+    hand = {(it.label, it.property): it for it in by_hand}
+    found: dict[tuple[str, str], MigrationDeclaration] = {}
+    for it in derived:
+        found.setdefault((it.label, it.property), hand.get((it.label, it.property), it))
+    for key, it in hand.items():
+        found.setdefault(key, it)
+    return list(found.values())
+
+
+def _kind_of(annotation: Any) -> DeclaredKind | None:
+    """The kind a field of `annotation` is declared: its own, or a list's, a tuple's or a set's items'; else None."""
+    shape = FieldShape.of(annotation)
+    if shape.collection == "dict":
+        return None
+    if shape.collection is not None:
+        shape = FieldShape.of(shape.item)
+        if shape.collection is not None:
+            return None
+    return _KINDS.get(shape.item)
 
 
 class MigratableProvider(Protocol):

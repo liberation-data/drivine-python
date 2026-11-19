@@ -41,7 +41,12 @@ from drivine import (
     refs,
 )
 from drivine.connection.sqlite.sqlite_connection_provider import SqliteConnectionProvider
-from drivine.migration.store_layout_migration import MigrationDeclaration, StoreLayoutMigration
+from drivine.migration.store_layout_migration import (
+    MigrationDeclaration,
+    StoreLayoutMigration,
+    declarations_of,
+    with_declared,
+)
 from drivine.query.statement import cypher_statement
 
 FIXTURE = Path(__file__).parents[3] / "integration" / "sqlite" / "migration" / "layout1-0.8.0.sqlite"
@@ -93,14 +98,16 @@ class Circle(GraphView):
     knows: Annotated[list[Knows], Relationship("KNOWS")] = []
 
 
-DECLARATIONS = [
-    MigrationDeclaration("Person", "born", "date"),
-    MigrationDeclaration("Person", "height", "float"),
-    MigrationDeclaration("KNOWS", "since", "date"),
-    MigrationDeclaration("Meeting", "at", "datetime"),
-    MigrationDeclaration("Event", "at", "datetime"),
-    MigrationDeclaration("File", "data", "bytes"),
-]
+DECLARATIONS = with_declared(
+    [
+        *declarations_of(Person),
+        *declarations_of(Meeting),
+        *declarations_of(File),
+        *declarations_of(Knows, "KNOWS"),
+    ],
+    # The Events were written in Cypher, and have no model to say what they hold.
+    [MigrationDeclaration("Event", "at", "datetime")],
+)
 
 
 class Interrupted(Exception):

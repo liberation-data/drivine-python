@@ -104,6 +104,35 @@ def test_a_tag_is_read_as_text_that_knows_its_kind_at_any_depth_and_a_users_tag_
     assert isinstance(after["d"], TagText) and after["d"].kind == "date"
 
 
+@pytest.mark.parametrize(
+    ("text", "kind"),
+    [
+        ("2024-01-01", "date"),
+        ("2024-01-01T10:00:00.123456789+02:00", "datetime"),
+        ("2024-01-01T10:00:00", "localdatetime"),
+        ("10:00:00Z", "time"),
+        ("10:00:00.123456789", "localtime"),
+        ("P1M2DT3S", "duration"),
+    ],
+)
+def test_a_tag_text_is_written_back_as_the_tag_it_was_read_from_on_each_store(text: str, kind: str):
+    # A node loaded and saved back keeps its value as the store held it, to the nanosecond, and a lookup by the id
+    # finds it (#561); a plain text of the same characters stays a text.
+    for store in ("postgres", "oracle", "sqlite"):
+        held = read(to_json(write(TagText(text, kind), store)))
+        assert held == text and isinstance(held, TagText) and held.kind == kind
+        assert write(text, store) == text
+
+
+def test_a_tag_text_in_a_list_or_a_map_is_written_back_as_the_tag_it_was_read_from():
+    # A property declared Any of a list or a map keeps each value as the store held it (#561).
+    value = {"days": [TagText("2024-01-01", "date"), "2024-01-01"], "span": {"d": TagText("P1M", "duration")}}
+    held = read(to_json(write(value, "postgres")))
+    assert held == value
+    assert held["days"][0].kind == "date" and not isinstance(held["days"][1], TagText)
+    assert held["span"]["d"].kind == "duration"
+
+
 def test_a_tag_text_is_copied_and_pickled_with_its_kind():
     # A load hands it to a field declared Any, which a deep model_copy or a cache copies.
     import copy

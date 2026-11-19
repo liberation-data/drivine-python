@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import types
 import typing
 from collections.abc import Iterable, Mapping
@@ -48,7 +49,9 @@ class GraphObjectMapper:
                 it for it in labels if (it in field.members if field.members is not None else it not in model.labels)
             ]
             values[field.field] = set(held) if field.is_set else held
-        return _instance(model.type, values, model.validate_on_load)
+        instance = _instance(model.type, values, model.validate_on_load)
+        _refuse_temporal_id_changed(model, props, instance)
+        return instance
 
     def view(self, model: GraphViewModel, row: Mapping[str, Any]) -> Any:
         rels: Mapping[str, Any] = row.get("rels") or {}
@@ -151,11 +154,68 @@ def _refuse_temporal_id(model: FragmentModel, props: Mapping[str, Any]) -> None:
     held = props.get(model.node_id_property or model.node_id_field)
     if not isinstance(held, TagText) or not _refuses_tags(model.node_id_type):
         return
-    declared = _declared_name(model.node_id_type)
+    raise _held_as_text(model, held)
+
+
+def _held_as_text(model: FragmentModel, held: TagText) -> DrivineError:
+    """The refusal of a node whose temporal id `model` would load as text: the words the three libraries share."""
     field = model.node_id_field
+    return DrivineError(
+        f"{model.type.__name__}'s NodeId {field} is declared a {_declared_name(model.node_id_type)}, but the node whose"
+        f" id is '{held}' holds it as a {held.kind}: declare {field} as a {held.kind} to load it."
+    )
+
+
+_PYTHON_TYPE_OF_TAG = {
+    "date": "date",
+    "datetime": "datetime",
+    "localdatetime": "datetime",
+    "time": "time",
+    "localtime": "time",
+    "duration": "timedelta",
+}
+"""The Python type each kind of tag loads as, and is saved back as that kind from."""
+
+_BELOW_THE_MICROSECOND = re.compile(r"\.\d{7,}")
+"""A fraction of a second past the microsecond, which no Python temporal value holds."""
+
+
+def _refuse_temporal_id_changed(model: FragmentModel, props: Mapping[str, Any], instance: Any) -> None:
+    """
+    Refuses, by name, a node whose NodeId a SQL store holds as a temporal value's tag that the id `model` declares
+    loads as another value: a `date` id over a `localdatetime` or a `datetime`, a `datetime` id over a `date`, a
+    time below the microsecond, which Python holds to the microsecond, or a `timedelta` id over a duration it doesn't
+    write back as the same text (`P1M`, `PT24H`). A save of the node would write the id it loaded
+    as, which a lookup by the id never finds, so it would make a second node (drivine-python#561, as
+    liberation-data/drivine#815). An id that holds the tag as it was read, as `Any` does (TagText), is saved back as
+    that tag, and isn't refused; one a union with `Any` validated as text (`str | Any`) is refused as text is.
+    """
+    field = model.node_id_field
+    if field is None:
+        return
+    held = props.get(model.node_id_property or field)
+    loaded = getattr(instance, field, None)
+    if not isinstance(held, TagText) or isinstance(loaded, TagText) or loaded is None:
+        return
+    from drivine.cypher.shared_compiler import written
+
+    request = written(loaded)
+    if not isinstance(request, dict) or "$temporal" not in request:
+        # A union with Any that validated the text as its `str`, `str | Any`: the id loaded as text.
+        raise _held_as_text(model, held)
+    kind = cast(str, request["$temporal"]).lower().replace("_", "")
+    below = _BELOW_THE_MICROSECOND.search(held) is not None
+    # A duration of months, or one written another way (`PT24H`, `PT-0.5S`), loads as a timedelta of days and seconds,
+    # which saves back as another duration: a duration is found by its text, which has no other form.
+    if kind == held.kind and not below and (kind != "duration" or request["text"] == held):
+        return
+    declared = _declared_name(model.node_id_type)
+    fits = _PYTHON_TYPE_OF_TAG[held.kind]
+    advice = f"declare {field} as Any" if fits == declared or kind == held.kind else f"declare {field} as a {fits}"
     raise DrivineError(
         f"{model.type.__name__}'s NodeId {field} is declared a {declared}, but the node whose id is '{held}' holds it"
-        f" as a {held.kind}: declare {field} as a {held.kind} to load it."
+        f" as a {held.kind}{' below the microsecond' if kind == held.kind and below else ''}, which a {declared} can't"
+        f" save back: {advice} to load it."
     )
 
 
@@ -164,7 +224,8 @@ def _refuses_tags(kind: Any) -> bool:
     Whether a NodeId declared `kind` refuses a temporal value's tag: a type no tag loads as (`str`), or a union that
     loads the tag's text as text: one with no temporal member (`int | None`), or one with a `str` (`str | date`, as
     pydantic keeps text that is a `str` as it is). `int | date` loads the text as the date, and isn't refused. One
-    declared `Any`, or a union with it, takes the text as it is given, and a union's `None` takes no tag.
+    declared `Any`, or a union with it, takes the text as it is given, and a union's `None` takes no tag; one such union
+    that validated the text as its `str` (`str | Any`) is refused after the load (_refuse_temporal_id_changed).
     """
     if typing.get_origin(kind) in (typing.Union, types.UnionType):
         members = [it for it in typing.get_args(kind) if it is not type(None)]

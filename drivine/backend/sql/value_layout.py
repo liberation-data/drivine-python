@@ -14,9 +14,9 @@ alike. host.yaml's write and read steps pin it.
   unescaped, at any depth.
 
 The module is asked only of a value or a column it has something to decide of: a save's value that holds nothing but
-whole numbers, texts, booleans and nulls under keys that don't begin with `$` is written as it is, and a column whose
-text holds neither `"$` nor `\\u0024` is read as it is. The module's ValueLayoutTest pins that every tag and escaped key
-it writes holds `"$`.
+whole numbers, texts, booleans and nulls under keys that don't begin with `$` is written as it is (a TagText, a text a
+row gave, is written as the tag it was read from), and a column whose text holds neither `"$` nor `\\u0024` is read as
+it is. The module's ValueLayoutTest pins that every tag and escaped key it writes holds `"$`.
 """
 
 from __future__ import annotations
@@ -99,7 +99,12 @@ def prepared(value: Any) -> Any:
 
 
 def _plain(value: Any) -> bool:
-    """Whether the layout holds `value` as plain JSON writes it: only whole numbers, texts, booleans and nulls."""
+    """
+    Whether the layout holds `value` as plain JSON writes it: only whole numbers, texts, booleans and nulls. A temporal
+    value's text a row gave (TagText) is held as the tag it was read from.
+    """
+    if isinstance(value, TagText):
+        return False
     if value is None or isinstance(value, (bool, int, str)):
         return True
     if isinstance(value, Decimal):
@@ -199,7 +204,9 @@ class TagText(str):
     `datetime`, `localdatetime`, `time`, `localtime` or `duration`, as the module names it). It is the text in every
     other way, and a model that validates the field holds a plain `str` of it. The load reads `kind` to refuse a node
     whose NodeId is held as a temporal value by a model that declares the id a `str` or a number, which a lookup by
-    the text would never find (liberation-data/drivine#813, drivine-python#560): see GraphObjectMapper.
+    the text would never find (liberation-data/drivine#813, drivine-python#560): see GraphObjectMapper. A save, and a
+    statement it is bound to, write it as the tag it was read from, so a field declared `Any` saved back keeps its value
+    as the store held it, and a lookup by it finds the node (drivine-python#561); text made from it is a plain `str`.
     """
 
     kind: str

@@ -55,7 +55,10 @@ people = await pm.query(spec.bind({"city": "Sydney"}))
   the rest make one, their fields read, and two moments compare as the moments they are. A parameter of a `date`,
   `time`, `datetime` or `timedelta` is a temporal value of its kind; one at an offset with seconds (a zone's local
   mean time, `-00:44:30`) is refused by name, as the store holds an offset to the minute
-  ([#517](https://github.com/liberation-data/drivine-python/issues/517)). A year is numbered as Neo4j and ISO 8601
+  ([#517](https://github.com/liberation-data/drivine-python/issues/517)). A stored temporal value a row gives is its
+  text, a `str`, and bound back as a parameter it is the value it was read from, so `WHERE n.at = $at` finds the node
+  it came from; text made from it, or any other `str`, is text
+  ([#561](https://github.com/liberation-data/drivine-python/issues/561)). A year is numbered as Neo4j and ISO 8601
   number it, where Oracle and Postgres keep no year 0: `0000` is 1 BC and `-0044` is 45 BC, made, read, worked out,
   truncated, written and read back ([#326](https://github.com/liberation-data/drivine-python/issues/326)). A stored
   value whose year is 1000 or later is read as before; one of an earlier year is read by its era, so a statement that

@@ -55,8 +55,12 @@ type that isn't temporal, or a union that would load the id's text as text: one 
 one with no temporal member (`int | None`). Its id would load as its text, which no lookup by the id finds, so saving it
 back would make a second node. The message says what to declare instead: `Event's NodeId id is declared a str, but the
 node whose id is '2026-01-05' holds it as a date: declare id as a date to load it.` A temporal id, or a union whose
-temporal member loads it (`date | None`, `int | date`), loads the value. An id declared `Any`, or a union with `Any`,
-loads the text as it is.
+temporal member loads it (`date | None`, `int | date`), loads the value, unless saving that value back would write a
+different one: a `date` id over a stored `datetime` or `localdatetime`, a `datetime` id over a `date`, a time below
+the microsecond, which Python can't hold, or a `timedelta` id over a duration of months or one written another way
+(`P1M`, `PT24H`). Those are refused by name too, and the message names the type to declare. An
+id declared `Any` loads as the text of the temporal value the store holds, and a save writes it back as that value, so
+the node stays one node while the id is unchanged. A property declared `Any` is saved back the same way.
 
 ### Queries
 

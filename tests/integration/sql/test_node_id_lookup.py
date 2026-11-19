@@ -34,6 +34,7 @@ from drivine import (
     RemovedTargets,
     Root,
     StatelessGraphObjectManager,
+    cypher_statement,
     node_ref,
     range_index,
     refs,
@@ -642,3 +643,93 @@ async def test_a_related_node_whose_date_id_is_declared_text_is_refused_by_name(
     assert await gom.edges.relate(TARGET, node_ref(LookupDay, date(2026, 1, 5)), "ON_TEXT_DAY")
     with pytest.raises(DrivineError, match=REFUSED):
         await gom.load_all(LookupTargetTextDays)
+
+
+class LookupDayAsAny(NodeFragment, labels=["SqlLookup", "LookupDay"]):
+    """A day's labels with its id and a property declared Any: each loads as the text of the tag it was read from."""
+
+    id: Annotated[Any, NodeId()]
+    name: str | None = None
+    when: Any = None
+
+
+async def test_a_date_id_declared_any_saved_back_is_one_node_that_keeps_its_date(gom: StatelessGraphObjectManager):
+    # Its id loads as its text, which the save looks up and writes as the date it was read from (#561).
+    await gom.save(LookupDay(id=date(2026, 1, 5), name="day"))
+    [loaded] = await gom.load_all(LookupDayAsAny)
+    await gom.save(loaded.model_copy(update={"name": "again"}))
+    assert [(it.id, it.name) for it in await gom.load_all(LookupDay)] == [(date(2026, 1, 5), "again")]
+
+
+async def test_an_id_declared_any_given_a_new_text_is_a_node_of_that_text(gom: StatelessGraphObjectManager):
+    await gom.save(LookupDay(id=date(2026, 1, 5), name="day"))
+    [loaded] = await gom.load_all(LookupDayAsAny)
+    await gom.save(loaded.model_copy(update={"id": "2026-01-05", "name": "text"}))
+    assert sorted(it.name or "" for it in await gom.load_all(LookupDayAsAny)) == ["day", "text"]
+
+
+async def test_a_temporal_value_a_query_gave_bound_back_finds_the_node_it_was_read_from(pm: PersistenceManager):
+    # A row's temporal value reads as its text, and binds back as the value it was read from, not as text (#561).
+    await pm.execute(
+        QuerySpecification[Any](cypher_statement("CREATE (:SqlLookup:LookupDay {id: date('2026-01-05')})"))
+    )
+    [held] = await pm.query(QuerySpecification[Any](cypher_statement("MATCH (n:LookupDay) RETURN n.id")))
+    assert held == "2026-01-05"
+    found = await pm.query(
+        QuerySpecification[Any](cypher_statement("MATCH (n:LookupDay) WHERE n.id = $id RETURN count(n)")).bind(
+            {"id": held}
+        )
+    )
+    assert found == [1]
+
+
+class LookupDayWhen(NodeFragment, labels=["SqlLookup", "LookupDay"]):
+    id: Annotated[date, NodeId()]
+    name: str | None = None
+    when: date | None = None
+
+
+async def test_a_property_declared_any_saved_back_keeps_the_date_a_where_finds_it_by(gom: StatelessGraphObjectManager):
+    await gom.save(LookupDayWhen(id=date(2026, 1, 5), name="day", when=date(2026, 2, 1)))
+    [loaded] = await gom.load_all(LookupDayAsAny)
+    await gom.save(loaded.model_copy(update={"name": "again"}))
+    found = await gom.load_all(LookupDayWhen, where=refs(LookupDayWhen).when.eq(date(2026, 2, 1)))
+    assert [(it.name, it.when) for it in found] == [("again", date(2026, 2, 1))]
+
+
+async def test_a_date_id_over_a_moment_is_refused_by_name_as_one_a_save_couldnt_find(
+    gom: StatelessGraphObjectManager,
+):
+    await gom.save(LookupDayAt(id=datetime(2026, 1, 5, tzinfo=UTC), name="midnight"))
+    with pytest.raises(
+        DrivineError,
+        match=r"LookupDay's NodeId id is declared a date, .* holds it as a datetime, which"
+        r" a date can't save back: declare id as a datetime to load it\.",
+    ):
+        await gom.load_all(LookupDay)
+
+
+class LookupDaySpan(NodeFragment, labels=["SqlLookup", "LookupDay"]):
+    id: Annotated[timedelta, NodeId()]
+    name: str | None = None
+
+
+@pytest.mark.parametrize(
+    ("made", "type_"),
+    [
+        ("datetime('2026-01-05T10:00:00.5+02:00')", LookupDayAt),
+        ("datetime('2026-01-05T10:00:00Z')", LookupDayAt),
+        ("localdatetime('2026-01-05T10:00:00.123456')", LookupDayAt),
+        ("duration('P1DT2H30M0.5S')", LookupDaySpan),
+    ],
+)
+async def test_a_temporal_id_at_an_offset_or_a_fraction_saved_back_is_one_node(
+    pm: PersistenceManager, gom: StatelessGraphObjectManager, made: str, type_: type[Any]
+):
+    # Another writer's value loads as the Python value, which a save writes back as the value the store holds (#561).
+    await pm.execute(
+        QuerySpecification[Any](cypher_statement(f"CREATE (:SqlLookup:LookupDay {{id: {made}, name: 'a'}})"))
+    )
+    [loaded] = await gom.load_all(type_)
+    await gom.save(loaded.model_copy(update={"name": "again"}))
+    assert await names(gom, type_) == ["again"]

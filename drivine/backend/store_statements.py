@@ -82,6 +82,12 @@ class StoreStatements:
     """On Oracle, each function's version, as its `-- drivine:<hash>` says, by name."""
     stored_functions: dict[str, Any] | None
     """On Oracle, the probe of each function a session may call, by compiler flag, and the errors that mean none."""
+    session: list[str] | None
+    """
+    On Oracle, what each connection runs once as it opens, before any other statement: it sets the session to compare
+    and sort text by its code points, as Cypher does, whatever `NLS_COMP` and `NLS_SORT` the database or a logon gave
+    it (drivine-cypher-spec#372). None on the other stores, and from a module older than 0.51.0.
+    """
     stamp: StampStatements
     marker: MarkerStatements
 
@@ -106,6 +112,7 @@ def store_statements(store: ModuleStore, graph: str | None = None) -> StoreState
             functions=given.get("functions"),
             versions=given.get("versions"),
             stored_functions=given.get("storedFunctions"),
+            session=given.get("session"),
             stamp=StampStatements(
                 prepare=stamp["prepare"],
                 assign_if_absent=stamp["assignIfAbsent"],

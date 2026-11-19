@@ -69,6 +69,12 @@ provider made in code with `sets_no_adaptive_plans=False`: `registry.register(Or
 the sync API). It is on by default because, without it, a read can come back with no rows and no
 error; if you turn it off, run that statement in each session yourself.
 
+Before that, each session runs the statement the shared module states for it, `ALTER SESSION SET NLS_COMP = BINARY
+NLS_SORT = BINARY`, so compiled Cypher compares, orders, groups and finds text by its code points whatever `NLS_COMP` and
+`NLS_SORT` the database or a logon trigger gave the session
+([#566](https://github.com/liberation-data/drivine-python/issues/566)). Under a linguistic sort such as `BINARY_CI`,
+`'B' < 'a'` would be false and `'a' = 'A'` true, with no error. `sets_no_adaptive_plans=False` leaves this one in place.
+
 Each session of the pool keeps the statements it runs prepared, 20 of them (python-oracledb's `stmtcachesize`), so a
 save, the same block each time, is neither sent nor parsed again. A Cypher statement compiled to SQL is not kept: Oracle
 holds a kept statement's memory for as long as the driver keeps it, from about 4 MB for a compiled statement to over

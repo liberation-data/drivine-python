@@ -6,6 +6,7 @@ import re
 from typing import Any
 
 from drivine.backend.oracle.oracle_graph import DEFAULT_GRAPH, OracleGraph
+from drivine.backend.store_statements import store_statements
 from drivine.connection.connection import Connection
 from drivine.connection.connection_provider import ConnectionProvider
 from drivine.connection.database_type import DatabaseType
@@ -73,7 +74,8 @@ class OracleConnectionProvider(ConnectionProvider):
         `connect_string` is `host:port/service`, say `localhost:1521/FREEPDB1`; `connection_timeout` is in ms.
         `sets_no_adaptive_plans` is whether each session the pool opens is set to make no adaptive plan (see
         NO_ADAPTIVE_PLANS). On by default: an adaptive plan can give a read of the graph no rows, and no error (#146).
-        False leaves the sessions as Oracle opens them; run the statement in each yourself then, or tune the database.
+        False leaves the plans as Oracle makes them; run the statement in each session yourself then, or tune the
+        database. Each session is set to compare text as Cypher does either way (see session_statements).
         """
         self.name = name
         self.type = DatabaseType.ORACLE
@@ -160,21 +162,36 @@ class OracleConnectionProvider(ConnectionProvider):
         finally:
             cursor.close()
 
+    def session_statements(self) -> list[str]:
+        """
+        What each session the pool opens runs once, before any other statement. First the session the shared module
+        states (its `storeStatements` answer `session`, drivine-cypher-spec#372): compiled Cypher compares, sorts,
+        groups and finds text in the order the session's `NLS_COMP` and `NLS_SORT` give, and a database or a logon that
+        set a linguistic sort, such as `BINARY_CI`, would have `'B' < 'a'` false and `'a' = 'A'` true, with no error.
+        The module's statements set them back to code-point order, as Cypher compares text (#566). Then, unless the
+        application asked otherwise, NO_ADAPTIVE_PLANS.
+        """
+        module = store_statements("oracle", self.graph.name).session or []
+        return [*module, *([NO_ADAPTIVE_PLANS] if self.sets_no_adaptive_plans else [])]
+
     def _pool_of(self) -> Any:
         if self._pool is None:
             import oracledb
 
             pool: Any = None
 
-            async def without_adaptive_plans(connection: Any, _requested_tag: str | None) -> None:
+            statements = self.session_statements()
+
+            async def set_up(connection: Any, _requested_tag: str | None) -> None:
                 """
-                Sets a session the pool opens to make no adaptive plan. One that can't be set is dropped from the pool
-                and its error raised from `acquire`, rather than given out unset: python-oracledb keeps a session whose
-                callback failed counted as out, and an async pool at its size then waits for it for ever
-                (oracle/python-oracledb#626).
+                Sets a session the pool opens, before any other statement runs in it: see session_statements. One that
+                can't be set is dropped from the pool and its error raised from `acquire`, rather than given out unset:
+                python-oracledb keeps a session whose callback failed counted as out, and an async pool at its size
+                then waits for it for ever (oracle/python-oracledb#626).
                 """
                 try:
-                    await self._run(connection, NO_ADAPTIVE_PLANS)
+                    for statement in statements:
+                        await self._run(connection, statement)
                 except BaseException:
                     with contextlib.suppress(Exception):
                         await pool.drop(connection)
@@ -187,7 +204,7 @@ class OracleConnectionProvider(ConnectionProvider):
                 min=0,
                 max=self.pool_max,
                 tcp_connect_timeout=self.connection_timeout / 1000 if self.connection_timeout else None,
-                session_callback=without_adaptive_plans if self.sets_no_adaptive_plans else None,
+                session_callback=set_up if statements else None,
             )
             self._pool = pool
         return self._pool

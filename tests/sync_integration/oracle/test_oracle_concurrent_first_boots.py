@@ -17,8 +17,9 @@ import pytest
 
 from drivine.connection.oracle import oracle_connection_provider
 from drivine.schema import schema_executor
-from drivine.sync import DatabaseRegistry
+from drivine.sync import DatabaseRegistry, PersistenceManagerFactory
 from tests.sync_integration.oracle.oracle_seed import ON_ORACLE
+from tests.sync_integration.sql.new_graph import drop_graph, registry_on
 
 pytestmark = ON_ORACLE
 
@@ -65,9 +66,15 @@ class Watched:
 
 @pytest.fixture
 def registries() -> Iterator[list[DatabaseRegistry]]:
+    """The test's registries, each closed after it; and its graph, a full node table's among them, dropped then."""
     made: list[DatabaseRegistry] = []
     try:
         yield made
     finally:
         for registry in made:
             registry.close()
+        cleaner = registry_on("oracle", GRAPH)
+        try:
+            drop_graph(PersistenceManagerFactory(cleaner).get("oracle"), GRAPH)
+        finally:
+            cleaner.close()

@@ -66,12 +66,18 @@ class Watched:
 
 @pytest.fixture
 async def registries() -> AsyncIterator[list[DatabaseRegistry]]:
+    """The test's registries, each closed after it; and its graph, a full node table's among them, dropped then."""
     made: list[DatabaseRegistry] = []
     try:
         yield made
     finally:
         for registry in made:
             await registry.close()
+        cleaner = registry_on("oracle", GRAPH)
+        try:
+            await drop_graph(PersistenceManagerFactory(cleaner).get("oracle"), GRAPH)
+        finally:
+            await cleaner.close()
 
 
 @pytest.mark.async_only

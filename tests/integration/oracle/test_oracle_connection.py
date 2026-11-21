@@ -1,13 +1,22 @@
 import asyncio
 import json
+import math
 import re
 import time
 from collections.abc import AsyncIterator
+from decimal import Decimal
 from typing import Any
 
 import pytest
 
-from drivine import Connection, CursorSpecification, DatabaseRegistry, PersistenceManager, QuerySpecification
+from drivine import (
+    Connection,
+    CursorSpecification,
+    DatabaseRegistry,
+    DrivineError,
+    PersistenceManager,
+    QuerySpecification,
+)
 from drivine.backend.oracle.oracle_graph import OracleGraph, has_labels
 from drivine.connection.oracle.oracle_connection_provider import oracle_refusal
 from drivine.query.statement import cypher_statement
@@ -45,6 +54,29 @@ async def test_a_parameter_is_never_the_prefix_of_a_longer_one_and_unnamed_binds
         )
     )
     assert row == {"id": "one", "list": "many"}
+
+
+@pytest.mark.parametrize(
+    ("given", "stands_for"),
+    [
+        (Decimal("Infinity"), math.inf),
+        (Decimal("-Infinity"), -math.inf),
+        (Decimal("NaN"), math.nan),
+        (Decimal("sNaN"), math.nan),
+    ],
+)
+async def test_a_decimal_that_is_no_finite_number_is_bound_as_the_float_it_stands_for(
+    pm: PersistenceManager, given: Decimal, stands_for: float
+):
+    # Bound as the float, not its JSON text, a signalling NaN as NaN, where it raised before it reached the driver
+    # (#303). Oracle's driver binds a float as a NUMBER, which holds no NaN or infinity, so it refuses the Decimal
+    # as it refuses the float.
+    statement = 'SELECT $v AS "v" FROM dual'
+    with pytest.raises(DrivineError) as as_float:
+        await pm.get_one(QuerySpecification[Any](statement).bind({"v": stands_for}))
+    with pytest.raises(DrivineError) as as_decimal:
+        await pm.get_one(QuerySpecification[Any](statement).bind({"v": given}))
+    assert str(as_decimal.value) == str(as_float.value)
 
 
 async def test_skips_and_limits_with_offset_and_fetch(pm):

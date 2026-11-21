@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import date, datetime
+from decimal import Decimal
 from typing import Any
 
-from drivine.backend.sql.sql_json import to_json
+from drivine.backend.sql.sql_json import storable, to_json
 from drivine.drivine_error import DrivineError
 from drivine.query.query_specification import QuerySpecification
 from drivine.query.query_specification_compiler import QuerySpecificationCompiler
@@ -60,4 +61,7 @@ class OracleSpecCompiler(QuerySpecificationCompiler):
 def _bindable(value: Any) -> Any:
     if value is None or isinstance(value, (str, bytes, bool, int, float, datetime, date)):
         return value
+    if isinstance(value, Decimal) and not value.is_finite():
+        # The float it stands for, bound as a float is, not its JSON text (#303).
+        return storable(value)
     return to_json(value)

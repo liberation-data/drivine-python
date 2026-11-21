@@ -93,6 +93,14 @@ def test_a_moment_a_date_a_decimal_and_a_map_are_bound_as_sqlite_keeps_them(pm: 
     assert pm.query(QuerySpecification[Any]("SELECT $1 + $2 AS total").bind([2, 3])) == [{"total": 5}]
 
 
+def test_a_decimal_that_is_no_finite_number_is_bound_as_the_float_it_stands_for(pm: PersistenceManager):
+    # A signalling NaN too, which float() and a comparison refuse, as a compiled statement binds it (#303).
+    statement = "SELECT $inf AS inf, $ninf AS ninf, $nan AS nan, $snan AS snan"
+    given = {"inf": Decimal("Infinity"), "ninf": Decimal("-Infinity"), "nan": Decimal("NaN"), "snan": Decimal("sNaN")}
+    floats = {"inf": float("inf"), "ninf": float("-inf"), "nan": float("nan"), "snan": float("nan")}
+    assert rows(pm, statement, **given) == rows(pm, statement, **floats)
+
+
 def test_the_functions_drivines_statements_call_are_there(pm: PersistenceManager):
     [row] = rows(
         pm,

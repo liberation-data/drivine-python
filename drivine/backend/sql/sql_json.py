@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import uuid
 from datetime import UTC, date, datetime, time
 from decimal import Decimal
@@ -16,7 +17,9 @@ def storable(value: Any) -> Any:
     """
     A value as a node's JSON holds it: a datetime as ISO 8601 in UTC to the millisecond (as JavaScript's
     `Date.toISOString` writes it, so a store written from Node and from Python compares alike), a naive one taken as
-    UTC; a date or time as its ISO text; an Enum as its value; a set or tuple as a list.
+    UTC; a date or time as its ISO text; an Enum as its value; a set or tuple as a list; a Decimal as the whole number
+    or the float it is, and one that is no finite number as the float it stands for: a NaN, a signalling one too, as
+    NaN, as a compiled statement binds it (see shared_compiler.written), and an infinity as the float's (#303).
     """
     if isinstance(value, datetime):
         utc = value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
@@ -30,6 +33,10 @@ def storable(value: Any) -> Any:
     if isinstance(value, dict):
         return {str(key): storable(it) for key, it in value.items()}  # pyright: ignore[reportUnknownVariableType, reportUnknownArgumentType]
     if isinstance(value, Decimal):
+        if value.is_nan():  # A signalling NaN too, which float() and a comparison refuse.
+            return math.nan
+        if value.is_infinite():
+            return float(value)
         return int(value) if value == value.to_integral_value() else float(value)
     return value
 

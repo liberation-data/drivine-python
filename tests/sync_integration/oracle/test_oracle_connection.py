@@ -1,9 +1,11 @@
 # Written by scripts/unasync.py from tests/integration/oracle/test_oracle_connection.py:
 # change that, and run the script again.
 import json
+import math
 import re
 import time
 from collections.abc import Iterator
+from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -46,6 +48,18 @@ def test_a_parameter_is_never_the_prefix_of_a_longer_one_and_unnamed_binds_are_l
         )
     )
     assert row == {"id": "one", "list": "many"}
+
+
+def test_a_decimal_that_is_no_finite_number_is_bound_as_the_float_it_stands_for(pm):
+    # Not as the JSON text of one, "Infinity", which Oracle reads as no number; a signalling NaN as NaN (#303).
+    row = pm.get_one(
+        QuerySpecification[Any]('SELECT $inf AS "inf", $ninf AS "ninf", $nan AS "nan", $snan AS "snan" FROM dual').bind(
+            {"inf": Decimal("Infinity"), "ninf": Decimal("-Infinity"), "nan": Decimal("NaN"), "snan": Decimal("sNaN")}
+        )
+    )
+    assert (row["inf"], row["ninf"]) == (math.inf, -math.inf)
+    assert math.isnan(row["nan"])
+    assert math.isnan(row["snan"])
 
 
 def test_skips_and_limits_with_offset_and_fetch(pm):

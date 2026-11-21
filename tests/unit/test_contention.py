@@ -2,6 +2,7 @@
 
 from typing import Annotated, Any
 
+import apsw
 import oracledb
 import psycopg
 import psycopg.errors
@@ -197,18 +198,22 @@ async def test_a_schema_statement_postgres_turned_away_for_a_deadlock_is_run_aga
 
 
 @pytest.mark.parametrize(
-    ("store", "failure", "runs"),
+    ("store", "failure"),
     [
-        (DatabaseType.POSTGRES, PostgresError("deadlock detected", "40P01"), 1),
-        # The other stores' contention under `once` is drivine#830's, ported apart.
-        (DatabaseType.ORACLE, RuntimeError("ORA-00060: deadlock detected while waiting for resource"), 2),
+        (DatabaseType.POSTGRES, PostgresError("deadlock detected", "40P01")),
+        (DatabaseType.ORACLE, RuntimeError("ORA-00060: deadlock detected while waiting for resource")),
+        (DatabaseType.ORACLE, RuntimeError("ORA-04020: deadlock detected while trying to lock object DRIVINE.X")),
+        (DatabaseType.ORACLE, RuntimeError("ORA-00054: resource busy and acquire with NOWAIT specified")),
+        (DatabaseType.SQLITE, apsw.BusyError("database is locked")),
     ],
 )
-async def test_a_schema_statement_the_planner_runs_once_raises_a_postgres_deadlock_to_it_at_once(
-    store: DatabaseType, failure: Exception, runs: int
+async def test_a_schema_statement_the_planner_runs_once_is_run_once_on_every_store_and_raises_its_contention_to_it(
+    store: DatabaseType, failure: Exception
 ):
-    # The planner reads a build's deadlock, waits until no online build is under way on the node table, and builds
-    # again (liberation-data/drivine-cypher-spec#382): run again here, it never would (drivine-python#572).
+    # The library runs a failed action again only as its `retry` says (the Cypher spec's README), as drivine4j runs
+    # one: the planner reads a ONCE statement's failure as it came. A Postgres build's deadlock it builds again after,
+    # once no online build is under way (liberation-data/drivine-cypher-spec#382, drivine-python#572); run again here,
+    # it never would. On Oracle and SQLite too (drivine-python#573). Each is still run again where not run once.
     ran = 0
 
     class Connection:
@@ -230,14 +235,13 @@ async def test_a_schema_statement_the_planner_runs_once_raises_a_postgres_deadlo
             return Connection()
 
     executor = SchemaExecutor(Provider())  # pyright: ignore[reportArgumentType]
-    run = executor.run("CREATE UNIQUE INDEX CONCURRENTLY x ON y (z)", once=True)
-    if runs == 1:
-        with pytest.raises(DrivineError) as raised:
-            await run
-        assert raised.value.root_cause is failure
-    else:
-        assert await run == []
-    assert ran == runs
+    with pytest.raises(DrivineError) as raised:
+        await executor.run("CREATE UNIQUE INDEX x ON y (z)", once=True)
+    assert raised.value.root_cause is failure
+    assert ran == 1
+    ran = 0
+    assert await executor.run("CREATE UNIQUE INDEX x ON y (z)") == []
+    assert ran == 2
 
 
 @pytest.mark.parametrize(("once", "runs"), [(True, 1), (False, 2)])

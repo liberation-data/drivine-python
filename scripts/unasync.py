@@ -40,7 +40,12 @@ class Tree:
 
 TREES = (
     Tree("drivine", "drivine.sync", ("drivine.sync", "drivine.testing", "drivine.stubs")),
-    Tree("tests.integration", "tests.sync_integration"),
+    # Two ensures at once, each a process of its own, run as tasks of one loop: the async API's alone.
+    Tree(
+        "tests.integration",
+        "tests.sync_integration",
+        ("tests.integration.postgres.test_postgres_concurrent_constraint_ensure",),
+    ),
 )
 
 TWINS = {"drivine.concurrency": "drivine.sync.concurrency"}

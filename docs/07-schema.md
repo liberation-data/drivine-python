@@ -69,8 +69,13 @@ missing `DATABASE_TYPE` raises `DrivineError` there rather than on first use. Wi
   claim older than that, with no build under way, is taken over. An `ensure` that finds another session's build under
   way waits for it and reads how it ended; an index a build cut short left invalid is dropped and built again; and a
   build Postgres cancels as a deadlock with another is built again once no build is under way on the table. Inside a
-  transaction, which refuses an online build, it is built holding writes until done. On Oracle, a range index of its
-  own is built `ONLINE`, and a uniqueness constraint's indexes hold writes until done.
+  transaction, which refuses an online build, it is built holding writes until done.
+- **Oracle's ensures of one item take turns too.** Sessions building one index at once on an Oracle table deadlock in
+  its library cache, so an `ensure` claims its turn in the `<graph>_schema` table, as on Postgres, before it builds
+  or drops an item's objects. The claim and its release each commit in a transaction of their own, so one taken on
+  the connection of your open transaction commits none of its work. A claim older than 60 seconds, with no online
+  build under way on the node table, is taken over. A range index of its own is built `ONLINE`, and a uniqueness
+  constraint's indexes hold writes until done.
 - **Versions.** `catalog.with_version("2")` recreates the catalog's items once, the first time it is enforced. Items an
   owner applied before and no longer declares are reported, never dropped. Each owner's version and inventory are kept
   in a `_DrivineSchema` node, as drivine4j and TypeScript keep them.

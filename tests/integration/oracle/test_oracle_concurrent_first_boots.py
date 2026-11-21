@@ -123,4 +123,11 @@ async def test_managers_booting_at_once_on_a_fresh_graph_take_turns_and_agree_on
             )
         )
         assert len({it.id for it in identities}) == 1
+        _, met, taken, turned_away = rounds[-1]
+        # The boots took turns: a take ran, and another session's take was refused while it held the turn (ORA-00001),
+        # where without turns no take runs. And none met the library cache deadlock that turns keep away.
+        assert met == 0, f"{nodes} nodes: the boots met ORA-04020: {rounds}"
+        assert taken > turned_away > 0, f"{nodes} nodes: the boots took no turns: {rounds}"
+    # On compiler 0.52.1, without turns, a round of a full table's boots took 12 to 20 s, where Oracle broke the library
+    # cache's cycle after about 9 s rather than refuse a statement; on 0.52.2, 3 to 7 s. Shown, not asserted.
     print(f"{nodes} nodes: rounds (seconds, ORA-04020 met, takes, takes refused): {rounds}")

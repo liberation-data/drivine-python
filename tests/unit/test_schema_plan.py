@@ -38,7 +38,11 @@ from drivine.schema.vector_index_spec import VectorIndexSpec
 
 
 class Host:
-    """A plan's host whose statements `answer` answers, each recorded in `ran`."""
+    """
+    A plan's host whose statements `answer` answers, each recorded in `ran`. Where `answer` gives no row for an ensure's
+    take of its turn to build an item on Postgres (drivine-cypher-spec#382), the host grants it with one, as drivine4j's
+    RecordingStore does: with none, the ensure would poll for its turn as long as a build is waited for.
+    """
 
     def __init__(self, answer: Callable[[str], list[Any]] = lambda _: []) -> None:
         self.answer = answer
@@ -49,7 +53,8 @@ class Host:
 
     async def run(self, statement: str | Mapping[str, Any], parameters: Mapping[str, Any]) -> list[Any]:
         self.ran.append(str(statement))
-        return self.answer(str(statement))
+        rows = self.answer(str(statement))
+        return rows or (["recording"] if claims(str(statement)) else [])
 
     async def marker(self, statement: str, parameters: Mapping[str, Any], compiled: bool, rows: bool) -> list[Any]:
         self.ran.append(statement)
@@ -63,6 +68,11 @@ class Host:
 
     def changed(self) -> None:
         self.told += 1
+
+
+def claims(statement: str) -> bool:
+    """Whether `statement` takes an ensure's turn to build an item on Postgres: an insert of a `CLAIM:<kind>` row."""
+    return statement.lstrip().upper().startswith("INSERT INTO") and "'CLAIM:" in statement
 
 
 def planning(store: Any, host: Host) -> SchemaPlanning:

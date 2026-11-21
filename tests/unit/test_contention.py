@@ -16,6 +16,7 @@ from drivine.backend.oracle.oracle_schema_grammar import oracle_schema_grammar
 from drivine.connection.database_type import DatabaseType
 from drivine.drivine_error import DrivineError
 from drivine.manager.contention import CONTENDED_ATTEMPTS, ddl_contended, ddl_deadlocked, when_not_contended
+from drivine.schema.planned_managers import SqlPlanHost
 from drivine.schema.schema_executor import SchemaExecutor
 from drivine.schema.schema_specs import uniqueness_constraint
 
@@ -234,6 +235,40 @@ async def test_a_schema_statement_the_planner_runs_once_raises_a_postgres_deadlo
         with pytest.raises(DrivineError) as raised:
             await run
         assert raised.value.root_cause is failure
+    else:
+        assert await run == []
+    assert ran == runs
+
+
+@pytest.mark.parametrize(("once", "runs"), [(True, 1), (False, 2)])
+async def test_a_sql_stores_plan_host_runs_a_statement_once_as_the_plan_driver_asks(once: bool, runs: int):
+    # The driver asks the host to run a `retry` ONCE build once; the host passes it to the executor, which raises a
+    # Postgres deadlock of it to the planner rather than run it again (drivine-python#572).
+    ran = 0
+
+    class Connection:
+        async def query(self, _spec: object) -> list[object]:
+            nonlocal ran
+            ran += 1
+            if ran == 1:
+                raise PostgresError("deadlock detected", "40P01")
+            return []
+
+        async def release(self, _error: BaseException | None = None) -> None:
+            return None
+
+    class Provider:
+        name = "postgres"
+        type = DatabaseType.POSTGRES
+
+        async def connect(self) -> Connection:
+            return Connection()
+
+    host = SqlPlanHost(SchemaExecutor(Provider()), None, None, lambda: None)  # pyright: ignore[reportArgumentType]
+    run = host.run("CREATE UNIQUE INDEX CONCURRENTLY x ON y (z)", {}, once=once)
+    if once:
+        with pytest.raises(DrivineError):
+            await run
     else:
         assert await run == []
     assert ran == runs

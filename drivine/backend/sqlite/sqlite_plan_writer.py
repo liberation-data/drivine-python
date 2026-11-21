@@ -392,8 +392,8 @@ class SqlitePlanWriter:
         held = set(_strings(step.get("held")))
         keep = _flag(step, "keep", False)
         delete = _flag(step, "delete", False)
-        # Each target's id as the text the plan keys it by in `ids` and `held`: a temporal value's tag as its text.
-        key = id_sql("sqlite", "keyText", "t", shape.key)
+        # Each target's id as the key the plan keys it by in `ids` and `held` (see postgres_save_builder.stored_key).
+        key = id_sql("sqlite", "planKey", "t", shape.key)
         labels = f" AND {has_labels('t', shape.labels)}" if shape.labels else ""
         # A relationship from the node to itself is read as leaving it, and so once when both directions are read.
         reached = self._rows(

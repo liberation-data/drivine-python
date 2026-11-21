@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -19,7 +18,6 @@ from drivine.backend.save_statement_builder import (
     replaced_fields,
     root_of,
 )
-from drivine.backend.sql.node_ids import temporal_text
 from drivine.backend.sql.node_writes import NodeWrites
 from drivine.backend.sql.owned_labels import OwnedLabels
 from drivine.backend.sql.plan_graph import PlanGraph
@@ -29,6 +27,7 @@ from drivine.backend.sql.sql_saves import fragment_of, stamp_excluded
 from drivine.backend.sql.value_layout import SqlStore, store_of, write
 from drivine.backend.sql.write_plan import WritePlan
 from drivine.backend.view_projector import target
+from drivine.cypher.shared_compiler import plan_key_of
 from drivine.drivine_error import DrivineError
 from drivine.manager.null_policy import NullPolicy
 from drivine.manager.removed_targets import RemovedTargets
@@ -303,45 +302,14 @@ class PostgresSaveBuilder:
 
 def stored_key(id: Any, store: SqlStore) -> str:
     """
-    An id as the text a write plan keys its node by, within the plan (a step's `k`, an unlink's `ids` and `held`), which
-    is how the store's write reads a stored target's id back (the module's `keyText`): text as it is, and a value the
-    layout holds as text, a UUID, as that text, unquoted, as drivine4j's `PostgresSql.key` keys it; a temporal value
-    as its tag's text `v`, as the module writes it (drivine4j's `NodeIds.temporalText`); and anything else as the JSON
-    text `store`'s layout holds it as (see value_layout.write), as a save writes it, so a float id is keyed by the text
-    it is held as (`1.0E-7` on SQLite, where Python's JSON writes `1e-07`). On Postgres a number is the text `jsonb`
-    gives back for it, `numeric`'s, with no exponent (`0.00000010` for `1.0E-7`): `jsonb` holds a number as a
-    `numeric`, not as the text it was written as. A node is found by its id's JSON, not by this text: see node_ids.
+    An id as the key a write plan keys its node by, within the plan (a step's `k`, an unlink's `ids` and `held`), which
+    is how the store's write reads a stored target's id back: the module's key of the id's JSON as `store`'s layout
+    holds it (see value_layout.write and shared_compiler.plan_key_of), as drivine4j's `SqlBackend.key` keys it. A text
+    id is marked apart from a temporal value or a number that reads alike (liberation-data/drivine-cypher-spec#391),
+    so the text `'2026-01-05'` and that date are two nodes. A node is found by its id's JSON, not by this key: see
+    node_ids.
     """
-    if isinstance(id, str):
-        return id
-    written = write(id, store)
-    if isinstance(written, str):
-        return written
-    text = to_json(written)
-    temporal = temporal_text(text)
-    if temporal is not None:
-        return temporal
-    return numeric_text(text) if store == "postgres" else text
-
-
-_NUMBER = re.compile(r"^(-?)(\d+)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$")
-
-
-def numeric_text(json: str) -> str:
-    """
-    `json`, JSON text, as Postgres's `numeric` writes the number it is, where it is one (`1.0E-7` as `0.00000010`): its
-    digits with no exponent, as many after the point as were written after it less the exponent, and zero with no sign.
-    Any other JSON is as it is.
-    """
-    number = _NUMBER.match(json)
-    if number is None:
-        return json
-    sign, whole, fraction, exponent = number.group(1), number.group(2), number.group(3) or "", number.group(4) or "0"
-    digits = whole + fraction
-    point = len(whole) + int(exponent)
-    before = "0" if point <= 0 else re.sub(r"^0+(?=\d)", "", digits[:point].ljust(point, "0"))
-    after = "0" * -point + digits if point <= 0 else digits[point:]
-    return f"{sign if re.search('[1-9]', digits) else ''}{before}{f'.{after}' if after else ''}"
+    return plan_key_of(store, to_json(write(id, store)))
 
 
 def without_key(props: Mapping[str, Any], key: str) -> dict[str, Any]:

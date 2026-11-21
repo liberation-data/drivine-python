@@ -12,7 +12,14 @@ import pytest
 
 from drivine.backend.oracle.oracle_graph import OracleGraph, has_labels
 from drivine.query.statement import cypher_statement
-from drivine.sync import Connection, CursorSpecification, DatabaseRegistry, PersistenceManager, QuerySpecification
+from drivine.sync import (
+    Connection,
+    CursorSpecification,
+    DatabaseRegistry,
+    DrivineError,
+    PersistenceManager,
+    QuerySpecification,
+)
 from drivine.sync.connection.oracle.oracle_connection_provider import oracle_refusal
 from tests.sync_integration.oracle.oracle_seed import ON_ORACLE
 
@@ -50,16 +57,27 @@ def test_a_parameter_is_never_the_prefix_of_a_longer_one_and_unnamed_binds_are_l
     assert row == {"id": "one", "list": "many"}
 
 
-def test_a_decimal_that_is_no_finite_number_is_bound_as_the_float_it_stands_for(pm):
-    # Not as the JSON text of one, "Infinity", which Oracle reads as no number; a signalling NaN as NaN (#303).
-    row = pm.get_one(
-        QuerySpecification[Any]('SELECT $inf AS "inf", $ninf AS "ninf", $nan AS "nan", $snan AS "snan" FROM dual').bind(
-            {"inf": Decimal("Infinity"), "ninf": Decimal("-Infinity"), "nan": Decimal("NaN"), "snan": Decimal("sNaN")}
-        )
-    )
-    assert (row["inf"], row["ninf"]) == (math.inf, -math.inf)
-    assert math.isnan(row["nan"])
-    assert math.isnan(row["snan"])
+@pytest.mark.parametrize(
+    ("given", "stands_for"),
+    [
+        (Decimal("Infinity"), math.inf),
+        (Decimal("-Infinity"), -math.inf),
+        (Decimal("NaN"), math.nan),
+        (Decimal("sNaN"), math.nan),
+    ],
+)
+def test_a_decimal_that_is_no_finite_number_is_bound_as_the_float_it_stands_for(
+    pm: PersistenceManager, given: Decimal, stands_for: float
+):
+    # Bound as the float, not its JSON text, a signalling NaN as NaN, where it raised before it reached the driver
+    # (#303). Oracle's driver binds a float as a NUMBER, which holds no NaN or infinity, so it refuses the Decimal
+    # as it refuses the float.
+    statement = 'SELECT $v AS "v" FROM dual'
+    with pytest.raises(DrivineError) as as_float:
+        pm.get_one(QuerySpecification[Any](statement).bind({"v": stands_for}))
+    with pytest.raises(DrivineError) as as_decimal:
+        pm.get_one(QuerySpecification[Any](statement).bind({"v": given}))
+    assert str(as_decimal.value) == str(as_float.value)
 
 
 def test_skips_and_limits_with_offset_and_fetch(pm):

@@ -62,6 +62,6 @@ def _bindable(value: Any) -> Any:
     if value is None or isinstance(value, (str, bytes, bool, int, float, datetime, date)):
         return value
     if isinstance(value, Decimal) and not value.is_finite():
-        # The float it stands for, a binary double, not its JSON text, which Oracle reads as no number (#303).
+        # The float it stands for, bound as a float is, not its JSON text (#303).
         return storable(value)
     return to_json(value)

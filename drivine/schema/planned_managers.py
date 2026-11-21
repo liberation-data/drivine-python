@@ -77,10 +77,12 @@ class SqlPlanHost:
         self.copies = copies
         self._changed = changed
 
-    async def run(self, statement: str | Mapping[str, Any], parameters: Mapping[str, Any]) -> list[Any]:
+    async def run(
+        self, statement: str | Mapping[str, Any], parameters: Mapping[str, Any], once: bool = False
+    ) -> list[Any]:
         if not isinstance(statement, str):
             raise DrivineError(f"A SQL store runs no native command: {dict(statement)}.")
-        return [value_of(it) for it in await self.executor.run(statement, parameters)]
+        return [value_of(it) for it in await self.executor.run(statement, parameters, once=once)]
 
     async def marker(self, statement: str, parameters: Mapping[str, Any], compiled: bool, rows: bool) -> list[Any]:
         from drivine.query.statement import cypher_statement

@@ -196,6 +196,50 @@ async def test_a_schema_statement_postgres_turned_away_for_a_deadlock_is_run_aga
 
 
 @pytest.mark.parametrize(
+    ("store", "failure", "runs"),
+    [
+        (DatabaseType.POSTGRES, PostgresError("deadlock detected", "40P01"), 1),
+        # The other stores' contention under `once` is drivine#830's, ported apart.
+        (DatabaseType.ORACLE, RuntimeError("ORA-00060: deadlock detected while waiting for resource"), 2),
+    ],
+)
+async def test_a_schema_statement_the_planner_runs_once_raises_a_postgres_deadlock_to_it_at_once(
+    store: DatabaseType, failure: Exception, runs: int
+):
+    # The planner reads a build's deadlock, waits until no online build is under way on the node table, and builds
+    # again (liberation-data/drivine-cypher-spec#382): run again here, it never would (drivine-python#572).
+    ran = 0
+
+    class Connection:
+        async def query(self, _spec: object) -> list[object]:
+            nonlocal ran
+            ran += 1
+            if ran == 1:
+                raise failure
+            return []
+
+        async def release(self, _error: BaseException | None = None) -> None:
+            return None
+
+    class Provider:
+        name = "store"
+        type = store
+
+        async def connect(self) -> Connection:
+            return Connection()
+
+    executor = SchemaExecutor(Provider())  # pyright: ignore[reportArgumentType]
+    run = executor.run("CREATE UNIQUE INDEX CONCURRENTLY x ON y (z)", once=True)
+    if runs == 1:
+        with pytest.raises(DrivineError) as raised:
+            await run
+        assert raised.value.root_cause is failure
+    else:
+        assert await run == []
+    assert ran == runs
+
+
+@pytest.mark.parametrize(
     ("message", "runs"),
     [
         ("ORA-00054: resource busy and acquire with NOWAIT specified or timeout expired", 1),

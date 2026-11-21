@@ -47,12 +47,18 @@ class Host:
     def __init__(self, answer: Callable[[str], list[Any]] = lambda _: []) -> None:
         self.answer = answer
         self.ran: list[str] = []
+        self.once: list[str] = []
+        """The statements run `once`, as the planner marks an `execute` of `retry` ONCE."""
         self.executor: Any = None
         self.copies: Any = None
         self.told = 0
 
-    async def run(self, statement: str | Mapping[str, Any], parameters: Mapping[str, Any]) -> list[Any]:
+    async def run(
+        self, statement: str | Mapping[str, Any], parameters: Mapping[str, Any], once: bool = False
+    ) -> list[Any]:
         self.ran.append(str(statement))
+        if once:
+            self.once.append(str(statement))
         rows = self.answer(str(statement))
         return rows or (["recording"] if claims(str(statement)) else [])
 
@@ -255,6 +261,36 @@ async def test_reads_the_data_once_the_store_refuses_a_constraint_a_sample_size_
     assert result.status == "VIOLATION" and result.sample == ()
     created = next(i for i, it in enumerate(host.ran) if "CREATE UNIQUE INDEX" in it)
     assert any("'count', COUNT(*)" in it for it in host.ran[created + 1 :])
+
+
+async def test_gives_a_postgres_builds_deadlock_to_the_planner_which_reads_the_online_builds_before_building_again(
+    caplog: pytest.LogCaptureFixture,
+):
+    # A build Postgres cancels as a deadlock with another online build (40P01) is the planner's to read
+    # (liberation-data/drivine-cypher-spec#382): the driver runs it once, as its `retry` says, and the planner waits
+    # until no online build is under way on the node table before it builds again (drivine-python#572).
+    class Deadlocked(Exception):
+        sqlstate = "40P01"
+
+    builds = 0
+
+    def answer(statement: str) -> list[Any]:
+        nonlocal builds
+        if "CREATE UNIQUE INDEX CONCURRENTLY" in statement:
+            builds += 1
+            if builds == 1:
+                raise Deadlocked("deadlock detected")
+        return []
+
+    host = Host(answer)
+    manager = PlannedConstraintManager(planning("postgres", host), schema_grammar_for(DatabaseType.POSTGRES))
+    with caplog.at_level(logging.CRITICAL), pytest.raises(DrivineError):
+        # The host never lists the constraint it made, so the ensure ends failed: what it ran is what is read here.
+        await manager.ensure(uniqueness_constraint("Person", "email"), 0)
+    first = next(i for i, it in enumerate(host.ran) if "CREATE UNIQUE INDEX CONCURRENTLY" in it)
+    assert host.ran[first] in host.once
+    again = next(i for i, it in enumerate(host.ran) if i > first and "CREATE UNIQUE INDEX CONCURRENTLY" in it)
+    assert any("pg_stat_progress_create_index" in it for it in host.ran[first + 1 : again])
 
 
 async def test_a_statement_that_makes_or_drops_an_item_tells_the_host_its_items_changed():

@@ -45,6 +45,11 @@ def _contended(failure: BaseException, waited_out_busy: bool) -> bool:
     )
 
 
+def _postgres_deadlock(failure: BaseException) -> bool:
+    """Whether Postgres cancelled the statement as a deadlock (40P01): the failure or a cause under it."""
+    return any_cause(failure, lambda it: getattr(it, "sqlstate", None) == "40P01")
+
+
 class SchemaExecutor:
     """
     Runs schema statements on a connection of their own, in auto-commit: schema DDL can't run inside a data transaction.
@@ -53,13 +58,19 @@ class SchemaExecutor:
     def __init__(self, provider: ConnectionProvider) -> None:
         self.provider = provider
 
-    async def run(self, statement: str | NativeOperation, bindings: Mapping[str, Any] | None = None) -> list[Any]:
+    async def run(
+        self, statement: str | NativeOperation, bindings: Mapping[str, Any] | None = None, once: bool = False
+    ) -> list[Any]:
         """
         Runs a statement, again after a pause when the engine turned it away because another write was in progress.
+        A statement the schema planner runs `once` (an `execute` of `retry` ONCE) is not run again on a Postgres
+        deadlock (40P01): the failure is raised to the planner, which reads it, waits until no online build is under
+        way on the node table, and builds again (liberation-data/drivine-cypher-spec#382, drivine-python#572).
         """
         waited_out_busy = isinstance(statement, str) and waits_out_busy_lock(statement)
         return await when_not_contended(
-            lambda: self._run_once(statement, bindings or {}), lambda it: _contended(it, waited_out_busy)
+            lambda: self._run_once(statement, bindings or {}),
+            lambda it: not (once and _postgres_deadlock(it)) and _contended(it, waited_out_busy),
         )
 
     async def _run_once(self, statement: str | NativeOperation, bindings: Mapping[str, Any]) -> list[Any]:

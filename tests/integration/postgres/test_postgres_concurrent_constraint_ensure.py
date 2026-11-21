@@ -13,6 +13,7 @@ a segment of /dev/shm until it disconnects, which a pool would keep, and leave a
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from collections.abc import AsyncIterator, Awaitable
 from typing import Any
@@ -267,15 +268,29 @@ async def test_a_claim_of_the_turn_older_than_60_seconds_left_by_a_session_that_
     assert claims == 0, "the claim taken over was given up once done"
 
 
-async def test_two_ensures_at_once_of_different_items_on_one_table_both_make_theirs(graphs: Graphs):
+DEADLOCKED = "deadlocked with another session's online build on the same table"
+"""What the planner says at INFO where Postgres cancelled one ensure's build as a deadlock with the other's."""
+
+
+async def test_two_ensures_at_once_of_different_items_on_one_table_both_make_theirs(
+    graphs: Graphs, caplog: pytest.LogCaptureFixture
+):
     # A constraint and a range index on the same node table, built online at once: Postgres cancels one as a deadlock,
-    # which waits for the other's build to end, and is made then.
+    # which waits for the other's build to end, and is made then. The planner must see that deadlock, run once
+    # (drivine-python#572), in at least one round: a host that ran the build again itself would hide it, and pass.
+    deadlocked: list[bool] = []
     for round_ in range(ROUNDS):
         graph = f"cc382_apart{round_}"
         gom = await graphs.seeded(graph)
         await graphs.run(f"UPDATE {graph}_node SET props = props || jsonb_build_object('n', props -> 'id')")
         first, second = await graphs.manager(graph), await graphs.manager(graph)
-        results = await together(first.constraints.ensure(SPEC), second.indexes.ensure(range_index("Big", "n")))
+        caplog.clear()
+        with caplog.at_level(logging.INFO, logger="drivine.schema"):
+            results = await together(first.constraints.ensure(SPEC), second.indexes.ensure(range_index("Big", "n")))
+        deadlocked.append(any(DEADLOCKED in it.getMessage() for it in caplog.records))
         assert all(status(it) == "CREATED" for it in results), f"round {round_}: {results}"
         assert list((await graphs.unique_indexes(graph)).values()) == [True], f"round {round_}"
         assert await enforced(gom.persistence_manager), f"round {round_}"
+    assert any(deadlocked), (
+        f"no round's builds deadlocked, so the planner's handling of one went untested: {deadlocked}"
+    )

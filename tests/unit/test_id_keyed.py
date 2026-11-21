@@ -61,7 +61,7 @@ from drivine.backend.sqlite.sqlite_graph import SqliteGraph, text_of
 from drivine.connection.falkordb.falkordb_parameter_coercer import FalkorDbParameterCoercer
 from drivine.cursor.cursor import Cursor
 from drivine.cursor.cursor_specification import CursorSpecification
-from drivine.cypher.shared_compiler import id_sql
+from drivine.cypher.shared_compiler import id_sql, plan_key_of
 from drivine.manager.patch_result import PatchResult
 from drivine.manager.persistence_manager import PersistenceManager
 from drivine.model.model_registry import ModelRegistry
@@ -643,6 +643,11 @@ def layout(value: Any, lookup: LookupStore) -> str:
 def test_id_sql_raises_the_modules_refusal_by_the_helper_and_the_store():
     with pytest.raises(DrivineError, match="The shared module wrote no hasId for sqlite: "):
         id_sql("sqlite", "hasId", "n", "id")
+
+
+def test_plan_key_of_raises_the_modules_refusal_of_text_that_is_no_json_by_the_store():
+    with pytest.raises(DrivineError, match="The shared module keyed no id nope{ for sqlite: idSql's planKeyOf"):
+        plan_key_of("sqlite", "nope{")
 
 
 async def test_a_lookup_by_id_on_a_graph_engine_binds_text_as_it_is_given_for_the_engine_compares_it():

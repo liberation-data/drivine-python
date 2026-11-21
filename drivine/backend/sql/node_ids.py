@@ -203,9 +203,9 @@ def has_id(store: str, alias: str, property: str, json_sql: str) -> str:
 
 def temporal_text(layout: str) -> str | None:
     """
-    The id as the text a write plan keys its node by, within the plan, where `layout` is the JSON text the store's
-    layout holds it as: a temporal value's tag (`{"$t": …, "v": …}`) as its text `v`, as the module writes it and reads
-    a stored target's id back as (drivine4j's `NodeIds.temporalText`); None for any other id.
+    The id as a batch reads it back (see read_back_key), where `layout` is the JSON text the store's layout holds it
+    as: a temporal value's tag (`{"$t": …, "v": …}`) as its text `v` (drivine4j's `NodeIds.temporalText`); None for
+    any other id. A write plan keys a node otherwise: see postgres_save_builder.stored_key.
     """
     if not layout.startswith('{"$t"'):
         return None

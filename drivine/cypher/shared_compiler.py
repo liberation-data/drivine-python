@@ -428,13 +428,28 @@ def module_text(request: Mapping[str, Any], store: str) -> str:
     return entry(json.dumps(request, ensure_ascii=False, separators=(",", ":")))
 
 
-IdSqlHelper = Literal["hasId", "keyText", "property", "hasProperty"]
+IdSqlHelper = Literal["hasId", "planKey", "property", "hasProperty"]
 """
 What the module's `idSql` request writes (its `IdSql`): `hasId`, whether the node's id is the id whose JSON, as the node
-holds it, is `json`; `keyText`, the id held as the text a write plan keys a node by (a temporal value's tag read as its
-text `v`); `property`, the property read as text, which a range index is made over; and `hasProperty`, whether the node
-has the property at all.
+holds it, is `json`; `planKey`, the id held as the key a write plan keys a node by (see `plan_key_of`); `property`, the
+property read as text, which a range index is made over; and `hasProperty`, whether the node has the property at all.
 """
+
+
+def plan_key_of(store: str, json_text: str) -> str:
+    """
+    The key a write plan on `store` keys a node by, within the plan, of the id whose JSON, as the store's layout holds
+    it, is `json_text`, as the module writes it (its `idSql` helper `planKeyOf`), and as the store reads a stored
+    target's id back (`planKey`): a text marked apart, as `t:` and its text, from a temporal value or a number that
+    reads alike (liberation-data/drivine-cypher-spec#391); a temporal value's tag as its text `v`; a number on Postgres
+    as `numeric` writes it, with no exponent, and on SQLite as its JSON; a truth value as its word.
+    """
+    answer = module_answer({"idSql": {"store": store, "helper": "planKeyOf", "json": json_text}}, store)
+    key = answer.get("key")
+    if not isinstance(key, str):
+        raise DrivineError(f"The shared module keyed no id {json_text} for {store}: {answer.get('error', 'no key')}")
+    return key
+
 
 _id_sql_written: dict[tuple[str, str, str, str, str | None], str] = {}
 """The SQL the module wrote for each request asked of `id_sql`, by the request: it is the same every time."""

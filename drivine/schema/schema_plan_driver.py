@@ -25,9 +25,12 @@ _LEVELS = {"INFO": logging.INFO, "WARN": logging.WARNING, "ERROR": logging.ERROR
 class PlanHost(Protocol):
     """What a host runs a plan's actions with, on the database the plan is for."""
 
-    async def run(self, statement: str | Mapping[str, Any], parameters: Mapping[str, Any]) -> list[Any]:
+    async def run(
+        self, statement: str | Mapping[str, Any], parameters: Mapping[str, Any], once: bool = False
+    ) -> list[Any]:
         """Runs a schema statement, or a listing, on a connection of its own: its rows, a row of one column its value.
-        A native command (FalkorDB's `GRAPH.CONSTRAINT`) is given as `{"native": [...]}`."""
+        A native command (FalkorDB's `GRAPH.CONSTRAINT`) is given as `{"native": [...]}`. A statement run `once`, an
+        `execute` the planner marks `retry` ONCE, is not run again on a Postgres deadlock (see SchemaExecutor.run)."""
         ...
 
     async def marker(self, statement: str, parameters: Mapping[str, Any], compiled: bool, rows: bool) -> list[Any]:
@@ -112,7 +115,8 @@ async def _answer(action: Mapping[str, Any], host: PlanHost) -> dict[str, Any]:
             await host.marker(action["statement"], action["parameters"], False, False)
             return {"type": "ran"}
         try:
-            await host.run(action["statement"], action["parameters"])
+            # The library runs a failed action again only as its `retry` says (the Cypher spec's README).
+            await host.run(action["statement"], action["parameters"], once=action.get("retry") == "ONCE")
         finally:
             if action["purpose"] != "PREPARE":
                 host.changed()

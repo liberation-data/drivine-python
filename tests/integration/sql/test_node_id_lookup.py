@@ -345,8 +345,8 @@ async def test_a_dropped_target_of_a_date_id_nothing_refers_to_is_deleted_and_th
 
 
 async def test_a_target_of_a_uuid_id_still_held_is_kept_by_its_text_unquoted(gom: StatelessGraphObjectManager):
-    # A UUID is held as its text, which the plan's `ids` key it by, unquoted: keyed by its JSON, the held key would be
-    # unlinked and joined again, which gives it a new relationship token, its stamp's second.
+    # A UUID is held as its text, which the plan's `ids` key it by as a text, `t:` and the text: keyed by its JSON, the
+    # held key would be unlinked and joined again, which gives it a new relationship token, its stamp's second.
     keys = LookupTarget(id="keys", name="a target of keys")
     first = LookupKey(id=uuid.UUID(int=1), name="first key")
     second = LookupKey(id=uuid.UUID(int=2), name="second key")
@@ -362,6 +362,109 @@ async def test_a_target_of_a_uuid_id_still_held_is_kept_by_its_text_unquoted(gom
     assert loaded is not None and [it.name for it in loaded.keys] == ["second key"]
     again = await gom.load(LookupKey, uuid.UUID(int=2))
     assert again is not None and again.stamp == held.stamp
+
+
+class LookupOwner(NodeFragment, labels=["SqlLookup", "LookupOwner"]):
+    id: Annotated[str, NodeId()]
+    name: str | None = None
+
+
+class LookupKin(NodeFragment, labels=["SqlLookup", "LookupKin"]):
+    """A node of a text id, beside nodes of its labels whose ids are a date or a number that reads as the same text."""
+
+    id: Annotated[str, NodeId()]
+    name: str | None = None
+
+
+class LookupKinAny(NodeFragment, labels=["SqlLookup", "LookupKin"]):
+    """LookupKin's labels with its id declared Any: it loads as the text of the tag it was read from."""
+
+    id: Annotated[Any, NodeId()]
+    name: str | None = None
+
+
+class LookupOwnerKin(GraphView):
+    owner: Annotated[LookupOwner, Root()]
+    kin: Annotated[list[LookupKin], Relationship("OWNS")] = []
+
+
+class LookupOwnerKinAny(GraphView):
+    owner: Annotated[LookupOwner, Root()]
+    kin: Annotated[list[LookupKinAny], Relationship("OWNS")] = []
+
+
+async def cypher(pm: PersistenceManager, statement: str) -> list[Any]:
+    return await pm.query(QuerySpecification[Any](cypher_statement(statement)))
+
+
+async def owned_alike(pm: PersistenceManager) -> None:
+    """The owner `o`, owning a date's node and the date's text's, and a number's node and the number's text's."""
+    await cypher(
+        pm,
+        "CREATE (o:SqlLookup:LookupOwner {id: 'o', name: 'owner'}), "
+        "(d:SqlLookup:LookupKin {id: date('2026-01-05'), name: 'date'}), "
+        "(t:SqlLookup:LookupKin {id: '2026-01-05', name: 'text'}), (n:SqlLookup:LookupKin {id: 1, name: 'number'}), "
+        "(s:SqlLookup:LookupKin {id: '1', name: 'one'}) "
+        "CREATE (o)-[:OWNS]->(d), (o)-[:OWNS]->(t), (o)-[:OWNS]->(n), (o)-[:OWNS]->(s)",
+    )
+
+
+async def owned(pm: PersistenceManager) -> list[Any]:
+    return await cypher(pm, "MATCH (:LookupOwner {id: 'o'})-[:OWNS]->(k) RETURN k.name ORDER BY k.name")
+
+
+THE_TEXTS = [LookupKin(id="2026-01-05", name="text"), LookupKin(id="1", name="one")]
+
+
+async def test_a_replace_that_keeps_a_text_ids_node_drops_the_relationship_to_a_date_or_a_number_whose_text_it_is(
+    gom: StatelessGraphObjectManager, pm: PersistenceManager
+):
+    # A write plan keys a related node by its id, a text id apart from a date or a number that reads alike
+    # (liberation-data/drivine-cypher-spec#391). Before, the plan keyed the text '2026-01-05' and the date alike, and
+    # '1' and 1, so a replace kept all four, with no error. drivine4j's IdKindContract, ported.
+    await owned_alike(pm)
+    await gom.save(LookupOwnerKin(owner=LookupOwner(id="o", name="owner"), kin=THE_TEXTS), replace=["kin"])
+    assert await owned(pm) == ["one", "text"]
+    assert await cypher(pm, "MATCH (n:LookupKin) RETURN count(n)") == [4]
+
+
+async def test_delete_unreferenced_deletes_the_dates_node_and_the_numbers_not_the_text_ids_nodes_the_view_holds(
+    gom: StatelessGraphObjectManager, pm: PersistenceManager
+):
+    await owned_alike(pm)
+    await gom.save(
+        LookupOwnerKin(owner=LookupOwner(id="o", name="owner"), kin=THE_TEXTS),
+        replace=["kin"],
+        removed_targets=RemovedTargets.DELETE_UNREFERENCED,
+    )
+    assert await owned(pm) == ["one", "text"]
+    assert await cypher(pm, "MATCH (n:LookupKin) RETURN n.name ORDER BY n.name") == ["one", "text"]
+
+
+@pytest.mark.parametrize(
+    "literal", ["date('2026-01-05')", "datetime('2026-01-05T01:02:03Z')", "localtime('10:11:12')", "duration('P1D')"]
+)
+async def test_a_replace_keeps_a_related_node_whose_id_declared_any_was_loaded_from_a_tag(
+    gom: StatelessGraphObjectManager, pm: PersistenceManager, literal: str
+):
+    # Loaded as its tag's text, the id is held by a replace as the tag, as the plan keys the node: the plan marks a text
+    # apart (liberation-data/drivine-cypher-spec#391), so keyed as the text it would be unlinked, and deleted under
+    # DELETE_UNREFERENCED.
+    await cypher(
+        pm,
+        "CREATE (o:SqlLookup:LookupOwner {id: 'o', name: 'owner'})"
+        f"-[:OWNS]->(:SqlLookup:LookupKin {{id: {literal}}})",
+    )
+    loaded = await gom.load(LookupOwnerKinAny, "o")
+    assert loaded is not None and len(loaded.kin) == 1
+    await gom.save(loaded, replace=["kin"])
+    assert await cypher(pm, "MATCH (:LookupOwner {id: 'o'})-[r:OWNS]->() RETURN count(r)") == [1]
+    loaded = await gom.load(LookupOwnerKinAny, "o")
+    assert loaded is not None
+    await gom.save(loaded, replace=["kin"], removed_targets=RemovedTargets.DELETE_UNREFERENCED)
+    assert await cypher(pm, "MATCH (:LookupOwner {id: 'o'})-[r:OWNS]->() RETURN count(r)") == [1]
+    assert await cypher(pm, f"MATCH (k:LookupKin) WHERE k.id = {literal} RETURN count(k)") == [1]
+    assert await cypher(pm, "MATCH (k:LookupKin) RETURN count(k)") == [1]
 
 
 async def test_the_query_dsl_finds_a_uuid_id_by_the_text_a_save_holds_it_as(gom: StatelessGraphObjectManager):

@@ -50,7 +50,7 @@ from drivine.backend.oracle.oracle_backend import OracleBackend
 from drivine.backend.oracle.oracle_graph import OracleGraph
 from drivine.backend.postgres.postgres_backend import PostgresBackend
 from drivine.backend.postgres.postgres_graph import PostgresGraph
-from drivine.backend.postgres.postgres_save_builder import numeric_text, stored_key
+from drivine.backend.postgres.postgres_save_builder import stored_key
 from drivine.backend.save_statement import SaveStatement
 from drivine.backend.sql.fragments import FRAGMENT_ROOT_ROW
 from drivine.backend.sql.node_ids import NO_NODE, read_back_key, typed_id
@@ -61,7 +61,7 @@ from drivine.backend.sqlite.sqlite_graph import SqliteGraph, text_of
 from drivine.connection.falkordb.falkordb_parameter_coercer import FalkorDbParameterCoercer
 from drivine.cursor.cursor import Cursor
 from drivine.cursor.cursor_specification import CursorSpecification
-from drivine.cypher.shared_compiler import id_sql
+from drivine.cypher.shared_compiler import id_sql, plan_key_of
 from drivine.manager.patch_result import PatchResult
 from drivine.manager.persistence_manager import PersistenceManager
 from drivine.model.model_registry import ModelRegistry
@@ -111,26 +111,24 @@ class Recording(PersistenceManager):
 
 
 def test_stored_key_on_postgres_is_a_numbers_text_as_jsonb_gives_it_back_numerics_with_no_exponent():
-    given = ["1.0E-7", "-1.5E-10", "1.230e-5", "2.0", "12", "0.1", "-0.0", "1.0E+2", '"1.0E-7"', "[1]"]
-    assert [numeric_text(it) for it in given] == [
+    assert [stored_key(it, "postgres") for it in (1e-7, -1.5e-10, 4.5, 7, 100.0, "a1e-7", True)] == [
         "0.00000010",
         "-0.00000000015",
-        "0.00001230",
-        "2.0",
-        "12",
-        "0.1",
-        "0.0",
-        "100",
-        '"1.0E-7"',
-        "[1]",
-    ]
-    assert [stored_key(it, "postgres") for it in (1e-7, 4.5, 7, "a1e-7", True)] == [
-        "0.00000010",
         "4.5",
         "7",
-        "a1e-7",
+        "100.0",
+        "t:a1e-7",
         "true",
     ]
+
+
+def test_stored_key_keeps_a_text_id_apart_from_a_date_or_a_number_that_reads_alike():
+    # liberation-data/drivine-cypher-spec#391: the text '2026-01-05' and that date, or '1' and 1, are two nodes, so a
+    # replace that keeps one drops the edge to the other.
+    for store in ("postgres", "sqlite"):
+        assert stored_key("2026-01-05", store) != stored_key(date(2026, 1, 5), store)
+        assert stored_key("1", store) != stored_key(1, store)
+        assert stored_key("true", store) != stored_key(True, store)
 
 
 def test_stored_key_is_a_temporal_ids_tag_text_as_the_module_reads_a_stored_targets_id_back():
@@ -139,9 +137,9 @@ def test_stored_key_is_a_temporal_ids_tag_text_as_the_module_reads_a_stored_targ
     assert stored_key(date(2024, 1, 2), "sqlite") == "2024-01-02"
 
 
-def test_stored_key_is_a_uuid_ids_text_unquoted_as_the_module_reads_a_stored_targets_text_id_back():
+def test_stored_key_is_a_uuid_ids_text_marked_as_text_as_the_module_reads_a_stored_targets_text_id_back():
     key = uuid.UUID("12345678-9abc-def0-1234-56789abcdef0")
-    assert [stored_key(key, "postgres"), stored_key(key, "sqlite")] == [str(key)] * 2
+    assert [stored_key(key, "postgres"), stored_key(key, "sqlite")] == [f"t:{key}"] * 2
 
 
 def test_stored_key_on_sqlite_is_the_json_text_the_module_writes_which_sqlite_reads_the_property_back_as():
@@ -645,6 +643,11 @@ def layout(value: Any, lookup: LookupStore) -> str:
 def test_id_sql_raises_the_modules_refusal_by_the_helper_and_the_store():
     with pytest.raises(DrivineError, match="The shared module wrote no hasId for sqlite: "):
         id_sql("sqlite", "hasId", "n", "id")
+
+
+def test_plan_key_of_raises_the_modules_refusal_of_text_that_is_no_json_by_the_store():
+    with pytest.raises(DrivineError, match="The shared module keyed no id nope{ for sqlite: idSql's planKeyOf"):
+        plan_key_of("sqlite", "nope{")
 
 
 async def test_a_lookup_by_id_on_a_graph_engine_binds_text_as_it_is_given_for_the_engine_compares_it():

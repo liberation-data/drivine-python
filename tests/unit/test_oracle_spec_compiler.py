@@ -3,6 +3,9 @@ Oracle's `$name` parameters become `:b0`, `:b1`, …, only those the statement n
 Drivine for TypeScript's OracleSpecCompiler.spec cases of liberation-data/drivine#789 (drivine-python#541).
 """
 
+import math
+from decimal import Decimal
+
 from drivine import QuerySpecification
 from drivine.connection.oracle.oracle_spec_compiler import OracleSpecCompiler
 from drivine.query.compiled_query import CompiledQuery
@@ -43,3 +46,13 @@ def test_binds_no_parameter_named_only_in_quoted_text():
     result = compiled(QuerySpecification("""select '$."$t"' from dual""").bind({"t": "a"}))
     assert result.statement == """select '$."$t"' from dual"""
     assert result.parameters == {}
+
+
+def test_binds_a_decimal_that_is_no_finite_number_as_the_float_it_stands_for():
+    # Not as the JSON text of one, "Infinity", which Oracle reads as no number (drivine-python#303).
+    given = {"inf": Decimal("Infinity"), "ninf": Decimal("-Infinity"), "nan": Decimal("NaN"), "snan": Decimal("sNaN")}
+    result = compiled(QuerySpecification("select $inf, $ninf, $nan, $snan from dual").bind(given))
+    assert result.parameters["b0"] == math.inf
+    assert result.parameters["b1"] == -math.inf
+    assert math.isnan(result.parameters["b2"])
+    assert math.isnan(result.parameters["b3"])

@@ -88,7 +88,9 @@ class Account(NodeFragment, labels=["Account"]):
     name: str | None = None
 
 
-class Ticket(NodeFragment, labels=["Ticket"]):
+class Ticket(NodeFragment, labels=["Ticket"], node_id_index=False):
+    """Its NodeId's default range index turned off."""
+
     id: Annotated[str, NodeId()]
 
 
@@ -164,7 +166,6 @@ DECLARATIONS: dict[str, Callable[[], Declared]] = {
     "text": lambda: one(),
     "fragment": lambda: Declared((SchemaCatalog.from_fragments(Article, dimensions=dimensions),)),
     "fragment id served by a constraint": lambda: Declared((SchemaCatalog.from_fragments(Account),)),
-    # No node id's index is given by default yet, so none is turned off (#552).
     "fragment without its id's index": lambda: Declared((SchemaCatalog.from_fragments(Ticket),)),
     "fragment class items": lambda: Declared((SchemaCatalog.from_fragments(Message),)),
     "fragments merged": lambda: Declared((SchemaCatalog.from_fragments(Customer, CustomerAgain),)),
@@ -191,10 +192,7 @@ DECLARATIONS: dict[str, Callable[[], Declared]] = {
 
 GAPS: dict[str, list[str]] = {
     "text": ["#356"],
-    "fragment": ["#552"],
-    "fragment class items": ["#552", "#442"],
-    "fragments merged": ["#552"],
-    "fragment ignoring case": ["#552"],
+    "fragment class items": ["#442"],
 }
 """
 The cases drivine-python can't yet declare as drivine4j does, each by the drivine-python issues that bring it level:
@@ -203,7 +201,6 @@ what the run of drivine-cypher-spec#135 across the libraries reports of each cas
 
 GAP_REASONS: dict[str, str] = {
     "#356": "drivine-python's schema API declares no TEXT index",
-    "#552": "a fragment's NodeId is given no range index by default",
     "#442": "FullTextIndex takes no analyzer",
 }
 """What each issue of GAPS leaves out."""
@@ -306,21 +303,6 @@ async def test_the_declarations_give_the_planner_the_catalogs_the_spec_pins(
         "catalogs": case["catalogs"],
         "runtime": case["runtime"],
     }
-
-
-@pytest.mark.parametrize("api", APIS)
-@pytest.mark.parametrize("case", [it for it in CASES if GAPS.get(it["case"]) == ["#552"]], ids=lambda it: it["case"])
-async def test_a_fragment_case_short_only_of_its_node_ids_index_gives_the_rest_as_the_spec_pins_in_order(
-    case: dict[str, Any], api: Api, tmp_path: Path, requests: list[dict[str, Any]]
-):
-    # Of the fragment cases, all but the node id's default range index (#552), which drivine4j adds after the rest.
-    def declared(catalog: dict[str, Any]) -> dict[str, Any]:
-        default = {"kind": "RANGE_INDEX", "label": catalog["items"][0]["label"], "properties": ["id"], "name": None}
-        items = [it for it in catalog["items"] if {k: it.get(k) for k in default} != default]
-        return {**catalog, "items": items}
-
-    given = await enforced(api, DECLARATIONS[case["case"]](), tmp_path, requests)
-    assert given == {"catalogs": [declared(it) for it in case["catalogs"]], "runtime": case["runtime"]}
 
 
 # ----- How a catalog gives its items, as drivine4j's SchemaCatalog.build and FragmentSchemaScanner do -----

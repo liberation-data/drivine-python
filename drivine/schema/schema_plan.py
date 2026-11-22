@@ -75,7 +75,7 @@ def module_spec(spec: PlanSpec) -> dict[str, Any]:
         written["ignoreCase"] = spec.ignore_case
         written["nodeIdProperty"] = spec.node_id_property
     elif isinstance(spec, FullTextIndexSpec):
-        written["analyzer"] = None
+        written["analyzer"] = spec.analyzer
     else:
         written.update(
             dimensions=spec.dimensions,
@@ -116,7 +116,7 @@ def plan_spec(written: Mapping[str, Any]) -> PlanSpec:
         node_id = written.get("nodeIdProperty") or None
         return UniquenessConstraintSpec(label, properties, node_id_property=node_id, ignore_case=ignore_case, name=name)
     if kind == "FULLTEXT":
-        return FullTextIndexSpec(label, properties)
+        return FullTextIndexSpec(label, properties, analyzer=written.get("analyzer"))
     if kind == "VECTOR":
         options = cast(Sequence[Mapping[str, Any]], written.get("engineOptions") or [])
         return VectorIndexSpec(

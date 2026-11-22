@@ -660,6 +660,39 @@ async def test_a_lookup_by_id_on_a_graph_engine_reads_text_as_the_ids_type_as_a_
     assert [it["id"] for _, it in pm.bound] == [6]
 
 
+class Patching(Recording):
+    """A Recording whose patch finds no node, so a patch by id runs and reads its one row."""
+
+    async def get_one(self, spec: QuerySpecification[T]) -> T:
+        await self.query(spec)
+        return {"found": False, "applied": False, "changed": False} if "set" in spec.parameters else 0  # type: ignore[return-value, operator]
+
+
+@pytest.mark.parametrize("engine", [DatabaseType.NEO4J, DatabaseType.MEMGRAPH, DatabaseType.FALKORDB])
+async def test_every_lookup_by_id_on_a_graph_engine_binds_the_ids_text_as_its_type(engine: DatabaseType):
+    # An update, a view's root, a cascade's depth check and its delete, a patch, and each end of a relate and an
+    # unrelate_all: each binds the text as the value a save writes for the field (drivine4j#806).
+    pm = Patching(engine)
+    gom = StatelessGraphObjectManager(pm)
+    day = date(2024, 3, 4)
+    assert await gom.update(Dial, "6", lambda it: it) is None
+    await gom.load(DialView, "6")
+    await gom.delete(GaugeTree, "6", cascade=CascadeType.DELETE_ALL)
+    assert await gom.patch(PatchedDay, "2024-03-04", set={"value": 1}) == NOTHING
+    await gom.edges.relate(node_ref(Dial, "6"), node_ref(PatchedDay, "2024-03-04"), "ON")
+    await gom.edges.unrelate_all(node_ref(PatchedDay, "2024-03-04"), "ON")
+    bound = [(it.get("id"), it.get("_fromId"), it.get("_toId")) for _, it in pm.bound]
+    assert bound == [
+        (6, None, None),
+        (6, None, None),
+        (6.0, None, None),
+        (6.0, None, None),
+        (day, None, None),
+        (None, 6, day),
+        (None, day, None),
+    ]
+
+
 def test_typed_id_reads_text_for_an_optional_id_as_its_type_and_keeps_a_value_as_it_is():
     clock = ModelRegistry().fragment(Clock)
     assert typed_id(clock, "10:00") == time(10, 0)

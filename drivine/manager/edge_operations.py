@@ -95,5 +95,5 @@ class EdgeOperations:
         id, for which no statement is run (see node_ids).
         """
         model = self._registry.fragment(ref.type)
-        id_ = lookup_id(self._backend, model, ref.id)
+        id_ = lookup_id(model, ref.id)
         return None if id_ is NO_NODE else MatchedNode(model, id_, tuple(ref.labels))

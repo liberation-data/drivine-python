@@ -28,6 +28,7 @@ from drivine.sync import (
     Root,
     StatelessGraphObjectManager,
     node_ref,
+    refs,
 )
 
 
@@ -44,6 +45,8 @@ class TextDay(NodeFragment, labels=["IdText", "TextDay"]):
 class TextKey(NodeFragment, labels=["IdText", "TextKey"]):
     id: Annotated[uuid.UUID, NodeId()]
     name: str | None = None
+    other: uuid.UUID | None = None
+    others: list[uuid.UUID] = []
 
 
 class TextString(NodeFragment, labels=["IdText", "TextString"]):
@@ -68,6 +71,11 @@ class TextDayTree(GraphView):
 
     day: Annotated[TextDay, Root()]
     parts: Annotated[list[TextDayTree], Relationship("PART_OF", Direction.INCOMING, max_depth=1)] = []
+
+
+class TextLongView(GraphView):
+    long: Annotated[TextLong, Root()]
+    targets: Annotated[list[TextTarget], Relationship("POINTS_TO")] = []
 
 
 TARGET = node_ref(TextTarget, "x")
@@ -154,3 +162,31 @@ def test_text_on_a_string_id_finds_only_the_string_not_a_number_of_the_same_text
     gom.save(TextString(id="6", name="string"))
     found = gom.load(TextString, "6")
     assert found is not None and found.name == "string"
+
+
+def test_update_and_a_views_load_find_the_root_by_the_ids_text(gom: StatelessGraphObjectManager):
+    gom.save(TextLong(id=11, name="eleven"))
+    assert gom.edges.relate(node_ref(TextLong, 11), TARGET, "POINTS_TO")
+    view = gom.load(TextLongView, "11")
+    assert view is not None and [it.id for it in view.targets] == ["x"]
+    updated = gom.update(TextLong, "11", lambda it: it.model_copy(update={"name": "renamed"}))
+    assert updated is not None and updated.name == "renamed"
+    loaded = gom.load(TextLong, 11)
+    assert loaded is not None and loaded.name == "renamed"
+
+
+def test_a_uuid_in_a_property_and_a_list_is_saved_patched_and_matched_and_reads_back_as_a_uuid(
+    gom: StatelessGraphObjectManager,
+):
+    # Each graph engine holds a UUID as its text (#583): a save, a patch and a where clause's binding send it so, and a
+    # field declared UUID reads the text back as the UUID.
+    key, other, third = uuid.UUID(int=1), uuid.UUID(int=2), uuid.UUID(int=3)
+    gom.save(TextKey(id=key, name="key", other=other, others=[other, third]))
+    loaded = gom.load(TextKey, key)
+    assert loaded is not None and (loaded.id, loaded.other, loaded.others) == (key, other, [other, third])
+    assert isinstance(loaded.id, uuid.UUID) and isinstance(loaded.other, uuid.UUID)
+    patched = gom.patch(TextKey, str(key), set={"other": third})
+    assert (patched.found, patched.changed) == (True, True)
+    q = refs(TextKey)
+    found = gom.load_all(TextKey, where=q.other.eq(third))
+    assert [it.id for it in found] == [key]

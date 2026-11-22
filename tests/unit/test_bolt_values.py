@@ -138,4 +138,17 @@ def test_a_uuid_is_sent_as_its_text_in_lists_and_maps_too_as_the_other_libraries
 
 def test_falkordb_is_sent_a_uuid_as_its_text_where_it_refused_one():
     key = uuid.UUID(int=5)
-    assert FalkorDbParameterCoercer().coerce({"id": key, "ids": [key]}) == {"id": str(key), "ids": [str(key)]}
+    # A save's rows are lists of maps.
+    assert FalkorDbParameterCoercer().coerce({"id": key, "ids": [key], "rows": [{"props": {"k": key}}]}) == {
+        "id": str(key),
+        "ids": [str(key)],
+        "rows": [{"props": {"k": str(key)}}],
+    }
+
+
+def test_memgraph_is_sent_a_uuid_as_its_text_beside_a_time_it_sends_as_text():
+    key = uuid.UUID(int=5)
+    at = time(10, 11, 12, tzinfo=timezone(timedelta(hours=2)))
+    assert bolt_parameters({"rows": [{"id": key, "at": at}]}, DatabaseType.MEMGRAPH) == {
+        "rows": [{"id": str(key), "at": "10:11:12.000000000+02:00"}]
+    }

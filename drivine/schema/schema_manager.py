@@ -228,10 +228,12 @@ class SchemaManager:
         owner = catalog.name
         gom = self.factory.get(database)
         pm = gom.persistence_manager
-        elsewhere = [
-            *(it for it in self.options.catalogs if it.items and database in self._targets(it)),
-            *(it for it in _runtime_catalogs(self._runtime) if it.name != owner and database in self._targets(it)),
-        ]
+        runtime = [it for it in _runtime_catalogs(self._runtime) if database in self._targets(it)]
+        # The startup catalogs as they are applied there: a NodeId's default another item serves declares nothing.
+        on_database = _beside(
+            {database: [it for it in self.options.catalogs if database in self._targets(it)]}, {database: runtime}
+        )[database]
+        elsewhere = [*(it for it in on_database if it.items), *(it for it in runtime if it.name != owner)]
         # What other owners' markers record, declared or ensured at runtime: an owner this manager wasn't given, such
         # as an application's, whose catalogs are another manager's or another process's.
         recorded_elsewhere: dict[str, tuple[str, ...]] = {}

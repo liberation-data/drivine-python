@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Annotated, Any
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -31,6 +32,7 @@ from drivine import (
 from drivine import SchemaManager as AsyncSchemaManager
 from drivine.manager.graph_object_manager_factory import GraphObjectManagerFactory
 from drivine.schema.range_index_spec import RangeIndexSpec
+from drivine.schema.schema_manager import inventory_key
 from drivine.sync import DatabaseRegistry as SyncDatabaseRegistry
 from drivine.sync import PersistenceManagerFactory as SyncPersistenceManagerFactory
 from drivine.sync import SchemaManager as SyncSchemaManager
@@ -223,3 +225,112 @@ async def test_index_node_ids_false_gives_the_planner_only_what_is_declared(
         [SchemaCatalog.from_fragments(Message) + [range_index("Topic", "name")]], index_node_ids=False
     )
     assert await enforced(api, options, tmp_path, requests) == [[item(range_index("Topic", "name"))]]
+
+
+def test_a_default_declared_the_same_by_an_addition_is_the_declared_item_kept_without_the_defaults():
+    merged = SchemaCatalog.from_fragments(Message) + [MESSAGE_ID]
+    assert merged.node_id_indexes == () and merged.items.count(MESSAGE_ID) == 1
+    assert merged.without_node_id_indexes().items == (MESSAGE_ID,)
+
+
+# ----- On a graph engine, whose schema the manager plans itself -----
+
+
+def graph_engine(api: Api) -> tuple[Any, MagicMock]:
+    """A factory whose one manager stands in for a graph engine's: no schema planning, no markers, nothing held."""
+    call = MagicMock if api == "sync" else AsyncMock
+    gom = MagicMock()
+    gom.schema_planning.return_value = None
+    gom.backend.marker_items.return_value = None
+    gom.persistence_manager.maybe_get_one = call(return_value=None)
+    gom.persistence_manager.execute = call(return_value=None)
+    gom.persistence_manager.query = call(return_value=[])
+    for of in (gom.indexes, gom.constraints):
+        for name in ("ensure", "recreate", "drop"):
+            setattr(of, name, call(return_value=MagicMock(status="CREATED")))
+    factory = MagicMock()
+    factory.get.return_value = gom
+    return factory, gom
+
+
+async def on_graph_engine(api: Api, options: SchemaOptions, tmp_path: Path, run: Any) -> MagicMock:
+    """`run(manager)`, each step awaited on the async API, against the stand-in graph engine; gives its manager."""
+    factory, gom = graph_engine(api)
+    env = {"SQLITE_DATABASE_TYPE": "SQLITE", "SQLITE_DATABASE_NAME": str(tmp_path / "graph.db")}
+    if api == "async":
+        registry = DatabaseRegistry()
+        registry.build_or_resolve_from_env("sqlite", env)
+        try:
+            for step in run(AsyncSchemaManager(registry, factory, options)):
+                await step
+        finally:
+            await registry.close()
+    else:
+        sync_registry = SyncDatabaseRegistry()
+        sync_registry.build_or_resolve_from_env("sqlite", env)
+        try:
+            for _ in run(SyncSchemaManager(sync_registry, factory, options)):
+                pass
+        finally:
+            sync_registry.close()
+    return gom
+
+
+def made(gom: MagicMock) -> list[Any]:
+    return [it.args[0] for it in gom.indexes.ensure.call_args_list]
+
+
+def recorded(gom: MagicMock) -> dict[str, list[str]]:
+    """Each owner's inventory, as its marker was last written."""
+    marks = [it.args[0] for it in gom.backend.record_schema_marker.return_value.spec.call_args_list]
+    return {it["scope"]: it["items"].splitlines() for it in marks}
+
+
+@pytest.mark.parametrize("api", APIS)
+async def test_on_a_graph_engine_a_default_another_catalog_serves_is_left_to_it_and_one_declared_the_same_co_owned(
+    api: Api, tmp_path: Path
+):
+    named = RangeIndexSpec("Message", ("id",), name="message_id")
+    options = SchemaOptions([SchemaCatalog.from_fragments(Message), SchemaCatalog.of(named).named("app")])
+    gom = await on_graph_engine(api, options, tmp_path, lambda manager: [manager.enforce()])
+    assert made(gom) == [named]
+    assert recorded(gom) == {"schema": [], "app": [inventory_key(named)]}
+    options = SchemaOptions([SchemaCatalog.from_fragments(Message), SchemaCatalog.of(MESSAGE_ID).named("app")])
+    gom = await on_graph_engine(api, options, tmp_path, lambda manager: [manager.enforce()])
+    assert made(gom) == [MESSAGE_ID, MESSAGE_ID]
+    assert recorded(gom) == {"schema": [inventory_key(MESSAGE_ID)], "app": [inventory_key(MESSAGE_ID)]}
+
+
+@pytest.mark.parametrize("api", APIS)
+async def test_on_a_graph_engine_an_item_ensured_at_runtime_that_serves_a_default_takes_its_place(
+    api: Api, tmp_path: Path
+):
+    # Beside the default, the named index would be a conflicting declaration of the same item.
+    named = RangeIndexSpec("Message", ("id",), name="message_id")
+    options = SchemaOptions([SchemaCatalog.from_fragments(Message)])
+    gom = await on_graph_engine(
+        api, options, tmp_path, lambda manager: [manager.ensure("dice", named), manager.enforce()]
+    )
+    assert made(gom) == [named, named]
+    assert recorded(gom)["schema"] == []
+
+
+@pytest.mark.parametrize("api", APIS)
+async def test_on_a_graph_engine_an_item_removed_is_dropped_where_only_a_default_another_item_serves_matches_it(
+    api: Api, tmp_path: Path
+):
+    # The default is left to the constraint, so it declares nothing the removed index is kept for.
+    named = RangeIndexSpec("Message", ("id",), name="message_id")
+    options = SchemaOptions(
+        [SchemaCatalog.from_fragments(Message), SchemaCatalog.of(uniqueness_constraint("Message", "id")).named("app")]
+    )
+    gom = await on_graph_engine(
+        api, options, tmp_path, lambda manager: [manager.ensure("dice", named), manager.remove("dice", named)]
+    )
+    assert [it.args[0] for it in gom.indexes.drop.call_args_list] == [named]
+    # Without the constraint the default is applied, and the index of its identity is kept for it.
+    options = SchemaOptions([SchemaCatalog.from_fragments(Message)])
+    gom = await on_graph_engine(
+        api, options, tmp_path, lambda manager: [manager.ensure("dice", named), manager.remove("dice", named)]
+    )
+    assert gom.indexes.drop.call_args_list == []

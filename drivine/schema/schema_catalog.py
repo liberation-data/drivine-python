@@ -6,8 +6,16 @@ from dataclasses import dataclass
 
 from drivine.drivine_error import DrivineError
 from drivine.model.model_registry import ModelRegistry
+from drivine.model.schema_declaration import SchemaDeclaration
 from drivine.schema.range_index_spec import RangeIndexSpec
-from drivine.schema.schema_specs import SchemaSpec, full_text_index, range_index, uniqueness_constraint, vector_index
+from drivine.schema.schema_specs import (
+    SchemaSpec,
+    full_text_index,
+    made_as,
+    range_index,
+    uniqueness_constraint,
+    vector_index,
+)
 from drivine.schema.uniqueness_constraint_spec import UniquenessConstraintSpec
 
 DEFAULT_SCOPE = "schema"
@@ -42,7 +50,8 @@ class SchemaCatalog:
 
     @staticmethod
     def of(*items: SchemaSpec) -> SchemaCatalog:
-        return SchemaCatalog(tuple(items))
+        """The items, each once, indexes before constraints, as drivine4j's `SchemaCatalog.of` builds them."""
+        return SchemaCatalog(_built(items))
 
     @staticmethod
     def from_fragments(
@@ -69,7 +78,7 @@ class SchemaCatalog:
             default = _node_id_index(type_, label, model.node_id_property)
             if default is not None and default not in defaults:
                 defaults.append(default)
-            for it in model.schema:
+            for it in _scanned(model.schema):
                 # An item that ignores case is over the lowercased copies a CaseInsensitive field keeps, and a save
                 # keeps none of another field: it would hold the nodes there were when it was ensured, and none after.
                 uncopied = [p for p in it.properties if p not in model.lower_copied] if it.ignore_case else []
@@ -111,12 +120,7 @@ class SchemaCatalog:
                             hnsw_ef_construction=it.hnsw_ef_construction,
                         )
                     )
-        return SchemaCatalog(tuple(items)).with_node_id_indexes(defaults)
-
-    def with_node_id_indexes(self, defaults: Sequence[RangeIndexSpec]) -> SchemaCatalog:
-        """The catalog with each of the NodeIds' range indexes `defaults` that none of its items serves."""
-        kept = tuple(it for it in defaults if not any(serves_node_id(item, it) for item in self.items))
-        return dataclasses.replace(self, items=(*self.items, *kept), node_id_indexes=(*self.node_id_indexes, *kept))
+        return SchemaCatalog(_with_defaults(items, defaults), node_id_indexes=_kept(items, defaults))
 
     def without_node_id_indexes(self) -> SchemaCatalog:
         """
@@ -166,10 +170,14 @@ class SchemaCatalog:
         return self.for_databases("default")
 
     def __add__(self, more: Sequence[SchemaSpec]) -> SchemaCatalog:
-        """The catalog with `more` among its items; a NodeId's default range index one of them serves is left out."""
-        return SchemaCatalog(
-            (*self.declared_items, *more), self.version, self.databases, self.name
-        ).with_node_id_indexes(self.node_id_indexes)
+        """The catalog with `more` among its items, built again; a NodeId's default range index one of them serves is
+        left out."""
+        declared = (*self.declared_items, *more)
+        return dataclasses.replace(
+            self,
+            items=_with_defaults(declared, self.node_id_indexes),
+            node_id_indexes=_kept(declared, self.node_id_indexes),
+        )
 
 
 def serves_node_id(declared: SchemaSpec, default: RangeIndexSpec) -> bool:
@@ -191,3 +199,71 @@ def _node_id_index(type_: type, label: str, node_id_property: str | None) -> Ran
     if node_id_property is None or not getattr(type_, "__drivine_node_id_index__", True):
         return None
     return range_index(label, node_id_property)
+
+
+_CLASS_KINDS = ("RANGE", "FULLTEXT", "UNIQUE")
+"""The order drivine4j's scanner reads a fragment's class-level items in: by kind, each in the order declared."""
+
+
+def _scanned(declared: Sequence[SchemaDeclaration]) -> list[SchemaDeclaration]:
+    """
+    A fragment's items in the order drivine4j's `FragmentSchemaScanner` gives them, which the planner is given them in
+    (liberation-data/drivine-cypher-spec#135, its declarations.yaml): the class-level ones first, by kind, then the
+    fields', by the field's name, as Kotlin's reflection lists a class's properties.
+    """
+    classes = [it for it in declared if not it.field]
+    fields = [it for it in declared if it.field]
+    return [it for kind in _CLASS_KINDS for it in classes if it.kind == kind] + sorted(fields, key=lambda it: it.field)
+
+
+def _built(items: Sequence[SchemaSpec]) -> tuple[SchemaSpec, ...]:
+    """
+    The items as drivine4j's `SchemaCatalog.build` gives them: each once, by its kind, label and the properties it is
+    made over, in the order first declared, and the indexes before the constraints. Of a uniqueness constraint declared
+    with and without the NodeId its violations name nodes by, a fragment's and a hand-written one, the one that has it
+    is kept. Two that differ otherwise are both kept, for the schema manager to refuse as a conflict.
+    """
+    kept: list[SchemaSpec] = []
+    for item in items:
+        same = next((i for i, it in enumerate(kept) if _key(it) == _key(item)), None)
+        if same is None:
+            kept.append(item)
+            continue
+        found = kept[same]
+        if found == item:
+            continue
+        if isinstance(found, UniquenessConstraintSpec) and isinstance(item, UniquenessConstraintSpec):
+            if dataclasses.replace(found, node_id_property=None) == dataclasses.replace(item, node_id_property=None):
+                kept[same] = found if found.node_id_property is not None else item
+                continue
+        kept.append(item)
+    return tuple(it for it in kept if it.kind != "UNIQUE") + tuple(it for it in kept if it.kind == "UNIQUE")
+
+
+def _key(spec: SchemaSpec) -> tuple[str, str, frozenset[str]]:
+    """What makes two declarations one item, as drivine4j keys them: kind, label and the properties it is made over."""
+    made = made_as(spec)
+    return (made.kind, made.label, frozenset(made.properties))
+
+
+def _kept(declared: Sequence[SchemaSpec], defaults: Sequence[RangeIndexSpec]) -> tuple[RangeIndexSpec, ...]:
+    """Each of the NodeIds' range indexes `defaults` once, that none of the items `declared` serves."""
+    kept: list[RangeIndexSpec] = []
+    for it in defaults:
+        if it not in kept and not any(serves_node_id(item, it) for item in declared):
+            kept.append(it)
+    return tuple(kept)
+
+
+def _with_defaults(declared: Sequence[SchemaSpec], defaults: Sequence[RangeIndexSpec]) -> tuple[SchemaSpec, ...]:
+    """
+    The items as drivine4j's `SchemaCatalog.build` gives them with the NodeIds' default range indexes: the declared
+    items built (see `_built`), and the defaults none of them serves, once each, between the indexes and the
+    constraints.
+    """
+    built = _built(declared)
+    return (
+        *(it for it in built if it.kind != "UNIQUE"),
+        *_kept(declared, defaults),
+        *(it for it in built if it.kind == "UNIQUE"),
+    )

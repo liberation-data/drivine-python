@@ -271,13 +271,15 @@ class TestItemsOverTheCopy:
         FALKORDB_SCHEMA.require_constrainable(uniqueness_constraint("Account", "email"))
 
     def test_are_declared_on_fields(self):
+        # The indexes, each by its field's name, then the NodeId's default, then the constraints, as drivine4j's scanner
+        # and catalog give them.
         catalog = SchemaCatalog.from_fragments(Member)
         assert catalog.items == (
-            uniqueness_constraint("Member", "email", node_id_property="uuid", ignore_case=True),
             range_index("Member", "handle", ignore_case=True),
             range_index("Member", "name"),
             # The NodeId's range index, which nothing declared over it alone serves (drivine4j#827).
             range_index("Member", "uuid"),
+            uniqueness_constraint("Member", "email", node_id_property="uuid", ignore_case=True),
         )
 
     def test_are_refused_over_a_field_that_keeps_no_copy(self):

@@ -93,9 +93,9 @@ class EdgeOperations:
 
     def _node(self, ref: NodeRef) -> MatchedNode | None:
         """
-        The node `ref` names, its id read as the NodeId field's type on a SQL store; None where no node can have the
+        The node `ref` names, its id read as the NodeId field's type on every store; None where no node can have the
         id, for which no statement is run (see node_ids).
         """
         model = self._registry.fragment(ref.type)
-        id_ = lookup_id(self._backend, model, ref.id)
+        id_ = lookup_id(model, ref.id)
         return None if id_ is NO_NODE else MatchedNode(model, id_, tuple(ref.labels))

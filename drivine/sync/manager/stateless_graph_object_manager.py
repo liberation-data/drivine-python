@@ -551,10 +551,10 @@ class StatelessGraphObjectManager:
 
     def _lookup_id(self, target: TargetModel, given: Any) -> Any:
         """
-        The id a lookup of the target's root by `given` binds: on a SQL store read as the NodeId field's type, and
+        The id a lookup of the target's root by `given` binds: read as the NodeId field's type, on every store, and
         NO_NODE where no node can have it, for which no statement is run (see node_ids).
         """
-        return lookup_id(self.backend, root_of(target), given)
+        return lookup_id(root_of(target), given)
 
     def _refuse_cascade_below_depth(self, target: TargetModel, where: str | None, values: Mapping[str, Any]) -> None:
         """
@@ -1108,7 +1108,8 @@ def _keyed(by_id: Mapping[Any, Any], id: Any) -> Any:
     The key `by_id`, results keyed by the id of each node, has for the node whose id an object holds as `id`: `id`
     itself where the store's results give the id as it was given (Postgres, SQLite, Neo4j, Memgraph), so two ids that
     read back alike (a Decimal and the float nearest it, a date and its text) stay apart, and otherwise `id` as the
-    store reads it back (see read_back_key): Oracle reads it from the node, FalkorDB gives a date as its text.
+    store reads it back (see read_back_key): Oracle reads it from the node, FalkorDB gives a date as its text, and each
+    graph engine a UUID, which it is sent as (#583).
     """
     return id if id in by_id else read_back_key(id)
 

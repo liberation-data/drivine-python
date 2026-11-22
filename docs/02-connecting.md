@@ -36,6 +36,10 @@ writes it, `10:11:12.000000000+02:00`, so the text sorts as the times do, and Fa
 `10:11:12+02:00`. A field declared `time` loads either back as the time, and a statement that returns it gives the text. A `time` without
 an offset, or of a `ZoneInfo`, which gives none for a time alone, is a local time on each.
 
+A `UUID` is saved and bound on each graph engine as its text, in lists and maps too, as drivine4j and Drivine for
+TypeScript hold one ([#583](https://github.com/liberation-data/drivine-python/issues/583)): before, a save of one raised
+on each. A field declared `UUID` loads the text back as the UUID, and a statement that returns it gives the text.
+
 On Oracle, `DATABASE_NAME` is the service (`FREEPDB1`, say), and `DATABASE_DEFAULT_GRAPH_PATH` names the graph,
 `drivine` by default. A graph is drivine4j's tables, `<graph>_node`, `<graph>_edge` and `<graph>_schema`, and a SQL
 property graph over them, made on the first connection when they aren't there, so one store serves the JVM, Node and

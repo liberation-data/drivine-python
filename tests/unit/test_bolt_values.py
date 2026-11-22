@@ -5,13 +5,16 @@ time is left as it is. The integration tests' OffsetTimes saves and binds one on
 """
 
 import pickle
+import uuid
 from datetime import UTC, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
+import pytest
 from neo4j._codec.hydration.bolt.v1.temporal import dehydrate_time, hydrate_time  # pyright: ignore[reportMissingTypeStubs]
 
 from drivine import QuerySpecification
 from drivine.connection.database_type import DatabaseType
+from drivine.connection.falkordb.falkordb_parameter_coercer import FalkorDbParameterCoercer
 from drivine.connection.neo4j.bolt_values import FixedOffset, bolt_parameters
 from drivine.connection.neo4j.neo4j_connection import Neo4jConnection
 from drivine.connection.neo4j.neo4j_connection_provider import Neo4jConnectionProvider
@@ -118,3 +121,34 @@ async def test_a_connection_is_given_its_providers_engine_so_memgraph_is_sent_th
     finally:
         await provider.end()
         sync_provider.end()
+
+
+@pytest.mark.parametrize("engine", [DatabaseType.NEO4J, DatabaseType.MEMGRAPH])
+def test_a_uuid_is_sent_as_its_text_in_lists_and_maps_too_as_the_other_libraries_hold_one(engine: DatabaseType):
+    # The driver sends a UUID only over Bolt 6.1, and Neo4j's aligned store format holds none (#583).
+    key = uuid.UUID("12345678-9abc-def0-1234-56789abcdef0")
+    text = "12345678-9abc-def0-1234-56789abcdef0"
+    assert bolt_parameters({"id": key, "ids": [key], "map": {"k": key}, "n": 1}, engine) == {
+        "id": text,
+        "ids": [text],
+        "map": {"k": text},
+        "n": 1,
+    }
+
+
+def test_falkordb_is_sent_a_uuid_as_its_text_where_it_refused_one():
+    key = uuid.UUID(int=5)
+    # A save's rows are lists of maps.
+    assert FalkorDbParameterCoercer().coerce({"id": key, "ids": [key], "rows": [{"props": {"k": key}}]}) == {
+        "id": str(key),
+        "ids": [str(key)],
+        "rows": [{"props": {"k": str(key)}}],
+    }
+
+
+def test_memgraph_is_sent_a_uuid_as_its_text_beside_a_time_it_sends_as_text():
+    key = uuid.UUID(int=5)
+    at = time(10, 11, 12, tzinfo=timezone(timedelta(hours=2)))
+    assert bolt_parameters({"rows": [{"id": key, "at": at}]}, DatabaseType.MEMGRAPH) == {
+        "rows": [{"id": str(key), "at": "10:11:12.000000000+02:00"}]
+    }

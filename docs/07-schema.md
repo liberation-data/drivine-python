@@ -110,7 +110,8 @@ missing `DATABASE_TYPE` raises `DrivineError` there rather than on first use. Wi
   missing catalog, and one left empty until an embedding model exists, can be told from an application with no schema.
 - **A catalog holds each item once**, by its kind, label and properties in any order, as drivine4j's does:
   `SchemaCatalog.of`, `from_fragments`, `+`, `ensure` and `remove` keep the first declared and give the indexes before
-  the constraints, the order the schema plan is given them in. A fragment's class arguments come before its fields', by
+  the constraints, the order the schema plan is given them in, with the `NodeId`s' default range indexes after the
+  indexes declared. A fragment's class arguments come before its fields', by
   kind (`RangeIndex`, `FullTextIndex`, `Unique`), and its fields' by the field's name. Of a uniqueness constraint
   declared with and without its `node_id_property`, the catalog keeps the one with it. A vector index declared with and
   without engine options is kept twice, and when enforced or ensured the one that pins them wins; two declarations that

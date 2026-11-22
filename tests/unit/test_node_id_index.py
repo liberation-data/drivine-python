@@ -127,6 +127,30 @@ def test_two_fragments_of_one_label_give_it_one_and_without_node_id_indexes_leav
     assert (both + [range_index("Topic", "name")]).node_id_indexes == both.node_id_indexes
 
 
+class Holder(NodeFragment, labels=["Holder"]):
+    id: Annotated[str, NodeId()]
+    code: Annotated[str, Unique()]
+
+
+class HeldByCode(NodeFragment, labels=["Holder"]):
+    code: Annotated[str, NodeId()]
+
+
+def test_a_catalog_built_with_its_defaults_gives_the_declared_indexes_the_defaults_then_the_constraints():
+    # As drivine4j's SchemaCatalog.build: one fragment's item serves another's default, whichever comes first.
+    code, holder_id = uniqueness_constraint("Holder", "code", node_id_property="id"), range_index("Holder", "id")
+    for types in ((Holder, HeldByCode), (HeldByCode, Holder)):
+        catalog = SchemaCatalog.from_fragments(*types)
+        assert catalog.items == (holder_id, code) and catalog.node_id_indexes == (holder_id,), types
+    # Added to, the catalog is built again: an item added once however often given, the defaults it doesn't serve kept
+    # between the indexes and the constraints.
+    topic, unique = range_index("Topic", "name"), uniqueness_constraint("Topic", "name")
+    added = SchemaCatalog.from_fragments(Message) + [unique, topic, topic]
+    assert added.items == (topic, MESSAGE_ID, unique) and added.node_id_indexes == (MESSAGE_ID,)
+    served = added + [uniqueness_constraint("Message", "id"), uniqueness_constraint("Message", "id")]
+    assert served.items == (topic, unique, uniqueness_constraint("Message", "id")) and served.node_id_indexes == ()
+
+
 # ----- Applied beside the other catalogs on a database -----
 
 Api = str

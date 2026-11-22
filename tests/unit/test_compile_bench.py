@@ -31,9 +31,9 @@ def test_p99_is_the_nearest_rank():
 def test_the_corpus_is_every_spec_file_but_the_ddl_and_the_hosts():
     spec_files = {it.name for it in (Path(__file__).parents[1] / "cypher").glob("*.yaml")}
     # host.yaml holds no Cypher: what the host's functions and row reading do. Since store layout 2, store.yaml,
-    # marker.yaml, plans.yaml, fragments.yaml and vector.yaml hold the store's own statements, its fragments and vector
-    # search, which no statement the bench times compiles to.
-    store_files = {"store.yaml", "marker.yaml", "plans.yaml", "fragments.yaml", "vector.yaml"}
+    # marker.yaml, plans.yaml, declarations.yaml, fragments.yaml and vector.yaml hold the store's own statements, the
+    # schema planner's requests, its fragments and vector search, which no statement the bench times compiles to.
+    store_files = {"store.yaml", "marker.yaml", "plans.yaml", "declarations.yaml", "fragments.yaml", "vector.yaml"}
     assert set(compile_bench.CORPUS) == spec_files - {"schema.yaml", "host.yaml"} - store_files
 
 

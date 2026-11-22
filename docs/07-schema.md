@@ -108,6 +108,14 @@ missing `DATABASE_TYPE` raises `DrivineError` there rather than on first use. Wi
   known later is given to `ensure`. With nothing to apply, no catalog or only empty ones and nothing ensured, the
   manager says so at INFO: that it found no `SchemaCatalog`, or that all it found are empty, naming their owners. So a
   missing catalog, and one left empty until an embedding model exists, can be told from an application with no schema.
+- **A catalog holds each item once**, by its kind, label and properties in any order, as drivine4j's does:
+  `SchemaCatalog.of`, `from_fragments`, `+`, `ensure` and `remove` keep the first declared and give the indexes before
+  the constraints, the order the schema plan is given them in, with the `NodeId`s' default range indexes after the
+  indexes declared. A fragment's class arguments come before its fields', by
+  kind (`RangeIndex`, `FullTextIndex`, `Unique`), and its fields' by the field's name. Of a uniqueness constraint
+  declared with and without its `node_id_property`, the catalog keeps the one with it. A vector index declared with and
+  without engine options is kept twice, and when enforced or ensured the one that pins them wins; two declarations that
+  differ otherwise raise then.
 - **A vector field needs its `VectorIndex`.** Drivine knows a field is an embedding from the marker alone: without it
   the field is saved as a plain list, not as a vector FalkorDB's index serves, and `load_nearest` can't find the
   index. So a catalog's `vector_index` over a fragment's field without one is refused with a `DrivineError` naming
@@ -149,7 +157,7 @@ sent the statement as it is. DDL sent as SQL is SQL, and runs as it is.
 |---|---|
 | `CREATE [RANGE] INDEX [name] [IF NOT EXISTS] FOR (n:L) ON (n.a, n.b)`, or Neo4j 4's `ON :L(a, b)` | `range_index("L", ["a", "b"])` |
 | `CREATE CONSTRAINT [name] [IF NOT EXISTS] FOR (n:L) REQUIRE n.p IS [NODE] UNIQUE`, `REQUIRE (n.a, n.b) IS UNIQUE`, or Neo4j 4's `ON (n:L) ASSERT n.p IS UNIQUE` | `uniqueness_constraint` |
-| `CREATE FULLTEXT INDEX … FOR (n:L) ON EACH [n.a, …]` | `full_text_index`; its `fulltext.analyzer` is read, and not applied yet ([#442](https://github.com/liberation-data/drivine-python/issues/442)), and `fulltext.eventually_consistent` is ignored |
+| `CREATE FULLTEXT INDEX … FOR (n:L) ON EACH [n.a, …]` | `full_text_index`; its `fulltext.analyzer` is recorded, and an index that records another is drift, as in drivine4j, though no search reads by it yet ([#442](https://github.com/liberation-data/drivine-python/issues/442)), and `fulltext.eventually_consistent` is ignored |
 | `CREATE VECTOR INDEX … FOR (n:L) ON n.p OPTIONS {indexConfig: {…}}` | `vector_index`: `vector.dimensions` (required), `vector.similarity_function` (`cosine` or `euclidean`, in any case), `vector.hnsw.m` and `vector.hnsw.ef_construction`, and `vector.quantization.enabled` as Neo4j's `EngineVectorOptions`; `indexProvider` is ignored |
 | `CREATE TEXT INDEX …` | Neo4j's TEXT index, which the SQL stores don't make, so the statement fails |
 | `DROP INDEX name [IF EXISTS]`, `DROP CONSTRAINT name [IF EXISTS]` | `SchemaManager.remove` of the item that goes by the name |

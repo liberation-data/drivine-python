@@ -18,6 +18,7 @@ import pytest
 from drivine import DatabaseType, ReusedIdsError
 from drivine.drivine_error import DrivineError
 from drivine.schema.engine_vector_options import EngineVectorOptions
+from drivine.schema.full_text_index_spec import FullTextIndexSpec
 from drivine.schema.planned_managers import PlannedConstraintManager, PlannedIndexManager, SchemaPlanning
 from drivine.schema.range_index_spec import RangeIndexSpec
 from drivine.schema.schema_grammar import schema_grammar_for
@@ -126,6 +127,7 @@ def planning(store: Any, host: Host) -> SchemaPlanning:
         RangeIndexSpec("Person", ("name", "born"), ignore_case=True, name="by_name"),
         uniqueness_constraint("Person", "email", node_id_property="id"),
         full_text_index("Note", ["title", "body"]),
+        FullTextIndexSpec("Note", ("body",), analyzer="english"),
         VectorIndexSpec(
             "Doc",
             ("embedding",),

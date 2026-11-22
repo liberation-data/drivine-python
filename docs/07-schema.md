@@ -113,8 +113,8 @@ missing `DATABASE_TYPE` raises `DrivineError` there rather than on first use. Wi
   the constraints, the order the schema plan is given them in. A fragment's class arguments come before its fields', by
   kind (`RangeIndex`, `FullTextIndex`, `Unique`), and its fields' by the field's name. Of a uniqueness constraint
   declared with and without its `node_id_property`, the catalog keeps the one with it. A vector index declared with and
-  without engine options is kept twice, and when enforced the one that pins them wins; two declarations that differ
-  otherwise raise when enforced.
+  without engine options is kept twice, and when enforced or ensured the one that pins them wins; two declarations that
+  differ otherwise raise then.
 - **A vector field needs its `VectorIndex`.** Drivine knows a field is an embedding from the marker alone: without it
   the field is saved as a plain list, not as a vector FalkorDB's index serves, and `load_nearest` can't find the
   index. So a catalog's `vector_index` over a fragment's field without one is refused with a `DrivineError` naming

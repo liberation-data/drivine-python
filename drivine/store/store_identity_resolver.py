@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 
 from drivine import concurrency
 from drivine.drivine_error import DrivineError
-from drivine.manager.contention import any_cause, contended_pause, ddl_contended
+from drivine.manager.contention import any_cause, contended_pause, ddl_deadlocked
 from drivine.schema.schema_specs import uniqueness_constraint
 from drivine.store.store_identity import StoreIdentity
 
@@ -157,13 +157,12 @@ class StoreIdentityResolver:
         Ensures the uniqueness constraint on the key. Returns whether it is in force; False degrades `resolve` to
         best-effort convergence rather than failing boot over an identity that can still be read.
 
-        Managers making the constraint at once get in each other's way. On a graph engine, a deadlock (Neo4j's, on the
-        label's lock) or a write turned away is already run again by the schema executor (see `when_not_contended`);
-        on a SQL store the schema plan runs the constraint's statements once, and their contention reaches here. One
-        manager's statement can also be refused for what another's has just made: the constraint or the key's index
-        already there (FalkorDB), or the index's name taken in the catalog (Postgres's `pg_class`, 23505). The
-        constraint is then ensured again, which finds the other's. Going on without it would let a stamp be refused by
-        the other's constraint, or two stamps be written before it is in force (#298, as drivine4j#473).
+        Managers making the constraint at once get in each other's way. A deadlock (Neo4j's, on the label's lock) or a
+        write turned away is already run again by the schema executor (see `when_not_contended`). One manager's
+        statement can also be refused for what another's has just made: the constraint or the key's index already there
+        (FalkorDB), or the index's name taken in the catalog (Postgres's `pg_class`, 23505). The constraint is then
+        ensured again, which finds the other's. Going on without it would let a stamp be refused by the other's
+        constraint, or two stamps be written before it is in force (#298, as drivine4j#473).
 
         A manager whose making still fails, as one that lost each round of Neo4j's label lock to the others does, looks
         for the winner's constraint before it goes on best-effort, as drivine4j does (see `_winners_in_force`). Turned
@@ -181,10 +180,8 @@ class StoreIdentityResolver:
             return self._in_force_after(await self._ensured_again_when_made_meanwhile(self.constraints))
         except Exception as error:
             failure = error
-        # A SQL store's DDL turned away by a deadlock or a busy lock as well as the engine's own contention, as
-        # drivine4j's resolver takes it (its DdlContention): a statement the schema plan runs once reaches here as it
-        # came (#573).
-        contended = self.backend.contended(failure) or ddl_contended(failure)
+        # A deadlock on a SQL store's DDL as well as the engine's own contention, as drivine4j's resolver takes it.
+        contended = self.backend.contended(failure) or ddl_deadlocked(failure)
         if await self._winners_in_force(self.constraints, contended):
             return True
         if contended:
@@ -224,8 +221,7 @@ class StoreIdentityResolver:
                 # The label is Drivine's, so a plain index on the key (Neo4j) is replaced by the constraint.
                 return await constraints.ensure(_KEY_CONSTRAINT, replace_blocking_index=True)
             except Exception as error:
-                # Not contention, which is the caller's to read: a graph engine's executor has run it again already,
-                # and a SQL store's plan runs it once.
+                # Not a deadlock: the schema executor has run that again already, as many times as it runs one.
                 if attempt >= _ENSURE_ATTEMPTS or not _made_meanwhile(error):
                     raise
                 await concurrency.sleep(contended_pause(attempt - 1))

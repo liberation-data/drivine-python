@@ -349,22 +349,10 @@ async def test_the_constraint_is_ensured_once_more_when_the_looks_for_the_winner
 
 
 @pytest.mark.parametrize("api", APIS)
-@pytest.mark.parametrize(
-    "turned_away",
-    [
-        "ORA-04020: deadlock detected while trying to lock object DRIVINE.DRIVINE_NODE",
-        # A lock busy past the wait of the module's block, which a statement run once raises to the resolver as it came
-        # (#573), where the executor ran it again before.
-        "ORA-00054: resource busy and acquire with NOWAIT specified or timeout expired",
-    ],
-)
-async def test_the_winners_constraint_is_looked_for_again_after_an_oracle_ddl_deadlock(
-    api: Api, caplog, turned_away: str
-):
-    # ORA-04020, on an object's library cache lock, and ORA-00054, a lock busy, are contention as drivine4j's resolver
-    # takes it (its DdlContention), so it is looked for again rather than once. The ensure's own look and the first
-    # after the deadlocks find nothing.
-    deadlock = OracleFailure(turned_away)
+async def test_the_winners_constraint_is_looked_for_again_after_an_oracle_ddl_deadlock(api: Api, caplog):
+    # ORA-04020, on an object's library cache lock, is contention as drivine4j's resolver takes it, so it is looked for
+    # again rather than once. The ensure's own look and the first after the deadlocks find nothing.
+    deadlock = OracleFailure("ORA-04020: deadlock detected while trying to lock object DRIVINE.DRIVINE_NODE")
     store = Store(
         EVERY_TIME,
         [],
@@ -375,6 +363,27 @@ async def test_the_winners_constraint_is_looked_for_again_after_an_oracle_ddl_de
 
     assert await resolve(store, api) == "store-8"
     assert store.creates == CONTENDED_ATTEMPTS and best_effort(caplog) == []
+
+
+@pytest.mark.parametrize("api", APIS)
+async def test_the_winners_constraint_is_looked_for_once_after_an_oracle_busy_lock_and_not_ensured_again(
+    api: Api, caplog
+):
+    # ORA-00054, a lock busy, is no contention to the resolver, as drivine4j's DdlContention takes it: Oracle's block
+    # waits it out already, and ensuring again on it would hold an application's start that long again. Run once by a
+    # SQL store's plan (#573), it reaches the resolver as it came, which looks for the winner's constraint once, finds
+    # none, and goes on best-effort, with no second ensure.
+    busy = OracleFailure("ORA-00054: resource busy and acquire with NOWAIT specified or timeout expired")
+    store = Store(
+        EVERY_TIME,
+        [],
+        made_meanwhile=busy,
+        found_after=False,
+        listed_by=lambda made, shows: made >= CONTENDED_ATTEMPTS and shows > 2,
+    )
+
+    await resolve(store, api)
+    assert store.creates == CONTENDED_ATTEMPTS and len(best_effort(caplog)) == 1
 
 
 @pytest.mark.parametrize("api", APIS)

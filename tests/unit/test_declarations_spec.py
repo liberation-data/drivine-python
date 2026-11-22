@@ -187,14 +187,28 @@ DECLARATIONS: dict[str, Callable[[], Declared]] = {
     ),
 }
 
-GAPS: dict[str, str] = {
-    "text": "drivine-python's schema API declares no TEXT index (#356)",
-    "fragment": "a fragment's NodeId is given no range index by default (#552)",
-    "fragment class items": "no default range index on the NodeId (#552), and FullTextIndex takes no analyzer (#442)",
-    "fragments merged": "a fragment's NodeId is given no range index by default (#552)",
-    "fragment ignoring case": "a fragment's NodeId is given no range index by default (#552)",
+GAPS: dict[str, list[str]] = {
+    "text": ["#356"],
+    "fragment": ["#552"],
+    "fragment class items": ["#552", "#442"],
+    "fragments merged": ["#552"],
+    "fragment ignoring case": ["#552"],
 }
-"""The cases drivine-python can't yet declare as drivine4j does, each by the issue that brings it level."""
+"""
+The cases drivine-python can't yet declare as drivine4j does, each by the drivine-python issues that bring it level:
+what the run of drivine-cypher-spec#135 across the libraries reports of each case (tests/interop) and pins.
+"""
+
+GAP_REASONS: dict[str, str] = {
+    "#356": "drivine-python's schema API declares no TEXT index",
+    "#552": "a fragment's NodeId is given no range index by default",
+    "#442": "FullTextIndex takes no analyzer",
+}
+"""What each issue of GAPS leaves out."""
+
+
+def gap_reason(case: str) -> str:
+    return "; ".join(f"{GAP_REASONS[it]} ({it})" for it in GAPS[case])
 
 
 # ----- The request an enforce gives the planner -----
@@ -269,13 +283,14 @@ def test_every_case_the_spec_pins_is_declared_here_and_no_other():
     assert len(pinned) == len(set(pinned))
     assert sorted(pinned) == sorted(DECLARATIONS), "declare each case of declarations.yaml in DECLARATIONS"
     assert set(GAPS) <= set(DECLARATIONS)
+    assert {it for issues in GAPS.values() for it in issues} == set(GAP_REASONS)
 
 
 @pytest.mark.parametrize("api", APIS)
 @pytest.mark.parametrize(
     "case",
     [
-        pytest.param(it, id=it["case"], marks=[pytest.mark.xfail(reason=GAPS[it["case"]], strict=True)])
+        pytest.param(it, id=it["case"], marks=[pytest.mark.xfail(reason=gap_reason(it["case"]), strict=True)])
         if it["case"] in GAPS
         else pytest.param(it, id=it["case"])
         for it in CASES

@@ -11,7 +11,10 @@ class SchemaDeclaration:
     kind: Literal["RANGE", "UNIQUE", "VECTOR", "FULLTEXT"]
     properties: tuple[str, ...]
     field: str = ""
-    """The field a vector index is declared on, for messages."""
+    """
+    The field it is declared on, for messages and the order a catalog gives a fragment's items in; empty for one a class
+    argument declares.
+    """
     similarity: Literal["COSINE", "EUCLIDEAN"] = "COSINE"
     dimensions: int | None = None
     hnsw_m: int | None = None

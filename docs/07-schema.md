@@ -149,7 +149,7 @@ sent the statement as it is. DDL sent as SQL is SQL, and runs as it is.
 |---|---|
 | `CREATE [RANGE] INDEX [name] [IF NOT EXISTS] FOR (n:L) ON (n.a, n.b)`, or Neo4j 4's `ON :L(a, b)` | `range_index("L", ["a", "b"])` |
 | `CREATE CONSTRAINT [name] [IF NOT EXISTS] FOR (n:L) REQUIRE n.p IS [NODE] UNIQUE`, `REQUIRE (n.a, n.b) IS UNIQUE`, or Neo4j 4's `ON (n:L) ASSERT n.p IS UNIQUE` | `uniqueness_constraint` |
-| `CREATE FULLTEXT INDEX … FOR (n:L) ON EACH [n.a, …]` | `full_text_index`; its `fulltext.analyzer` is read, and not applied yet ([#442](https://github.com/liberation-data/drivine-python/issues/442)), and `fulltext.eventually_consistent` is ignored |
+| `CREATE FULLTEXT INDEX … FOR (n:L) ON EACH [n.a, …]` | `full_text_index`; its `fulltext.analyzer` is recorded, and an index that records another is drift, as in drivine4j, though no search reads by it yet ([#442](https://github.com/liberation-data/drivine-python/issues/442)), and `fulltext.eventually_consistent` is ignored |
 | `CREATE VECTOR INDEX … FOR (n:L) ON n.p OPTIONS {indexConfig: {…}}` | `vector_index`: `vector.dimensions` (required), `vector.similarity_function` (`cosine` or `euclidean`, in any case), `vector.hnsw.m` and `vector.hnsw.ef_construction`, and `vector.quantization.enabled` as Neo4j's `EngineVectorOptions`; `indexProvider` is ignored |
 | `CREATE TEXT INDEX …` | Neo4j's TEXT index, which the SQL stores don't make, so the statement fails |
 | `DROP INDEX name [IF EXISTS]`, `DROP CONSTRAINT name [IF EXISTS]` | `SchemaManager.remove` of the item that goes by the name |

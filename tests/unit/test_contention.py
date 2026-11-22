@@ -1,6 +1,7 @@
 """Which failures over Bolt, and of a SQL store's DDL, are contention, and that only those are run again."""
 
-from typing import Annotated, Any
+from collections.abc import Callable
+from typing import Annotated, Any, Literal
 
 import apsw
 import oracledb
@@ -20,11 +21,59 @@ from drivine.manager.contention import CONTENDED_ATTEMPTS, ddl_contended, ddl_de
 from drivine.schema.planned_managers import SqlPlanHost
 from drivine.schema.schema_executor import SchemaExecutor
 from drivine.schema.schema_specs import uniqueness_constraint
+from drivine.sync.schema.planned_managers import SqlPlanHost as SyncSqlPlanHost
+from drivine.sync.schema.schema_executor import SchemaExecutor as SyncSchemaExecutor
+
+Api = Literal["async", "sync"]
+APIS: list[Api] = ["async", "sync"]
 
 
 def bolt(code: str) -> Neo4jError:
     """An error as the driver makes one from the server's failure."""
     return Neo4jError._hydrate_neo4j(code=code, message=code)
+
+
+def failing_first(api: Api, store: DatabaseType, failure: Exception, ran: Callable[[], int]) -> Any:
+    """A provider of the API for `store` whose connections raise `failure` on the first statement `ran` counts."""
+
+    class AsyncConnection:
+        async def query(self, _spec: object) -> list[object]:
+            if ran() == 1:
+                raise failure
+            return []
+
+        async def release(self, _error: BaseException | None = None) -> None:
+            return None
+
+    class SyncConnection:
+        def query(self, _spec: object) -> list[object]:
+            if ran() == 1:
+                raise failure
+            return []
+
+        def release(self, _error: BaseException | None = None) -> None:
+            return None
+
+    class AsyncProvider:
+        name = "store"
+        type = store
+
+        async def connect(self) -> AsyncConnection:
+            return AsyncConnection()
+
+    class SyncProvider:
+        name = "store"
+        type = store
+
+        def connect(self) -> SyncConnection:
+            return SyncConnection()
+
+    return AsyncProvider() if api == "async" else SyncProvider()
+
+
+async def outcome(api: Api, run: Any) -> Any:
+    """What a run of the API gives: an async one's awaited, a sync one's as it came."""
+    return await run() if api == "async" else run()
 
 
 def caused_by(cause: BaseException) -> Exception:
@@ -207,8 +256,9 @@ async def test_a_schema_statement_postgres_turned_away_for_a_deadlock_is_run_aga
         (DatabaseType.SQLITE, apsw.BusyError("database is locked")),
     ],
 )
+@pytest.mark.parametrize("api", APIS)
 async def test_a_schema_statement_the_planner_runs_once_is_run_once_on_every_store_and_raises_its_contention_to_it(
-    store: DatabaseType, failure: Exception
+    store: DatabaseType, failure: Exception, api: Api
 ):
     # The library runs a failed action again only as its `retry` says (the Cypher spec's README), as drivine4j runs
     # one: the planner reads a ONCE statement's failure as it came. A Postgres build's deadlock it builds again after,
@@ -216,65 +266,49 @@ async def test_a_schema_statement_the_planner_runs_once_is_run_once_on_every_sto
     # it never would. On Oracle and SQLite too (drivine-python#573). Each is still run again where not run once.
     ran = 0
 
-    class Connection:
-        async def query(self, _spec: object) -> list[object]:
-            nonlocal ran
-            ran += 1
-            if ran == 1:
-                raise failure
-            return []
+    def counted() -> int:
+        nonlocal ran
+        ran += 1
+        return ran
 
-        async def release(self, _error: BaseException | None = None) -> None:
-            return None
-
-    class Provider:
-        name = "store"
-        type = store
-
-        async def connect(self) -> Connection:
-            return Connection()
-
-    executor = SchemaExecutor(Provider())  # pyright: ignore[reportArgumentType]
+    provider = failing_first(api, store, failure, counted)
+    executor = SchemaExecutor(provider) if api == "async" else SyncSchemaExecutor(provider)
     with pytest.raises(DrivineError) as raised:
-        await executor.run("CREATE UNIQUE INDEX x ON y (z)", once=True)
+        await outcome(api, lambda: executor.run("CREATE UNIQUE INDEX x ON y (z)", once=True))
     assert raised.value.root_cause is failure
     assert ran == 1
     ran = 0
-    assert await executor.run("CREATE UNIQUE INDEX x ON y (z)") == []
+    assert await outcome(api, lambda: executor.run("CREATE UNIQUE INDEX x ON y (z)")) == []
     assert ran == 2
 
 
+@pytest.mark.parametrize("api", APIS)
 @pytest.mark.parametrize(("once", "runs"), [(True, 1), (False, 2)])
-async def test_a_sql_stores_plan_host_runs_a_statement_once_as_the_plan_driver_asks(once: bool, runs: int):
+async def test_a_sql_stores_plan_host_runs_a_statement_once_as_the_plan_driver_asks(once: bool, runs: int, api: Api):
     # The driver asks the host to run a `retry` ONCE build once; the host passes it to the executor, which raises a
     # Postgres deadlock of it to the planner rather than run it again (drivine-python#572).
     ran = 0
 
-    class Connection:
-        async def query(self, _spec: object) -> list[object]:
-            nonlocal ran
-            ran += 1
-            if ran == 1:
-                raise PostgresError("deadlock detected", "40P01")
-            return []
+    def counted() -> int:
+        nonlocal ran
+        ran += 1
+        return ran
 
-        async def release(self, _error: BaseException | None = None) -> None:
-            return None
+    provider = failing_first(api, DatabaseType.POSTGRES, PostgresError("deadlock detected", "40P01"), counted)
+    host = (
+        SqlPlanHost(SchemaExecutor(provider), None, None, lambda: None)
+        if api == "async"
+        else SyncSqlPlanHost(SyncSchemaExecutor(provider), None, None, lambda: None)
+    )
 
-    class Provider:
-        name = "postgres"
-        type = DatabaseType.POSTGRES
+    def run() -> Any:
+        return host.run("CREATE UNIQUE INDEX CONCURRENTLY x ON y (z)", {}, once=once)
 
-        async def connect(self) -> Connection:
-            return Connection()
-
-    host = SqlPlanHost(SchemaExecutor(Provider()), None, None, lambda: None)  # pyright: ignore[reportArgumentType]
-    run = host.run("CREATE UNIQUE INDEX CONCURRENTLY x ON y (z)", {}, once=once)
     if once:
         with pytest.raises(DrivineError):
-            await run
+            await outcome(api, run)
     else:
-        assert await run == []
+        assert await outcome(api, run) == []
     assert ran == runs
 
 

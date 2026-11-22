@@ -102,11 +102,11 @@ class Renamed(NodeFragment, labels=["Renamed"]):
 
 
 def test_the_fragment_scan_names_a_violations_nodes_by_the_stored_node_id():
-    [member] = SchemaCatalog.from_fragments(Member).items
+    [member] = SchemaCatalog.from_fragments(Member).declared_items
     assert member == uniqueness_constraint("Member", "email", node_id_property="uuid")
-    [anonymous] = SchemaCatalog.from_fragments(Anonymous).items
+    [anonymous] = SchemaCatalog.from_fragments(Anonymous).declared_items
     assert anonymous == uniqueness_constraint("Anonymous", "email")
-    [renamed] = SchemaCatalog.from_fragments(Renamed).items
+    [renamed] = SchemaCatalog.from_fragments(Renamed).declared_items
     assert renamed.kind == "UNIQUE" and renamed.node_id_property == "member_ref"
 
 

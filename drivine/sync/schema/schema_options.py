@@ -34,6 +34,12 @@ class SchemaOptions:
     place. Only Neo4j reports one in the way: there the constraint brings its own index, while on FalkorDB the plain
     index is what the constraint needs.
     """
+    index_node_ids: bool = True
+    """
+    Whether the range index each fragment's NodeId is given by default (`SchemaCatalog.from_fragments`) is made. False
+    gives the manager its catalogs without them, leaving only what is declared, as drivine4j's
+    `drivine.schema.index-node-ids=false` does.
+    """
     index_build_timeout: float = BUILD_TIMEOUT
     """
     How many seconds an index the engine builds in the background (Neo4j, FalkorDB) is waited on to be built before

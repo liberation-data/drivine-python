@@ -516,6 +516,8 @@ class TestSchemaManager:
                 "__module__": __name__,
             },
             labels=[label],
+            # The constraint alone: the NodeId's default range index is no part of what this pins.
+            node_id_index=False,
         )
         scanned = SchemaCatalog.from_fragments(fragment).named(f"{label}-lib").for_database(pm.database)
         by_hand = (

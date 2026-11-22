@@ -19,6 +19,16 @@ async with AppDrivine() as drivine:      # makes what is missing on the way in; 
     ...
 ```
 
+**A fragment's `NodeId` is given a range index** by `from_fragments`, under its first label and over the property the
+id is stored under, since each save and each load by id finds its node by it, and without one a store reads every node
+of the label. None is added where an item declared over the id alone serves it: a range index or a uniqueness
+constraint over that property only, not ignoring case, in any catalog applied on the database or ensured at runtime
+there. (`Chunk` above has none, as its `uuid` is `Unique`.) To go without it, pass `node_id_index=False` on the class
+(`class Chunk(NodeFragment, labels=["Chunk"], node_id_index=False)`, inherited by its subclasses), call
+`catalog.without_node_id_indexes()`, or set `SchemaOptions(index_node_ids=False)` for every catalog, as drivine4j's
+`drivine.schema.index-node-ids=false` does. **Behaviour change:** an existing store gains this index on its next
+enforce, built once, where nothing declared served the id.
+
 `RangeIndex(ignore_case=True)` and `Unique(ignore_case=True)` on a `CaseInsensitive` field are made over the lowercased
 copy a save keeps of it, so they serve `eq_ignore_case` and refuse two values that differ only in case. Ensuring one
 fills the copies in first. See [Lookups that ignore case](06-fragments-and-views.md#lookups-that-ignore-case). The

@@ -113,9 +113,10 @@ class SchemaManager:
     def ensure(self, owner: str, *specs: SchemaSpec) -> dict[str, list[EnsureResult[Any]]]:
         """
         Ensures schema known only at runtime under `owner` (DEFAULT_SCOPE is the unnamed catalogs' owner), on every
-        graph database. See `ensure_catalog`.
+        graph database, built as `SchemaCatalog.of` builds a catalog's items: indexes before constraints, as drivine4j
+        gives them. See `ensure_catalog`.
         """
-        return self.ensure_catalog(SchemaCatalog(tuple(specs), name=owner))
+        return self.ensure_catalog(SchemaCatalog.of(*specs).named(owner))
 
     def ensure_catalog(self, catalog: SchemaCatalog) -> dict[str, list[EnsureResult[Any]]]:
         """

@@ -116,3 +116,12 @@ def test_the_node_id_makes_nothing_so_a_fragments_declaration_and_a_hand_written
     assert inventory_key(scanned) == inventory_key(by_hand)
     for first, second in ((scanned, by_hand), (by_hand, scanned)):
         assert SchemaManager._reconciled("default", first, second, "app", "app") == scanned  # pyright: ignore[reportPrivateUsage]
+
+
+def test_a_catalog_keeps_of_a_constraint_declared_with_and_without_the_node_id_the_one_that_has_it_where_it_was_first():
+    scanned = uniqueness_constraint("Member", "email", node_id_property="uuid")
+    by_hand = uniqueness_constraint("Member", "email")
+    other = uniqueness_constraint("Member", "handle")
+    for first, second in ((scanned, by_hand), (by_hand, scanned)):
+        assert SchemaCatalog.of(first, other, second).items == (scanned, other)
+        assert (SchemaCatalog.of(first, other) + [second]).items == (scanned, other)

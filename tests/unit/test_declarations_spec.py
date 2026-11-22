@@ -5,7 +5,8 @@ What drivine-python's schema declarations give the module's schema planner, agai
 everything from these, the store's listings and its markers, so a store one library indexed is up to date for the
 others only where each library's declarations give the same catalogs. drivine4j's DeclarationsGoldenTest, ported, on
 the async and the sync API. No database is spoken to: the request is read as the planner is given it, and the plan is
-not run. A case the spec adds that no declaration here covers fails, so none is passed over.
+not run. A case the spec adds that no declaration here covers fails, so none is passed over. Then how a catalog gives
+its items, which those requests are written from, beyond what the cases pin.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ import drivine.sync.schema.schema_manager as sync_schema_manager
 from drivine import (
     CaseInsensitive,
     DatabaseRegistry,
+    DrivineError,
     FullTextIndex,
     NodeFragment,
     NodeId,
@@ -304,3 +306,54 @@ async def test_the_declarations_give_the_planner_the_catalogs_the_spec_pins(
         "catalogs": case["catalogs"],
         "runtime": case["runtime"],
     }
+
+
+# ----- How a catalog gives its items, as drivine4j's SchemaCatalog.build and FragmentSchemaScanner do -----
+
+
+def test_a_catalog_gives_each_item_once_its_indexes_before_its_constraints_and_so_does_one_added_to():
+    unique, name, body = uniqueness_constraint("P", "email"), range_index("P", "name"), full_text_index("P", "body")
+    assert SchemaCatalog.of(unique, name, name, body).items == (name, body, unique)
+    assert (SchemaCatalog.of(unique) + [name, unique, range_index("P", ["name"])]).items == (name, unique)
+
+
+@pytest.mark.parametrize("api", APIS)
+async def test_two_declarations_of_one_item_that_differ_are_both_kept_for_the_manager_to_refuse(
+    api: Api, tmp_path: Path, requests: list[dict[str, Any]]
+):
+    unnamed, named = range_index("P", "name"), RangeIndexSpec("P", ("name",), name="by_name")
+    catalog = SchemaCatalog.of(unnamed, named)
+    assert catalog.items == (unnamed, named)
+    with pytest.raises(DrivineError, match="declare the RANGE on P\\(name\\) on sqlite differently"):
+        await enforced(api, Declared((catalog,)), tmp_path, requests)
+
+
+class Composite(
+    NodeFragment,
+    labels=["Composite"],
+    schema=[Unique(["a", "z"]), FullTextIndex(["z", "a"]), RangeIndex(["a", "z"]), FullTextIndex(["a"])],
+):
+    z: Annotated[str, RangeIndex()]
+    a: Annotated[str, FullTextIndex()]
+
+
+def test_a_fragments_class_arguments_come_first_by_kind_each_as_declared_then_its_fields_by_name():
+    assert SchemaCatalog.from_fragments(Composite).items == (
+        range_index("Composite", ["a", "z"]),
+        full_text_index("Composite", ["z", "a"]),
+        full_text_index("Composite", "a"),
+        range_index("Composite", "z"),
+        uniqueness_constraint("Composite", ["a", "z"]),
+    )
+
+
+@pytest.mark.parametrize("api", APIS)
+async def test_what_ensure_gives_an_owner_reaches_the_planner_indexes_before_constraints(
+    api: Api, tmp_path: Path, requests: list[dict[str, Any]]
+):
+    unique, code = uniqueness_constraint("Tenant", "id"), range_index("Tenant", "code")
+    given = await enforced(api, Declared(runtime=(("dice", (unique, code, code)),)), tmp_path, requests)
+    [ensured] = given["runtime"]
+    assert [it["kind"] for it in ensured["items"]] == ["RANGE_INDEX", "UNIQUENESS_CONSTRAINT"]
+    [ensure] = [it["operation"] for it in requests if it["operation"]["type"] == "ensure"]
+    assert ensure["items"] == ensured["items"]

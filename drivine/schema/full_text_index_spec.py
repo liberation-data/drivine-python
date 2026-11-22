@@ -14,5 +14,7 @@ class FullTextIndexSpec:
     analyzer: str | None = None
     """
     The analyzer Neo4j's schema DDL names, `fulltext.analyzer` (see schema_ddl), as drivine4j's spec holds it. This
-    library reads it from DDL, and doesn't make an index with it, record it, or compare it yet (#442).
+    library reads it from DDL. On the SQL stores the schema plan records it, and reports an index that records another
+    as drift, as drivine4j's does; no store's search reads by it, and the graph engines' DDL doesn't make an index with
+    it yet (#442).
     """

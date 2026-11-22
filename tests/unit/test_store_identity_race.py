@@ -370,9 +370,10 @@ async def test_the_winners_constraint_is_looked_for_once_after_an_oracle_busy_lo
     api: Api, caplog
 ):
     # ORA-00054, a lock busy, is no contention to the resolver, as drivine4j's DdlContention takes it: Oracle's block
-    # waits it out already, and ensuring again on it would hold an application's start that long again. Run once by a
-    # SQL store's plan (#573), it reaches the resolver as it came, which looks for the winner's constraint once, finds
-    # none, and goes on best-effort, with no second ensure.
+    # waits it out already, and ensuring again on it would hold an application's start that long again. However it
+    # reaches the resolver, run once by a SQL store's plan (#573) or, as by this fake store's executor, again until it
+    # gives up, the resolver looks for the winner's constraint once, without a pause, finds none, and goes on
+    # best-effort, with no second ensure. The winner's constraint would be listed from a second look.
     busy = OracleFailure("ORA-00054: resource busy and acquire with NOWAIT specified or timeout expired")
     store = Store(
         EVERY_TIME,
@@ -382,8 +383,10 @@ async def test_the_winners_constraint_is_looked_for_once_after_an_oracle_busy_lo
         listed_by=lambda made, shows: made >= CONTENDED_ATTEMPTS and shows > 2,
     )
 
-    await resolve(store, api)
-    assert store.creates == CONTENDED_ATTEMPTS and len(best_effort(caplog)) == 1
+    assert await resolve(store, api) == "store-8"
+    # The ensure's own look, then the resolver's one.
+    assert store.creates == CONTENDED_ATTEMPTS and store.shows == 1 + 1 and store.pauses == []
+    assert len(best_effort(caplog)) == 1
 
 
 @pytest.mark.parametrize("api", APIS)

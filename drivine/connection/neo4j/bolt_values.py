@@ -10,10 +10,15 @@ Memgraph has no Time (its Bolt decoder has no Time structure, as liberation-data
 the time as text of one width, as drivine4j writes it (`10:11:12.000000000+02:00`, see `fixed_width_time`), where
 FalkorDB is sent its ISO text: a field declared `time` reads either back as the time. A time
 without an offset, which the driver sends as a LocalTime, is left as it is.
+
+A UUID is sent as its text, as drivine4j and Drivine for TypeScript hold one on every engine (#583): the driver sends a
+UUID only over Bolt 6.1, and Neo4j's aligned store format can't hold one, so a save of a UUID NodeId raised. A field
+declared `UUID` reads the text back as the UUID, and a lookup by one binds the same text.
 """
 
 from __future__ import annotations
 
+import uuid
 from datetime import time, timedelta, tzinfo
 from typing import Any
 
@@ -51,7 +56,10 @@ class FixedOffset(tzinfo):
 
 
 def bolt_parameters(parameters: dict[str, Any], engine: DatabaseType) -> dict[str, Any]:
-    """`parameters` with each `time` with an offset, in lists and maps too, as `engine` takes it: see the module."""
+    """
+    `parameters` with each `time` with an offset, and each UUID, in lists and maps too, as `engine` takes it: see the
+    module.
+    """
     as_text = engine is DatabaseType.MEMGRAPH
     if not any(_holds_time(it) for it in parameters.values()):
         return parameters
@@ -59,7 +67,8 @@ def bolt_parameters(parameters: dict[str, Any], engine: DatabaseType) -> dict[st
 
 
 def _holds_time(value: Any) -> bool:
-    if isinstance(value, time):
+    """Whether `value`, or a list or map in it, holds a `time` or a UUID, which are sent otherwise (see the module)."""
+    if isinstance(value, (time, uuid.UUID)):
         return True
     if isinstance(value, (list, tuple)):
         return any(_holds_time(it) for it in value)  # pyright: ignore[reportUnknownVariableType]
@@ -71,6 +80,8 @@ def _holds_time(value: Any) -> bool:
 def _value(value: Any, as_text: bool) -> Any:
     if isinstance(value, time):
         return _time(value, as_text)
+    if isinstance(value, uuid.UUID):
+        return str(value)
     if isinstance(value, (list, tuple)):
         return [_value(it, as_text) for it in value]  # pyright: ignore[reportUnknownVariableType]
     if isinstance(value, dict):

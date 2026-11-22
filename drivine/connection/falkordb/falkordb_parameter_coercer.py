@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import re
+import uuid
 from collections.abc import Mapping
 from datetime import UTC, date, datetime, time
 from enum import Enum
@@ -21,7 +22,8 @@ class FalkorDbParameterCoercer:
       FalkorDB holds it as text and compares it as text, which sorts as time only when every value is the same width.
       Nine digits matches drivine4j and TypeScript, so a store written from any of them compares alike. A naive
       datetime is taken as UTC. A date or time is written as its ISO text.
-    - A set or tuple is written as a list; Cypher has no set. An Enum is written as its value.
+    - A set or tuple is written as a list; Cypher has no set. An Enum is written as its value, and a UUID as its text,
+      as drivine4j and TypeScript hold one (#583).
     - A parameter name that isn't a plain name is refused: the client writes names unquoted.
     - A number that isn't finite is refused, as Cypher has no literal for it.
 
@@ -44,6 +46,8 @@ class FalkorDbParameterCoercer:
             return value
         if isinstance(value, Enum):
             return self._value(value.value)
+        if isinstance(value, uuid.UUID):
+            return str(value)
         if isinstance(value, int):
             return value
         if isinstance(value, float):

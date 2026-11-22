@@ -7,7 +7,7 @@ import json
 import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from drivine.backend.sql.sql_catalog import CATALOG_KINDS
 from drivine.connection.database_type import DatabaseType
@@ -30,6 +30,9 @@ from drivine.sync.manager.stateless_graph_object_manager import StatelessGraphOb
 from drivine.sync.schema.index_manager import IndexNotBuilt
 from drivine.sync.schema.schema_options import SchemaOptions
 from drivine.sync.schema.schema_plan_driver import run_plan
+
+if TYPE_CHECKING:
+    from drivine.sync.schema.planned_managers import SchemaPlanning
 
 logger = logging.getLogger("drivine.schema")
 
@@ -290,6 +293,30 @@ class SchemaManager:
             kept,
         )
 
+    def _declared_on(
+        self, database: str, planning: SchemaPlanning
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """
+        What a plan on `database` is given of what is declared, as the module's JSON writes it: the startup catalogs
+        that apply there, each its owner, version and items, and the items `ensure` gave that hold there, a catalog for
+        each owner. The Cypher spec's declarations.yaml pins these, as drivine4j's declarations give them
+        (liberation-data/drivine-cypher-spec#135).
+        """
+        catalogs = [
+            {"owner": _owner_of(it.name), "version": it.version, "items": [module_spec(spec) for spec in it.items]}
+            for it in self.options.catalogs
+            if database in self._targets(it)
+        ]
+        runtime = [
+            {
+                "owner": _owner_of(owner),
+                "databases": None if databases is None else list(databases),
+                "items": [module_spec(spec) for spec in specs.values()],
+            }
+            for (owner, databases), specs in self._runtime.items()
+        ]
+        return catalogs, planning.plan.runtime_on(database, runtime)
+
     def _planned(self, database: str, operation: Mapping[str, Any]) -> list[EnsureResult[Any]] | None:
         """
         `operation` on `database`, where it is a SQL store, as the shared module's schema plan applies it: the startup
@@ -301,19 +328,7 @@ class SchemaManager:
         if planning is None:
             return None
         options = self.options
-        catalogs = [
-            {"owner": _owner_of(it.name), "version": it.version, "items": [module_spec(spec) for spec in it.items]}
-            for it in options.catalogs
-            if database in self._targets(it)
-        ]
-        runtime = [
-            {
-                "owner": _owner_of(owner),
-                "databases": None if databases is None else list(databases),
-                "items": [module_spec(spec) for spec in specs.values()],
-            }
-            for (owner, databases), specs in self._runtime.items()
-        ]
+        catalogs, runtime = self._declared_on(database, planning)
         request = plan_request(
             database,
             operation,
@@ -324,7 +339,7 @@ class SchemaManager:
                 build_timeout_millis=int(options.index_build_timeout * 1000),
             ),
             catalogs,
-            planning.plan.runtime_on(database, runtime),
+            runtime,
             Recreate(on_drift=options.recreate_on_drift, on_startup=options.recreate_on_startup),
         )
         refusal = planning.plan.validate(request)

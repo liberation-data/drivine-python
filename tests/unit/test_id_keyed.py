@@ -650,11 +650,14 @@ def test_plan_key_of_raises_the_modules_refusal_of_text_that_is_no_json_by_the_s
         plan_key_of("sqlite", "nope{")
 
 
-async def test_a_lookup_by_id_on_a_graph_engine_binds_text_as_it_is_given_for_the_engine_compares_it():
-    gom, pm = manager(DatabaseType.NEO4J)
+@pytest.mark.parametrize("engine", [DatabaseType.NEO4J, DatabaseType.MEMGRAPH, DatabaseType.FALKORDB])
+async def test_a_lookup_by_id_on_a_graph_engine_reads_text_as_the_ids_type_as_a_sql_store_does(engine: DatabaseType):
+    # The engine compares the value bound with the one a save wrote, the int 6, so the text "6" is bound as 6; text that
+    # is no int finds no node, and nothing is run for it (#583, drivine4j#806).
+    gom, pm = manager(engine)
     await gom.load(Dial, "6")
     await gom.load(Dial, "abc")
-    assert [it["id"] for _, it in pm.bound] == ["6", "abc"]
+    assert [it["id"] for _, it in pm.bound] == [6]
 
 
 def test_typed_id_reads_text_for_an_optional_id_as_its_type_and_keeps_a_value_as_it_is():

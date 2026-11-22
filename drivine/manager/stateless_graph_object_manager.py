@@ -551,7 +551,7 @@ class StatelessGraphObjectManager:
 
     def _lookup_id(self, target: TargetModel, given: Any) -> Any:
         """
-        The id a lookup of the target's root by `given` binds: on a SQL store read as the NodeId field's type, and
+        The id a lookup of the target's root by `given` binds: read as the NodeId field's type, on every store, and
         NO_NODE where no node can have it, for which no statement is run (see node_ids).
         """
         return lookup_id(self.backend, root_of(target), given)

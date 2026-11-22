@@ -26,7 +26,6 @@ from decimal import Decimal, InvalidOperation
 from enum import Enum
 from typing import Any, cast
 
-from drivine.backend.sql.sql_graph import SqlGraph
 from drivine.backend.sql.value_layout import held_key
 from drivine.cypher.shared_compiler import id_sql
 from drivine.model.fragment_model import FragmentModel
@@ -169,19 +168,14 @@ _READERS: list[tuple[type, Callable[[str], Any]]] = [
 """How text is read as a value of each type an id's text is read as; NO_NODE where it is no value of the type."""
 
 
-def is_sql_backend(backend: Any) -> bool:
-    """Whether `backend` keeps its graph in SQL tables, where an id is found as `typed_id` reads it."""
-    return isinstance(getattr(backend, "graph", None), SqlGraph)
-
-
 def lookup_id(backend: Any, model: FragmentModel, given: Any) -> Any:
     """
-    The id a lookup of a node of `model` by `given` binds on `backend`: on a SQL store `given` read as the id's type
-    (`typed_id`), and NO_NODE where it finds no node, which the caller runs no statement for, saying why at DEBUG where
-    the text can't be read (a None id says nothing); on a graph engine `given` as it is, as the engine compares it.
+    The id a lookup of a node of `model` by `given` binds on `backend`: `given` read as the id's type (`typed_id`), and
+    NO_NODE where it finds no node, which the caller runs no statement for, saying why at DEBUG where the text can't be
+    read (a None id says nothing). On every store alike, as drivine4j reads it (drivine4j#806): a graph engine compares
+    the value bound with the one a save wrote for the field, so the text `'5'` finds a node whose int id is 5, and
+    `'2024-03-04'` one whose date id is that day, as on a SQL store.
     """
-    if not is_sql_backend(backend):
-        return given
     id_ = typed_id(model, given)
     if id_ is NO_NODE and given is not None:
         logger.debug(

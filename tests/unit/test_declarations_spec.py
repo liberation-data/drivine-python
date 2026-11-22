@@ -312,6 +312,9 @@ def test_a_catalog_gives_each_item_once_its_indexes_before_its_constraints_and_s
     unique, name, body = uniqueness_constraint("P", "email"), range_index("P", "name"), full_text_index("P", "body")
     assert SchemaCatalog.of(unique, name, name, body).items == (name, body, unique)
     assert (SchemaCatalog.of(unique) + [name, unique, range_index("P", ["name"])]).items == (name, unique)
+    # Built again, the catalog keeps its owner, version and databases.
+    added = SchemaCatalog.of(unique).named("rag").with_version("v2").for_database("users") + [name]
+    assert (added.name, added.version, added.databases) == ("rag", "v2", ("users",))
 
 
 @pytest.mark.parametrize("api", APIS)

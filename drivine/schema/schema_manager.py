@@ -178,8 +178,11 @@ class SchemaManager:
             return report
 
     async def remove(self, owner: str, *specs: SchemaSpec) -> None:
-        """Takes items back from what `owner` declares, on every graph database. See `remove_catalog`."""
-        await self.remove_catalog(SchemaCatalog(tuple(specs), name=owner))
+        """
+        Takes items back from what `owner` declares, on every graph database, the specs as `SchemaCatalog.of` holds
+        them, as drivine4j's remove does. See `remove_catalog`.
+        """
+        await self.remove_catalog(SchemaCatalog.of(*specs).named(owner))
 
     async def remove_catalog(self, catalog: SchemaCatalog) -> None:
         """

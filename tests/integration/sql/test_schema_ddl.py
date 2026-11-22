@@ -461,6 +461,24 @@ async def test_a_record_a_library_without_aliases_wrote_over_reads_as_it_did_but
     assert "no index named 'by_name'" in messages(lost.value)
 
 
+async def test_a_full_text_index_ddl_made_with_an_analyzer_matches_one_declared_without_and_drifts_from_another(
+    db: Store, caplog: pytest.LogCaptureFixture
+):
+    # The analyzer is recorded: a declaration that names none, as a fragment's FullTextIndex does, matches it, as one
+    # recorded before it was (with none) matches any; one that names another is drift, as in drivine4j.
+    await db.ddl(
+        "CREATE FULLTEXT INDEX chunk_text FOR (n:Chunk) ON EACH [n.text] OPTIONS {indexConfig: "
+        "{`fulltext.analyzer`: 'english'}}"
+    )
+    with caplog.at_level(logging.WARNING, logger="drivine.schema"):
+        report = await db.schema().ensure("app", full_text_index("Chunk", "text"))
+    assert warnings(caplog) == []
+    assert all_matching(report), report
+
+    with pytest.raises(DrivineError, match="DRIFT: FULLTEXT_INDEX on Chunk\\[text\\]"):
+        await db.schema().ensure("other", FullTextIndexSpec("Chunk", ("text",), analyzer="standard"))
+
+
 async def test_if_not_exists_over_another_shape_leaves_it_a_text_index_is_refused_and_drivines_own_constraint_stays(
     db: Store,
 ):

@@ -349,10 +349,22 @@ async def test_the_constraint_is_ensured_once_more_when_the_looks_for_the_winner
 
 
 @pytest.mark.parametrize("api", APIS)
-async def test_the_winners_constraint_is_looked_for_again_after_an_oracle_ddl_deadlock(api: Api, caplog):
-    # ORA-04020, on an object's library cache lock, is contention as drivine4j's resolver takes it, so it is looked for
-    # again rather than once. The ensure's own look and the first after the deadlocks find nothing.
-    deadlock = OracleFailure("ORA-04020: deadlock detected while trying to lock object DRIVINE.DRIVINE_NODE")
+@pytest.mark.parametrize(
+    "turned_away",
+    [
+        "ORA-04020: deadlock detected while trying to lock object DRIVINE.DRIVINE_NODE",
+        # A lock busy past the wait of the module's block, which a statement run once raises to the resolver as it came
+        # (#573), where the executor ran it again before.
+        "ORA-00054: resource busy and acquire with NOWAIT specified or timeout expired",
+    ],
+)
+async def test_the_winners_constraint_is_looked_for_again_after_an_oracle_ddl_deadlock(
+    api: Api, caplog, turned_away: str
+):
+    # ORA-04020, on an object's library cache lock, and ORA-00054, a lock busy, are contention as drivine4j's resolver
+    # takes it (its DdlContention), so it is looked for again rather than once. The ensure's own look and the first
+    # after the deadlocks find nothing.
+    deadlock = OracleFailure(turned_away)
     store = Store(
         EVERY_TIME,
         [],

@@ -30,7 +30,8 @@ class PlanHost(Protocol):
     def run(self, statement: str | Mapping[str, Any], parameters: Mapping[str, Any], once: bool = False) -> list[Any]:
         """Runs a schema statement, or a listing, on a connection of its own: its rows, a row of one column its value.
         A native command (FalkorDB's `GRAPH.CONSTRAINT`) is given as `{"native": [...]}`. A statement run `once`, an
-        `execute` the planner marks `retry` ONCE, is not run again on a Postgres deadlock (see SchemaExecutor.run)."""
+        `execute` the planner marks `retry` ONCE, is run exactly once, and its failure raised to the planner as it came
+        (see SchemaExecutor.run)."""
         ...
 
     def marker(self, statement: str, parameters: Mapping[str, Any], compiled: bool, rows: bool) -> list[Any]:

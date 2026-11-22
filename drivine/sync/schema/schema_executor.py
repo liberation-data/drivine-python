@@ -47,11 +47,6 @@ def _contended(failure: BaseException, waited_out_busy: bool) -> bool:
     )
 
 
-def _postgres_deadlock(failure: BaseException) -> bool:
-    """Whether Postgres cancelled the statement as a deadlock (40P01): the failure or a cause under it."""
-    return any_cause(failure, lambda it: getattr(it, "sqlstate", None) == "40P01")
-
-
 class SchemaExecutor:
     """
     Runs schema statements on a connection of their own, in auto-commit: schema DDL can't run inside a data transaction.
@@ -65,14 +60,17 @@ class SchemaExecutor:
     ) -> list[Any]:
         """
         Runs a statement, again after a pause when the engine turned it away because another write was in progress.
-        A statement the schema planner runs `once` (an `execute` of `retry` ONCE) is not run again on a Postgres
-        deadlock (40P01): the failure is raised to the planner, which reads it, waits until no online build is under
-        way on the node table, and builds again (liberation-data/drivine-cypher-spec#382, drivine-python#572).
+        A statement the schema planner runs `once` (an `execute` of `retry` ONCE) runs exactly once, on every store,
+        and its failure is raised to the planner as it came, which reads it, as drivine4j's driver runs one: a Postgres
+        deadlock it builds again after (liberation-data/drivine-cypher-spec#382, drivine-python#572), and an Oracle
+        deadlock or lock, or a SQLite file locked longer than the connection waits, it decides on, rather than see
+        only what this run left after its own attempts (drivine-python#573, liberation-data/drivine#830).
         """
+        if once:
+            return self._run_once(statement, bindings or {})
         waited_out_busy = isinstance(statement, str) and waits_out_busy_lock(statement)
         return when_not_contended(
-            lambda: self._run_once(statement, bindings or {}),
-            lambda it: not (once and _postgres_deadlock(it)) and _contended(it, waited_out_busy),
+            lambda: self._run_once(statement, bindings or {}), lambda it: _contended(it, waited_out_busy)
         )
 
     def _run_once(self, statement: str | NativeOperation, bindings: Mapping[str, Any]) -> list[Any]:

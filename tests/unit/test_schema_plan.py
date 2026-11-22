@@ -11,7 +11,7 @@ import logging
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 
 import pytest
 
@@ -35,6 +35,11 @@ from drivine.schema.schema_plan import (
 from drivine.schema.schema_plan_driver import plan_item
 from drivine.schema.schema_specs import full_text_index, range_index, uniqueness_constraint, vector_index
 from drivine.schema.vector_index_spec import VectorIndexSpec
+from drivine.sync.schema.planned_managers import PlannedConstraintManager as SyncPlannedConstraintManager
+from drivine.sync.schema.planned_managers import SchemaPlanning as SyncSchemaPlanning
+
+Api = Literal["async", "sync"]
+APIS: list[Api] = ["async", "sync"]
 
 
 class Host:
@@ -56,6 +61,10 @@ class Host:
     async def run(
         self, statement: str | Mapping[str, Any], parameters: Mapping[str, Any], once: bool = False
     ) -> list[Any]:
+        return self.answered(statement, once)
+
+    def answered(self, statement: str | Mapping[str, Any], once: bool) -> list[Any]:
+        """Records `statement`, as run `once` or not, and gives its rows."""
         self.ran.append(str(statement))
         if once:
             self.once.append(str(statement))
@@ -74,6 +83,31 @@ class Host:
 
     def changed(self) -> None:
         self.told += 1
+
+
+class SyncHost:
+    """`host` as the sync API's plan driver calls one: its statements answered and recorded in `host`."""
+
+    def __init__(self, host: Host) -> None:
+        self.host = host
+        self.executor: Any = None
+        self.copies: Any = None
+
+    def run(self, statement: str | Mapping[str, Any], parameters: Mapping[str, Any], once: bool = False) -> list[Any]:
+        return self.host.answered(statement, once)
+
+    def marker(self, statement: str, parameters: Mapping[str, Any], compiled: bool, rows: bool) -> list[Any]:
+        self.host.ran.append(statement)
+        return []
+
+    def read_lower_copies(self) -> list[list[str]] | None:
+        return None
+
+    def fill_lower_copies(self, label: str, properties: Sequence[str]) -> bool:
+        return False
+
+    def changed(self) -> None:
+        self.host.changed()
 
 
 def claims(statement: str) -> bool:
@@ -263,8 +297,9 @@ async def test_reads_the_data_once_the_store_refuses_a_constraint_a_sample_size_
     assert any("'count', COUNT(*)" in it for it in host.ran[created + 1 :])
 
 
+@pytest.mark.parametrize("api", APIS)
 async def test_gives_a_postgres_builds_deadlock_to_the_planner_which_reads_the_online_builds_before_building_again(
-    caplog: pytest.LogCaptureFixture,
+    caplog: pytest.LogCaptureFixture, api: Api
 ):
     # A build Postgres cancels as a deadlock with another online build (40P01) is the planner's to read
     # (liberation-data/drivine-cypher-spec#382): the driver runs it once, as its `retry` says, and the planner waits
@@ -283,10 +318,16 @@ async def test_gives_a_postgres_builds_deadlock_to_the_planner_which_reads_the_o
         return []
 
     host = Host(answer)
-    manager = PlannedConstraintManager(planning("postgres", host), schema_grammar_for(DatabaseType.POSTGRES))
+    spec = uniqueness_constraint("Person", "email")
     with caplog.at_level(logging.CRITICAL), pytest.raises(DrivineError):
         # The host never lists the constraint it made, so the ensure ends failed: what it ran is what is read here.
-        await manager.ensure(uniqueness_constraint("Person", "email"), 0)
+        if api == "async":
+            await PlannedConstraintManager(
+                planning("postgres", host), schema_grammar_for(DatabaseType.POSTGRES)
+            ).ensure(spec, 0)
+        else:
+            sync = SyncSchemaPlanning(SchemaPlan("postgres", "drivine"), "db", SyncHost(host))  # pyright: ignore[reportArgumentType]
+            SyncPlannedConstraintManager(sync, schema_grammar_for(DatabaseType.POSTGRES)).ensure(spec, 0)
     first = next(i for i, it in enumerate(host.ran) if "CREATE UNIQUE INDEX CONCURRENTLY" in it)
     assert host.ran[first] in host.once
     again = next(i for i, it in enumerate(host.ran) if i > first and "CREATE UNIQUE INDEX CONCURRENTLY" in it)

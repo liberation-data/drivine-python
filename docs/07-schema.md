@@ -76,6 +76,11 @@ missing `DATABASE_TYPE` raises `DrivineError` there rather than on first use. Wi
   the connection of your open transaction commits none of its work. A claim older than 60 seconds, with no online
   build under way on the node table, is taken over. A range index of its own is built `ONLINE`, and a uniqueness
   constraint's indexes hold writes until done.
+- **A schema statement runs once on the SQL stores.** Drivine runs a statement that makes or drops an item once, as
+  drivine4j does, and the schema plan reads how it failed: Postgres's deadlock it builds again after, and another
+  failure it reports. Oracle's DDL waits out a busy lock itself, and a SQLite connection waits for a locked file for its
+  busy timeout. The listings it reads, and the claims of a turn, are still run again after a pause where another
+  session's write turns them away.
 - **Versions.** `catalog.with_version("2")` recreates the catalog's items once, the first time it is enforced. Items an
   owner applied before and no longer declares are reported, never dropped. Each owner's version and inventory are kept
   in a `_DrivineSchema` node, as drivine4j and TypeScript keep them.

@@ -357,3 +357,34 @@ async def test_what_ensure_gives_an_owner_reaches_the_planner_indexes_before_con
     assert [it["kind"] for it in ensured["items"]] == ["RANGE_INDEX", "UNIQUENESS_CONSTRAINT"]
     [ensure] = [it["operation"] for it in requests if it["operation"]["type"] == "ensure"]
     assert ensure["items"] == ensured["items"]
+
+
+@pytest.mark.parametrize("api", APIS)
+async def test_what_remove_takes_from_an_owner_reaches_the_planner_each_once_indexes_before_constraints(
+    api: Api, tmp_path: Path, requests: list[dict[str, Any]]
+):
+    # As drivine4j's remove builds its catalog with SchemaCatalog.of.
+    unique, code = uniqueness_constraint("Tenant", "id"), range_index("Tenant", "code")
+    if api == "async":
+        registry = registry_on(DatabaseRegistry(), tmp_path)
+        manager = AsyncSchemaManager(
+            registry, GraphObjectManagerFactory(PersistenceManagerFactory(registry)), SchemaOptions()
+        )
+        try:
+            await manager.remove("dice", unique, code, code)
+        finally:
+            await registry.close()
+    else:
+        registry = registry_on(SyncDatabaseRegistry(), tmp_path)
+        manager = SyncSchemaManager(
+            registry, SyncGraphObjectManagerFactory(SyncPersistenceManagerFactory(registry)), SchemaOptions()
+        )
+        try:
+            manager.remove("dice", unique, code, code)
+        finally:
+            registry.close()
+    [remove] = [it["operation"] for it in requests if it["operation"]["type"] == "remove"]
+    assert [(it["kind"], it["properties"]) for it in remove["items"]] == [
+        ("RANGE_INDEX", ["code"]),
+        ("UNIQUENESS_CONSTRAINT", ["id"]),
+    ]

@@ -149,7 +149,8 @@ def _built(items: Sequence[SchemaSpec]) -> tuple[SchemaSpec, ...]:
     The items as drivine4j's `SchemaCatalog.build` gives them: each once, by its kind, label and the properties it is
     made over, in the order first declared, and the indexes before the constraints. Of a uniqueness constraint declared
     with and without the NodeId its violations name nodes by, a fragment's and a hand-written one, the one that has it
-    is kept. Two that differ otherwise are both kept, for the schema manager to refuse as a conflict.
+    is kept. Two that differ otherwise are both kept, for the schema manager to reconcile, as it does a vector index
+    declared with and without engine options, or to refuse as a conflict.
     """
     kept: list[SchemaSpec] = []
     for item in items:

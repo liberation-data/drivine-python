@@ -334,3 +334,62 @@ async def test_on_a_graph_engine_an_item_removed_is_dropped_where_only_a_default
         api, options, tmp_path, lambda manager: [manager.ensure("dice", named), manager.remove("dice", named)]
     )
     assert gom.indexes.drop.call_args_list == []
+
+
+@pytest.mark.parametrize("api", APIS)
+async def test_on_a_graph_engine_a_default_served_on_one_database_only_is_left_out_there_and_kept_on_the_other(
+    api: Api, tmp_path: Path
+):
+    (factory, one), (_, two) = graph_engine(api), graph_engine(api)
+    factory.get.side_effect = lambda database: one if database == "one" else two
+    options = SchemaOptions(
+        [
+            SchemaCatalog.from_fragments(Message).for_databases("one", "two"),
+            SchemaCatalog.of(uniqueness_constraint("Message", "id")).named("app").for_database("one"),
+        ]
+    )
+    env = {
+        "ONE_DATABASE_TYPE": "SQLITE",
+        "ONE_DATABASE_NAME": str(tmp_path / "one.db"),
+        "TWO_DATABASE_TYPE": "SQLITE",
+        "TWO_DATABASE_NAME": str(tmp_path / "two.db"),
+    }
+    if api == "async":
+        registry = DatabaseRegistry()
+        for name in ("one", "two"):
+            registry.build_or_resolve_from_env(name, env)
+        try:
+            await AsyncSchemaManager(registry, factory, options).recreate_all()
+        finally:
+            await registry.close()
+    else:
+        sync_registry = SyncDatabaseRegistry()
+        for name in ("one", "two"):
+            sync_registry.build_or_resolve_from_env(name, env)
+        try:
+            SyncSchemaManager(sync_registry, factory, options).recreate_all()
+        finally:
+            sync_registry.close()
+    assert [it.args[0] for it in one.indexes.recreate.call_args_list] == []
+    assert recorded(one)["schema"] == []
+    assert [it.args[0] for it in two.indexes.recreate.call_args_list] == [MESSAGE_ID]
+    assert recorded(two) == {"schema": [inventory_key(MESSAGE_ID)]}
+
+
+@pytest.mark.parametrize("api", APIS)
+async def test_on_a_graph_engine_index_node_ids_false_leaves_the_defaults_out_of_every_path(
+    api: Api, tmp_path: Path, caplog: pytest.LogCaptureFixture
+):
+    named = RangeIndexSpec("Message", ("id",), name="message_id")
+    options = SchemaOptions([SchemaCatalog.from_fragments(Message)], index_node_ids=False)
+    with caplog.at_level("INFO"):
+        gom = await on_graph_engine(
+            api,
+            options,
+            tmp_path,
+            lambda manager: [manager.enforce(), manager.ensure("dice", named), manager.remove("dice", named)],
+        )
+    assert "all empty: unnamed; nothing to apply" in caplog.text
+    # Only the item ensured is made, and with no default to keep it for, it is dropped when removed.
+    assert made(gom) == [named]
+    assert [it.args[0] for it in gom.indexes.drop.call_args_list] == [named]

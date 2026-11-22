@@ -308,6 +308,21 @@ async def test_the_declarations_give_the_planner_the_catalogs_the_spec_pins(
     }
 
 
+@pytest.mark.parametrize("api", APIS)
+@pytest.mark.parametrize("case", [it for it in CASES if GAPS.get(it["case"]) == ["#552"]], ids=lambda it: it["case"])
+async def test_a_fragment_case_short_only_of_its_node_ids_index_gives_the_rest_as_the_spec_pins_in_order(
+    case: dict[str, Any], api: Api, tmp_path: Path, requests: list[dict[str, Any]]
+):
+    # Of the fragment cases, all but the node id's default range index (#552), which drivine4j adds after the rest.
+    def declared(catalog: dict[str, Any]) -> dict[str, Any]:
+        default = {"kind": "RANGE_INDEX", "label": catalog["items"][0]["label"], "properties": ["id"], "name": None}
+        items = [it for it in catalog["items"] if {k: it.get(k) for k in default} != default]
+        return {**catalog, "items": items}
+
+    given = await enforced(api, DECLARATIONS[case["case"]](), tmp_path, requests)
+    assert given == {"catalogs": [declared(it) for it in case["catalogs"]], "runtime": case["runtime"]}
+
+
 # ----- How a catalog gives its items, as drivine4j's SchemaCatalog.build and FragmentSchemaScanner do -----
 
 

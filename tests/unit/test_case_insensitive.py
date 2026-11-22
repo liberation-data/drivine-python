@@ -276,6 +276,8 @@ class TestItemsOverTheCopy:
             uniqueness_constraint("Member", "email", node_id_property="uuid", ignore_case=True),
             range_index("Member", "handle", ignore_case=True),
             range_index("Member", "name"),
+            # The NodeId's range index, which nothing declared over it alone serves (drivine4j#827).
+            range_index("Member", "uuid"),
         )
 
     def test_are_refused_over_a_field_that_keeps_no_copy(self):

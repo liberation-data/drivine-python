@@ -91,7 +91,11 @@ class SchemaManager:
     def __init__(self, registry: DatabaseRegistry, factory: GraphObjectManagerFactory, options: SchemaOptions) -> None:
         self.registry = registry
         self.factory = factory
-        self.options = options
+        self.options = (
+            options
+            if options.index_node_ids
+            else dataclasses.replace(options, catalogs=[it.without_node_id_indexes() for it in options.catalogs])
+        )
         self._runtime: dict[tuple[str, tuple[str, ...] | None], dict[str, SchemaSpec]] = {}
         """What `ensure` was given, by owner and databases, each item by its identity: a later one replaces it."""
         self._lock = concurrency.Lock()
@@ -150,8 +154,8 @@ class SchemaManager:
             # names no database.
             items = tuple(self._merged(None, [catalog]).values())
             candidate = self._with_runtime(catalog, items)
-            declared = self._catalogs_by_database(self.options.catalogs)
             ensured = self._catalogs_by_database(_runtime_catalogs(candidate))
+            declared = _beside(self._catalogs_by_database(self.options.catalogs), ensured)
             # Every database is planned before anything is kept or applied, so a conflict leaves all as they were.
             plans = {
                 database: self._plan(database, declared.get(database, []), ensured.get(database, []))
@@ -301,10 +305,13 @@ class SchemaManager:
         if planning is None:
             return None
         options = self.options
+        ensured = self._catalogs_by_database(_runtime_catalogs(self._runtime)).get(database, [])
+        on_database = _beside(
+            {database: [it for it in options.catalogs if database in self._targets(it)]}, {database: ensured}
+        )
         catalogs = [
             {"owner": _owner_of(it.name), "version": it.version, "items": [module_spec(spec) for spec in it.items]}
-            for it in options.catalogs
-            if database in self._targets(it)
+            for it in on_database[database]
         ]
         runtime = [
             {
@@ -361,8 +368,8 @@ class SchemaManager:
                 return {}
             # Before anything is applied: a vector index over a fragment's field without VectorIndex is refused.
             vector_annotation_check.register(spec for it in [*self.options.catalogs, *runtime] for spec in it.items)
-            declared = self._catalogs_by_database(self.options.catalogs)
             ensured = self._catalogs_by_database(runtime)
+            declared = _beside(self._catalogs_by_database(self.options.catalogs), ensured)
             report: dict[str, list[EnsureResult[Any]]] = {}
             for database in dict.fromkeys([*declared, *ensured]):
                 plan = self._plan(database, declared.get(database, []), ensured.get(database, []))
@@ -698,6 +705,24 @@ def _described(unbuilt: IndexNotBuilt) -> str:
             "is fixed"
         )
     return f"  - STILL BUILDING: {unbuilt}. It is left to be built, and waited for again on the next enforce"
+
+
+def _beside(
+    declared: Mapping[str, list[SchemaCatalog]], ensured: Mapping[str, list[SchemaCatalog]]
+) -> dict[str, list[SchemaCatalog]]:
+    """
+    Each database's catalogs as they are applied there, beside what every catalog on it and every item ensured at
+    runtime there declare: a NodeId's default range index another of them serves is left out, as one its own catalog's
+    items serve is, as drivine4j's SchemaManager gives its catalogs (`itemsBeside`, drivine4j#827).
+    """
+    beside: dict[str, list[SchemaCatalog]] = {}
+    for database, catalogs in declared.items():
+        items = [
+            *(spec for it in catalogs for spec in it.declared_items),
+            *(spec for it in ensured.get(database, []) for spec in it.items),
+        ]
+        beside[database] = [it.beside(items) for it in catalogs]
+    return beside
 
 
 def _runtime_catalogs(

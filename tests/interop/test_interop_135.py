@@ -153,7 +153,7 @@ async def test_runs_the_case(index: int, name: str, monkeypatch: pytest.MonkeyPa
                 SchemaOptions([it.for_database(graph) for it in declared.catalogs]),
             )
             for owner, specs in declared.runtime:
-                await manager.ensure_catalog(SchemaCatalog(specs, name=owner).for_database(graph))
+                await manager.ensure_catalog(SchemaCatalog.of(*specs).named(owner).for_database(graph))
             results = await manager.enforce()
             reported["outcome"] = [it.status for found in results.values() for it in found]
     except Exception as error:

@@ -1,8 +1,8 @@
 """
 StoreLayoutMigration's driver, against a connection kept in memory and a planner that answers rounds as scripted
 (drivine-python#514): what each action runs, and on which connection, and what it gives back. The module's own rounds
-are the spec's (`migrate.yaml`, the module's LayoutMigratorTest); a store's are proven once drivine-python is on
-layout 2.
+are the spec's (`migrate.yaml`, the module's LayoutMigratorTest); a store's, by test_sqlite_store_layout_migration and
+test_store_layout_migration_servers.
 """
 
 from __future__ import annotations
@@ -199,3 +199,20 @@ def test_a_graph_engine_is_refused() -> None:
     provider.type = "NEO4J"  # type: ignore[misc]
     with pytest.raises(DrivineError, match="Postgres, Oracle or SQLite"):
         StoreLayoutMigration(provider, Planner([]))
+
+
+def test_no_provider_is_refused() -> None:
+    # What a registry's `connection_provider` gives for a name nothing is registered under.
+    with pytest.raises(DrivineError, match="no database is registered under that name"):
+        StoreLayoutMigration(None, Planner([]))
+
+
+def test_a_sql_provider_without_the_migratable_methods_is_refused() -> None:
+    class Bare:
+        type = "POSTGRES"
+        graph_name = "drivine"
+
+        async def connect_unjudged(self) -> FakeConnection: ...
+
+    with pytest.raises(DrivineError, match=r"not on Bare, which lacks prepare_unjudged, stamp_statement\."):
+        StoreLayoutMigration(Bare(), Planner([]))  # pyright: ignore[reportArgumentType]

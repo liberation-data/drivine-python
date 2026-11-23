@@ -6,9 +6,6 @@ writes nothing, a run cut short after its first written batch and resumed, two s
 index stopping it as `collisions`, resumed once corrected with plain SQL, and read by this version as layout 2 after,
 its models loaded. drivine4j's StoreLayoutMigrationSqliteTest and Drivine for TypeScript's StoreLayoutMigration.spec.ts,
 ported.
-
-The migrator is in no released compiler yet: the test runs where the compiler installed answers a `migrate` request
-(drivine-cypher-spec#344, #348 and #350, released after 0.50.0), and is skipped elsewhere.
 """
 
 from __future__ import annotations
@@ -36,7 +33,7 @@ from drivine import (
     refs,
 )
 from drivine.connection.sqlite.sqlite_connection_provider import SqliteConnectionProvider
-from drivine.migration.store_layout_migration import Declaration, StoreLayoutMigration, declarations_of
+from drivine.migration import Declaration, StoreLayoutMigration, declarations_of
 from drivine.query.statement import cypher_statement
 from tests.integration.migration.models import DECLARATIONS, Circle, File, Meeting, Person
 
@@ -52,13 +49,6 @@ def _migrator() -> Callable[[str], str] | None:
         return None
     answer = json.loads(compile_json(json.dumps({"migrate": {"store": "sqlite", "graph": "drivine", "start": {}}})))
     return compile_json if "run" in answer or "done" in answer else None
-
-
-pytestmark = pytest.mark.skipif(
-    _migrator() is None,
-    reason="the installed drivine-cypher-compiler has no store layout migrator (drivine-cypher-spec#344, #348, #350): "
-    "it needs the compiler released after 0.50.0",
-)
 
 
 class Interrupted(Exception):

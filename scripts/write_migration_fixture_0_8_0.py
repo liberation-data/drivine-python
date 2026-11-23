@@ -1,9 +1,18 @@
 """
-Writes a SQLite graph with drivine-python 0.8.0, the last release of store layout 1: the fixture a layout-1 to layout-2
-migration is tested on (drivine-cypher-spec#256, drivine-python#514),
-`tests/integration/sqlite/migration/layout1-0.8.0.sqlite`.
-Run it in an environment of its own, with `pip install "drivine[sqlite]==0.8.0"`, from a directory outside the checkout:
-`python -I <checkout>/scripts/write_migration_fixture_0_8_0.py <path of the file to write>`.
+Writes a graph with drivine-python 0.8.0, the last release of store layout 1: the fixture a layout-1 to layout-2
+migration is tested on (drivine-cypher-spec#256, drivine-python#514). On SQLite it is a file,
+`tests/integration/sqlite/migration/layout1-0.8.0.sqlite`; on Postgres and Oracle the migration's tests write it into
+the test's own database, a graph of each test's own (tests/integration/migration).
+
+Run it in a new environment of its own, with `drivine[sqlite]==0.8.0` (or `[postgres]`, `[oracle]`) installed from
+PyPI, from a directory outside the checkout, so that this checkout's drivine isn't the one imported: it refuses to run
+on it. An environment this checkout is installed in won't do, even with `uv run --with drivine==0.8.0`: the checkout
+says it is 0.8.0 until a release bumps it, and satisfies that.
+
+    python -I <checkout>/scripts/write_migration_fixture_0_8_0.py sqlite <path of the file to write> [graph]
+    python -I <checkout>/scripts/write_migration_fixture_0_8_0.py postgres|oracle host port user password database graph
+
+where Oracle's database is its service, say FREEPDB1, and the graph is `drivine` where it isn't given.
 
 drivine4j's `fixture070` and Drivine for TypeScript's `migration-fixture-5.0.0` write the same graph, and this adds what
 a Python model saves: a date, a datetime, a float and a relationship's date, each saved by the object manager, and bytes
@@ -16,6 +25,8 @@ from __future__ import annotations
 import asyncio
 import sys
 from datetime import UTC, date, datetime
+from importlib.metadata import distribution, version
+from pathlib import Path
 from typing import Annotated, Any
 
 from drivine import (
@@ -59,9 +70,51 @@ class Circle(GraphView):
     knows: Annotated[list[Knows], Relationship("KNOWS")] = []
 
 
-async def main(path: str) -> None:
+STORES = {"sqlite": DatabaseType.SQLITE, "postgres": DatabaseType.POSTGRES, "oracle": DatabaseType.ORACLE}
+
+
+def registered(arguments: list[str]) -> tuple[DatabaseRegistry, str]:
+    """A registry of the store and graph the arguments name, and what to call the graph written."""
+    usage = "usage: sqlite <path> [graph] | postgres|oracle <host> <port> <user> <password> <database> <graph>"
+    if not arguments or arguments[0] not in STORES:
+        raise SystemExit(usage)
+    store, rest = STORES[arguments[0]], arguments[1:]
     registry = DatabaseRegistry()
-    registry.builder().database_type(DatabaseType.SQLITE).database_name(path).register("fixture")
+    builder = registry.builder().database_type(store)
+    if store is DatabaseType.SQLITE:
+        if len(rest) not in (1, 2):
+            raise SystemExit(usage)
+        builder.database_name(rest[0])
+        graph = rest[1] if len(rest) == 2 else "drivine"
+        written = rest[0]
+    else:
+        if len(rest) != 6:
+            raise SystemExit(usage)
+        host, port, user, password, database, graph = rest
+        builder.host(host).port(int(port)).user_name(user).password(password).database_name(database)
+        written = f"{arguments[0]} {host}:{port}/{database}"
+    builder.default_graph_path(graph).register("fixture")
+    return registry, f"{written}, graph {graph}"
+
+
+def released() -> None:
+    """
+    Refuses to write with any drivine but the 0.8.0 release: a checkout's own, of whatever version it says, would write
+    the layout it reads, not layout 1, and the fixture would test nothing. One installed from a directory or a file, not
+    an index, records where in `direct_url.json`, which catches a checkout other than the one this script is in, such
+    as the original of a copy whose editable install still points at it.
+    """
+    import drivine
+
+    imported = Path(drivine.__file__).resolve()
+    local = distribution("drivine").read_text("direct_url.json") is not None
+    if Path(__file__).resolve().parents[1] / "drivine" in imported.parents or local or version("drivine") != "0.8.0":
+        raise SystemExit(f"Run with drivine 0.8.0 as released, not {imported} ({version('drivine')})")
+
+
+async def main(arguments: list[str]) -> None:
+    released()
+    registry, written = registered(arguments)
     pm = PersistenceManagerFactory(registry).get("fixture")
     gom = StatelessGraphObjectManager(pm)
 
@@ -86,8 +139,8 @@ async def main(path: str) -> None:
         await cypher("CREATE (:Event {at: '2024-03-15T10:30:00.500Z'})")
     finally:
         await registry.close()
-    print(f"wrote {path}")
+    print(f"wrote {written}")
 
 
 if __name__ == "__main__":
-    asyncio.run(main(sys.argv[1]))
+    asyncio.run(main(sys.argv[1:]))

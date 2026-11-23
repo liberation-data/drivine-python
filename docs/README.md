@@ -15,6 +15,7 @@ drivine-python's documentation, also published at [drivine.org/py](https://drivi
 - [Logging](12-logging.md)
 - [Building](13-building.md)
 - [License](14-license.md)
+- [Migrating a graph from store layout 1 to layout 2](15-migrating-a-store-layout.md)
 
 Notes, which the site doesn't publish: [the design](design.md), and the Oracle crashes Drivine works around,
 [a long JSON string](oracle-long-json-string-crash.md) and [ON TRUE in a scalar subquery](oracle-on-true-in-scalar-subquery-crash.md).

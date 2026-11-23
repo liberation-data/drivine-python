@@ -14,8 +14,6 @@ next start.
 
 Statements run on a connection of their own that neither makes the graph's tables nor judges its layout, as `connect`
 would, and refuse the graph; the lock on another, in a transaction left open until the migration ends.
-
-Not yet proven on every store (drivine-python#514): `migrate` refuses to run unless told `unproven=True`.
 """
 
 from __future__ import annotations
@@ -226,7 +224,6 @@ class StoreLayoutMigration:
         batch_size: int = 1000,
         dry_run: bool = False,
         keep_invalid: bool = False,
-        unproven: bool = False,
     ) -> MigrationReport:
         """
         Migrates the graph by `declarations`, or with `dry_run` reports what a migration would do and writes nothing,
@@ -234,11 +231,6 @@ class StoreLayoutMigration:
         kind is kept as it is, and named in the report, where it would otherwise refuse the graph. Gives the module's
         report.
         """
-        if not unproven:
-            raise DrivineError(
-                "The store layout migration is not yet proven on every store (drivine-python#514): back the graph up "
-                "first, and pass unproven=True to run it."
-            )
         # Asked first, so declarations or a batch size the module refuses are refused before the store is reached.
         answer = self._ask(
             {

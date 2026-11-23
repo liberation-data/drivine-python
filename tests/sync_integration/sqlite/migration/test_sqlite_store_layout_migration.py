@@ -8,9 +8,6 @@ writes nothing, a run cut short after its first written batch and resumed, two s
 index stopping it as `collisions`, resumed once corrected with plain SQL, and read by this version as layout 2 after,
 its models loaded. drivine4j's StoreLayoutMigrationSqliteTest and Drivine for TypeScript's StoreLayoutMigration.spec.ts,
 ported.
-
-The migrator is in no released compiler yet: the test runs where the compiler installed answers a `migrate` request
-(drivine-cypher-spec#344, #348 and #350, released after 0.50.0), and is skipped elsewhere.
 """
 
 from __future__ import annotations
@@ -39,7 +36,7 @@ from drivine.sync import (
     refs,
 )
 from drivine.sync.connection.sqlite.sqlite_connection_provider import SqliteConnectionProvider
-from drivine.sync.migration.store_layout_migration import Declaration, StoreLayoutMigration, declarations_of
+from drivine.sync.migration import Declaration, StoreLayoutMigration, declarations_of
 from tests.sync_integration.migration.models import DECLARATIONS, Circle, File, Meeting, Person
 
 FIXTURE = Path(__file__).parents[3] / "integration" / "sqlite" / "migration" / "layout1-0.8.0.sqlite"
@@ -54,13 +51,6 @@ def _migrator() -> Callable[[str], str] | None:
         return None
     answer = json.loads(compile_json(json.dumps({"migrate": {"store": "sqlite", "graph": "drivine", "start": {}}})))
     return compile_json if "run" in answer or "done" in answer else None
-
-
-pytestmark = pytest.mark.skipif(
-    _migrator() is None,
-    reason="the installed drivine-cypher-compiler has no store layout migrator (drivine-cypher-spec#344, #348, #350): "
-    "it needs the compiler released after 0.50.0",
-)
 
 
 class Interrupted(Exception):
@@ -139,11 +129,9 @@ def test_a_graph_0_8_0_wrote_is_refused_dry_run_resumed_stopped_at_a_collision_c
     refused(path)
 
     provider = SqliteConnectionProvider("migration", path)
-    with pytest.raises(Exception, match="not yet proven"):
-        StoreLayoutMigration(provider).migrate(DECLARATIONS)
 
     untouched = snapshot(path)
-    dry_run = StoreLayoutMigration(provider).migrate(DECLARATIONS, dry_run=True, unproven=True)
+    dry_run = StoreLayoutMigration(provider).migrate(DECLARATIONS, dry_run=True)
     assert dry_run["status"] == "dryRun", dry_run["message"]
     assert snapshot(path) == untouched, "a dry run writes nothing"
     assert len(dry_run["notes"]) == 2
@@ -156,9 +144,7 @@ def test_a_graph_0_8_0_wrote_is_refused_dry_run_resumed_stopped_at_a_collision_c
 
     # Stopped after its first batch of writes, two rows a batch, then begun again: it resumes after that batch.
     with pytest.raises(Interrupted):
-        StoreLayoutMigration(provider, interrupted_after_a_write(_compile())).migrate(
-            DECLARATIONS, batch_size=2, unproven=True
-        )
+        StoreLayoutMigration(provider, interrupted_after_a_write(_compile())).migrate(DECLARATIONS, batch_size=2)
     assert sql(path, "SELECT count(*) FROM sqlite_master WHERE name = 'drivine_migrate2'") == [(1,)]
     # The first batch rewritten, Ada's and Charles's nodes, their dates tagged; the rows after it not yet.
     born = "SELECT json_type(props, '$.born') FROM drivine_node WHERE json_extract(props, '$.name') = 'Ada'"
@@ -167,7 +153,7 @@ def test_a_graph_0_8_0_wrote_is_refused_dry_run_resumed_stopped_at_a_collision_c
     refused(path)
 
     # Two spellings of one moment are one value in layout 2: the run stops, every value rewritten, the graph refused.
-    stopped = StoreLayoutMigration(provider).migrate(DECLARATIONS, batch_size=2, unproven=True)
+    stopped = StoreLayoutMigration(provider).migrate(DECLARATIONS, batch_size=2)
     assert stopped["status"] == "collisions", stopped["message"]
     assert [(it["label"], it["properties"]) for it in stopped["collisions"]] == [("Event", ["at"])]
     refused(path)
@@ -175,10 +161,10 @@ def test_a_graph_0_8_0_wrote_is_refused_dry_run_resumed_stopped_at_a_collision_c
     # Corrected with the store's own tools, then resumed: migrated.
     [(event,)] = sql(path, "SELECT max(nid) FROM drivine_node WHERE labels LIKE '%\"Event\"%'")
     sql(path, f"DELETE FROM drivine_node WHERE nid = {event}")
-    migrated = StoreLayoutMigration(provider).migrate(DECLARATIONS, unproven=True)
+    migrated = StoreLayoutMigration(provider).migrate(DECLARATIONS)
     assert migrated["status"] == "migrated", migrated["message"]
     # A migrated graph is current: the next run has nothing to do.
-    again = StoreLayoutMigration(provider).migrate(DECLARATIONS, unproven=True)
+    again = StoreLayoutMigration(provider).migrate(DECLARATIONS)
     assert again["status"] == "current", again["message"]
     provider.end()
 
@@ -251,9 +237,7 @@ def test_the_migration_reads_each_kind_declared_from_the_form_0_8_0_saved_it_in_
     )
     provider = SqliteConnectionProvider("forms", path)
     try:
-        report = StoreLayoutMigration(provider).migrate(
-            [Declaration("Person", "probe", kind)], dry_run=True, unproven=True
-        )
+        report = StoreLayoutMigration(provider).migrate([Declaration("Person", "probe", kind)], dry_run=True)
     finally:
         provider.end()
     invalid = [it for p in report["properties"] if p["property"] == "probe" for it in p["invalid"]]
@@ -278,12 +262,12 @@ def test_bytes_0_8_0_saved_as_their_utf8_text_are_kept_a_text_by_the_migration_a
     assert [it for it in declarations_of(Upload) if it.property == "photo"] == []
     provider = SqliteConnectionProvider("migration", path)
     try:
-        stopped = StoreLayoutMigration(provider).migrate(DECLARATIONS, unproven=True)
+        stopped = StoreLayoutMigration(provider).migrate(DECLARATIONS)
         assert stopped["status"] == "collisions", stopped["message"]
         # The fixture's two spellings of one moment, corrected with plain SQL, as the first test does.
         [(event,)] = sql(path, "SELECT max(nid) FROM drivine_node WHERE labels LIKE '%\"Event\"%'")
         sql(path, f"DELETE FROM drivine_node WHERE nid = {event}")
-        migrated = StoreLayoutMigration(provider).migrate(DECLARATIONS, unproven=True)
+        migrated = StoreLayoutMigration(provider).migrate(DECLARATIONS)
     finally:
         provider.end()
     assert migrated["status"] == "migrated", migrated["message"]

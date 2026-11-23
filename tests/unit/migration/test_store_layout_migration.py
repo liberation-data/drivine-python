@@ -1,8 +1,8 @@
 """
 StoreLayoutMigration's driver, against a connection kept in memory and a planner that answers rounds as scripted
 (drivine-python#514): what each action runs, and on which connection, and what it gives back. The module's own rounds
-are the spec's (`migrate.yaml`, the module's LayoutMigratorTest); a store's are proven once drivine-python is on
-layout 2.
+are the spec's (`migrate.yaml`, the module's LayoutMigratorTest); a store's, by test_sqlite_store_layout_migration and
+test_store_layout_migration_servers.
 """
 
 from __future__ import annotations
@@ -81,11 +81,6 @@ class Planner:
 DECLARED = [Declaration("Person", "born", "date")]
 
 
-async def test_a_migration_unless_told_it_is_unproven_is_refused() -> None:
-    with pytest.raises(DrivineError, match="not yet proven"):
-        await StoreLayoutMigration(FakeProvider(), Planner([])).migrate(DECLARED)
-
-
 async def test_each_action_runs_where_it_belongs_and_the_lock_is_held_on_a_connection_of_its_own(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -109,9 +104,7 @@ async def test_each_action_runs_where_it_belongs_and_the_lock_is_held_on_a_conne
         ]
     )
     with caplog.at_level(logging.INFO, logger="drivine.store"):
-        report = await StoreLayoutMigration(provider, planner).migrate(
-            DECLARED, batch_size=2, dry_run=False, unproven=True
-        )
+        report = await StoreLayoutMigration(provider, planner).migrate(DECLARED, batch_size=2, dry_run=False)
     assert report["status"] == "migrated"
     # Its status logged, and each note, what it leaves to others, warned of, as drivine4j and TypeScript's do.
     assert [(it.levelname, it.getMessage()) for it in caplog.records] == [
@@ -157,7 +150,7 @@ async def test_a_failed_action_ends_its_round_and_a_failed_transaction_is_rolled
         ]
     )
     with caplog.at_level(logging.WARNING, logger="drivine.store"):
-        await StoreLayoutMigration(provider, planner).migrate(DECLARED, unproven=True)
+        await StoreLayoutMigration(provider, planner).migrate(DECLARED)
     assert planner.asked[1]["outcomes"] == [{"type": "failed", "message": "refused UPDATE"}]
     assert "c1: rollback" in provider.log and not any("NEVER" in line for line in provider.log)
     # Logged as drivine4j logs it, as the module's report may not say which statement the store refused.
@@ -175,16 +168,14 @@ async def test_a_store_without_the_compiler_is_told_how_to_install_it_for_that_s
     provider = FakeProvider()
     provider.type = "POSTGRES"  # type: ignore[misc]
     with pytest.raises(DrivineError, match=r"drivine\[postgres\]"):
-        await StoreLayoutMigration(provider).migrate(DECLARED, unproven=True)
+        await StoreLayoutMigration(provider).migrate(DECLARED)
     assert provider.connections == 0
 
 
 async def test_the_modules_refusal_is_thrown_before_the_store_is_reached() -> None:
     provider = FakeProvider()
     with pytest.raises(DrivineError, match="refused the migration"):
-        await StoreLayoutMigration(provider, lambda _: json.dumps({"error": "No kind x"})).migrate(
-            DECLARED, unproven=True
-        )
+        await StoreLayoutMigration(provider, lambda _: json.dumps({"error": "No kind x"})).migrate(DECLARED)
     assert provider.connections == 0
 
 
@@ -198,7 +189,7 @@ async def test_a_lock_whose_statement_fails_is_given_back_and_ends_its_round() -
             ]
         ]
     )
-    await StoreLayoutMigration(provider, planner).migrate(DECLARED, unproven=True)
+    await StoreLayoutMigration(provider, planner).migrate(DECLARED)
     assert planner.asked[1]["outcomes"] == [{"type": "failed", "message": "refused LOCK"}]
     assert provider.log == ["c2: begin", "c2: LOCK []", "c2: rollback", "c2: release", "c1: release"]
 
@@ -208,3 +199,20 @@ def test_a_graph_engine_is_refused() -> None:
     provider.type = "NEO4J"  # type: ignore[misc]
     with pytest.raises(DrivineError, match="Postgres, Oracle or SQLite"):
         StoreLayoutMigration(provider, Planner([]))
+
+
+def test_no_provider_is_refused() -> None:
+    # What a registry's `connection_provider` gives for a name nothing is registered under.
+    with pytest.raises(DrivineError, match="no database is registered under that name"):
+        StoreLayoutMigration(None, Planner([]))
+
+
+def test_a_sql_provider_without_the_migratable_methods_is_refused() -> None:
+    class Bare:
+        type = "POSTGRES"
+        graph_name = "drivine"
+
+        async def connect_unjudged(self) -> FakeConnection: ...
+
+    with pytest.raises(DrivineError, match=r"not on Bare, which lacks prepare_unjudged, stamp_statement\."):
+        StoreLayoutMigration(Bare(), Planner([]))  # pyright: ignore[reportArgumentType]

@@ -320,7 +320,7 @@ async def migrate(
     try:
         provider = registry.registered(server.store)
         assert provider is not None
-        return await StoreLayoutMigration(provider).migrate(declarations, unproven=True, **options)  # pyright: ignore[reportArgumentType]
+        return await StoreLayoutMigration(provider).migrate(declarations, **options)
     finally:
         await registry.close()
 

@@ -320,7 +320,7 @@ def migrate(
     try:
         provider = registry.registered(server.store)
         assert provider is not None
-        return StoreLayoutMigration(provider).migrate(declarations, unproven=True, **options)  # pyright: ignore[reportArgumentType]
+        return StoreLayoutMigration(provider).migrate(declarations, **options)
     finally:
         registry.close()
 

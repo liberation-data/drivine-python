@@ -14,8 +14,6 @@ next start.
 
 Statements run on a connection of their own that neither makes the graph's tables nor judges its layout, as `connect`
 would, and refuse the graph; the lock on another, in a transaction left open until the migration ends.
-
-Not yet proven on every store (drivine-python#514): `migrate` refuses to run unless told `unproven=True`.
 """
 
 from __future__ import annotations
@@ -37,6 +35,7 @@ from drivine.model.field_shape import FieldShape
 from drivine.model.model_registry import ModelRegistry
 from drivine.query.query_specification import QuerySpecification
 from drivine.sync.connection.connection import Connection
+from drivine.sync.connection.connection_provider import ConnectionProvider
 
 logger = logging.getLogger("drivine.store")
 
@@ -204,19 +203,33 @@ Compile = Callable[[str], str]
 
 STORES = ("postgres", "oracle", "sqlite")
 
+_MIGRATABLE = ("connect_unjudged", "prepare_unjudged", "stamp_statement")
+"""What a provider gives a migration beyond `ConnectionProvider`'s: `MigratableProvider`'s methods."""
+
 
 class StoreLayoutMigration:
     """See the module."""
 
-    def __init__(self, provider: MigratableProvider, compile_json: Compile | None = None) -> None:
+    def __init__(
+        self, provider: ConnectionProvider | MigratableProvider | None, compile_json: Compile | None = None
+    ) -> None:
+        # Takes what a registry's `connection_provider` gives, and refuses here what it can't migrate.
+        if provider is None:
+            raise DrivineError("A store layout migration needs a provider: no database is registered under that name.")
         store = str(getattr(provider.type, "value", provider.type)).lower()
         if store not in STORES:
             raise DrivineError(
                 "A store layout migration runs on Postgres, Oracle or SQLite, which keep a graph in tables, "
                 f"not on {provider.type}."
             )
+        missing = [it for it in _MIGRATABLE if not callable(getattr(provider, it, None))]
+        if missing:
+            raise DrivineError(
+                f"A store layout migration runs on Drivine's own {store} provider, not on "
+                f"{type(provider).__name__}, which lacks {', '.join(missing)}."
+            )
         self._store = store
-        self._provider = provider
+        self._provider = cast(MigratableProvider, provider)
         self._compile = compile_json
 
     def migrate(
@@ -226,7 +239,6 @@ class StoreLayoutMigration:
         batch_size: int = 1000,
         dry_run: bool = False,
         keep_invalid: bool = False,
-        unproven: bool = False,
     ) -> MigrationReport:
         """
         Migrates the graph by `declarations`, or with `dry_run` reports what a migration would do and writes nothing,
@@ -234,11 +246,6 @@ class StoreLayoutMigration:
         kind is kept as it is, and named in the report, where it would otherwise refuse the graph. Gives the module's
         report.
         """
-        if not unproven:
-            raise DrivineError(
-                "The store layout migration is not yet proven on every store (drivine-python#514): back the graph up "
-                "first, and pass unproven=True to run it."
-            )
         # Asked first, so declarations or a batch size the module refuses are refused before the store is reached.
         answer = self._ask(
             {

@@ -13,6 +13,7 @@ database, Oracle's service, or the directory of SQLite's `<graph>.db` files).
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from collections.abc import Iterator
@@ -53,6 +54,11 @@ RUN_CASES: list[dict[str, Any]] = (
 """The driver's cases, or, in a run that isn't one of the driver's, which skips them, this copy's."""
 
 REPORTS: list[dict[str, Any]] = []
+
+CASE_TIMEOUT = 120.0
+"""How long a case's enforce may take, in seconds, before it is the case's failure. On Oracle a case builds its indexes
+and constraints one DDL at a time, the slowest ("fragment") well past the few seconds the others take; a case that hangs
+past this is reported, rather than holding up the driver's run, as Drivine for TypeScript's 120 s jest timeout does."""
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -129,23 +135,26 @@ async def test_runs_the_case(index: int, name: str, monkeypatch: pytest.MonkeyPa
     registry: DatabaseRegistry | None = None
     pm: PersistenceManager | None = None
     try:
-        # Inside the try, so that a store that can't be registered is the case's failure, in the report.
-        registry = registered(graph)
-        pm = PersistenceManagerFactory(registry).get(graph)
-        reported["markerBefore"] = await marker(pm)
-        declare = DECLARATIONS.get(name)
-        if declare is None:
-            raise LookupError(f"No declaration for the spec's case '{name}'.")
-        declared = declare()
-        manager = SchemaManager(
-            registry,
-            GraphObjectManagerFactory(PersistenceManagerFactory(registry)),
-            SchemaOptions([it.for_database(graph) for it in declared.catalogs]),
-        )
-        for owner, specs in declared.runtime:
-            await manager.ensure_catalog(SchemaCatalog(specs, name=owner).for_database(graph))
-        results = await manager.enforce()
-        reported["outcome"] = [it.status for found in results.values() for it in found]
+        async with asyncio.timeout(CASE_TIMEOUT):
+            # Inside the try, so that a store that can't be registered is the case's failure, in the report.
+            registry = registered(graph)
+            pm = PersistenceManagerFactory(registry).get(graph)
+            reported["markerBefore"] = await marker(pm)
+            declare = DECLARATIONS.get(name)
+            if declare is None:
+                raise LookupError(f"No declaration for the spec's case '{name}'.")
+            declared = declare()
+            manager = SchemaManager(
+                registry,
+                GraphObjectManagerFactory(PersistenceManagerFactory(registry)),
+                SchemaOptions([it.for_database(graph) for it in declared.catalogs]),
+            )
+            for owner, specs in declared.runtime:
+                await manager.ensure_catalog(SchemaCatalog(specs, name=owner).for_database(graph))
+            results = await manager.enforce()
+            reported["outcome"] = [it.status for found in results.values() for it in found]
+    except TimeoutError:
+        reported["failure"] = f"Ran past {CASE_TIMEOUT:g} s."
     except Exception as error:
         reported["failure"] = str(error) or type(error).__name__
     finally:

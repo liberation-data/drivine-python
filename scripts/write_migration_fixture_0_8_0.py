@@ -4,8 +4,10 @@ migration is tested on (drivine-cypher-spec#256, drivine-python#514). On SQLite 
 `tests/integration/sqlite/migration/layout1-0.8.0.sqlite`; on Postgres and Oracle the migration's tests write it into
 the test's own database, a graph of each test's own (tests/integration/migration).
 
-Run it in an environment of its own, with `drivine[sqlite]==0.8.0` (or `[postgres]`, `[oracle]`) installed, from a
-directory outside the checkout, so that this checkout's drivine isn't the one imported:
+Run it in a new environment of its own, with `drivine[sqlite]==0.8.0` (or `[postgres]`, `[oracle]`) installed from
+PyPI, from a directory outside the checkout, so that this checkout's drivine isn't the one imported: it refuses to run
+on it. An environment this checkout is installed in won't do, even with `uv run --with drivine==0.8.0`: the checkout
+says it is 0.8.0 until a release bumps it, and satisfies that.
 
     python -I <checkout>/scripts/write_migration_fixture_0_8_0.py sqlite <path of the file to write> [graph]
     python -I <checkout>/scripts/write_migration_fixture_0_8_0.py postgres|oracle host port user password database graph
@@ -23,6 +25,8 @@ from __future__ import annotations
 import asyncio
 import sys
 from datetime import UTC, date, datetime
+from importlib.metadata import distribution, version
+from pathlib import Path
 from typing import Annotated, Any
 
 from drivine import (
@@ -93,7 +97,23 @@ def registered(arguments: list[str]) -> tuple[DatabaseRegistry, str]:
     return registry, f"{written}, graph {graph}"
 
 
+def released() -> None:
+    """
+    Refuses to write with any drivine but the 0.8.0 release: a checkout's own, of whatever version it says, would write
+    the layout it reads, not layout 1, and the fixture would test nothing. One installed from a directory or a file, not
+    an index, records where in `direct_url.json`, which catches a checkout other than the one this script is in, such
+    as the original of a copy whose editable install still points at it.
+    """
+    import drivine
+
+    imported = Path(drivine.__file__).resolve()
+    local = distribution("drivine").read_text("direct_url.json") is not None
+    if Path(__file__).resolve().parents[1] / "drivine" in imported.parents or local or version("drivine") != "0.8.0":
+        raise SystemExit(f"Run with drivine 0.8.0 as released, not {imported} ({version('drivine')})")
+
+
 async def main(arguments: list[str]) -> None:
+    released()
     registry, written = registered(arguments)
     pm = PersistenceManagerFactory(registry).get("fixture")
     gom = StatelessGraphObjectManager(pm)

@@ -6,8 +6,9 @@ by the shared module's migrator as StoreLayoutMigration runs it on the store (dr
 drivine-python#514): what test_sqlite_store_layout_migration shows on a file, shown on a server. drivine4j's
 StoreLayoutMigrationStoreTest, ported.
 
-The graph is written by 0.8.0 itself (scripts/write_migration_fixture_0_8_0.py, run by `uv` in an environment of its
-own), so it is the layout 1 a release wrote, not this checkout's idea of it. Each test has graphs of its own.
+The graph is written by 0.8.0 itself (scripts/write_migration_fixture_0_8_0.py, run in an environment of its own that
+uv makes with 0.8.0 from PyPI), so it is the layout 1 a release wrote, not this checkout's idea of it. Each test has
+graphs of its own.
 
 - A dry run writes nothing and reports what a run would do.
 - A run stopped by two spellings of one moment under a unique key is corrected with SQL and resumed, and the graph it
@@ -20,6 +21,7 @@ own), so it is the layout 1 a release wrote, not this checkout's idea of it. Eac
 
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import re
@@ -255,26 +257,53 @@ def graph_name(name: str) -> str:
     return f"mig_{name}_{uuid.uuid4().hex[:8]}"
 
 
+RELEASED: dict[str, Path] = {}
+"""The Python of an environment of drivine-python 0.8.0 alone, made once a run for each store and removed at exit."""
+
+
+def released_python(store: str) -> Path:
+    """
+    The Python of a new virtual environment holding drivine-python 0.8.0 from PyPI with the store's extra, and nothing
+    of this checkout: made with uv, outside any project. Not `uv run --with drivine==0.8.0` on the test's environment,
+    which the checkout's own editable drivine, of version 0.8.0 until a release bumps it, satisfies.
+    """
+    if store not in RELEASED:
+        uv = shutil.which("uv")
+        assert uv is not None, "0.8.0's environment is made by uv, which isn't on the PATH"
+        root = Path(tempfile.mkdtemp(prefix="drivine-0.8.0-"))
+        atexit.register(shutil.rmtree, root, ignore_errors=True)
+        python = root / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+        environment = {k: v for k, v in os.environ.items() if k not in ("VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT")}
+        version = f"{sys.version_info.major}.{sys.version_info.minor}"
+        for step in (
+            [uv, "venv", "--no-project", "--python", version, str(root)],
+            [uv, "pip", "install", "--python", str(python), "--no-sources", f"drivine[{store}]==0.8.0"],
+        ):
+            made = subprocess.run(
+                step, cwd=root, capture_output=True, text=True, timeout=300, check=False, env=environment
+            )
+            assert made.returncode == 0, f"{' '.join(step)}: {made.stdout}{made.stderr}"
+        RELEASED[store] = python
+    return RELEASED[store]
+
+
 def write_layout1(server: Server, graph: str) -> None:
     """Writes the fixture's layout-1 graph with drivine-python 0.8.0, in an environment and a process of its own."""
-    uv = shutil.which("uv")
-    assert uv is not None, "0.8.0's writer is run by uv, which isn't on the PATH"
-    python = f"{sys.version_info.major}.{sys.version_info.minor}"
     store = server.store
+    python = released_python(store)
     arguments = [env(store, it) for it in ("HOST", "PORT", "USER", "PASSWORD", "NAME")]
-    # From an empty directory, with -I, so that this checkout's drivine isn't the one imported; its output to a file,
-    # not a pipe read to its end, which would wait on a writer that hangs past the timeout.
+    # From an empty directory, with -I, so that this checkout's drivine isn't the one imported (the writer refuses to
+    # run on it); its output to a file, not a pipe read to its end, which would wait on a writer that hangs past the
+    # timeout.
     with tempfile.TemporaryDirectory() as empty, tempfile.TemporaryFile("w+") as output:
-        command = [uv, "run", "--no-project", "--python", python, "--with", f"drivine[{store}]==0.8.0", "python", "-I"]
         try:
             process = subprocess.run(
-                [*command, str(WRITER), store, *arguments, graph],
+                [str(python), "-I", str(WRITER), store, *arguments, graph],
                 cwd=empty,
                 stdout=output,
                 stderr=subprocess.STDOUT,
                 timeout=300,
                 check=False,
-                env={k: v for k, v in os.environ.items() if k not in ("VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT")},
             )
         except subprocess.TimeoutExpired:
             output.seek(0)

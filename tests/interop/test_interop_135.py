@@ -126,7 +126,9 @@ async def test_runs_the_case(index: int, name: str, monkeypatch: pytest.MonkeyPa
             ran.append(
                 {
                     "purpose": action["purpose"],
-                    "statement": statement if isinstance(statement, str) else json.dumps(statement),
+                    "statement": statement
+                    if isinstance(statement, str)
+                    else json.dumps(statement, separators=(",", ":"), ensure_ascii=False),
                 }
             )
         return await answer(action, host)
@@ -134,11 +136,12 @@ async def test_runs_the_case(index: int, name: str, monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(schema_plan_driver, "_answer", recorded)
     registry: DatabaseRegistry | None = None
     pm: PersistenceManager | None = None
+    limit = asyncio.timeout(CASE_TIMEOUT)
     try:
-        async with asyncio.timeout(CASE_TIMEOUT):
+        async with limit:
             # Inside the try, so that a store that can't be registered is the case's failure, in the report.
             registry = registered(graph)
-            pm = PersistenceManagerFactory(registry).get(graph)
+            pm = PersistenceManagerFactory(registry).get(graph, "NON_TRANSACTIONAL")
             reported["markerBefore"] = await marker(pm)
             declare = DECLARATIONS.get(name)
             if declare is None:
@@ -153,10 +156,10 @@ async def test_runs_the_case(index: int, name: str, monkeypatch: pytest.MonkeyPa
                 await manager.ensure_catalog(SchemaCatalog(specs, name=owner).for_database(graph))
             results = await manager.enforce()
             reported["outcome"] = [it.status for found in results.values() for it in found]
-    except TimeoutError:
-        reported["failure"] = f"Ran past {CASE_TIMEOUT:g} s."
     except Exception as error:
-        reported["failure"] = str(error) or type(error).__name__
+        # A store's own timeout, raised before the case's limit, is its failure as any other error is.
+        expired = isinstance(error, TimeoutError) and limit.expired()
+        reported["failure"] = f"Ran past {CASE_TIMEOUT:g} s." if expired else str(error) or type(error).__name__
     finally:
         reported["statements"] = ran
         monkeypatch.undo()

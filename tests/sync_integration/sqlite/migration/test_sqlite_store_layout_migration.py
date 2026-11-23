@@ -29,27 +29,18 @@ from drivine.query.statement import cypher_statement
 from drivine.sync import (
     DatabaseRegistry,
     DatabaseType,
-    GraphView,
     NodeFragment,
     NodeId,
     PersistenceManager,
     PersistenceManagerFactory,
     QuerySpecification,
-    Relationship,
-    RelationshipFragment,
-    Root,
     StatelessGraphObjectManager,
     StoreLayoutError,
-    TargetNode,
     refs,
 )
 from drivine.sync.connection.sqlite.sqlite_connection_provider import SqliteConnectionProvider
-from drivine.sync.migration.store_layout_migration import (
-    Declaration,
-    StoreLayoutMigration,
-    declarations_of,
-    with_declared,
-)
+from drivine.sync.migration.store_layout_migration import Declaration, StoreLayoutMigration, declarations_of
+from tests.sync_integration.migration.models import DECLARATIONS, Circle, File, Meeting, Person
 
 FIXTURE = Path(__file__).parents[3] / "integration" / "sqlite" / "migration" / "layout1-0.8.0.sqlite"
 """The fixture, which the sync twin of this test reads too."""
@@ -69,48 +60,6 @@ pytestmark = pytest.mark.skipif(
     _migrator() is None,
     reason="the installed drivine-cypher-compiler has no store layout migrator (drivine-cypher-spec#344, #348, #350): "
     "it needs the compiler released after 0.50.0",
-)
-
-
-class Person(NodeFragment, labels=["Person"]):
-    name: Annotated[str, NodeId()]
-    born: date | None = None
-    height: float | None = None
-    visits: int | None = None
-    nick: str | None = None
-
-
-class Meeting(NodeFragment, labels=["Meeting"]):
-    id: Annotated[str, NodeId()]
-    at: datetime
-
-
-class File(NodeFragment, labels=["File"]):
-    name: Annotated[str, NodeId()]
-    data: bytes
-
-
-class Knows(RelationshipFragment):
-    since: date
-    target: Annotated[Person, TargetNode()]
-
-
-class Circle(GraphView):
-    person: Annotated[Person, Root()]
-    knows: Annotated[list[Knows], Relationship("KNOWS")] = []
-
-
-DECLARATIONS = with_declared(
-    [
-        *declarations_of(Person),
-        *declarations_of(Meeting),
-        *declarations_of(File),
-        *declarations_of(Knows, "KNOWS"),
-    ],
-    # The Events were written in Cypher, and have no model to say what they hold; nor are bytes ever derived, as 0.8.0's
-    # object manager saved them as their UTF-8 text (see _KINDS): File's were written in Cypher as base64, so are
-    # declared by hand.
-    [Declaration("Event", "at", "datetime"), Declaration("File", "data", "bytes")],
 )
 
 

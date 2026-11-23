@@ -266,15 +266,19 @@ def write_layout1(server: Server, graph: str) -> None:
     # not a pipe read to its end, which would wait on a writer that hangs past the timeout.
     with tempfile.TemporaryDirectory() as empty, tempfile.TemporaryFile("w+") as output:
         command = [uv, "run", "--no-project", "--python", python, "--with", f"drivine[{store}]==0.8.0", "python", "-I"]
-        process = subprocess.run(
-            [*command, str(WRITER), store, *arguments, graph],
-            cwd=empty,
-            stdout=output,
-            stderr=subprocess.STDOUT,
-            timeout=300,
-            check=False,
-            env={k: v for k, v in os.environ.items() if k not in ("VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT")},
-        )
+        try:
+            process = subprocess.run(
+                [*command, str(WRITER), store, *arguments, graph],
+                cwd=empty,
+                stdout=output,
+                stderr=subprocess.STDOUT,
+                timeout=300,
+                check=False,
+                env={k: v for k, v in os.environ.items() if k not in ("VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT")},
+            )
+        except subprocess.TimeoutExpired:
+            output.seek(0)
+            pytest.fail(f"0.8.0's writer didn't finish in 5 minutes: {output.read()}")
         output.seek(0)
         assert process.returncode == 0, f"0.8.0's writer: {output.read()}"
 
@@ -350,7 +354,7 @@ async def test_a_graph_0_8_0_wrote_is_refused_dry_run_stopped_at_a_collision_cor
     assert {"label": "Person", "property": "nick", "kind": "date", "values": 1} in dry_run["candidates"]
     assert dry_run["tables"]["nodes"]["rows"] > 0 and dry_run["tables"]["nodes"]["changed"] > 0, dry_run["tables"]
     born = [it for it in dry_run["properties"] if (it["label"], it["property"]) == ("Person", "born")]
-    assert born and sum(born[0]["changes"].values()) > 0, dry_run["properties"]
+    assert born and born[0]["changes"].get("temporal", 0) > 0, dry_run["properties"]
     assert all(not it["invalid"] for it in dry_run["properties"]), dry_run["properties"]
 
     stopped = await migrate(server, graph)

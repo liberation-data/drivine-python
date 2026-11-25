@@ -19,6 +19,22 @@ ON_ORACLE = pytest.mark.skipif(
 """Skips a suite unless Oracle is configured."""
 
 
+MAX_LITERAL = 8000
+"""The characters one literal of `plsql_text` holds: each is four bytes at most, or a quote written twice."""
+
+
+def plsql_text(text: str) -> str:
+    """
+    `text` as a PL/SQL string of any length: one literal, or past `MAX_LITERAL` several joined as a `CLOB`. PL/SQL
+    takes a literal of 32,767 bytes at most (`PLS-00172`), and a statement compiled knowing a graph's labelled indexes,
+    with a batch's rows written in, is longer. drivine4j's `OracleSql.text`.
+    """
+    if len(text) <= MAX_LITERAL:
+        return sql_text(text)
+    parts = (text[it : it + MAX_LITERAL] for it in range(0, len(text), MAX_LITERAL))
+    return "\n|| ".join(f"TO_CLOB({sql_text(part)})" for part in parts)
+
+
 def oracle_plan(pm: PersistenceManager, sql: str, parameters: dict[str, Any], format: str) -> str:
     """
     The plan Oracle makes for `sql` on `pm`, its parameters written in as literals so that the plan is the one for
@@ -28,7 +44,7 @@ def oracle_plan(pm: PersistenceManager, sql: str, parameters: dict[str, Any], fo
         sql = sql.replace(f"${name}", "NULL" if value is None else sql_text(str(value)))
     block = (
         "DECLARE\n    v_plan SYS_REFCURSOR;\nBEGIN\n"
-        f"    EXECUTE IMMEDIATE {sql_text(f'EXPLAIN PLAN FOR {sql}')};\n"
+        f"    EXECUTE IMMEDIATE {plsql_text(f'EXPLAIN PLAN FOR {sql}')};\n"
         f"    OPEN v_plan FOR SELECT plan_table_output FROM TABLE(DBMS_XPLAN.DISPLAY(format => '{format}'));\n"
         "    DBMS_SQL.RETURN_RESULT(v_plan);\nEND;"
     )

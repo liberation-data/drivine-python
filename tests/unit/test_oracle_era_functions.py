@@ -25,6 +25,8 @@ from drivine.connection.oracle.oracle_spec_compiler import OracleSpecCompiler
 from drivine.cypher.cypher_specification import cypher_compiled
 from tests.unit.test_oracle_stored_functions import ora
 
+pytestmark = pytest.mark.usefixtures("no_labelled_indexes")
+
 CHECKS = (
     ("nulls_equal", "_nulls_equal(JSON('[1]'), JSON('[1]'))"),
     ("era", "_era('0000-01-01')"),

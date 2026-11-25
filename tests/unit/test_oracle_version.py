@@ -16,6 +16,8 @@ from drivine.sync.connection.oracle.oracle_connection_provider import (
     OracleConnectionProvider as SyncOracleConnectionProvider,
 )
 
+pytestmark = pytest.mark.usefixtures("no_labelled_indexes")
+
 REFUSED = (
     "Drivine needs Oracle 23.9 or later (it uses UUID()); this database is 23.8.0.25.4. "
     "Upgrade, or use an Oracle Free image 23.9 or newer. Plain SQL over this provider still runs; Cypher does not."

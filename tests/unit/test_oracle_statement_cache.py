@@ -7,10 +7,14 @@ layout for Drivine's own statements alone.
 
 from typing import Any
 
+import pytest
+
 from drivine import QuerySpecification, cypher_statement
 from drivine.connection.oracle.oracle_connection import OracleConnection
 from drivine.cursor.cursor_specification import CursorSpecification
 from drivine.sync.connection.oracle.oracle_connection import OracleConnection as SyncOracleConnection
+
+pytestmark = pytest.mark.usefixtures("no_labelled_indexes")
 
 
 class Cursor:

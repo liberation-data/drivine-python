@@ -3,8 +3,8 @@
 compared as JSON inside a `CASE` alone, which no index answers, so a batch of relationships read every node of the label
 for each row. Beside it now stands a test the index answers on Postgres, for a value of any kind, that leaves out no row
 the comparison keeps: a text, a number, a float equal to a whole one, a truth value, a list, null and a missing key each
-give the rows they gave. On Oracle the shared compiler is told of no index yet (liberation-data/drivine4j#638): the rows
-here are found as before on it, and its plan is drivine4j's to check, with a compiler told of the indexes. drivine4j's
+give the rows they gave. On Oracle a statement is compiled knowing the graph's labelled indexes, as its connection reads
+them from the catalog (#508, liberation-data/drivine4j#805), so a key equality on one is read through it. drivine4j's
 PropertyKeyIndexTest is the reference.
 """
 
@@ -23,6 +23,7 @@ from drivine import (
 )
 from drivine.cypher.shared_compiler import SharedStore, compile_cypher
 from drivine.cypher.sql.compiled_cypher import CompiledCypher
+from tests.integration.oracle.oracle_seed import oracle_plan
 from tests.integration.sql.test_id_key_plans import GRAPH, analyze, clear, plan, spec
 
 NODES = 5000
@@ -74,9 +75,17 @@ async def seeded(factory: PersistenceManagerFactory, store: str) -> AsyncIterato
         await gom.constraints.drop(it)
 
 
+INDEXED = [("Person", "id"), (IMPORT_LABEL, IMPORT_ID)]
+"""The labelled indexes the graph has, which an Oracle connection compiles a statement knowing."""
+
+
 def compiled(pm: PersistenceManager, statement: str, parameters: dict[str, Any]) -> CompiledCypher:
-    """The statement as the store compiles it, by the shared compiler, as the connection compiles it."""
-    return compile_cypher(statement, parameters, cast(SharedStore, pm.type.value), GRAPH)
+    """
+    The statement as the store compiles it, by the shared compiler, as the connection compiles it: on Oracle, knowing
+    the graph's labelled indexes (see the test of query()'s own compile).
+    """
+    indexed = INDEXED if pm.type is DatabaseType.ORACLE else []
+    return compile_cypher(statement, parameters, cast(SharedStore, pm.type.value), GRAPH, indexed_properties=indexed)
 
 
 def probes_index(pm: PersistenceManager, explained: str) -> bool:
@@ -107,14 +116,6 @@ def read_through_index(pm: PersistenceManager) -> None:
 def plans_checked(pm: PersistenceManager) -> None:
     if pm.type is DatabaseType.SQLITE:
         pytest.skip("SQLite compares a row's value as JSON alone, as before: its plan is not the one drivine4j checks.")
-    if pm.type is DatabaseType.ORACLE:
-        pytest.skip(ORACLE_NAMES_NO_INDEX)
-
-
-ORACLE_NAMES_NO_INDEX = (
-    "On Oracle the shared compiler is told of no index yet (liberation-data/drivine4j#638): a statement reads every "
-    "node of the label, and drivine4j checks the plan of one compiled knowing the indexes."
-)
 
 
 async def test_a_rows_value_of_each_kind_finds_the_nodes_it_is_equal_to_as_json_compares_them(
@@ -361,10 +362,6 @@ async def test_a_batch_of_relationships_as_apoc_exports_it_finds_each_rows_nodes
     pm: PersistenceManager, seeded: None
 ):
     read_through_index(pm)
-    # Not on Oracle, as in Drivine for TypeScript: a statement there names no index yet, and reads every node of the
-    # label for each end of each row: minutes for 10.
-    if pm.type is DatabaseType.ORACLE:
-        pytest.skip(ORACLE_NAMES_NO_INDEX)
     # Its reads, planned as a query: a write compiles to a procedure, which no EXPLAIN takes.
     explained = await plan(pm, compiled(pm, apoc_batch(0, 20, "RETURN start, finish"), {}))
     print(f"apoc\n{explained}\n")
@@ -375,6 +372,26 @@ async def test_a_batch_of_relationships_as_apoc_exports_it_finds_each_rows_nodes
     assert await query(
         pm, f"MATCH (a)-[:NEXT_CHUNK]->(b {{`{IMPORT_ID}`: 10}}) RETURN [a.`{IMPORT_ID}`, b.`{IMPORT_ID}`]"
     ) == [[9, 10]]
+
+
+async def test_a_statement_run_through_query_is_compiled_with_the_graphs_labelled_indexes_so_each_rows_node_is_read(
+    pm: PersistenceManager, seeded: None
+):
+    """
+    A connection compiled a Cypher statement knowing no index on Oracle, so a keyed MATCH read every node of the label
+    for each row: an APOC batch of 20 relationships took 137 s to read its nodes in drivine4j, and each write of one
+    about three minutes (liberation-data/drivine4j#805). The batch's reads, compiled as the connection compiles them.
+    """
+    if pm.type is not DatabaseType.ORACLE:
+        pytest.skip("A statement is compiled knowing the graph's labelled indexes on Oracle.")
+    connection = await pm.provider.connect()
+    try:
+        sql = await connection._compiled(spec(apoc_batch(0, 20, "RETURN start, finish")).finalized_copy("SQL"))
+    finally:
+        await connection.release()
+    assert sql.statement is not None and isinstance(sql.parameters, dict)
+    explained = await oracle_plan(pm, sql.statement.text, sql.parameters, "BASIC +PREDICATE")
+    assert probes_index(pm, explained), f"query() reads every node of the label for each row:\n{explained}"
 
 
 async def test_a_parameters_text_finds_its_node_through_the_index(pm: PersistenceManager, seeded: None):

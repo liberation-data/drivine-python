@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from typing import Any, TypeVar
 
 from drivine.backend.graph_statement import StoredFunctionCalls
+from drivine.backend.oracle import oracle_indexed_properties
 from drivine.backend.oracle.oracle_stored_functions import (
     OracleStoredFunctions,
     StoredFunction,
@@ -116,16 +117,19 @@ class OracleConnection(Connection):
         """
         The specification, a Cypher statement compiled for Oracle, calling the functions the graph's store keeps where
         the statement needs one and the session may call it, and compiled again to call none it may not call: see
-        OracleStoredFunctions. On an Oracle older than 23.9, which has no UUID() for randomUUID(), plain SQL runs, and
-        Cypher is refused with why. The object manager's own statement that calls one is refused where the session may
-        not call it (see `_callable`).
+        OracleStoredFunctions. It is compiled knowing the graph's labelled indexes, so a key equality is read through
+        one (see oracle_indexed_properties). On an Oracle older than 23.9, which has no UUID() for randomUUID(), plain
+        SQL runs, and Cypher is refused with why. The object manager's own statement that calls one is refused where the
+        session may not call it (see `_callable`).
         """
         if self.cypher_refusal and finalized.statement is not None and finalized.statement.language == "CYPHER":
             raise DrivineError(self.cypher_refusal, finalized)
         if isinstance(finalized.parameters, Mapping):
             # Read once, so a compile again binds an iterator in them as its items too, not as none.
             finalized.parameters = drained(finalized.parameters)
-        sql, compiled = cypher_compiled(finalized, "ORACLE", self.graph)
+        cypher = finalized.statement is not None and finalized.statement.language == "CYPHER"
+        indexed = await self._indexed() if cypher else oracle_indexed_properties.NONE
+        sql, compiled = cypher_compiled(finalized, "ORACLE", self.graph, indexed_properties=indexed)
         if compiled is None:
             if finalized.stored_functions is not None:
                 await self._callable(finalized.stored_functions, finalized)
@@ -135,7 +139,34 @@ class OracleConnection(Connection):
         era = not compiled.calls_stored_era or await self._calls_era()
         if nulls_equal and era:
             return sql
-        return cypher_compiled(finalized, "ORACLE", self.graph, nulls_equal_stored=nulls_equal, era_stored=era)[0]
+        return cypher_compiled(
+            finalized, "ORACLE", self.graph, nulls_equal_stored=nulls_equal, era_stored=era, indexed_properties=indexed
+        )[0]
+
+    async def _indexed(self) -> oracle_indexed_properties.IndexedProperties:
+        """
+        The graph's labelled indexes' leading properties, as kept, or read on this connection where what is kept is
+        old (see oracle_indexed_properties). A query that fails rolls back only itself, so a transaction open on the
+        connection is left as it was.
+        """
+        key = oracle_indexed_properties.key(self.database, self.graph)
+        query = oracle_indexed_properties.query(self.graph)
+        if key is None or query is None:
+            return oracle_indexed_properties.NONE
+        known = oracle_indexed_properties.known(key, self.graph)
+        if known is not None:
+            return known
+        since = oracle_indexed_properties.changes(self.graph)
+        self.connection.autocommit = not self._in_transaction
+        cursor = self.connection.cursor()
+        try:
+            await cursor.execute(query)
+            # Read inside the try, as drivine4j reads them: a row that can't be read is a catalog that can't be.
+            return oracle_indexed_properties.found(key, self.graph, [it[0] for it in await cursor.fetchall()], since)
+        except Exception as error:
+            return oracle_indexed_properties.failed(key, self.graph, error, since)
+        finally:
+            cursor.close()
 
     async def _callable(self, calls: StoredFunctionCalls, spec: QuerySpecification[Any]) -> None:
         """

@@ -224,7 +224,7 @@ class SchemaManager:
             return
         with self._lock:
             identities = {_key_of(it) for it in catalog.items}
-            databases = None if catalog.databases is None else tuple(sorted(set(catalog.databases)))
+            databases = self._databases_of(catalog)
             for (owner, targets), specs in self._runtime.items():
                 if owner == catalog.name and (databases is None or targets == databases):
                     for identity in identities:
@@ -468,9 +468,7 @@ class SchemaManager:
         databases.
         """
         copy = {key: dict(specs) for key, specs in self._runtime.items()}
-        # The databases as a set, as drivine4j keeps a catalog's: the order they are named in is no part of the key.
-        databases = None if catalog.databases is None else tuple(sorted(set(catalog.databases)))
-        specs = copy.setdefault((catalog.name, databases), {})
+        specs = copy.setdefault((catalog.name, self._databases_of(catalog)), {})
         for spec in items:
             specs[_key_of(spec)] = spec
         return copy
@@ -713,14 +711,30 @@ class SchemaManager:
         return result
 
     def _targets(self, catalog: SchemaCatalog) -> list[str]:
-        """The databases a catalog applies to: those it names, each a registered graph, or every graph."""
+        """
+        The databases a catalog applies to, each by the name it is registered under: those it names, each a registered
+        graph, or every graph. `default` is the first registered database's name, so a catalog for it and one for every
+        database are planned together there, as drivine4j's SchemaTargets resolves them (drivine4j#854, #595).
+        """
         if catalog.databases is None:
             return [it.name for it in self.registry.providers if it.type in GRAPH_TYPES]
+        targets: list[str] = []
         for name in catalog.databases:
             provider = self.registry.connection_provider(name)
             if provider is None or provider.type not in GRAPH_TYPES:
                 raise DrivineError(f"A schema catalog names {name}, which is not a registered graph database.")
-        return list(catalog.databases)
+            targets.append(provider.name)
+        return list(dict.fromkeys(targets))
+
+    def _databases_of(self, catalog: SchemaCatalog) -> tuple[str, ...] | None:
+        """
+        The databases a catalog names, as its runtime items are kept by them: each by the name it is registered under
+        (`default` the first registered database's), as a set, since the order they are named in is no part of the key;
+        None for every database. drivine4j's `databasesOf`.
+        """
+        if catalog.databases is None:
+            return None
+        return tuple(sorted({self._registered(it) for it in catalog.databases}))
 
     def _merged(self, database: str | None, catalogs: list[SchemaCatalog]) -> dict[str, SchemaSpec]:
         """

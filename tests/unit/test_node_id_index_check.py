@@ -628,6 +628,50 @@ async def test_what_serves_an_id_is_listed_after_an_enforce_and_a_recreate_all_a
 
 
 @pytest.mark.parametrize("api", APIS)
+async def test_the_check_is_given_the_stores_range_indexes_and_uniqueness_constraints_each_as_its_kind(
+    api: Api, tmp_path: Path, calls: list[tuple[Any, ...]], monkeypatch: pytest.MonkeyPatch
+):
+    """
+    What the store lists after an enforce: its range indexes, not its other kinds, as ranges, its uniqueness constraints
+    as uniques, and whether its engine indexes a label's range properties one by one, as its grammar says.
+    """
+    import dataclasses
+
+    from drivine import StatelessGraphObjectManager
+    from drivine.sync import StatelessGraphObjectManager as SyncStatelessGraphObjectManager
+
+    ranges, uniques = [range_("Session", "id", "at")], [unique("Session", "id")]
+    kinds: list[str] = []
+
+    def indexes(_: Any, kind: str = "RANGE") -> list[SchemaItem]:
+        kinds.append(kind)
+        return ranges if kind == "RANGE" else [range_("Session", "text")]
+
+    async def indexes_async(self: Any, kind: str = "RANGE") -> list[SchemaItem]:
+        return indexes(self, kind)
+
+    async def constraints_async(*_: Any) -> list[SchemaItem]:
+        return uniques
+
+    monkeypatch.setattr(PlannedIndexManager, "list", indexes_async)
+    monkeypatch.setattr(SyncPlannedIndexManager, "list", indexes)
+    monkeypatch.setattr(PlannedConstraintManager, "list", constraints_async)
+    monkeypatch.setattr(SyncPlannedConstraintManager, "list", lambda *_: uniques)
+    for of in (StatelessGraphObjectManager, SyncStatelessGraphObjectManager):
+        grammar = of._schema_grammar  # pyright: ignore[reportPrivateUsage]
+        monkeypatch.setattr(
+            of, "_schema_grammar", lambda self, _g=grammar: dataclasses.replace(_g(self), ranges_per_property=True)
+        )
+
+    def steps(manager_of: Any) -> Iterator[Any]:
+        yield manager_of(SchemaOptions([SchemaCatalog.from_fragments(SessionFixture)])).enforce()
+
+    await run(api, tmp_path, steps)
+    assert named(calls, "listed") == [("graph", ranges, uniques, True)]
+    assert kinds == ["RANGE"]
+
+
+@pytest.mark.parametrize("api", APIS)
 async def test_a_listing_that_fails_is_passed_over_so_the_enforce_still_succeeds(
     api: Api, tmp_path: Path, calls: list[tuple[Any, ...]], monkeypatch: pytest.MonkeyPatch
 ):

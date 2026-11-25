@@ -275,6 +275,18 @@ async def test_plain_sql_reads_no_catalog(graph: str, now: list[float], compiled
     assert LABELLED not in session.run
 
 
+async def test_a_connection_that_names_no_database_reads_no_catalog_and_compiles_with_none(
+    graph: str, now: list[float], compiled_with: list[Any]
+):
+    # As the connection a provider judges a graph's layout on: it names no database and user to keep what is read for.
+    session = Session([row("Person", "id")])
+    await OracleConnection(session, None, "s", graph).query(
+        QuerySpecification[Any](cypher_statement(STATEMENT)).bind({"s": "p1"})
+    )
+    assert LABELLED not in session.run
+    assert compiled_with[-1] == set()
+
+
 async def test_a_catalog_that_cant_be_read_compiles_the_statement_with_none_and_runs_it(
     graph: str, now: list[float], compiled_with: list[Any]
 ):

@@ -748,3 +748,71 @@ async def test_a_database_applied_as_default_and_by_its_name_is_listed_once_all_
 
     await run(api, tmp_path, steps)
     assert warnings == []
+
+
+@pytest.mark.parametrize("api", APIS)
+async def test_a_graph_engines_managers_tell_the_check_what_they_ensure_or_recreate_under_the_database_they_are_of(
+    api: Api, calls: list[tuple[Any, ...]], monkeypatch: pytest.MonkeyPatch
+):
+    """
+    On a graph engine the managers are drivine-python's own, not the planned ones: each ensure and recreate is told,
+    under the `database` they were made with, and nothing of the store is read for it. The store's part is stubbed.
+    """
+    from drivine.schema.constraint_manager import ConstraintManager
+    from drivine.sync.schema.constraint_manager import ConstraintManager as SyncConstraintManager
+    from drivine.sync.schema.index_manager import IndexManager as SyncIndexManager
+
+    indexes_of, constraints_of = (
+        (IndexManager, ConstraintManager) if api == "async" else (SyncIndexManager, SyncConstraintManager)
+    )
+
+    def stub(of: type, name: str, value: Any = None) -> None:
+        if api == "async":
+
+            async def answer(*_: Any, **__: Any) -> Any:
+                return value(*_) if callable(value) else value
+
+            monkeypatch.setattr(of, name, answer)
+        else:
+            monkeypatch.setattr(of, name, lambda *_, **__: value(*_) if callable(value) else value)
+
+    for name in ("_find", "_create", "_await_built", "_log_effective", "drop"):
+        stub(indexes_of, name)
+    stub(constraints_of, "_ensure_made", lambda _self, spec, *__: EnsureResult("CREATED", spec))
+    stub(constraints_of, "list", [])
+    stub(constraints_of, "drop")
+    order, invoice = range_index("Order", "id"), uniqueness_constraint("Invoice", "invoice_no")
+    indexes = indexes_of(SchemaExecutor(None), NEO4J_SCHEMA, database="neo")  # pyright: ignore[reportArgumentType]
+    constraints = constraints_of(SchemaExecutor(None), NEO4J_SCHEMA, database="neo")  # pyright: ignore[reportArgumentType]
+    for step in (
+        indexes.ensure(order),
+        indexes.recreate(order),
+        constraints.ensure(invoice),
+        constraints.recreate(invoice),
+    ):
+        if api == "async":
+            await step
+    assert [(database, spec, result.status) for database, spec, result in named(calls, "ensured")] == [
+        ("neo", order, "CREATED"),
+        ("neo", order, "RECREATED"),
+        ("neo", invoice, "CREATED"),
+        ("neo", invoice, "CREATED"),
+    ], "a constraint's recreate is told once, as the ensure it makes it again by"
+
+
+def test_a_catalogs_fragment_labels_are_kept_through_every_operation_on_it():
+    """Where a fragment belongs is read from them, whatever its catalog is made into (drivine4j#848)."""
+    catalog = SchemaCatalog.from_fragments(OrderFixture)
+    labels = frozenset({"Order", "Purchase"})
+    assert catalog.fragment_labels == labels
+    for made in (
+        catalog.named("app"),
+        catalog.with_version("2"),
+        catalog.for_database("other"),
+        catalog.for_default_database(),
+        catalog.without_node_id_indexes(),
+        catalog.beside([uniqueness_constraint("Order", "id")]),
+        catalog + [range_index("Order", "at")],
+    ):
+        assert made.fragment_labels == labels
+    assert SchemaCatalog.of(range_index("Order", "id")).fragment_labels == frozenset()

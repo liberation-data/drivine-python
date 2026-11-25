@@ -131,9 +131,13 @@ class StatelessGraphObjectManager:
         """
         planning = self.schema_planning()
         if planning is not None:
-            return PlannedIndexManager(planning, self._schema_grammar())
+            return PlannedIndexManager(planning, self._schema_grammar(), database=self._registered_as())
         return IndexManager(
-            self._schema_executor(), self._schema_grammar(), self.index_advisor.refresh, self._lower_copies()
+            self._schema_executor(),
+            self._schema_grammar(),
+            self.index_advisor.refresh,
+            self._lower_copies(),
+            database=self._registered_as(),
         )
 
     @property
@@ -144,9 +148,13 @@ class StatelessGraphObjectManager:
         """
         planning = self.schema_planning()
         if planning is not None:
-            return PlannedConstraintManager(planning, self._schema_grammar())
+            return PlannedConstraintManager(planning, self._schema_grammar(), database=self._registered_as())
         return ConstraintManager(
-            self._schema_executor(), self._schema_grammar(), self.index_advisor.refresh, self._lower_copies()
+            self._schema_executor(),
+            self._schema_grammar(),
+            self.index_advisor.refresh,
+            self._lower_copies(),
+            database=self._registered_as(),
         )
 
     def schema_planning(self) -> SchemaPlanning | None:
@@ -182,6 +190,13 @@ class StatelessGraphObjectManager:
         if provider is None:
             raise DrivineError("Schema management needs a persistence manager that names its connection provider.")
         return SchemaExecutor(provider)
+
+    def _registered_as(self) -> str:
+        """
+        The name this manager's database is registered under, which `database` is not where it was asked for as
+        `default`: the first registered database's, by which SchemaManager lists it (drivine4j#886).
+        """
+        return getattr(getattr(self.persistence_manager, "provider", None), "name", None) or self.database
 
     def _schema_grammar(self) -> SchemaGrammar:
         return schema_grammar_for(self.persistence_manager.type, getattr(self.backend, "graph", None))

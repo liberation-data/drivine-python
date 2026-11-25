@@ -130,9 +130,10 @@ class PlannedIndexManager(IndexManager):
         planning: SchemaPlanning,
         grammar: SchemaGrammar,
         build_timeout: float = DEFAULT_BUILD_TIMEOUT / 1000,
+        database: str | None = None,
     ) -> None:
         host = planning.host
-        super().__init__(host.executor, grammar, host.changed, host.copies, build_timeout)
+        super().__init__(host.executor, grammar, host.changed, host.copies, build_timeout, database)
         self.planning = planning
 
     def list(self, kind: Literal["RANGE", "VECTOR", "FULLTEXT"] = "RANGE") -> list[SchemaItem]:
@@ -144,7 +145,7 @@ class PlannedIndexManager(IndexManager):
 
     def ensure(self, spec: S) -> EnsureResult[S]:
         """Makes the index unless the store holds one over its label and properties."""
-        return self._result("ENSURE", spec)
+        return self._noted(spec, self._result("ENSURE", spec))
 
     def recreate(self, spec: S) -> EnsureResult[S]:
         """
@@ -154,7 +155,7 @@ class PlannedIndexManager(IndexManager):
         """
         result = self._result("RECREATE", spec)
         if result.status == "RECREATED":
-            return result
+            return self._noted(spec, result)
         index = f"{KINDS[spec.kind]} on {spec.label}[{', '.join(spec.properties)}]"
         if result.status == "DRIFT":
             name = result.found.name if result.found is not None else None
@@ -194,9 +195,10 @@ class PlannedConstraintManager(ConstraintManager):
         planning: SchemaPlanning,
         grammar: SchemaGrammar,
         build_timeout: float = DEFAULT_BUILD_TIMEOUT / 1000,
+        database: str | None = None,
     ) -> None:
         host = planning.host
-        super().__init__(host.executor, grammar, host.changed, host.copies, build_timeout)
+        super().__init__(host.executor, grammar, host.changed, host.copies, build_timeout, database)
         self.planning = planning
 
     def list(self) -> list[SchemaItem]:
@@ -210,7 +212,7 @@ class PlannedConstraintManager(ConstraintManager):
         replace_blocking_index: bool = False,
     ) -> EnsureResult[UniquenessConstraintSpec]:
         """Makes the constraint unless it is there: a key held more than once is a VIOLATION, up to `sample_size`."""
-        return self._result("ENSURE", spec, sample_size, replace_blocking_index)
+        return self._noted(spec, self._result("ENSURE", spec, sample_size, replace_blocking_index))
 
     def in_force(self, spec: UniquenessConstraintSpec) -> bool:
         """Whether the constraint is there and built, so that the store enforces it, as one another process made."""
@@ -236,7 +238,7 @@ class PlannedConstraintManager(ConstraintManager):
         which is dropped only once the new one is built, so a VIOLATION keeps the old one. The constraint made again
         keeps the aliases its record kept.
         """
-        return self._result("RECREATE", spec, sample_size, replace_blocking_index)
+        return self._noted(spec, self._result("RECREATE", spec, sample_size, replace_blocking_index))
 
     def drop(self, declared: UniquenessConstraintSpec) -> None:
         """Drops the constraint."""

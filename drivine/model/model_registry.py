@@ -46,7 +46,7 @@ from drivine.model.relationship_model import RelationshipModel
 from drivine.model.schema_declaration import SchemaDeclaration
 from drivine.model.target_model import RelatedModel, TargetModel
 from drivine.model.vector_field import VectorField
-from drivine.schema import vector_annotation_check
+from drivine.schema import node_id_index_check, vector_annotation_check
 
 ClassKind = Literal["NODE_FRAGMENT", "RELATIONSHIP_FRAGMENT", "GRAPH_VIEW"]
 
@@ -276,6 +276,8 @@ class ModelRegistry:
         # A catalog's vector index over a field without VectorIndex is refused here as well as when the catalog is
         # applied, since either may come first.
         vector_annotation_check.admit(model)
+        # A NodeId no index serves is warned of, once per database: never raised, so the model is built all the same.
+        node_id_index_check.admit(model)
         return model
 
     def _build_relationship_fragment(self, type_: type) -> RelationshipFragmentModel:

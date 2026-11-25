@@ -416,6 +416,9 @@ class SchemaManager:
                 report[database] = (
                     planned if planned is not None else self._apply_plan(database, plan, recreate, None, None)
                 )
+            # Each database once, after all its catalogs are applied: one applied as `default` and by its name is listed
+            # only once both are, so an index the second makes isn't taken for missing.
+            for database in dict.fromkeys(self._registered(it) for it in report):
                 self._list_for_node_ids(database)
             return report
 

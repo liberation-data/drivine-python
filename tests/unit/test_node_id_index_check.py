@@ -423,6 +423,20 @@ def test_the_warning_with_no_schema_manager_is_given_on_a_timer_which_a_manager_
     assert eventually(lambda: warnings == [ORDER_WARNING])
 
 
+def test_the_one_timer_gives_each_pending_warning_when_it_is_due_and_is_set_again_for_the_next(
+    warnings: list[str], monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(node_id_index_check, "UNMANAGED_DELAY", 0.3)
+    use(OrderFixture)
+    time.sleep(0.15)
+    # Pending behind Order's, on the timer already set: given when it is due, not with Order's.
+    use(InvoiceFixture)
+    assert eventually(lambda: len(warnings) == 1)
+    assert warnings == [ORDER_WARNING]
+    assert eventually(lambda: len(warnings) == 2)
+    assert warnings[1].startswith("@NodeId 'invoice_no' of InvoiceFixture has no index under :Invoice")
+
+
 def test_a_fragment_with_no_node_id_is_never_warned_of(warnings: list[str]):
     node_id_index_check.managed()
     use(NoteWithoutIdFixture)
@@ -553,19 +567,19 @@ async def test_the_check_is_given_each_databases_catalogued_labels_before_it_lis
         yield manager.enforce()
 
     await run(api, tmp_path, steps, ("graph", "other"))
-    # Each enforce lists each database it applies catalogs on, by its registered name: 'default' is graph's.
+    # Each enforce lists each database it applies catalogs on once, by its registered name: 'default' is graph's.
     order = [
         it[:2] if it[0] == "listed" else it[:1] for it in calls if it[0] in ("catalogued", "catalogued_too", "listed")
     ]
     assert order == [
         ("catalogued",),
-        *(("listed", it) for it in ("graph", "other", "graph")),
+        *(("listed", it) for it in ("graph", "other")),
         ("catalogued_too",),
         ("listed", "other"),
         ("catalogued_too",),
         ("listed", "other"),
         ("catalogued",),
-        *(("listed", it) for it in ("graph", "other", "graph")),
+        *(("listed", it) for it in ("graph", "other")),
     ]
     first, again = (labels for (labels,) in named(calls, "catalogued"))
     assert {db: sorted(it) for db, it in first.items()} == {
@@ -705,3 +719,32 @@ async def test_an_index_or_a_constraint_ensured_or_recreated_by_hand_is_told_to_
         ("graph", invoice, "ALREADY_MATCHING"),
         ("graph", invoice, "RECREATED"),
     ]
+
+
+class CustomerFixture(NodeFragment, labels=["Customer"]):
+    id: Annotated[str, NodeId()]
+
+
+@pytest.mark.parametrize("api", APIS)
+async def test_a_database_applied_as_default_and_by_its_name_is_listed_once_all_its_catalogs_are_applied(
+    api: Api, tmp_path: Path, warnings: list[str]
+):
+    """
+    A catalog for `default` and one for every database are applied on the first registered database apart, as
+    `default` and by its name: it is listed only once both are, so the index the second makes isn't taken for missing.
+    """
+    use(CustomerFixture)
+
+    def steps(manager_of: Any) -> Iterator[Any]:
+        manager = manager_of(
+            SchemaOptions(
+                [
+                    SchemaCatalog.of(range_index("Person", "name")).for_default_database(),
+                    SchemaCatalog.from_fragments(CustomerFixture),
+                ]
+            )
+        )
+        yield manager.enforce()
+
+    await run(api, tmp_path, steps)
+    assert warnings == []

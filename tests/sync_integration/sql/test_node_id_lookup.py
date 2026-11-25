@@ -20,6 +20,7 @@ from typing import Annotated, Any
 import pytest
 
 from drivine.backend.matched_node import MatchedNode
+from drivine.backend.sql.sql_graph import sql_text
 from drivine.backend.sql.sql_json import to_json
 from drivine.backend.sql.value_layout import write
 from drivine.model.model_registry import ModelRegistry
@@ -44,9 +45,11 @@ from drivine.sync import (
     node_ref,
     range_index,
     refs,
+    transaction,
     uniqueness_constraint,
 )
 from tests.sync_integration.sql.sql_seed import SqlSeed
+from tests.sync_integration.sql.test_schema_ddl import messages
 
 
 class LookupNumber(NodeFragment, labels=["SqlLookup", "LookupNumber"]):
@@ -682,6 +685,99 @@ def test_each_lookup_by_id_reads_the_index_by_the_row_its_statements_from_declar
         assert reads("n").search(plan(backend.found_stamp(model).text))
     finally:
         gom.indexes.drop(index)
+
+
+def test_a_lookup_by_a_str_id_reads_the_uniqueness_constraints_index(
+    gom: StatelessGraphObjectManager, pm: PersistenceManager
+):
+    """As a number id's: a load, a delete by id and load_related of a str id read its uniqueness constraint's index."""
+    if pm.type is DatabaseType.ORACLE:
+        pytest.skip("Oracle's lookups by id are planned in drivine4j's suite.")
+    constraint = uniqueness_constraint("LookupText", "id")
+    gom.save_all([LookupText(id=f"t{1000 + i}", name="filler") for i in range(3000)])
+    gom.constraints.ensure(constraint)
+    try:
+        assert_reads_index(gom, pm, LookupText, "t1500", "uq2_LookupTextid")
+    finally:
+        gom.constraints.drop(constraint)
+
+
+def test_a_saves_lookup_on_postgres_reads_the_uniqueness_constraints_index(
+    gom: StatelessGraphObjectManager, pm: PersistenceManager
+):
+    """
+    A save finds each node through the lookup the module's write function prepares on its connection, `drivine_find`,
+    by the id's JSON: for a number, a date and a str id it reads the id's uniqueness constraint's index. Called in one
+    transaction, so on one connection, the statement it prepared there is explained for the id's JSON.
+    """
+    if pm.type is not DatabaseType.POSTGRES:
+        pytest.skip("drivine_find is Postgres's write function's lookup.")
+    cases: list[tuple[type[Any], str, list[Any], Any]] = [
+        (LookupNumber, "LookupNumber", [LookupNumber(id=1000 + i) for i in range(3000)], 1500),
+        (
+            LookupDate,
+            "LookupDate",
+            [LookupDate(id=date(2000, 1, 1) + timedelta(days=i)) for i in range(3000)],
+            date(2001, 1, 1),
+        ),
+        (LookupText, "LookupText", [LookupText(id=f"t{1000 + i}") for i in range(3000)], "t1500"),
+    ]
+    for type_, label, fillers, id_ in cases:
+        constraint = uniqueness_constraint(label, "id")
+        gom.save_all(fillers)
+        gom.constraints.ensure(constraint)
+        try:
+            pm.execute(QuerySpecification[Any]("ANALYZE drivine_node"))
+            labels = sql_text(to_json(ModelRegistry().fragment(type_).labels))
+            id_json = sql_text(to_json(write(id_, "postgres")))
+            with transaction(rollback=True):
+                pm.query(
+                    QuerySpecification[Any](
+                        f"SELECT (drivine_find(CAST({labels} AS jsonb), 'id', CAST({id_json} AS jsonb))).nid"
+                    )
+                )
+                like = sql_text(f'%"{label}"%')
+                prepared = pm.query(
+                    QuerySpecification[Any](
+                        "SELECT name FROM pg_prepared_statements "
+                        f"WHERE name LIKE 'drivine_find_%' AND statement LIKE {like}"
+                    )
+                )
+                assert len(prepared) == 1, prepared
+                rows = pm.query(
+                    QuerySpecification[Any](f"EXPLAIN EXECUTE {prepared[0]['name']}(CAST({id_json} AS jsonb))")
+                )
+            plan = "\n".join(str(next(iter(it.values()))) for it in rows)
+            assert re.search(
+                rf"Index (Only )?Scan using drivine_uq2_{label}id_\w+ on drivine_node[\s\S]*?"
+                r"Index Cond: \(\(props -> 'id'::text\) = ",
+                plan,
+                re.IGNORECASE,
+            ), f"the save's lookup of a {label}:\n{plan}"
+            assert not re.search(r"Seq Scan on drivine_node\b", plan), f"the save's lookup of a {label}:\n{plan}"
+        finally:
+            gom.constraints.drop(constraint)
+
+
+def test_a_ref_or_a_patch_step_without_the_ids_json_is_refused_by_name_on_postgres(pm: PersistenceManager):
+    """
+    A plan whose `ref` or `patch` step carries only the id's text, as plans before layout 2 did, is refused by name by
+    the store's write function, rather than finding no node and reading as absent
+    (liberation-data/drivine-cypher-spec#245).
+    """
+    if pm.type is not DatabaseType.POSTGRES:
+        pytest.skip("drivine_write is Postgres's write function.")
+    shapes = sql_text('[{"labels": ["LookupText"], "key": "id"}]')
+    for step in (
+        '{"op": "ref", "r": 0, "s": 0, "k": "t1"}',
+        '{"op": "patch", "s": 0, "k": "t1", "i": "0", "fresh": "f"}',
+    ):
+        plan = sql_text(f"[{step}]")
+        statement = f"SELECT drivine_write(CAST({plan} AS jsonb), CAST({shapes} AS jsonb), 'mark', 'COUNT', NULL)"
+        with pytest.raises(DrivineError) as refused:
+            pm.query(QuerySpecification[Any](statement))
+        refusal = messages(refused.value)
+        assert "A plan step that finds a node by id carries no id" in refusal, (step, refusal)
 
 
 class LookupDay(NodeFragment, labels=["SqlLookup", "LookupDay"]):

@@ -20,6 +20,7 @@ from typing import Annotated, Any
 import pytest
 
 from drivine.backend.matched_node import MatchedNode
+from drivine.backend.sql.sql_graph import sql_text
 from drivine.backend.sql.sql_json import to_json
 from drivine.backend.sql.value_layout import write
 from drivine.model.model_registry import ModelRegistry
@@ -48,6 +49,7 @@ from drivine.sync import (
     uniqueness_constraint,
 )
 from tests.sync_integration.sql.sql_seed import SqlSeed
+from tests.sync_integration.sql.test_schema_ddl import messages
 
 
 class LookupNumber(NodeFragment, labels=["SqlLookup", "LookupNumber"]):
@@ -700,11 +702,6 @@ def test_a_lookup_by_a_str_id_reads_the_uniqueness_constraints_index(
         gom.constraints.drop(constraint)
 
 
-def postgres_literal(text: str) -> str:
-    """`text` as a Postgres string literal."""
-    return "'" + text.replace("'", "''") + "'"
-
-
 def test_a_saves_lookup_on_postgres_reads_the_uniqueness_constraints_index(
     gom: StatelessGraphObjectManager, pm: PersistenceManager
 ):
@@ -731,15 +728,15 @@ def test_a_saves_lookup_on_postgres_reads_the_uniqueness_constraints_index(
         gom.constraints.ensure(constraint)
         try:
             pm.execute(QuerySpecification[Any]("ANALYZE drivine_node"))
-            labels = postgres_literal(to_json(ModelRegistry().fragment(type_).labels))
-            id_json = postgres_literal(to_json(write(id_, "postgres")))
+            labels = sql_text(to_json(ModelRegistry().fragment(type_).labels))
+            id_json = sql_text(to_json(write(id_, "postgres")))
             with transaction(rollback=True):
                 pm.query(
                     QuerySpecification[Any](
                         f"SELECT (drivine_find(CAST({labels} AS jsonb), 'id', CAST({id_json} AS jsonb))).nid"
                     )
                 )
-                like = postgres_literal(f'%"{label}"%')
+                like = sql_text(f'%"{label}"%')
                 prepared = pm.query(
                     QuerySpecification[Any](
                         "SELECT name FROM pg_prepared_statements "
@@ -752,7 +749,10 @@ def test_a_saves_lookup_on_postgres_reads_the_uniqueness_constraints_index(
                 )
             plan = "\n".join(str(next(iter(it.values()))) for it in rows)
             assert re.search(
-                rf"Index (Only )?Scan using drivine_uq2_{label}id_\w+ on drivine_node", plan, re.IGNORECASE
+                rf"Index (Only )?Scan using drivine_uq2_{label}id_\w+ on drivine_node[\s\S]*?"
+                r"Index Cond: \(\(props -> 'id'::text\) = ",
+                plan,
+                re.IGNORECASE,
             ), f"the save's lookup of a {label}:\n{plan}"
             assert not re.search(r"Seq Scan on drivine_node\b", plan), f"the save's lookup of a {label}:\n{plan}"
         finally:
@@ -767,21 +767,17 @@ def test_a_ref_or_a_patch_step_without_the_ids_json_is_refused_by_name_on_postgr
     """
     if pm.type is not DatabaseType.POSTGRES:
         pytest.skip("drivine_write is Postgres's write function.")
-    shapes = postgres_literal('[{"labels": ["LookupText"], "key": "id"}]')
+    shapes = sql_text('[{"labels": ["LookupText"], "key": "id"}]')
     for step in (
         '{"op": "ref", "r": 0, "s": 0, "k": "t1"}',
         '{"op": "patch", "s": 0, "k": "t1", "i": "0", "fresh": "f"}',
     ):
-        plan = postgres_literal(f"[{step}]")
+        plan = sql_text(f"[{step}]")
         statement = f"SELECT drivine_write(CAST({plan} AS jsonb), CAST({shapes} AS jsonb), 'mark', 'COUNT', NULL)"
         with pytest.raises(DrivineError) as refused:
             pm.query(QuerySpecification[Any](statement))
-        messages: list[str] = []
-        error: BaseException | None = refused.value
-        while error is not None:
-            messages.append(str(error))
-            error = error.__cause__
-        assert any("A plan step that finds a node by id carries no id" in it for it in messages), (step, messages)
+        refusal = messages(refused.value)
+        assert "A plan step that finds a node by id carries no id" in refusal, (step, refusal)
 
 
 class LookupDay(NodeFragment, labels=["SqlLookup", "LookupDay"]):

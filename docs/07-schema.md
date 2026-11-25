@@ -29,6 +29,19 @@ there. (`Chunk` above has none, as its `uuid` is `Unique`.) To go without it, pa
 `drivine.schema.index-node-ids=false` does. **Behaviour change:** an existing store gains this index on its next
 enforce, built once, where nothing declared served the id.
 
+**A fragment whose `NodeId` no index serves is warned of**, once per fragment and database, on the `drivine.schema`
+logger: `@NodeId 'id' of Chunk has no index under :Chunk, so each save scans every :Chunk node. …`, with how to give
+it one. An index serves it where it is a range index or a uniqueness constraint over the id's property alone, not
+ignoring case, under any of the fragment's labels. After `enforce` or `recreate_all` applied the catalogs, the manager
+lists each database's indexes and constraints and checks every fragment whose model has been built against them; one
+first used later is checked when its model is built, against what was listed and what was ensured since
+(`indexes.ensure`, `constraints.ensure`, their `recreate`, or `SchemaManager.ensure`). A fragment is checked only on
+the databases whose catalogs were read from it or have an item under one of its labels, and on every database where no
+catalog names it; with more than one database, the warning ends `On database '<name>'.`, by its registered name. With
+no `SchemaManager` that has an item to apply, the warning comes 30 seconds after the fragment's first use, unless one
+has been built by then, or an index or constraint that serves the id was ensured by hand by then, on any database. The
+check reads nothing of the store while a fragment is used, and never raises.
+
 `RangeIndex(ignore_case=True)` and `Unique(ignore_case=True)` on a `CaseInsensitive` field are made over the lowercased
 copy a save keeps of it, so they serve `eq_ignore_case` and refuse two values that differ only in case. Ensuring one
 fills the copies in first. See [Lookups that ignore case](06-fragments-and-views.md#lookups-that-ignore-case). The

@@ -14,7 +14,7 @@ from drivine.connection.database_type import DatabaseType
 from drivine.drivine_error import DrivineError
 from drivine.query.query_specification import QuerySpecification
 from drivine.query.statement import cypher_statement
-from drivine.schema import vector_annotation_check
+from drivine.schema import node_id_index_check, vector_annotation_check
 from drivine.schema.ensure_result import EnsureResult
 from drivine.schema.recorded_inventory import RecordedInventory, inventory_entries, read_inventory
 from drivine.schema.schema_catalog import DEFAULT_SCOPE, SchemaCatalog
@@ -91,6 +91,8 @@ class SchemaManager:
     Before anything is applied or kept, by `enforce`, `recreate_all` or `ensure`, a vector index over a fragment's
     field that has no `VectorIndex` is refused, naming the class, the field and the spec; a fragment whose model is
     built later is checked against the specs applied here.
+    After `enforce` or `recreate_all` applied the catalogs on a database, a fragment whose NodeId no index there serves
+    is warned of, once per database: see node_id_index_check.
     """
 
     def __init__(self, registry: DatabaseRegistry, factory: GraphObjectManagerFactory, options: SchemaOptions) -> None:
@@ -105,6 +107,10 @@ class SchemaManager:
         """What `ensure` was given, by owner and databases, each item by its identity: a later one replaces it."""
         self._lock = concurrency.Lock()
         """Serializes `enforce`, `recreate_all` and `ensure`, which read and write the runtime items and the markers."""
+        # A manager with no item to apply applies none, and lists nothing: its fragments are warned of as where there
+        # is no manager.
+        if any(it.items for it in self.options.catalogs):
+            node_id_index_check.managed()
 
     def enforce(self) -> dict[str, list[EnsureResult[Any]]]:
         """Ensures every catalog on its databases: indexes before constraints. Returns the results, by database."""
@@ -179,6 +185,14 @@ class SchemaManager:
                 report[database] = (
                     planned if planned is not None else self._apply_plan(database, plan, False, catalog.name, given)
                 )
+                # What an enforce listed is kept current, so a fragment first used after this isn't warned of. Its
+                # labels are named on the database from then on, so a fragment under one is checked there too.
+                registered = self._registered(database)
+                if node_id_index_check.listed_on(registered):
+                    node_id_index_check.catalogued_too(
+                        registered, [*(it.label for it in catalog.items), *catalog.fragment_labels]
+                    )
+                    self._list_for_node_ids(database)
             return report
 
     def remove(self, owner: str, *specs: SchemaSpec) -> None:
@@ -390,7 +404,10 @@ class SchemaManager:
             # Before anything is applied: a vector index over a fragment's field without VectorIndex is refused.
             vector_annotation_check.register(spec for it in [*self.options.catalogs, *runtime] for spec in it.items)
             ensured = self._catalogs_by_database(runtime)
-            declared = _beside(self._catalogs_by_database(self.options.catalogs), ensured)
+            on_database = self._catalogs_by_database(self.options.catalogs)
+            declared = _beside(on_database, ensured)
+            # Before any is listed: a fragment is checked on the databases whose catalogs name its labels.
+            node_id_index_check.catalogued(self._catalogued_on(on_database, ensured))
             report: dict[str, list[EnsureResult[Any]]] = {}
             for database in dict.fromkeys([*declared, *ensured]):
                 plan = self._plan(database, declared.get(database, []), ensured.get(database, []))
@@ -399,7 +416,46 @@ class SchemaManager:
                 report[database] = (
                     planned if planned is not None else self._apply_plan(database, plan, recreate, None, None)
                 )
+                self._list_for_node_ids(database)
             return report
+
+    def _catalogued_on(
+        self, declared: Mapping[str, list[SchemaCatalog]], ensured: Mapping[str, list[SchemaCatalog]]
+    ) -> dict[str, set[str]]:
+        """
+        The labels the catalogs on each database, declared or ensured at runtime, have items under or were read from,
+        by the database's registered name: for node_id_index_check to check a fragment where it belongs. A catalog
+        read from a fragment with its default index off declares nothing, and names its labels all the same.
+        """
+        labels: dict[str, set[str]] = {}
+        for database in dict.fromkeys([*declared, *ensured]):
+            named = labels.setdefault(self._registered(database), set())
+            for catalog in [*declared.get(database, []), *ensured.get(database, [])]:
+                named.update(it.label for it in catalog.items)
+                named.update(catalog.fragment_labels)
+        return labels
+
+    def _list_for_node_ids(self, database: str) -> None:
+        """
+        What serves a fragment's NodeId on `database` once the catalogs are applied, its range indexes and uniqueness
+        constraints, for node_id_index_check to warn of a fragment none serves. Read outside any transaction, as the
+        managers read it. A listing that fails is passed over: it only warns.
+        """
+        try:
+            gom = self.factory.get(database)
+            indexes = gom.indexes
+            ranges = indexes.list("RANGE")
+            uniques = gom.constraints.list()
+            ranges_per_property = bool(indexes.grammar.ranges_per_property)
+        except Exception as error:
+            logger.debug("Could not list the schema of '%s' to check fragments' NodeIds: %s", database, error)
+            return
+        node_id_index_check.listed(self._registered(database), ranges, uniques, ranges_per_property)
+
+    def _registered(self, database: str) -> str:
+        """The name `database` is registered under: `default` is the first registered database's."""
+        provider = self.registry.connection_provider(database)
+        return provider.name if provider is not None else database
 
     def _with_runtime(
         self, catalog: SchemaCatalog, items: Sequence[SchemaSpec]

@@ -46,3 +46,14 @@ def pytest_terminal_summary(terminalreporter: pytest.TerminalReporter) -> None:
     """Says once, at the end of a run without Oracle, that Oracle was left out, so it isn't taken for a full run."""
     if os.environ.get("ORACLE_TESTS") != "true":
         terminalreporter.write_sep("=", ORACLE_SKIPPED, yellow=True, bold=True)
+
+
+@pytest.fixture(autouse=True)
+def node_id_index_check_reset() -> None:
+    """
+    Each test starts with the warning of an unindexed NodeId knowing nothing: no fragment admitted, no database listed,
+    no SchemaManager built, and no warning from an earlier test's fragment still due on its timer.
+    """
+    from drivine.schema import node_id_index_check
+
+    node_id_index_check.reset()

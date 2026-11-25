@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from drivine.drivine_error import DrivineError
 from drivine.model.model_registry import ModelRegistry
@@ -47,6 +47,12 @@ class SchemaCatalog:
     The range indexes among `items` that fragments' NodeIds are given by default (`from_fragments`), each one no item
     declared serves, as drivine4j's catalog keeps them. `without_node_id_indexes` leaves them out.
     """
+    fragment_labels: frozenset[str] = field(default=frozenset(), compare=False, repr=False)
+    """
+    The labels of the fragments it was read from (`from_fragments`), kept whatever items it keeps, as with its default
+    indexes left out: where a fragment belongs, so that the warning of an unindexed NodeId is given on the databases
+    its catalog is for, and not on another it is never used on (node_id_index_check, drivine4j#848).
+    """
 
     @staticmethod
     def of(*items: SchemaSpec) -> SchemaCatalog:
@@ -72,9 +78,11 @@ class SchemaCatalog:
         models = registry or ModelRegistry()
         items: list[SchemaSpec] = []
         defaults: list[RangeIndexSpec] = []
+        labels: set[str] = set()
         for type_ in types:
             model = models.fragment(type_)
             label = model.labels[0]
+            labels.update(model.labels)
             default = _node_id_index(type_, label, model.node_id_property)
             if default is not None and default not in defaults:
                 defaults.append(default)
@@ -120,7 +128,9 @@ class SchemaCatalog:
                             hnsw_ef_construction=it.hnsw_ef_construction,
                         )
                     )
-        return SchemaCatalog(_with_defaults(items, defaults), node_id_indexes=_kept(items, defaults))
+        return SchemaCatalog(
+            _with_defaults(items, defaults), node_id_indexes=_kept(items, defaults), fragment_labels=frozenset(labels)
+        )
 
     def without_node_id_indexes(self) -> SchemaCatalog:
         """

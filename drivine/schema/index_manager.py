@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Literal, NoReturn, TypeVar, cast
 
 from drivine import concurrency
 from drivine.drivine_error import DrivineError
+from drivine.schema import node_id_index_check
 from drivine.schema.ensure_result import EnsureResult
 from drivine.schema.full_text_index_spec import FullTextIndexSpec
 from drivine.schema.lower_copy_catalog import LowerCopyCatalog, fill_in_lower_copies
@@ -62,17 +63,25 @@ class IndexManager:
         changed: Callable[[], None] = lambda: None,
         copies: LowerCopyCatalog | None = None,
         build_timeout: float = BUILD_TIMEOUT,
+        database: str | None = None,
     ) -> None:
         """
         `changed` is told once this has made or dropped an index: the object manager's index list is then stale.
         `copies` fills in the lowercased copies an index that ignores case is made over; without it, such an index is
         refused. `build_timeout` is how many seconds an index the engine builds in the background is waited for.
+        `database` is the name the manager's database is registered under (see `database`).
         """
         self.executor = executor
         self.grammar = grammar
         self.changed = changed
         self.copies = copies
         self.build_timeout = build_timeout
+        self.database = database
+        """
+        The database this manager is of, by the name its connection is registered under, as SchemaManager lists it: an
+        object manager asked for `default` gives the first registered database's name, so that an index ensured through
+        it serves a fragment there (node_id_index_check, drivine4j#886). None for a manager made on its own.
+        """
 
     async def list(self, kind: Literal["RANGE", "VECTOR", "FULLTEXT"] = "RANGE") -> list[SchemaItem]:
         """The indexes of a kind the engine holds."""
@@ -100,7 +109,7 @@ class IndexManager:
         result = dataclasses.replace(await self._ensure_made(made, found), spec=spec)
         if result.status != "DRIFT":
             await self._await_built(made, result)
-        return result
+        return self._noted(spec, result)
 
     async def _ensure_made(self, spec: S, found: SchemaItem | None) -> EnsureResult[S]:
         """`ensure`, of the index as it is made, which the engine holds as `found`."""
@@ -140,6 +149,14 @@ class IndexManager:
         self.changed()
         result = EnsureResult("RECREATED", spec)
         await self._await_built(made, result)
+        return self._noted(spec, result)
+
+    def _noted(self, spec: S, result: EnsureResult[S]) -> EnsureResult[S]:
+        """
+        `result`, of `spec` ensured or recreated here, told to node_id_index_check, so that a fragment whose NodeId it
+        serves isn't warned of (drivine4j#828, #886).
+        """
+        node_id_index_check.ensured(self.database, spec, result)
         return result
 
     async def alias(self, kind: CatalogKind, item: SchemaItem, aliases: Sequence[str]) -> None:

@@ -7,6 +7,7 @@ from typing import Any, Literal
 
 from drivine import concurrency
 from drivine.drivine_error import DrivineError
+from drivine.schema import node_id_index_check
 from drivine.schema.ensure_result import EnsureResult
 from drivine.schema.index_manager import BUILD_TIMEOUT, IndexManager
 from drivine.schema.lower_copy_catalog import LowerCopyCatalog, fill_in_lower_copies
@@ -38,18 +39,22 @@ class ConstraintManager:
         changed: Callable[[], None] = lambda: None,
         copies: LowerCopyCatalog | None = None,
         build_timeout: float = BUILD_TIMEOUT,
+        database: str | None = None,
     ) -> None:
         """
         `changed` is told once this has made or dropped a constraint, as the object manager's list is then stale.
         `copies` fills in the lowercased copies a constraint that ignores case is made over; without it, such a
         constraint is refused. `build_timeout` is how long the range index a constraint needs first (FalkorDB) is waited
-        on to be built (see `IndexManager.ensure`).
+        on to be built (see `IndexManager.ensure`). `database` is the name the manager's database is registered under,
+        as IndexManager's `database` is.
         """
         self.executor = executor
         self.grammar = grammar
         self.changed = changed
         self.copies = copies
         self.build_timeout = build_timeout
+        self.database = database
+        """The database this manager is of, by its registered name: see IndexManager's `database`."""
 
     async def list(self) -> list[SchemaItem]:
         return self.grammar.list_uniques.read(await self.executor.run(self.grammar.list_uniques.statement))
@@ -85,7 +90,18 @@ class ConstraintManager:
             # recorded or not: they may have gone out of step while it was gone.
             await fill_in_lower_copies(self.copies, spec, not await self._exists(made))
         result = await self._ensure_made(made, sample_size, replace_blocking_index)
-        return dataclasses.replace(result, spec=spec)
+        # A recreate makes it again through here, and is told as what this gives.
+        return self._noted(spec, dataclasses.replace(result, spec=spec))
+
+    def _noted(
+        self, spec: UniquenessConstraintSpec, result: EnsureResult[UniquenessConstraintSpec]
+    ) -> EnsureResult[UniquenessConstraintSpec]:
+        """
+        `result`, of `spec` ensured or recreated here, told to node_id_index_check, so that a fragment whose NodeId it
+        serves isn't warned of (drivine4j#828, #886).
+        """
+        node_id_index_check.ensured(self.database, spec, result)
+        return result
 
     async def _ensure_made(
         self, spec: UniquenessConstraintSpec, sample_size: int, replace_blocking_index: bool

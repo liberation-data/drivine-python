@@ -122,16 +122,19 @@ def compile_cypher(
     graph: str,
     nulls_equal_stored: bool = True,
     era_stored: bool = True,
+    indexed_properties: Iterable[tuple[str, str]] = (),
 ) -> CompiledCypher:
     """
     The statement compiled to the store's SQL over the graph's tables, with the values its parameters are bound to. On
-    Oracle `nulls_equal_stored` and `era_stored` say whether it may call the functions the graph is made with. A
-    statement the compiler refuses is a DrivineError with the compiler's message, as the spec's refusals pin it.
+    Oracle `nulls_equal_stored` and `era_stored` say whether it may call the functions the graph is made with, and
+    `indexed_properties`, each a label and a property, are the labelled indexes a key equality may be read through (see
+    oracle_indexed_properties). A statement the compiler refuses is a DrivineError with the compiler's message, as the
+    spec's refusals pin it.
     """
     request = json.dumps(
         {
             "store": store.lower(),
-            "graph": _graph(store, graph, nulls_equal_stored, era_stored),
+            "graph": _graph(store, graph, nulls_equal_stored, era_stored, sorted(set(indexed_properties))),
             "cypher": cypher,
             "parameters": written(parameters),
         },

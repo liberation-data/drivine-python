@@ -16,6 +16,7 @@ from drivine.backend.fragment_group import FragmentGroup
 from drivine.backend.graph_statement import GraphStatement
 from drivine.backend.matching_search import FullTextIndexLookup, MatchingSearch
 from drivine.backend.nearest_search import NearestSearch
+from drivine.backend.oracle import oracle_indexed_properties
 from drivine.backend.page import Page
 from drivine.backend.save_statement import SaveStatement
 from drivine.backend.save_statement_builder import id_of, items, packed, props_of, root_of, stored, target
@@ -157,9 +158,14 @@ class StatelessGraphObjectManager:
         if store is None:
             return None
         graph = getattr(self.backend, "graph", None)
-        host = SqlPlanHost(
-            self._schema_executor(), self.persistence_manager, self._lower_copies(), self.index_advisor.refresh
-        )
+
+        def changed() -> None:
+            # The DSL's list of indexes, and on Oracle what a Cypher statement is compiled knowing, are read again.
+            self.index_advisor.refresh()
+            if graph is not None and store == "oracle":
+                oracle_indexed_properties.changed(graph.name)
+
+        host = SqlPlanHost(self._schema_executor(), self.persistence_manager, self._lower_copies(), changed)
         return SchemaPlanning(SchemaPlan(store, graph.name if graph is not None else None), self.database, host)
 
     def store_identity(self) -> StoreIdentity:

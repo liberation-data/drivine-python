@@ -88,6 +88,12 @@ class StoreStatements:
     and sort text by its code points, as Cypher does, whatever `NLS_COMP` and `NLS_SORT` the database or a logon gave
     it (drivine-cypher-spec#372). None on the other stores, and from a module older than 0.51.0.
     """
+    labelled: str | None
+    """
+    On Oracle, the query that lists the graph's labelled indexes, a JSON row of `kind`, `label` and `properties` each:
+    what a Cypher statement is compiled knowing (see oracle_indexed_properties). None on the other stores, and from a
+    module older than drivine-cypher-spec#431.
+    """
     stamp: StampStatements
     marker: MarkerStatements
 
@@ -113,6 +119,7 @@ def store_statements(store: ModuleStore, graph: str | None = None) -> StoreState
             versions=given.get("versions"),
             stored_functions=given.get("storedFunctions"),
             session=given.get("session"),
+            labelled=given.get("labelled"),
             stamp=StampStatements(
                 prepare=stamp["prepare"],
                 assign_if_absent=stamp["assignIfAbsent"],

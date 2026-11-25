@@ -115,9 +115,11 @@ count of them up to 16, since `numeric` keeps the scale a product makes (`0.25 *
 ([#429](https://github.com/liberation-data/drivine-python/issues/429)). This holds where the rows are known to hold no
 list or map at the key: a parameter's, or a list written of literals, maps, lists and parameters, as APOC's export
 writes its rows. A row that may hold a list, or a null in a list or a map, is compared as JSON alone, as before, which
-reads every node of the label for each row. Oracle compares such a value as JSON alone for now: the compiler can read
-it through the labelled index where the request names the graph's indexed properties (`indexedProperties`), and
-the connection doesn't name them yet ([drivine4j#638](https://github.com/liberation-data/drivine4j/issues/638)).
+reads every node of the label for each row. On Oracle a statement is compiled knowing the graph's labelled indexes,
+each range index and each uniqueness constraint over one property, so such a value is read through the index whose
+first property it is compared with ([#508](https://github.com/liberation-data/drivine-python/issues/508)). The
+connection reads them from the graph's catalog and keeps them for a minute, or until an index or a constraint of the
+graph is made or dropped in the process: one made by another process is used once that minute is up.
 
 A `DELETE` deletes the nodes and relationships of all its rows at once, a statement for each table, not one for each
 row: the relationships first, then the nodes, a node's relationships going with it where it is `DETACH`. One that ends

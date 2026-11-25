@@ -20,6 +20,8 @@ from drivine.connection.oracle.oracle_connection_provider import OracleConnectio
 from drivine.cursor.cursor_specification import CursorSpecification
 from drivine.sync.connection.oracle.oracle_connection import OracleConnection as SyncOracleConnection
 
+pytestmark = pytest.mark.usefixtures("no_labelled_indexes")
+
 
 class Missing(SimpleNamespace):
     """What python-oracledb's error holds: its number."""

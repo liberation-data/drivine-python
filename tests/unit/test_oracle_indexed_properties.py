@@ -176,6 +176,12 @@ def test_a_connection_that_names_no_database_reads_and_keeps_nothing(graph: str,
     assert catalog.reads == 1
 
 
+def test_the_query_is_the_modules_of_the_graphs_schema_table_and_oracles_indexes():
+    query = indexed.query("Social")
+    assert query is not None
+    assert "FROM Social_schema" in query and "user_indexes" in query, query
+
+
 # ----- The connection -----
 
 

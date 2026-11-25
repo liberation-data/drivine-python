@@ -9,17 +9,23 @@ import json
 import logging
 import uuid
 from collections.abc import Iterator
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
-from drivine import QuerySpecification, cypher_statement
+from drivine import DatabaseType, QuerySpecification, cypher_statement
 from drivine.backend.oracle import oracle_indexed_properties as indexed
+from drivine.backend.oracle.oracle_stored_functions import OracleStoredFunctions
 from drivine.connection.oracle import oracle_connection
 from drivine.connection.oracle.oracle_connection import OracleConnection
 from drivine.cypher.shared_compiler import compile_cypher
+from drivine.manager.stateless_graph_object_manager import StatelessGraphObjectManager
 from drivine.sync.connection.oracle import oracle_connection as sync_oracle_connection
 from drivine.sync.connection.oracle.oracle_connection import OracleConnection as SyncOracleConnection
+from drivine.sync.manager.stateless_graph_object_manager import (
+    StatelessGraphObjectManager as SyncStatelessGraphObjectManager,
+)
 
 LABELLED = "SELECT labelled indexes"
 """The catalog's query, as these tests give it."""
@@ -184,6 +190,7 @@ class Cursor:
     async def execute(self, statement: str, parameters: Any = None, **_: Any) -> None:
         self.session.run.append(statement)
         if statement == LABELLED:
+            self.session.read_in_autocommit.append(self.session.autocommit)
             if self.session.failing is not None:
                 raise self.session.failing
             self.description = [("R",)]
@@ -202,6 +209,7 @@ class SyncCursor(Cursor):
     def execute(self, statement: str, parameters: Any = None, **_: Any) -> None:  # type: ignore[override]
         self.session.run.append(statement)
         if statement == LABELLED:
+            self.session.read_in_autocommit.append(self.session.autocommit)
             if self.session.failing is not None:
                 raise self.session.failing
             self.description = [("R",)]
@@ -219,6 +227,7 @@ class Session:
         self.sync = sync
         self.run: list[str] = []
         self.autocommit = True
+        self.read_in_autocommit: list[bool] = []
 
     def cursor(self) -> Cursor:
         return SyncCursor(self) if self.sync else Cursor(self)
@@ -286,3 +295,52 @@ def test_a_statement_compiled_knowing_an_index_compares_its_property_as_the_inde
     key = """CASE WHEN JSON_EXISTS(n1.labels, '$[*]?(@ == "Person")') AND JSON_EXISTS(n1.props, '$.id') THEN"""
     assert key in knowing, knowing
     assert key not in without, without
+
+
+def test_a_statement_compiled_without_the_graphs_indexes_compares_the_property_as_json_alone_and_tests_the_labels():
+    # A property with no index of its own: its labels tested by their text, the node table would be read whole
+    # (liberation-data/drivine4j#638). drivine4j's OraclePropertyKeyIndexTest.
+    rows = {"rows": [{"s": "p1"}]}
+    statement = "UNWIND $rows AS row MATCH (a:Person {id: row.s}) RETURN a.k"
+    key = """CASE WHEN JSON_EXISTS(n2.labels, '$[*]?(@ == "Person")') AND JSON_EXISTS(n2.props, '$.id') THEN"""
+    sql = compile_cypher(statement, rows, "ORACLE", "g").sql
+    assert key not in sql, sql
+    assert "CARDINALITY" not in sql, sql
+    assert """JSON_EXISTS(n2.labels, '$[*]?(@ == "Person")')""" in sql, sql
+    assert key in compile_cypher(statement, rows, "ORACLE", "g", indexed_properties=[("Person", "id")]).sql
+
+
+async def test_a_statement_compiled_again_to_call_no_stored_function_keeps_the_graphs_labelled_indexes(
+    graph: str, now: list[float], compiled_with: list[Any], monkeypatch: pytest.MonkeyPatch
+):
+    # The session may call none of the graph's era functions, so date() is compiled again to call none of them.
+    monkeypatch.setattr(OracleStoredFunctions, "known", lambda key: False)
+    session = Session([row("Person", "id")])
+    await OracleConnection(session, None, "s", graph, DB).query(
+        QuerySpecification[Any](cypher_statement("MATCH (a:Person {id: $s}) RETURN date(a.d) AS d")).bind({"s": "p1"})
+    )
+    assert compiled_with == [{("Person", "id")}, {("Person", "id")}]
+
+
+async def test_a_catalog_read_in_a_transaction_leaves_it_open_and_a_row_that_cant_be_read_compiles_with_none(
+    graph: str, now: list[float], compiled_with: list[Any]
+):
+    session = Session([{"kind": "RANGE_INDEX", "properties": ["id"]}])
+    connection = OracleConnection(session, None, "s", graph, DB)
+    await connection.start_transaction()
+    await connection.query(QuerySpecification[Any](cypher_statement(STATEMENT)).bind({"s": "p1"}))
+    assert session.read_in_autocommit == [False], "The catalog is read inside the transaction, which goes on"
+    assert compiled_with[-1] == set()
+
+
+@pytest.mark.parametrize("manager", [StatelessGraphObjectManager, SyncStatelessGraphObjectManager])
+@pytest.mark.parametrize("database", [DatabaseType.ORACLE, DatabaseType.POSTGRES])
+def test_an_index_the_object_managers_schema_plan_makes_or_drops_has_oracles_catalog_read_again(
+    graph: str, manager: Any, database: DatabaseType
+):
+    pm = SimpleNamespace(type=database, database="db", provider=SimpleNamespace(graph_name=graph))
+    planning = manager(pm).schema_planning()
+    assert planning is not None
+    before = indexed.changes(graph)
+    planning.host.changed()
+    assert indexed.changes(graph) == before + (1 if database is DatabaseType.ORACLE else 0)

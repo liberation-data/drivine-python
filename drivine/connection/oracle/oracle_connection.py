@@ -161,12 +161,12 @@ class OracleConnection(Connection):
         cursor = self.connection.cursor()
         try:
             await cursor.execute(query)
-            rows = [it[0] for it in await cursor.fetchall()]
+            # Read inside the try, as drivine4j reads them: a row that can't be read is a catalog that can't be.
+            return oracle_indexed_properties.found(key, self.graph, [it[0] for it in await cursor.fetchall()], since)
         except Exception as error:
             return oracle_indexed_properties.failed(key, self.graph, error, since)
         finally:
             cursor.close()
-        return oracle_indexed_properties.found(key, self.graph, rows, since)
 
     async def _callable(self, calls: StoredFunctionCalls, spec: QuerySpecification[Any]) -> None:
         """

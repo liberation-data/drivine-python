@@ -18,7 +18,7 @@ ON_ORACLE = pytest.mark.skipif(
 
 
 MAX_LITERAL = 8000
-"""The characters one literal of `plsql_text` holds: each is three bytes at most, or a quote written twice."""
+"""The characters one literal of `plsql_text` holds: each is four bytes at most, or a quote written twice."""
 
 
 def plsql_text(text: str) -> str:

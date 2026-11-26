@@ -187,10 +187,9 @@ class SchemaManager:
                 )
                 # What an enforce listed is kept current, so a fragment first used after this isn't warned of. Its
                 # labels are named on the database from then on, so a fragment under one is checked there too.
-                registered = self._registered(database)
-                if node_id_index_check.listed_on(registered):
+                if node_id_index_check.listed_on(database):
                     node_id_index_check.catalogued_too(
-                        registered, [*(it.label for it in catalog.items), *catalog.fragment_labels]
+                        database, [*(it.label for it in catalog.items), *catalog.fragment_labels]
                     )
                     await self._list_for_node_ids(database)
             return report
@@ -416,9 +415,9 @@ class SchemaManager:
                 report[database] = (
                     planned if planned is not None else await self._apply_plan(database, plan, recreate, None, None)
                 )
-            # Each database once, after all its catalogs are applied: one applied as `default` and by its name is listed
-            # only once both are, so an index the second makes isn't taken for missing.
-            for database in dict.fromkeys(self._registered(it) for it in report):
+            # Each database once, after all its catalogs are applied, so an index a later one makes isn't taken for
+            # missing. The report is by registered name, a catalog for `default` planned with the rest there.
+            for database in report:
                 await self._list_for_node_ids(database)
             return report
 
@@ -427,12 +426,13 @@ class SchemaManager:
     ) -> dict[str, set[str]]:
         """
         The labels the catalogs on each database, declared or ensured at runtime, have items under or were read from,
-        by the database's registered name: for node_id_index_check to check a fragment where it belongs. A catalog
-        read from a fragment with its default index off declares nothing, and names its labels all the same.
+        by the database's registered name (as `_targets` keys them): for node_id_index_check to check a fragment
+        where it belongs. A catalog read from a fragment with its default index off declares nothing, and names its
+        labels all the same.
         """
         labels: dict[str, set[str]] = {}
         for database in dict.fromkeys([*declared, *ensured]):
-            named = labels.setdefault(self._registered(database), set())
+            named = labels.setdefault(database, set())
             for catalog in [*declared.get(database, []), *ensured.get(database, [])]:
                 named.update(it.label for it in catalog.items)
                 named.update(catalog.fragment_labels)
@@ -440,9 +440,9 @@ class SchemaManager:
 
     async def _list_for_node_ids(self, database: str) -> None:
         """
-        What serves a fragment's NodeId on `database` once the catalogs are applied, its range indexes and uniqueness
-        constraints, for node_id_index_check to warn of a fragment none serves. Read outside any transaction, as the
-        managers read it. A listing that fails is passed over: it only warns.
+        What serves a fragment's NodeId on `database`, a registered name, once the catalogs are applied, its range
+        indexes and uniqueness constraints, for node_id_index_check to warn of a fragment none serves. Read outside any
+        transaction, as the managers read it. A listing that fails is passed over: it only warns.
         """
         try:
             gom = self.factory.get(database)
@@ -453,7 +453,7 @@ class SchemaManager:
         except Exception as error:
             logger.debug("Could not list the schema of '%s' to check fragments' NodeIds: %s", database, error)
             return
-        node_id_index_check.listed(self._registered(database), ranges, uniques, ranges_per_property)
+        node_id_index_check.listed(database, ranges, uniques, ranges_per_property)
 
     def _registered(self, database: str) -> str:
         """The name `database` is registered under: `default` is the first registered database's."""

@@ -171,3 +171,28 @@ async def test_default_is_the_first_registered_database_alone(
     assert [it.spec.label for it in report["other"]] == ["Customer"], "the default catalog is graph's alone"
     assert ("Person", ("name",)) not in {(it.label, tuple(it.properties)) for it in other}
     assert orphan_warnings(caplog) == []
+
+
+@pytest.mark.parametrize("api", APIS)
+async def test_a_catalog_naming_default_and_the_database_by_name_targets_it_once(
+    api: Api, tmp_path: Path, caplog: pytest.LogCaptureFixture
+):
+    """
+    `default` and the name it resolves to are one database: planned once, and the runtime items kept by it alone, so a
+    catalog that names it by name removes them.
+    """
+
+    def steps(store: Store) -> Iterator[Any]:
+        manager = store.manager(SchemaCatalog.of(CUSTOMERS))
+        yield manager.ensure_catalog(SchemaCatalog.of(PEOPLE).for_databases("default", "graph"))
+        yield manager.remove_catalog(SchemaCatalog.of(PEOPLE).for_database("graph"))
+        yield manager.enforce()
+        yield store.ranges("graph")
+
+    with caplog.at_level(logging.WARNING, "drivine.schema"):
+        ensured, _, enforced, ranges = await run(api, tmp_path, steps, "graph", "other")
+
+    assert list(ensured) == ["graph"] and len(ensured["graph"]) == 1
+    assert sorted(enforced) == ["graph", "other"] and [it.spec.label for it in enforced["graph"]] == ["Customer"]
+    assert ("Person", ("name",)) not in {(it.label, tuple(it.properties)) for it in ranges}
+    assert orphan_warnings(caplog) == []

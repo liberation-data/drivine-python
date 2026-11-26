@@ -612,6 +612,22 @@ async def test_an_ensured_catalog_is_not_catalogued_on_a_database_no_enforce_lis
 
 
 @pytest.mark.parametrize("api", APIS)
+async def test_an_ensured_catalog_for_default_is_catalogued_and_listed_on_the_database_by_its_name(
+    api: Api, tmp_path: Path, calls: list[tuple[Any, ...]]
+):
+    """`default` is the first registered database's name, whose listing an ensure for it keeps current (#595)."""
+
+    def steps(manager_of: Any) -> Iterator[Any]:
+        manager = manager_of(SchemaOptions([SchemaCatalog.of(range_index("Person", "name"))]))
+        yield manager.enforce()
+        yield manager.ensure_catalog(SchemaCatalog.of(range_index("Order", "at")).named("app").for_default_database())
+
+    await run(api, tmp_path, steps, ("graph", "other"))
+    assert [(db, sorted(labels)) for db, labels in named(calls, "catalogued_too")] == [("graph", ["Order"])]
+    assert [it[0] for it in named(calls, "listed")] == ["graph", "other", "graph"]
+
+
+@pytest.mark.parametrize("api", APIS)
 async def test_what_serves_an_id_is_listed_after_an_enforce_and_a_recreate_all_and_after_an_ensure_once_one_listed(
     api: Api, tmp_path: Path, calls: list[tuple[Any, ...]]
 ):
@@ -774,8 +790,8 @@ async def test_a_database_applied_as_default_and_by_its_name_is_listed_once_all_
     api: Api, tmp_path: Path, warnings: list[str]
 ):
     """
-    A catalog for `default` and one for every database are applied on the first registered database apart, as
-    `default` and by its name: it is listed only once both are, so the index the second makes isn't taken for missing.
+    A catalog for `default` and one for every database are planned on the first registered database together, by its
+    name, and it is listed once both are applied, so the index the second makes isn't taken for missing (#595).
     """
     use(CustomerFixture)
 

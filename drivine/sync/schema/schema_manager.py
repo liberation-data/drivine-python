@@ -187,10 +187,9 @@ class SchemaManager:
                 )
                 # What an enforce listed is kept current, so a fragment first used after this isn't warned of. Its
                 # labels are named on the database from then on, so a fragment under one is checked there too.
-                registered = self._registered(database)
-                if node_id_index_check.listed_on(registered):
+                if node_id_index_check.listed_on(database):
                     node_id_index_check.catalogued_too(
-                        registered, [*(it.label for it in catalog.items), *catalog.fragment_labels]
+                        database, [*(it.label for it in catalog.items), *catalog.fragment_labels]
                     )
                     self._list_for_node_ids(database)
             return report
@@ -224,7 +223,7 @@ class SchemaManager:
             return
         with self._lock:
             identities = {_key_of(it) for it in catalog.items}
-            databases = None if catalog.databases is None else tuple(sorted(set(catalog.databases)))
+            databases = self._databases_of(catalog)
             for (owner, targets), specs in self._runtime.items():
                 if owner == catalog.name and (databases is None or targets == databases):
                     for identity in identities:
@@ -416,9 +415,9 @@ class SchemaManager:
                 report[database] = (
                     planned if planned is not None else self._apply_plan(database, plan, recreate, None, None)
                 )
-            # Each database once, after all its catalogs are applied: one applied as `default` and by its name is listed
-            # only once both are, so an index the second makes isn't taken for missing.
-            for database in dict.fromkeys(self._registered(it) for it in report):
+            # Each database once, after all its catalogs are applied, so an index a later one makes isn't taken for
+            # missing. The report is by registered name, a catalog for `default` planned with the rest there.
+            for database in report:
                 self._list_for_node_ids(database)
             return report
 
@@ -427,12 +426,13 @@ class SchemaManager:
     ) -> dict[str, set[str]]:
         """
         The labels the catalogs on each database, declared or ensured at runtime, have items under or were read from,
-        by the database's registered name: for node_id_index_check to check a fragment where it belongs. A catalog
-        read from a fragment with its default index off declares nothing, and names its labels all the same.
+        by the database's registered name (as `_targets` keys them): for node_id_index_check to check a fragment
+        where it belongs. A catalog read from a fragment with its default index off declares nothing, and names its
+        labels all the same.
         """
         labels: dict[str, set[str]] = {}
         for database in dict.fromkeys([*declared, *ensured]):
-            named = labels.setdefault(self._registered(database), set())
+            named = labels.setdefault(database, set())
             for catalog in [*declared.get(database, []), *ensured.get(database, [])]:
                 named.update(it.label for it in catalog.items)
                 named.update(catalog.fragment_labels)
@@ -440,9 +440,9 @@ class SchemaManager:
 
     def _list_for_node_ids(self, database: str) -> None:
         """
-        What serves a fragment's NodeId on `database` once the catalogs are applied, its range indexes and uniqueness
-        constraints, for node_id_index_check to warn of a fragment none serves. Read outside any transaction, as the
-        managers read it. A listing that fails is passed over: it only warns.
+        What serves a fragment's NodeId on `database`, a registered name, once the catalogs are applied, its range
+        indexes and uniqueness constraints, for node_id_index_check to warn of a fragment none serves. Read outside any
+        transaction, as the managers read it. A listing that fails is passed over: it only warns.
         """
         try:
             gom = self.factory.get(database)
@@ -453,7 +453,7 @@ class SchemaManager:
         except Exception as error:
             logger.debug("Could not list the schema of '%s' to check fragments' NodeIds: %s", database, error)
             return
-        node_id_index_check.listed(self._registered(database), ranges, uniques, ranges_per_property)
+        node_id_index_check.listed(database, ranges, uniques, ranges_per_property)
 
     def _registered(self, database: str) -> str:
         """The name `database` is registered under: `default` is the first registered database's."""
@@ -468,9 +468,7 @@ class SchemaManager:
         databases.
         """
         copy = {key: dict(specs) for key, specs in self._runtime.items()}
-        # The databases as a set, as drivine4j keeps a catalog's: the order they are named in is no part of the key.
-        databases = None if catalog.databases is None else tuple(sorted(set(catalog.databases)))
-        specs = copy.setdefault((catalog.name, databases), {})
+        specs = copy.setdefault((catalog.name, self._databases_of(catalog)), {})
         for spec in items:
             specs[_key_of(spec)] = spec
         return copy
@@ -713,14 +711,30 @@ class SchemaManager:
         return result
 
     def _targets(self, catalog: SchemaCatalog) -> list[str]:
-        """The databases a catalog applies to: those it names, each a registered graph, or every graph."""
+        """
+        The databases a catalog applies to, each by the name it is registered under: those it names, each a registered
+        graph, or every graph. `default` is the first registered database's name, so a catalog for it and one for every
+        database are planned together there, as drivine4j's SchemaTargets resolves them (drivine4j#854, #595).
+        """
         if catalog.databases is None:
             return [it.name for it in self.registry.providers if it.type in GRAPH_TYPES]
+        targets: list[str] = []
         for name in catalog.databases:
             provider = self.registry.connection_provider(name)
             if provider is None or provider.type not in GRAPH_TYPES:
                 raise DrivineError(f"A schema catalog names {name}, which is not a registered graph database.")
-        return list(catalog.databases)
+            targets.append(provider.name)
+        return list(dict.fromkeys(targets))
+
+    def _databases_of(self, catalog: SchemaCatalog) -> tuple[str, ...] | None:
+        """
+        The databases a catalog names, as its runtime items are kept by them: each by the name it is registered under
+        (`default` the first registered database's), as a set, since the order they are named in is no part of the key;
+        None for every database. drivine4j's `databasesOf`.
+        """
+        if catalog.databases is None:
+            return None
+        return tuple(sorted({self._registered(it) for it in catalog.databases}))
 
     def _merged(self, database: str | None, catalogs: list[SchemaCatalog]) -> dict[str, SchemaSpec]:
         """

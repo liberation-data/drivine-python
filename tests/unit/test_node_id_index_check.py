@@ -1107,6 +1107,38 @@ async def test_each_operation_of_a_manager_is_a_use_on_the_database_it_is_regist
     assert missed == [], "operations that told the check otherwise"
 
 
+@pytest.mark.parametrize("api", APIS)
+async def test_a_manager_whose_database_cannot_be_named_still_runs_the_operation_and_tells_the_check_nothing(
+    api: Api, tmp_path: Path, warnings: list[str]
+):
+    """A use is never what fails an operation: where the manager's registered name can't be read, it is passed over."""
+    env = {"GRAPH_DATABASE_TYPE": "SQLITE", "GRAPH_DATABASE_NAME": str(tmp_path / "graph.db")}
+    registry: Any = DatabaseRegistry() if api == "async" else SyncDatabaseRegistry()
+    registry.build_or_resolve_from_env("graph", env)
+    pms: Any = PersistenceManagerFactory(registry) if api == "async" else SyncPersistenceManagerFactory(registry)
+    goms: Any = GraphObjectManagerFactory(pms) if api == "async" else SyncGraphObjectManagerFactory(pms)
+    objects = goms.get("graph")
+
+    def unnamed() -> str:
+        raise RuntimeError("no name")
+
+    objects._registered_as = unnamed
+    node_id_index_check.managed()
+    node_id_index_check.catalogued({"a": {"Order"}, "graph": set()})
+    node_id_index_check.listed("graph", [], [])
+    try:
+        loaded = objects.load(OrderFixture, "o1")
+        if api == "async":
+            loaded = await loaded
+        assert loaded is None
+        assert warnings == []
+    finally:
+        if api == "async":
+            await registry.close()
+        else:
+            registry.close()
+
+
 class UsedTicketFixture(NodeFragment, labels=["UsedTicket"]):
     id: Annotated[str, NodeId()]
 

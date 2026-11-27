@@ -75,8 +75,8 @@ _catalogued: dict[str, set[str]] = {}
 """
 The labels the catalogs a SchemaManager applies declare items of, or were read from, by database, given before its
 enforce lists any: a fragment whose labels some catalog names is checked only on the databases where one does, as it
-belongs there, and isn't warned of on another it is never used on (drivine4j#848). A fragment no catalog names is
-checked on every database listed.
+belongs there, and on those it is `used` on (`_used_on`, drivine4j#858), and isn't warned of on another it is never used
+on (drivine4j#848). A fragment no catalog names is checked on every database listed.
 """
 
 _used_on: dict[str, weakref.WeakKeyDictionary[type, set[_Shape]]] = {}

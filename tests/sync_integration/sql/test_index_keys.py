@@ -3,8 +3,9 @@
 """
 The spec's `store.yaml` `indexKeys` on each SQL store (#511, liberation-data/drivine-cypher-spec#286): each value
 stored under each key, as the store holds it at rest, is found by a lookup of it that the module compiles, with a range
-index over the key. A lookup compares the class and key the store's index expressions give over the property with those
-of the bound value (on Postgres, the property's JSON with the value's), so a module that keys a value otherwise than the
+index over the key. On SQLite a lookup compares the class and key the index's expressions give over the property with
+those of the bound value (on Oracle, a text, number or boolean's typed value with the key bound, and a temporal's tag
+with the value's; on Postgres, the property's JSON with the value's), so a module that keys a value otherwise than the
 store holds it finds nothing where the node is there: the drift guard. Where the pins can be read without the module's
 index expressions, they are checked too: a temporal's sort key, which the module works out (`temporalKey`) both for the
 value at rest and for the value bound, on every store; the key the module binds on Oracle (`_cyk_`); and on SQLite, the

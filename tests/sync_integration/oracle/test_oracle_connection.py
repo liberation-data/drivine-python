@@ -79,7 +79,7 @@ def test_a_decimal_that_is_no_finite_number_is_bound_as_the_float_it_stands_for(
 
 
 def test_a_float_that_is_no_finite_number_is_compared_and_stored_as_a_number(pm: PersistenceManager):
-    """A NaN or an infinity bound to a statement is a number to it, as drivine4j's double is: compared, and stored."""
+    """A NaN or an infinity bound to a statement is a number to it: compared, and stored."""
     row = pm.get_one(
         QuerySpecification[Any](
             'SELECT CASE WHEN $i > 1e100 THEN 1 ELSE 0 END AS "above", CASE WHEN $n < 0 THEN 1 ELSE 0 END AS "below" '

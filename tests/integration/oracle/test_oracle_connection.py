@@ -13,7 +13,6 @@ from drivine import (
     Connection,
     CursorSpecification,
     DatabaseRegistry,
-    DrivineError,
     PersistenceManager,
     QuerySpecification,
 )
@@ -69,14 +68,40 @@ async def test_a_decimal_that_is_no_finite_number_is_bound_as_the_float_it_stand
     pm: PersistenceManager, given: Decimal, stands_for: float
 ):
     # Bound as the float, not its JSON text, a signalling NaN as NaN, where it raised before it reached the driver
-    # (#303). Oracle's driver binds a float as a NUMBER, which holds no NaN or infinity, so it refuses the Decimal
-    # as it refuses the float.
+    # (#303). The float is bound as a BINARY_DOUBLE, which holds NaN and the infinities, where python-oracledb would
+    # bind a NUMBER, which holds neither, and refuse it (DPY-4004, #575): both read back as the float.
     statement = 'SELECT $v AS "v" FROM dual'
-    with pytest.raises(DrivineError) as as_float:
-        await pm.get_one(QuerySpecification[Any](statement).bind({"v": stands_for}))
-    with pytest.raises(DrivineError) as as_decimal:
-        await pm.get_one(QuerySpecification[Any](statement).bind({"v": given}))
-    assert str(as_decimal.value) == str(as_float.value)
+    for value in (stands_for, given):
+        read = await pm.get_one(QuerySpecification[Any](statement).bind({"v": value}))
+        assert isinstance(read, float)
+        assert math.isnan(read) if math.isnan(stands_for) else read == stands_for
+
+
+async def test_a_float_that_is_no_finite_number_is_compared_and_stored_as_a_number(pm: PersistenceManager):
+    """A NaN or an infinity bound to a statement is a number to it, as drivine4j's double is: compared, and stored."""
+    row = await pm.get_one(
+        QuerySpecification[Any](
+            'SELECT CASE WHEN $i > 1e308 THEN 1 ELSE 0 END AS "above", CASE WHEN $n < 0 THEN 1 ELSE 0 END AS "below" '
+            "FROM dual"
+        ).bind({"i": math.inf, "n": -math.inf})
+    )
+    assert row == {"above": 1, "below": 1}
+    await pm.execute(QuerySpecification[Any]("CREATE TABLE drivine_nonfinite (v BINARY_DOUBLE)"))
+    try:
+        for value in (math.inf, -math.inf, math.nan):
+            await pm.execute(
+                QuerySpecification[Any]("INSERT INTO drivine_nonfinite (v) VALUES ($v)").bind({"v": value})
+            )
+        rows = await pm.query(QuerySpecification[Any]('SELECT v AS "v" FROM drivine_nonfinite'))
+        # NaN is equal to no float, itself included, so it is counted apart.
+        assert sorted(it for it in rows if not math.isnan(it)) == [-math.inf, math.inf]
+        assert sum(1 for it in rows if math.isnan(it)) == 1
+    finally:
+        await pm.execute(QuerySpecification[Any]("DROP TABLE drivine_nonfinite"))
+
+
+async def test_a_finite_float_is_bound_as_before(pm: PersistenceManager):
+    assert await pm.get_one(QuerySpecification[Any]('SELECT $v AS "v" FROM dual').bind({"v": 2.5})) == 2.5
 
 
 async def test_skips_and_limits_with_offset_and_fetch(pm):
@@ -194,6 +219,21 @@ async def test_reads_a_cursor_in_batches(registry: DatabaseRegistry):
         seen = [it async for it in cursor]
         await cursor.close()
         assert seen == [1, 2, 3, 4, 5, 6, 7]
+    finally:
+        await connection.release()
+
+
+async def test_a_cursor_binds_a_float_that_is_no_finite_number_as_a_query_does(registry: DatabaseRegistry):
+    provider = registry.connection_provider("oracle")
+    assert provider is not None
+    connection = await provider.connect()
+    try:
+        cursor = await connection.open_cursor(
+            CursorSpecification[Any]('SELECT $v AS "v" FROM dual').bind({"v": math.inf})
+        )
+        seen = [it async for it in cursor]
+        await cursor.close()
+        assert seen == [math.inf]
     finally:
         await connection.release()
 

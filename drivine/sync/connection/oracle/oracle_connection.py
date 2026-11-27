@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import re
 import time
 from collections.abc import Mapping
@@ -82,7 +83,7 @@ class OracleConnection(Connection):
         columns: list[str] = []
         try:
             _prepare(cursor, compiled.statement, sql is not finalized)
-            cursor.execute(compiled.statement, self._bindable(compiled.parameters), fetch_lobs=False)
+            cursor.execute(compiled.statement, self._bindable(compiled.parameters, cursor), fetch_lobs=False)
             if cursor.description is None and _BLOCK.match(compiled.statement):
                 implicit = _implicit_results(cursor)
                 cursor.close()
@@ -112,7 +113,7 @@ class OracleConnection(Connection):
         cursor = self.connection.cursor()
         cursor.arraysize = spec.batch
         _prepare(cursor, compiled.statement, sql is not finalized)
-        cursor.execute(compiled.statement, self._bindable(compiled.parameters), fetch_lobs=False)
+        cursor.execute(compiled.statement, self._bindable(compiled.parameters, cursor), fetch_lobs=False)
         return OracleCursor(finalized, cursor, self.result_mapper, sql is not finalized or finalized.store_layout)
 
     def _compiled(self, finalized: QuerySpecification[T]) -> QuerySpecification[T]:
@@ -235,17 +236,25 @@ class OracleConnection(Connection):
             cursor.close()
         return OracleStoredFunctions.found(key, self.graph, found, function)
 
-    def _bindable(self, parameters: dict[str, Any]) -> dict[str, Any]:
+    def _bindable(self, parameters: dict[str, Any], cursor: Any) -> dict[str, Any]:
         """
         The parameters, with each text of more than _MAX_TEXT bytes as a CLOB, as drivine4j binds one, whatever wrote
         the statement: a compiled Cypher statement's parameter is bound as its JSON text, a save's properties as theirs,
         and a schema marker's inventory as one text, any of which may be more than Oracle takes as a VARCHAR2
-        (ORA-01460, ORA-01461, or ORA-06502 in a block).
+        (ORA-01460, ORA-01461, or ORA-06502 in a block). A float that is NaN or an infinity is bound as a BINARY_DOUBLE,
+        a variable of `cursor`'s, which holds them, as drivine4j's driver binds a double: python-oracledb binds a float
+        as a NUMBER, which holds neither, and refuses it (DPY-4004, #575).
         """
         import oracledb
 
         bindable = dict(parameters)
         for name, value in parameters.items():
+            if isinstance(value, float) and not math.isfinite(value):
+                double: Any = oracledb.DB_TYPE_BINARY_DOUBLE  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+                variable = cursor.var(double)
+                variable.setvalue(0, value)
+                bindable[name] = variable
+                continue
             # A character is at most four bytes of UTF-8, so a text of fewer than a quarter of _MAX_TEXT fits.
             if isinstance(value, str) and len(value) * 4 > _MAX_TEXT and len(value.encode()) > _MAX_TEXT:
                 clob: Any = oracledb.DB_TYPE_CLOB  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]

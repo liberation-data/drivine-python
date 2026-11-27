@@ -56,6 +56,7 @@ from drivine.model.relationship_model import RelationshipModel
 from drivine.model.target_model import TargetModel
 from drivine.model.vector_field import VectorField
 from drivine.query.query_specification import QuerySpecification
+from drivine.schema import node_id_index_check
 from drivine.schema.constraint_manager import ConstraintManager
 from drivine.schema.index_manager import IndexManager
 from drivine.schema.lower_copy_catalog import LowerCopyCatalog
@@ -110,9 +111,11 @@ class StatelessGraphObjectManager:
         self._identity: StoreIdentity | None = None
         self._lower_copy_catalog: LowerCopyCatalog | None = None
         """See `_lower_copies`."""
-        self.edges = EdgeOperations(self.registry, self._run_one, self._query, self.mapper, self.backend)
+        self.edges = EdgeOperations(self.registry, self._run_one, self._query, self.mapper, self.backend, self._used)
         """Relationships on their own, between stored nodes: see EdgeOperations."""
-        self.groups = GroupOperations(self.registry, self._query, self.mapper, self.backend, self._group_lookups)
+        self.groups = GroupOperations(
+            self.registry, self._query, self.mapper, self.backend, self._group_lookups, self._used
+        )
         """Grouped reads: see GroupOperations."""
         self.index_advice = IndexAdvicePolicy.WARN
         """What an ordered query with no range index to seek into does: see IndexAdvicePolicy."""
@@ -198,6 +201,23 @@ class StatelessGraphObjectManager:
         """
         return getattr(getattr(self.persistence_manager, "provider", None), "name", None) or self.database
 
+    def _model_of(self, type_: Any) -> TargetModel:
+        """The model of a class an operation reads or writes, which is `_used` here."""
+        model = self.registry.model_of(type_)
+        self._used(model)
+        return model
+
+    def _used(self, model: TargetModel) -> None:
+        """
+        `model` is read or written through this manager: node_id_index_check checks the fragments it holds on this
+        database, by its registered name (drivine4j#858). Never raises.
+        """
+        try:
+            database = self._registered_as()
+        except Exception:
+            return
+        node_id_index_check.used(database, model)
+
     def _schema_grammar(self) -> SchemaGrammar:
         return schema_grammar_for(self.persistence_manager.type, getattr(self.backend, "graph", None))
 
@@ -230,7 +250,7 @@ class StatelessGraphObjectManager:
         Cypher predicate over the root, `n`, with its values in `bindings`. `seek` continues after a keyset cursor.
         `depth` overrides a recursive relationship's max_depth for this load, by field name.
         """
-        target = self.registry.model_of(type_)
+        target = self._model_of(type_)
         where = await self._lookups(where, target)
         query = Query(None, order_by, limit, skip, seek, depth)
         rendered = self._rendered(target, where, bindings, query, await self._filter_indexes(where))
@@ -262,7 +282,7 @@ class StatelessGraphObjectManager:
 
     async def _load_row(self, type_: type[T], id: Any, depth: Mapping[str, int] | None = None) -> tuple[T, Any] | None:
         """The object whose root has the id, and the row it was mapped from; None when there is none."""
-        target = self.registry.model_of(type_)
+        target = self._model_of(type_)
         id = self._lookup_id(target, id)
         if id is NO_NODE:
             return None
@@ -283,7 +303,7 @@ class StatelessGraphObjectManager:
         self, type_: type[Any], where: str | Where | None = None, bindings: Mapping[str, Any] | None = None
     ) -> int:
         """How many objects of the class a load with the same filter would find."""
-        target = self.registry.model_of(type_)
+        target = self._model_of(type_)
         where = await self._lookups(where, target)
         rendered = self._rendered(target, where, bindings, Query(), await self._filter_indexes(where))
         if isinstance(target, GraphViewModel):
@@ -321,7 +341,7 @@ class StatelessGraphObjectManager:
         `partition_label` searches the index of that label instead of the fragment's first: one vector index for each
         partition.
         """
-        target = self.registry.model_of(type_)
+        target = self._model_of(type_)
         predicate, values = self._condition(target, where, bindings)
         root = target.root if isinstance(target, GraphViewModel) else target
         searched = _searched_vector(root, property)
@@ -381,7 +401,7 @@ class StatelessGraphObjectManager:
         The search is the shared module's on every store (drivine-cypher-compiler): on a graph engine, whose extra
         doesn't install it, it is installed on its own.
         """
-        target = self.registry.model_of(type_)
+        target = self._model_of(type_)
         predicate, values = self._condition(target, where, bindings)
         root = target.root if isinstance(target, GraphViewModel) else target
         indexes = root.full_text_indexes
@@ -505,7 +525,7 @@ class StatelessGraphObjectManager:
         class, and may be async. Returns the saved object, or None when there is no such node or it is deleted
         meanwhile.
         """
-        target_ = self.registry.model_of(type_)
+        target_ = self._model_of(type_)
         id = self._lookup_id(target_, id)
         if id is NO_NODE:
             return None
@@ -558,7 +578,7 @@ class StatelessGraphObjectManager:
         Outside a transaction, a delete the engine turns away because another writer held what it deletes is run again,
         after a pause, as a save is.
         """
-        target = self.registry.model_of(type_)
+        target = self._model_of(type_)
         id = self._lookup_id(target, id)
         if id is NO_NODE:
             return 0
@@ -606,7 +626,7 @@ class StatelessGraphObjectManager:
         a filter, every one. Returns the number deleted. Outside a transaction, one the engine turns away because
         another writer held what it deletes is run again, after a pause, as a save is.
         """
-        target = self.registry.model_of(type_)
+        target = self._model_of(type_)
         where = await self._lookups(where, target)
         rendered = self._rendered(target, where, bindings, Query(), await self._filter_indexes(where))
         statement = self.backend.delete_all(target, rendered.where, rendered.labels_tested)
@@ -638,7 +658,7 @@ class StatelessGraphObjectManager:
         fragments: dict[type, FragmentGroup] = {}
         views: list[T] = []
         for obj in objects:
-            target_ = self.registry.model_of(type(obj))
+            target_ = self._model_of(type(obj))
             # A view, or a fragment with a property bag or node labels, whose entries no row of a batch can carry, is a
             # statement of its own.
             if isinstance(target_, GraphViewModel) or target_.property_bags or target_.node_labels:
@@ -678,7 +698,7 @@ class StatelessGraphObjectManager:
         isn't checked against a stamp, and hands none back: a node it changed has a new stamp, so an object loaded
         before is refused when saved. On a view, the fields are its root's.
         """
-        target = self.registry.model_of(type_)
+        target = self._model_of(type_)
         root = root_of(target)
         named = [*(set or {}), *clear]
         self._assert_patchable(root, named)
@@ -722,7 +742,7 @@ class StatelessGraphObjectManager:
         kind: Any = objects[0].__class__
         if any(type(it) is not kind for it in objects):
             raise DrivineError(f"patch_all takes objects of one class; the first is a {kind.__name__}.")
-        target_ = self.registry.model_of(kind)
+        target_ = self._model_of(kind)
         root = root_of(target_)
         self._assert_patchable(root, list(only or []))
         written = [
@@ -939,7 +959,7 @@ class StatelessGraphObjectManager:
         return await self.persistence_manager.query(statement.spec())
 
     async def _write(self, obj: T, given: SaveOptions, create_only: bool) -> T | None:
-        target_ = self.registry.model_of(type(obj))
+        target_ = self._model_of(type(obj))
         options = await self._with_held_keys(target_, obj, given)
         statement = self.backend.save(target_, obj, options, create_only, self.registry)
 
@@ -1035,7 +1055,7 @@ class StatelessGraphObjectManager:
             )
         if from_ is obj:
             raise DrivineError(_SAVED_ITSELF)
-        target_ = self.registry.model_of(type(obj))
+        target_ = self._model_of(type(obj))
         root = root_of(target_)
         if isinstance(target_, GraphViewModel):
             saved_root, loaded_root = getattr(obj, target_.root_field, None), getattr(from_, target_.root_field, None)

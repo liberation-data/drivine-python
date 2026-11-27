@@ -8,7 +8,8 @@ Nothing here reads the store while a fragment is used, nor raises: a check that 
 save or load goes on. What serves an id is what SchemaManager's `enforce` (or `recreate_all`) listed of each database
 (`listed`), after it applied the catalogs, outside any caller's transaction, and kept current by each ensure after it
 (`ensured`). A fragment whose model was built before an enforce is checked when it runs, and one built after it against
-what it listed, each only on the databases where it belongs (`catalogued`, drivine4j#848). Where no SchemaManager with
+what it listed, each only on the databases where it belongs: those it is `used` on (drivine4j#858), and those whose
+catalogs name its labels (`catalogued`, drivine4j#848). Where no SchemaManager with
 a catalog has been built, nothing applies one; as one may yet be, as an application starts, a fragment is warned of only
 if none has been UNMANAGED_DELAY seconds after its model was first built, and no index or constraint ensured by hand by
 then serves its id (`ensured`, drivine4j#886).
@@ -27,6 +28,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from drivine.model.fragment_model import FragmentModel
+from drivine.model.graph_view_model import GraphViewModel
+from drivine.model.relationship_fragment_model import RelationshipFragmentModel
 from drivine.schema.ensure_result import EnsureResult
 from drivine.schema.range_index_spec import RangeIndexSpec
 from drivine.schema.schema_item import SchemaItem
@@ -72,8 +75,20 @@ _catalogued: dict[str, set[str]] = {}
 """
 The labels the catalogs a SchemaManager applies declare items of, or were read from, by database, given before its
 enforce lists any: a fragment whose labels some catalog names is checked only on the databases where one does, as it
-belongs there, and isn't warned of on another it is never used on (drivine4j#848). A fragment no catalog names is
-checked on every database listed.
+belongs there, and on those it is `used` on (`_used_on`, drivine4j#858), and isn't warned of on another it is never used
+on (drivine4j#848). A fragment no catalog names is checked on every database listed.
+"""
+
+_used_on: dict[str, weakref.WeakKeyDictionary[type, set[_Shape]]] = {}
+"""
+The fragments `used` on each database, by its registered name, each by the shapes of it used there: they belong there
+whatever the catalogs name (drivine4j#858).
+"""
+
+_uses: dict[int, tuple[weakref.ref[Any], int, set[str]]] = {}
+"""
+The databases each model was `used` on under a generation, by the model's identity (a model isn't hashable), held
+weakly: the check each use makes, read without the lock, so a use after the first on a database costs a lookup.
 """
 
 _managed = False
@@ -101,9 +116,9 @@ def admit(model: FragmentModel) -> None:
     """Checks a newly built model: against each database an enforce listed, or, with no SchemaManager, later."""
 
     def check() -> None:
-        if model.node_id_property is None or not model.labels:
+        shape = _shape_of(model)
+        if shape is None:
             return
-        shape = _Shape(model.type.__name__, tuple(model.labels), model.node_id_property)
         with _lock:
             shapes = _admitted.get(model.type)
             if shapes is not None and shape in shapes:
@@ -115,6 +130,48 @@ def admit(model: FragmentModel) -> None:
                 _unmanaged_later(model.type)
 
     _guarded(check)
+
+
+def used(database: str, model: FragmentModel | GraphViewModel) -> None:
+    """
+    `model`, a fragment's or a view's, is saved, loaded, counted, searched, deleted, patched, related or grouped through
+    a manager on `database`, the name it is registered under: each fragment it reads or writes belongs on `database`
+    (drivine4j#858), and is checked there now if an enforce has listed it, or when one does. After the first use on a
+    database, a use costs a lookup in a set, without the lock.
+    """
+    seen = _uses.get(id(model))
+    if seen is not None and seen[0]() is model and seen[1] == _generation and database in seen[2]:
+        return
+
+    def check() -> None:
+        shapes = [(it.type, shape) for it in _fragments_of(model) if (shape := _shape_of(it)) is not None]
+        with _lock:
+            for type_, shape in shapes:
+                _used_on.setdefault(database, weakref.WeakKeyDictionary()).setdefault(type_, set()).add(shape)
+                serving = _served.get(database)
+                if serving is not None:
+                    _check(database, type_, shape, serving)
+
+    def remember() -> None:
+        key = id(model)
+        with _lock:
+            seen = _uses.get(key)
+            if seen is None or seen[0]() is not model or seen[1] != _generation:
+                # Dropped with the model, before its identity can be another's.
+                seen = _uses[key] = (weakref.ref(model, lambda _: _forget(key)), _generation, set())
+            seen[2].add(database)
+
+    _guarded(check)
+    # Once, even where the check failed: a use never pays for it again.
+    _guarded(remember)
+
+
+def _forget(key: int) -> None:
+    """
+    A model `used` is gone: its entry goes with it. Without the lock, which the collector may run this under: a pop is
+    atomic, and an entry replaced since dropped the weak reference that would call this.
+    """
+    _uses.pop(key, None)
 
 
 def listed(
@@ -229,14 +286,53 @@ def reset() -> None:
         _admitted.clear()
         _served.clear()
         _ensured_unlisted.clear()
+        _used_on.clear()
+        _uses.clear()
         _warned.clear()
         _catalogued = {}
         _managed = False
         _cancel_pending()
 
 
-def _belongs(database: str, shape: _Shape) -> bool:
-    """Whether `shape` is checked on `database`: no catalog names its labels, or one on `database` does."""
+def _shape_of(model: FragmentModel) -> _Shape | None:
+    """What the check needs of `model`: None for a fragment with no NodeId, or no label, which is never warned of."""
+    if model.node_id_property is None or not model.labels:
+        return None
+    return _Shape(model.type.__name__, tuple(model.labels), model.node_id_property)
+
+
+def _fragments_of(model: FragmentModel | GraphViewModel) -> list[FragmentModel]:
+    """
+    The fragments `model` reads and writes: itself if a fragment's; a view's root and what its relationships lead to,
+    the targets of relationship fragments and the views nested in it too.
+    """
+    found: dict[int, FragmentModel] = {}
+    views: set[int] = set()
+
+    def visit(it: object) -> None:
+        if isinstance(it, FragmentModel):
+            found.setdefault(id(it), it)
+        elif isinstance(it, RelationshipFragmentModel):
+            visit(it.target)
+        elif isinstance(it, GraphViewModel) and id(it) not in views:
+            views.add(id(it))
+            visit(it.root)
+            for relationship in it.relationships:
+                visit(relationship.related)
+
+    visit(model)
+    return list(found.values())
+
+
+def _belongs(database: str, type_: type, shape: _Shape) -> bool:
+    """
+    Whether `shape` is checked on `database`: it was `used` there, or no catalog names its labels, or one on `database`
+    does. The union keeps each warning the catalogs give, and adds the databases a fragment is used on, where its saves
+    scan the label all the same.
+    """
+    used = _used_on.get(database)
+    if used is not None and shape in used.get(type_, ()):
+        return True
     if not any(label in named for label in shape.labels for named in _catalogued.values()):
         return True
     return any(label in _catalogued.get(database, ()) for label in shape.labels)
@@ -247,7 +343,7 @@ def _check(database: str, type_: type, shape: _Shape, serving: set[tuple[str, st
     Warns of the shape where no index `serving` is over its NodeId under any of its labels: a save and a load by id
     match every label of the fragment, so an index under any of them answers it. Under the lock.
     """
-    if not _belongs(database, shape):
+    if not _belongs(database, type_, shape):
         return
     if not any((label, shape.property) in serving for label in shape.labels):
         _warn(database, type_, shape)

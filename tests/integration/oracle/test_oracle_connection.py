@@ -81,7 +81,7 @@ async def test_a_float_that_is_no_finite_number_is_compared_and_stored_as_a_numb
     """A NaN or an infinity bound to a statement is a number to it, as drivine4j's double is: compared, and stored."""
     row = await pm.get_one(
         QuerySpecification[Any](
-            'SELECT CASE WHEN $i > 1e308 THEN 1 ELSE 0 END AS "above", CASE WHEN $n < 0 THEN 1 ELSE 0 END AS "below" '
+            'SELECT CASE WHEN $i > 1e100 THEN 1 ELSE 0 END AS "above", CASE WHEN $n < 0 THEN 1 ELSE 0 END AS "below" '
             "FROM dual"
         ).bind({"i": math.inf, "n": -math.inf})
     )
@@ -102,6 +102,28 @@ async def test_a_float_that_is_no_finite_number_is_compared_and_stored_as_a_numb
 
 async def test_a_finite_float_is_bound_as_before(pm: PersistenceManager):
     assert await pm.get_one(QuerySpecification[Any]('SELECT $v AS "v" FROM dual').bind({"v": 2.5})) == 2.5
+
+
+async def test_one_statement_takes_a_float_that_is_no_finite_number_after_a_finite_float_and_an_integer(
+    registry: DatabaseRegistry, pm: PersistenceManager
+):
+    """
+    The statement is given an infinity, then a finite float, then an integer, then an infinity again, through a query
+    and through a cursor: run with a NUMBER between two BINARY_DOUBLEs, one text failed the last (ORA-01426, #575).
+    """
+    statement = 'SELECT $v AS "v" FROM dual WHERE 1 = 1'
+    for value in (math.inf, 2.5, 7, -math.inf):
+        assert await pm.get_one(QuerySpecification[Any](statement).bind({"v": value})) == value
+    provider = registry.connection_provider("oracle")
+    assert provider is not None
+    connection = await provider.connect()
+    try:
+        cursor = await connection.open_cursor(CursorSpecification[Any](statement).bind({"v": math.inf}))
+        seen = [it async for it in cursor]
+        await cursor.close()
+        assert seen == [math.inf]
+    finally:
+        await connection.release()
 
 
 async def test_skips_and_limits_with_offset_and_fetch(pm):

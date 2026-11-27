@@ -1,49 +1,42 @@
 """
 The spec's `store.yaml` `indexKeys` on each SQL store (#511, liberation-data/drivine-cypher-spec#286): each value
-stored under each key, as the store holds it at rest, is found by a lookup of it, compiled by the module, through a
-range index over the key. On Oracle and SQLite a lookup compares the class and key the module works out of the value as
-the statement compiles with those the store's index expressions give over the property; on Postgres, the property's JSON
-with the value's. A module that works out another key than the store's index holds would find nothing where the node
-is there: the drift guard. On Oracle the key the module binds (`_cyk_`) is also the one the spec pins.
+stored under each key, as the store holds it at rest, is found by a lookup of it that the module compiles, with a range
+index over the key. A lookup compares the class and key the store's index expressions give over the property with those
+of the bound value (on Postgres, the property's JSON with the value's), so a module that keys a value otherwise than the
+store holds it finds nothing where the node is there: the drift guard. Where the pins can be read without the module's
+index expressions, they are checked too: a temporal's sort key, which the module works out (`temporalKey`) both for the
+value at rest and for the value bound, on every store; the key the module binds on Oracle (`_cyk_`); and on SQLite, the
+class and key the index holds, read through its own expressions as `sqlite_master` records them.
 
-drivine4j's IndexKeysCrossEngineTest reads the index's class and key back through the module's index expressions and
-compares them with the pins directly; the module's JSON entry gives a library neither, so here the lookup stands for
-the comparison.
+drivine4j's IndexKeysCrossEngineTest reads the index's class and key back through the module's index expressions
+(`IndexKey.column`) on every store; the module's JSON entry gives a library none, so on Oracle and Postgres the lookup
+stands for that comparison.
 """
 
 from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
-from pathlib import Path
 from typing import Any, cast
 
 import pytest
-import yaml
 
-from drivine import PersistenceManager, PersistenceManagerFactory, StatelessGraphObjectManager, range_index
+from drivine import (
+    PersistenceManager,
+    PersistenceManagerFactory,
+    QuerySpecification,
+    StatelessGraphObjectManager,
+    range_index,
+)
 from drivine.backend.sql.value_layout import TagText
 from drivine.cypher.shared_compiler import compile_cypher, module_answer
+from tests.cypher.cypher_spec import expanded, read
 from tests.integration.sql.test_id_key_plans import spec
-from tests.integration.stores import create, is_oracle, is_postgres
+from tests.integration.stores import create, is_oracle, is_postgres, is_sqlite
 
 LABEL = "IndexKeyProbe"
 
-INDEX_KEYS: dict[str, Any] = yaml.safe_load((Path(__file__).parents[2] / "cypher" / "store.yaml").read_text())[
-    "indexKeys"
-]
-
-
-def expanded(value: Any) -> Any:
-    """`value` with each `{$repeat: text, times: n}` in it written out, as the spec's runners read it."""
-    if isinstance(value, dict):
-        given = cast(dict[str, Any], value)
-        if set(given) == {"$repeat", "times"}:
-            return given["$repeat"] * given["times"]
-        return {key: expanded(it) for key, it in given.items()}
-    if isinstance(value, list):
-        return [expanded(it) for it in cast(list[Any], value)]
-    return value
+INDEX_KEYS: dict[str, Any] = read("store.yaml")["indexKeys"]
 
 
 def at_rest(value: Any, store: str) -> Any:
@@ -93,6 +86,37 @@ async def indexed(factory: PersistenceManagerFactory, store: str) -> AsyncIterat
         await gom.indexes.drop(it)
 
 
+def columns(ddl: str) -> list[str]:
+    """The expressions of a SQLite index's `CREATE INDEX` over the node table, each as written there."""
+    body = ddl[ddl.index("(") + 1 : ddl.rindex(") WHERE ")]
+    parts: list[str] = []
+    depth, start, quoted = 0, 0, False
+    for at, it in enumerate(body):
+        if it == "'":
+            quoted = not quoted
+        elif not quoted and it in "()":
+            depth += 1 if it == "(" else -1
+        elif not quoted and it == "," and depth == 0:
+            parts.append(body[start:at])
+            start = at + 1
+    return [*parts, body[start:]]
+
+
+async def held(pm: PersistenceManager, name: str) -> list[str]:
+    """On SQLite, the class and key the probe's range index over the key stored as `name` holds of its one node."""
+    indexes = await pm.query(
+        QuerySpecification[Any]("SELECT sql FROM sqlite_master WHERE type = 'index' AND sql LIKE $label").bind(
+            {"label": f'%"{LABEL}"%'}
+        )
+    )
+    ddl = next(it["sql"] for it in indexes if f"'$.\"{name}\"'" in it["sql"])
+    kind, key = columns(ddl)
+    # The nodes the partial index holds: the label's, as its own `WHERE` selects them.
+    over = ddl[ddl.rindex(") WHERE ") + 2 :]
+    row = await pm.get_one(QuerySpecification[Any](f"SELECT {kind} AS c, {key} AS k FROM drivine_node {over}"))
+    return [str(row["c"]), str(row["k"])]
+
+
 async def found(pm: PersistenceManager, key: str, value: Any) -> int:
     return await pm.get_one(spec(lookup(key), {"v": bound(value)}))
 
@@ -115,10 +139,19 @@ async def test_each_value_is_found_through_the_index_by_the_key_the_module_works
             continue
         value = expanded(row["value"])
         text = json.dumps(value)[:60]
+        if isinstance(value, dict) and "$t" in value:
+            # The sort key the module works out, which the value at rest and the value bound both carry, is the one
+            # pinned; a duration, which has none, is keyed by its text.
+            tag = cast(dict[str, Any], at_rest(value, store))
+            if (keyed := [tag["$t"], tag.get("s", tag["v"])]) != pin:
+                wrong.append(f"{text}: keyed {keyed!r}, pinned {pin!r}")
         for key in INDEX_KEYS["keys"]:
-            await stored(pm, key.get("stored", key["key"]), value, store)
+            name = key.get("stored", key["key"])
+            await stored(pm, name, value, store)
             if await found(pm, key["key"], value) != 1:
                 wrong.append(f"{text} under {key['key']}: not found by a lookup of it")
+            if is_sqlite(pm) and (got := await held(pm, name)) != pin:
+                wrong.append(f"{text} under {key['key']}: the index holds {got!r}, pinned {pin!r}")
             if is_oracle(pm):
                 # The key the module binds, where it binds one, is the one the spec pins: a temporal is compared by the
                 # SQL over the value, and binds none.

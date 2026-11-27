@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import re
 import time
 from collections.abc import Mapping
@@ -81,8 +82,10 @@ class OracleConnection(Connection):
         rows: list[Any] = []
         columns: list[str] = []
         try:
-            _prepare(cursor, compiled.statement, sql is not finalized)
-            cursor.execute(compiled.statement, self._bindable(compiled.parameters), fetch_lobs=False)
+            bindable = self._bindable(compiled.parameters, cursor)
+            statement = _apart(compiled.statement, bindable)
+            _prepare(cursor, statement, sql is not finalized)
+            cursor.execute(statement, bindable, fetch_lobs=False)
             if cursor.description is None and _BLOCK.match(compiled.statement):
                 implicit = _implicit_results(cursor)
                 cursor.close()
@@ -111,8 +114,10 @@ class OracleConnection(Connection):
         self.connection.autocommit = not self._in_transaction
         cursor = self.connection.cursor()
         cursor.arraysize = spec.batch
-        _prepare(cursor, compiled.statement, sql is not finalized)
-        cursor.execute(compiled.statement, self._bindable(compiled.parameters), fetch_lobs=False)
+        bindable = self._bindable(compiled.parameters, cursor)
+        statement = _apart(compiled.statement, bindable)
+        _prepare(cursor, statement, sql is not finalized)
+        cursor.execute(statement, bindable, fetch_lobs=False)
         return OracleCursor(finalized, cursor, self.result_mapper, sql is not finalized or finalized.store_layout)
 
     def _compiled(self, finalized: QuerySpecification[T]) -> QuerySpecification[T]:
@@ -235,17 +240,26 @@ class OracleConnection(Connection):
             cursor.close()
         return OracleStoredFunctions.found(key, self.graph, found, function)
 
-    def _bindable(self, parameters: dict[str, Any]) -> dict[str, Any]:
+    def _bindable(self, parameters: dict[str, Any], cursor: Any) -> dict[str, Any]:
         """
         The parameters, with each text of more than _MAX_TEXT bytes as a CLOB, as drivine4j binds one, whatever wrote
         the statement: a compiled Cypher statement's parameter is bound as its JSON text, a save's properties as theirs,
         and a schema marker's inventory as one text, any of which may be more than Oracle takes as a VARCHAR2
-        (ORA-01460, ORA-01461, or ORA-06502 in a block).
+        (ORA-01460, ORA-01461, or ORA-06502 in a block). A float that is NaN or an infinity is bound as a BINARY_DOUBLE,
+        a variable of `cursor`'s, which holds them: python-oracledb binds a float as a NUMBER, which holds neither, and
+        refuses it (DPY-4004, #575). A finite float is still bound as a NUMBER, as
+        the object manager's JSON writes take it. Its statement is kept apart from its NUMBER-bound runs: see `_apart`.
         """
         import oracledb
 
         bindable = dict(parameters)
         for name, value in parameters.items():
+            if isinstance(value, float) and not math.isfinite(value):
+                double: Any = oracledb.DB_TYPE_BINARY_DOUBLE  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+                variable = cursor.var(double)
+                variable.setvalue(0, value)
+                bindable[name] = variable
+                continue
             # A character is at most four bytes of UTF-8, so a text of fewer than a quarter of _MAX_TEXT fits.
             if isinstance(value, str) and len(value) * 4 > _MAX_TEXT and len(value.encode()) > _MAX_TEXT:
                 clob: Any = oracledb.DB_TYPE_CLOB  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
@@ -277,6 +291,20 @@ class OracleConnection(Connection):
 
 _MAX_TEXT = 32_767
 """The most bytes of text Oracle binds as a VARCHAR2; past it a text is bound as a CLOB."""
+
+
+def _apart(statement: str, bindable: Mapping[str, Any]) -> str:
+    """
+    `statement`, where it binds a NaN or an infinity (a BINARY_DOUBLE variable, see `_bindable`), with a comment that
+    names those binds, so Oracle shares its cursor only with runs that bind them alike. Shared with one whose bind of
+    the same name was a NUMBER, a later run with a NaN or an infinity failed, ORA-01426: Oracle's cursor for the text,
+    made for a BINARY_DOUBLE, takes a NUMBER for its next run, and then reads the next BINARY_DOUBLE as a NUMBER, which
+    holds neither (#575). On its own line, so no comment the statement ends with takes it in.
+    """
+    import oracledb
+
+    doubles = [name for name, it in bindable.items() if isinstance(it, oracledb.Var)]
+    return f"{statement}\n/* drivine: binary doubles {','.join(doubles)} */" if doubles else statement
 
 
 def _prepare(cursor: Any, statement: str, compiled_from_cypher: bool) -> None:

@@ -154,8 +154,8 @@ async def test_each_value_is_found_through_the_index_by_the_key_the_module_works
             if is_sqlite(pm) and (got := await held(pm, name)) != pin:
                 wrong.append(f"{text} under {key['key']}: the index holds {got!r}, pinned {pin!r}")
             if is_oracle(pm):
-                # The key the module binds, where it binds one, is the one the spec pins: a temporal is compared by the
-                # SQL over the value, and binds none.
+                # The key the module binds, where it binds one, is the one the spec pins: a temporal, or an integer past
+                # 2^53, is compared by the SQL over the value, and binds none.
                 binds = compile_cypher(lookup(key["key"]), {"v": bound(value)}, "ORACLE", "drivine").parameters
                 if "_cyk_v" in binds and str(binds["_cyk_v"]) != pin[1]:
                     wrong.append(f"{text} under {key['key']}: bound {binds['_cyk_v']!r}, pinned {pin[1]!r}")

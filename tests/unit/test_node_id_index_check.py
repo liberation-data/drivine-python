@@ -7,8 +7,10 @@ async and the sync API. No database is spoken to but SQLite's file, and the plan
 
 from __future__ import annotations
 
+import gc
 import logging
 import time
+import weakref
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Annotated, Any
@@ -999,6 +1001,35 @@ def test_a_use_that_fails_is_passed_over(monkeypatch: pytest.MonkeyPatch, warnin
     monkeypatch.undo()
     node_id_index_check.used("b", model)
     assert warnings == [], "a use never pays for the check again, even where it failed"
+
+
+def test_a_use_remembered_of_another_model_with_the_same_identity_is_not_taken_for_this_ones(warnings: list[str]):
+    """The uses remembered are a model's own: an entry under its identity, held for another, is no use of it."""
+    node_id_index_check.managed()
+    node_id_index_check.catalogued({"a": {"Order"}, "b": set()})
+    node_id_index_check.listed("b", [], [])
+    model, other = ModelRegistry().fragment(OrderFixture), ModelRegistry().fragment(InvoiceFixture)
+    # As a model gone whose identity this one was given would have left it, had its entry not gone with it.
+    entry = (weakref.ref(other), node_id_index_check._generation, {"b"})  # pyright: ignore[reportPrivateUsage]
+    node_id_index_check._uses[id(model)] = entry  # pyright: ignore[reportPrivateUsage]
+    node_id_index_check.used("b", model)
+    assert [it for it in warnings if "OrderFixture" in it] == [ORDER_WARNING + on("b")]
+
+
+def test_a_class_once_used_can_still_be_collected_and_its_uses_go_with_its_model():
+    def used_once() -> tuple[weakref.ref[type], int]:
+        class UsedCollected(NodeFragment, labels=["UsedCollected"]):
+            id: Annotated[str, NodeId()]
+
+        model = ModelRegistry().fragment(UsedCollected)
+        node_id_index_check.used("b", model)
+        return weakref.ref(UsedCollected), id(model)
+
+    collected, key = used_once()
+    gc.collect()
+
+    assert collected() is None
+    assert key not in node_id_index_check._uses  # pyright: ignore[reportPrivateUsage]
 
 
 Operation = tuple[str, list[str], Any]

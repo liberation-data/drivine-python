@@ -12,6 +12,7 @@ from drivine.backend.sql.node_ids import NO_NODE, lookup_id
 from drivine.manager.node_ref import NodeRef
 from drivine.manager.relate_mode import RelateMode
 from drivine.mapper.graph_object_mapper import GraphObjectMapper
+from drivine.model.fragment_model import FragmentModel
 from drivine.model.model_registry import ModelRegistry
 
 T = TypeVar("T")
@@ -32,12 +33,18 @@ class EdgeOperations:
         query: Callable[[GraphStatement], Awaitable[list[Any]]],
         mapper: GraphObjectMapper,
         backend: GraphBackend,
+        used: Callable[[FragmentModel], None] | None = None,
     ) -> None:
+        """
+        `used` is told of each fragment a node is matched or loaded as: matched by its NodeId, it is used on the
+        database as a load by id is (node_id_index_check, drivine4j#858).
+        """
         self._registry = registry
         self._run = run
         self._query = query
         self._mapper = mapper
         self._backend = backend
+        self._used: Callable[[FragmentModel], None] = used or _unused
 
     async def load_related(
         self, origin: NodeRef, type: str, target: type[T], direction: Direction = Direction.OUTGOING
@@ -47,6 +54,7 @@ class EdgeOperations:
         class, or the subclass of it whose labels each carries.
         """
         model = self._registry.fragment(target)
+        self._used(model)
         node = self._node(origin)
         if node is None:
             return []
@@ -95,5 +103,10 @@ class EdgeOperations:
         id, for which no statement is run (see node_ids).
         """
         model = self._registry.fragment(ref.type)
+        self._used(model)
         id_ = lookup_id(model, ref.id)
         return None if id_ is NO_NODE else MatchedNode(model, id_, tuple(ref.labels))
+
+
+def _unused(model: FragmentModel) -> None:
+    """Where no manager is told of a use."""

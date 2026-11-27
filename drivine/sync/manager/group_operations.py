@@ -39,16 +39,19 @@ class GroupOperations:
         mapper: GraphObjectMapper,
         backend: GraphBackend,
         lookups: Callable[[FragmentModel, Any], Any] | None = None,
+        used: Callable[[FragmentModel], None] | None = None,
     ) -> None:
         """
         `lookups` gives a condition with its case-insensitive comparisons of the source's `CaseInsensitive` properties
         made comparisons with their lowercased copies, where every node is known to have them: see lower_copy_lookups.
+        `used` is told of the source each read groups, used on the database (node_id_index_check, drivine4j#858).
         """
         self._registry = registry
         self._query = query
         self._mapper = mapper
         self._backend = backend
         self._lookups = lookups
+        self._used: Callable[[FragmentModel], None] = used or _unused
 
     def load(
         self,
@@ -80,6 +83,7 @@ class GroupOperations:
         read as the type its property's field declares, as drivine4j's GroupRow reads one: a datetime as a datetime.
         """
         model = self._registry.fragment(source)
+        self._used(model)
         targets: dict[str, FragmentModel] = {}
         # Checked before anything is looked up or written, so every store refuses the same keys: a path key's groups are
         # ordered by its node's id, so its fragment must have a NodeId (path_key_id; drivine4j's GroupQuery.check).
@@ -166,3 +170,7 @@ def _declared(model: FragmentModel, aggregate: GroupAggregate) -> Callable[[Any]
 
 def _as_given(value: Any) -> Any:
     return value
+
+
+def _unused(model: FragmentModel) -> None:
+    """Where no manager is told of a use."""

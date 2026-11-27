@@ -35,9 +35,11 @@ it one. An index serves it where it is a range index or a uniqueness constraint 
 ignoring case, under any of the fragment's labels. After `enforce` or `recreate_all` applied the catalogs, the manager
 lists each database's indexes and constraints and checks every fragment whose model has been built against them; one
 first used later is checked when its model is built, against what was listed and what was ensured since
-(`indexes.ensure`, `constraints.ensure`, their `recreate`, or `SchemaManager.ensure`). A fragment is checked only on
-the databases whose catalogs were read from it or have an item under one of its labels, and on every database where no
-catalog names it; with more than one database, the warning ends `On database '<name>'.`, by its registered name. With
+(`indexes.ensure`, `constraints.ensure`, their `recreate`, or `SchemaManager.ensure`). A fragment whose catalogs were
+read from it or have an item under one of its labels is checked on the databases those catalogs are for, and on each
+database it is saved, loaded, counted, searched, deleted, patched, related (`edges`) or grouped (`groups`) on through an
+object manager, itself or in a view that holds it, from its first use there; any other fragment is checked on every
+database. With more than one database, the warning ends `On database '<name>'.`, by its registered name. With
 no `SchemaManager` that has an item to apply, the warning comes 30 seconds after the fragment's first use, unless one
 has been built by then, or an index or constraint that serves the id was ensured by hand by then, on any database. The
 check reads nothing of the store while a fragment is used, and never raises.

@@ -20,13 +20,21 @@ import drivine.sync.schema.schema_manager as sync_schema_manager
 from drivine import (
     DatabaseRegistry,
     GraphProperty,
+    GraphView,
     NodeFragment,
     NodeId,
     PersistenceManagerFactory,
     RangeIndex,
+    Relationship,
+    RelationshipFragment,
+    Root,
     SchemaCatalog,
     SchemaOptions,
+    TargetNode,
+    count,
     full_text_index,
+    key,
+    node_ref,
     range_index,
     uniqueness_constraint,
 )
@@ -876,3 +884,238 @@ def test_a_catalogs_fragment_labels_are_kept_through_every_operation_on_it():
     ):
         assert made.fragment_labels == labels
     assert SchemaCatalog.of(range_index("Order", "id")).fragment_labels == frozenset()
+
+
+# ----- Where a fragment is used (drivine4j#858) -----
+
+
+class OrderInvoicesFixture(GraphView):
+    order: Annotated[OrderFixture, Root()]
+    invoices: Annotated[list[InvoiceFixture], Relationship("BILLED_AS")] = []
+
+
+class OrderChainFixture(GraphView):
+    """A view nested in itself."""
+
+    order: Annotated[OrderFixture, Root()]
+    previous: Annotated[OrderChainFixture | None, Relationship("FOLLOWS")] = None
+
+
+class BilledFixture(RelationshipFragment):
+    on: str
+    invoice: Annotated[InvoiceFixture, TargetNode()]
+
+
+class CustomerOrdersFixture(GraphView):
+    """A view whose relationships reach a nested view, nested in itself, and a relationship fragment's target."""
+
+    customer: Annotated[CustomerFixture, Root()]
+    orders: Annotated[list[OrderChainFixture], Relationship("PLACED")] = []
+    billed: Annotated[list[BilledFixture], Relationship("BILLED")] = []
+
+
+def used(database: str, type_: type) -> None:
+    """`type_` used on `database`, its model built in a registry of its own as an object manager's is."""
+    node_id_index_check.used(database, ModelRegistry().model_of(type_))
+
+
+def test_a_fragment_used_on_a_database_is_checked_there_whether_it_was_used_before_the_listing_or_after_it(
+    warnings: list[str],
+):
+    """A fragment used on a database no catalog names it on is checked there all the same: its saves scan the label."""
+    node_id_index_check.managed()
+    # Order is catalogued for a alone, but is used on b, and later on c.
+    node_id_index_check.catalogued({"a": {"Order"}, "b": set(), "c": set()})
+    used("b", OrderFixture)
+    node_id_index_check.listed("a", [], [])
+    node_id_index_check.listed("b", [], [])
+    node_id_index_check.listed("c", [], [])
+    assert warnings == [ORDER_WARNING + on("a"), ORDER_WARNING + on("b")], "not on c, where it isn't used yet"
+    used("c", OrderFixture)
+    used("c", OrderFixture)
+    used("b", OrderFixture)
+    assert warnings == [ORDER_WARNING + on("a"), ORDER_WARNING + on("b"), ORDER_WARNING + on("c")], "once per database"
+
+
+def test_a_fragment_used_on_a_database_where_an_index_serves_its_id_is_not_warned_of_there(warnings: list[str]):
+    node_id_index_check.managed()
+    node_id_index_check.catalogued({"a": {"Order"}, "b": set()})
+    node_id_index_check.listed("b", [range_("Purchase", "id")], [])
+    used("b", OrderFixture)
+    used("unlisted", OrderFixture)
+    assert warnings == [], "served under its other label on b; nothing is known of a database no enforce listed"
+
+
+def test_a_view_used_on_a_database_has_its_root_and_the_fragments_of_its_relationships_checked_there(
+    warnings: list[str],
+):
+    node_id_index_check.managed()
+    node_id_index_check.catalogued({"a": {"Order", "Invoice"}, "b": set()})
+    node_id_index_check.listed("b", [], [])
+    used("b", OrderInvoicesFixture)
+    assert [it for it in warnings if "OrderFixture" in it] == [ORDER_WARNING + on("b")]
+    assert len([it for it in warnings if "of InvoiceFixture " in it and it.endswith(on("b"))]) == 1
+
+
+def test_a_views_nested_views_one_nested_in_itself_and_a_relationship_fragments_target_are_checked_where_it_is_used(
+    warnings: list[str],
+):
+    node_id_index_check.managed()
+    node_id_index_check.catalogued({"a": {"Order", "Invoice", "Customer"}, "b": set()})
+    node_id_index_check.listed("b", [], [])
+    used("b", CustomerOrdersFixture)
+    fragments = ["CustomerFixture", "OrderFixture", "InvoiceFixture"]
+    counts = [len([it for it in warnings if f"of {name} " in it and it.endswith(on("b"))]) for name in fragments]
+    assert counts == [1, 1, 1], list(warnings)
+
+
+def test_a_reset_forgets_where_a_fragment_was_used(warnings: list[str]):
+    node_id_index_check.managed()
+    node_id_index_check.catalogued({"a": {"Order"}, "b": set()})
+    model = ModelRegistry().fragment(OrderFixture)
+    node_id_index_check.used("b", model)
+    node_id_index_check.reset()
+    node_id_index_check.managed()
+    node_id_index_check.catalogued({"a": {"Order"}, "b": set()})
+    use(OrderFixture)
+    node_id_index_check.listed("b", [], [])
+    assert warnings == []
+    node_id_index_check.used("b", model)
+    assert warnings == [ORDER_WARNING + on("b")], "used again after the reset, by the same model, it is checked again"
+
+
+def test_a_use_that_fails_is_passed_over(monkeypatch: pytest.MonkeyPatch, warnings: list[str]):
+    node_id_index_check.managed()
+    node_id_index_check.catalogued({"a": {"Order"}, "b": set()})
+    node_id_index_check.listed("b", [], [])
+
+    def broken(*_: Any) -> Any:
+        raise RuntimeError("no fragments")
+
+    monkeypatch.setattr(node_id_index_check, "_fragments_of", broken)
+    model = ModelRegistry().fragment(OrderFixture)
+    node_id_index_check.used("b", model)
+    assert warnings == []
+    monkeypatch.undo()
+    node_id_index_check.used("b", model)
+    assert warnings == [], "a use never pays for the check again, even where it failed"
+
+
+Operation = tuple[str, list[str], Any]
+
+
+def operations(objects: Any) -> list[Operation]:
+    """Each operation of a manager, by name, with the fragments it uses, as a call to make on `objects`."""
+    order, invoice = OrderFixture(id="o1"), InvoiceFixture(number="i1")
+    order_ref, invoice_ref = node_ref(OrderFixture, "o1"), node_ref(InvoiceFixture, "i1")
+    both = ["OrderFixture", "InvoiceFixture"]
+    return [
+        ("load_all", ["OrderFixture"], lambda: objects.load_all(OrderFixture)),
+        ("load", ["OrderFixture"], lambda: objects.load(OrderFixture, "o1")),
+        ("count", ["OrderFixture"], lambda: objects.count(OrderFixture)),
+        ("load_nearest", ["OrderFixture"], lambda: objects.load_nearest(OrderFixture, [1.0], top_k=1)),
+        ("load_matching", ["OrderFixture"], lambda: objects.load_matching(OrderFixture, "o", top_k=1)),
+        ("save", ["OrderFixture"], lambda: objects.save(order)),
+        ("create", ["OrderFixture"], lambda: objects.create(order)),
+        ("update", ["OrderFixture"], lambda: objects.update(OrderFixture, "o1", lambda it: it)),
+        ("delete", ["OrderFixture"], lambda: objects.delete(OrderFixture, "o1")),
+        ("delete_all", ["OrderFixture"], lambda: objects.delete_all(OrderFixture)),
+        ("save_all", ["OrderFixture"], lambda: objects.save_all([order])),
+        ("patch", ["OrderFixture"], lambda: objects.patch(OrderFixture, "o1", set={"id": "o1"})),
+        ("patch_all", ["OrderFixture"], lambda: objects.patch_all([order], only=["id"])),
+        ("save a view", both, lambda: objects.save(OrderInvoicesFixture(order=order, invoices=[invoice]))),
+        ("relate", both, lambda: objects.edges.relate(order_ref, invoice_ref, "BILLED_AS")),
+        ("unrelate", both, lambda: objects.edges.unrelate(order_ref, invoice_ref, "BILLED_AS")),
+        ("unrelate_all", ["OrderFixture"], lambda: objects.edges.unrelate_all(order_ref, "BILLED_AS")),
+        ("load_related", both, lambda: objects.edges.load_related(order_ref, "BILLED_AS", InvoiceFixture)),
+        ("groups.load", ["OrderFixture"], lambda: objects.groups.load(OrderFixture, keys={"id": key("id")})),
+        ("groups.count_by", ["OrderFixture"], lambda: objects.groups.count_by(OrderFixture, "id")),
+        (
+            "groups with a count",
+            ["OrderFixture"],
+            lambda: objects.groups.load(OrderFixture, keys={}, aggregates={"n": count()}),
+        ),
+    ]
+
+
+@pytest.mark.parametrize("api", APIS)
+async def test_each_operation_of_a_manager_is_a_use_on_the_database_it_is_registered_as(
+    api: Api, tmp_path: Path, warnings: list[str]
+):
+    """
+    Each operation of a manager, its edges' and its groups', tells the check of the fragments it uses, on the
+    database by the name it is registered under: here through the manager for `default` (drivine4j#858, #886).
+    """
+    env = {"GRAPH_DATABASE_TYPE": "SQLITE", "GRAPH_DATABASE_NAME": str(tmp_path / "graph.db")}
+    registry: Any = DatabaseRegistry() if api == "async" else SyncDatabaseRegistry()
+    registry.build_or_resolve_from_env("graph", env)
+    pms: Any = PersistenceManagerFactory(registry) if api == "async" else SyncPersistenceManagerFactory(registry)
+    goms: Any = GraphObjectManagerFactory(pms) if api == "async" else SyncGraphObjectManagerFactory(pms)
+    missed: list[str] = []
+    try:
+        for name, fragments, operation in operations(goms.get("default")):
+            node_id_index_check.reset()
+            warnings.clear()
+            node_id_index_check.managed()
+            node_id_index_check.catalogued({"a": {"Order", "Invoice"}, "graph": set()})
+            node_id_index_check.listed("graph", [], [])
+            try:
+                answer = operation()
+                if api == "async":
+                    await answer
+            except Exception:  # What the store makes of the operation is not the point: that it was a use is.
+                pass
+            told = [next((it for it in fragments if f"of {it} " in warning), warning) for warning in warnings]
+            if sorted(told) != sorted(fragments) or not all(it.endswith(on("graph")) for it in warnings):
+                missed.append(name)
+    finally:
+        if api == "async":
+            await registry.close()
+        else:
+            registry.close()
+    assert missed == [], "operations that told the check otherwise"
+
+
+class UsedTicketFixture(NodeFragment, labels=["UsedTicket"]):
+    id: Annotated[str, NodeId()]
+
+
+@pytest.mark.parametrize("api", APIS)
+async def test_a_fragment_catalogued_for_one_database_and_saved_to_another_is_warned_of_on_both(
+    api: Api, tmp_path: Path, warnings: list[str]
+):
+    """
+    A fragment saved to a database no catalog names it on is warned of there, where its saves scan the label, as on the
+    database whose catalog names it (drivine4j#858). Two SQLite files, `a` and `b`, stand for two databases.
+    """
+    catalogs = [
+        # UsedTicket's id is left without its index on a, whose catalogs make another item; b's names another label.
+        SchemaCatalog.from_fragments(UsedTicketFixture).without_node_id_indexes().for_database("a").named("tickets"),
+        SchemaCatalog.of(range_index("Elsewhere", "code")).for_database("a").named("other-a"),
+        SchemaCatalog.of(range_index("Elsewhere", "code")).for_database("b").named("other"),
+    ]
+    env: dict[str, str] = {}
+    for name in ("a", "b"):
+        env[f"{name.upper()}_DATABASE_TYPE"] = "SQLITE"
+        env[f"{name.upper()}_DATABASE_NAME"] = str(tmp_path / f"{name}.db")
+    registry: Any = DatabaseRegistry() if api == "async" else SyncDatabaseRegistry()
+    for name in ("a", "b"):
+        registry.build_or_resolve_from_env(name, env)
+    pms: Any = PersistenceManagerFactory(registry) if api == "async" else SyncPersistenceManagerFactory(registry)
+    goms: Any = GraphObjectManagerFactory(pms) if api == "async" else SyncGraphObjectManagerFactory(pms)
+    of: Any = AsyncSchemaManager if api == "async" else SyncSchemaManager
+    schema = of(registry, goms, SchemaOptions(catalogs))
+    try:
+        enforced = schema.enforce()
+        if api == "async":
+            await enforced
+        assert [it[-len(on("a")) :] for it in warnings] == [on("a")], f"on a, whose catalog names it: {list(warnings)}"
+        saved = goms.get("b").save(UsedTicketFixture(id="t1"))
+        if api == "async":
+            await saved
+        assert [it[-len(on("a")) :] for it in warnings] == [on("a"), on("b")], "and on b, where it was saved"
+    finally:
+        if api == "async":
+            await registry.close()
+        else:
+            registry.close()

@@ -247,7 +247,8 @@ class OracleConnection(Connection):
         and a schema marker's inventory as one text, any of which may be more than Oracle takes as a VARCHAR2
         (ORA-01460, ORA-01461, or ORA-06502 in a block). A float that is NaN or an infinity is bound as a BINARY_DOUBLE,
         a variable of `cursor`'s, which holds them, as drivine4j's driver binds a double: python-oracledb binds a float
-        as a NUMBER, which holds neither, and refuses it (DPY-4004, #575).
+        as a NUMBER, which holds neither, and refuses it (DPY-4004, #575). A finite float is still bound as a NUMBER, as
+        the object manager's JSON writes take it. Its statement is kept apart from its NUMBER-bound runs: see `_apart`.
         """
         import oracledb
 

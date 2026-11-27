@@ -5,12 +5,14 @@ SQL is cheap to keep. drivine4j's JdbcConnectionTest of it. And a JSON column th
 layout for Drivine's own statements alone.
 """
 
+import math
 from typing import Any
 
+import oracledb
 import pytest
 
 from drivine import QuerySpecification, cypher_statement
-from drivine.connection.oracle.oracle_connection import OracleConnection
+from drivine.connection.oracle.oracle_connection import OracleConnection, _apart
 from drivine.cursor.cursor_specification import CursorSpecification
 from drivine.sync.connection.oracle.oracle_connection import OracleConnection as SyncOracleConnection
 
@@ -28,6 +30,10 @@ class Cursor:
 
     async def execute(self, statement: str, parameters: Any = None, **_: Any) -> None:
         self.session.run.append(statement)
+        self.session.bound.append(parameters)
+
+    def var(self, kind: Any) -> "Variable":
+        return Variable(kind)
 
     def close(self) -> None:
         pass
@@ -45,10 +51,22 @@ class Session:
         self.sync = sync
         self.prepared: list[tuple[str, bool]] = []
         self.run: list[str] = []
+        self.bound: list[Any] = []
         self.autocommit = True
 
     def cursor(self) -> Cursor:
         return SyncCursor(self) if self.sync else Cursor(self)
+
+
+class Variable(oracledb.Var):
+    """A variable of a cursor's, of the kind it was made as, holding the value it was set to."""
+
+    def __init__(self, kind: Any) -> None:
+        self.kind = kind
+        self.value: Any = None
+
+    def setvalue(self, pos: int, value: Any) -> None:
+        self.value = value
 
 
 READ = "MATCH (n:Claim) RETURN n.id"
@@ -114,3 +132,37 @@ async def test_a_json_column_is_read_in_the_store_layout_for_drivines_own_sql_an
     opened.store_layout = True
     assert (await (await connection.open_cursor(opened)).read(10))[0] == [{"d": "2024-01-01"}]
     assert (await (await connection.open_cursor(CursorSpecification[Any](SQL))).read(10))[0] == [{"d": TAG}]
+
+
+async def test_a_float_that_is_no_finite_number_is_bound_as_a_binary_double_and_its_statement_kept_apart():
+    """
+    A NaN or an infinity is bound as a BINARY_DOUBLE, and its statement tagged with the binds that are, so Oracle
+    shares its cursor with no run that bound a NUMBER for the name (ORA-01426, #575). A finite float, and a bool, are
+    bound as they were, and their statement left as it is.
+    """
+    session = Session()
+    connection = OracleConnection(session, None, "s", "cache_unit", "db|me")
+    statement = "SELECT $a AS a, $b AS b, $c AS c FROM dual"
+    await connection.query(QuerySpecification[Any](statement).bind({"a": math.inf, "b": 2.5, "c": -math.inf}))
+    await connection.open_cursor(CursorSpecification[Any](statement).bind({"a": math.nan, "b": True, "c": 7}))
+    await connection.query(QuerySpecification[Any](statement).bind({"a": 1.5, "b": True, "c": 7}))
+    doubles, opened, finite = session.run
+    assert doubles == "SELECT :b0 AS a, :b1 AS b, :b2 AS c FROM dual\n/* drivine: binary doubles b0,b2 */"
+    assert opened == "SELECT :b0 AS a, :b1 AS b, :b2 AS c FROM dual\n/* drivine: binary doubles b0 */"
+    assert finite == "SELECT :b0 AS a, :b1 AS b, :b2 AS c FROM dual"
+    bound = session.bound[0]
+    assert [bound["b0"].kind, bound["b0"].value, bound["b1"], bound["b2"].value] == [
+        oracledb.DB_TYPE_BINARY_DOUBLE,  # pyright: ignore[reportUnknownMemberType]
+        math.inf,
+        2.5,
+        -math.inf,
+    ]
+    assert math.isnan(session.bound[1]["b0"].value) and session.bound[1]["b1"] is True
+    assert session.bound[2] == {"b0": 1.5, "b1": True, "b2": 7}
+
+
+def test_a_statement_ending_in_a_line_comment_is_tagged_on_a_line_of_its_own():
+    assert _apart("SELECT :b0 FROM dual -- one", {"b0": Variable(None)}) == (
+        "SELECT :b0 FROM dual -- one\n/* drivine: binary doubles b0 */"
+    )
+    assert _apart("SELECT :b0 FROM dual -- one", {"b0": 1.0}) == "SELECT :b0 FROM dual -- one"
